@@ -75,6 +75,14 @@ class SQLiteOpportunityLedger:
                     "ALTER TABLE cognition_opportunities "
                     "ADD COLUMN response_undelivered INTEGER NOT NULL DEFAULT 0"
                 )
+            # A claimed intention exists only while one synchronous Gateway
+            # turn owns it.  Opening the store after a stopped process proves
+            # no such turn still exists, so restore it without interpreting
+            # the occasion or touching any future-cognition request.
+            self._connection.execute(
+                "UPDATE cognition_opportunities SET response_undelivered = 1 "
+                "WHERE response_undelivered = 2"
+            )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS commissioning (
@@ -264,20 +272,44 @@ class SQLiteOpportunityLedger:
                 (opportunity_id,),
             )
 
-    def resolve_undelivered(self, opportunity_id: str) -> bool:
-        """Close one undelivered occasion because AL/X decided what to do.
+    def claim_undelivered_responses(self) -> tuple[dict[str, Any], ...]:
+        """Claim every intention for one session-open Core turn.
 
-        Only she may close it. Nothing expires it, nothing infers resolution
-        because similar words were later spoken, and there is no priority or
-        ordering beyond when it happened.
+        The integer is an internal lifecycle state: 0 is resolved, 1 is open,
+        and 2 is claimed.  Claiming and reading happen in one transaction, so
+        two sessions opening together cannot buy two turns for the same
+        intentions.  The caller projects the returned audit rows through an
+        explicit allowlist before they reach Core.
         """
         with self._connection:
-            changed = self._connection.execute(
-                "UPDATE cognition_opportunities SET response_undelivered = 0 "
+            rows = self._connection.execute(
+                "SELECT * FROM cognition_opportunities "
+                "WHERE response_undelivered = 1 ORDER BY recorded_at"
+            ).fetchall()
+            self._connection.executemany(
+                "UPDATE cognition_opportunities SET response_undelivered = 2 "
                 "WHERE opportunity_id = ? AND response_undelivered = 1",
-                (opportunity_id,),
-            ).rowcount
-        return bool(changed)
+                [(row["opportunity_id"],) for row in rows],
+            )
+        return tuple(dict(row) for row in rows)
+
+    def resolve_claimed_responses(self, opportunity_ids: tuple[str, ...]) -> None:
+        """Resolve intentions after their one fresh Core turn succeeds."""
+        with self._connection:
+            self._connection.executemany(
+                "UPDATE cognition_opportunities SET response_undelivered = 0 "
+                "WHERE opportunity_id = ? AND response_undelivered = 2",
+                [(item,) for item in opportunity_ids],
+            )
+
+    def restore_claimed_responses(self, opportunity_ids: tuple[str, ...]) -> None:
+        """Restore intentions when their Core turn fails or checkpoints."""
+        with self._connection:
+            self._connection.executemany(
+                "UPDATE cognition_opportunities SET response_undelivered = 1 "
+                "WHERE opportunity_id = ? AND response_undelivered = 2",
+                [(item,) for item in opportunity_ids],
+            )
 
     def undelivered(self) -> tuple[dict[str, Any], ...]:
         """Occasions whose response could not be delivered, newest last."""
@@ -285,7 +317,7 @@ class SQLiteOpportunityLedger:
             dict(row)
             for row in self._connection.execute(
                 "SELECT * FROM cognition_opportunities "
-                "WHERE response_undelivered = 1 ORDER BY recorded_at"
+                "WHERE response_undelivered != 0 ORDER BY recorded_at"
             ).fetchall()
         )
 

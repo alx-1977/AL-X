@@ -74,8 +74,6 @@ class _Transport:
     def deliver(self, conversation_id, response):
         from alx.contracts import ResponseDelivery
 
-        if self.accepts == "queued":
-            return ResponseDelivery.QUEUED
         if not self.accepts:
             return ResponseDelivery.UNDELIVERABLE
         self.delivered.append(response)
@@ -211,12 +209,10 @@ class UndeliveredResponseTests(Harness):
         self._tick(Gateway("responded"), transport=True)
         self.assertEqual(self.ledger.undelivered(), ())
 
-    def test_kept_for_friedls_next_session_is_not_undelivered(self) -> None:
-        # D-044: it will be shown to him, so she is not told it went unheard
-        # and does not say it a second time.
+    def test_a_response_cannot_be_queued_for_replay(self) -> None:
         self._request()
-        self._tick(Gateway("responded"), transport="queued")
-        self.assertEqual(self.ledger.undelivered(), ())
+        self._tick(Gateway("responded"), transport=False)
+        self.assertEqual(len(self.ledger.undelivered()), 1)
 
     def test_finished_silently_is_never_undelivered(self) -> None:
         self._request()
@@ -591,39 +587,21 @@ class EndToEndContinuityTests(Harness):
         self.assertEqual(sorted(seen), ["conversation-A", "conversation-B"])
 
     def test_the_full_undelivered_cycle(self) -> None:
-        """Responded with nobody listening, then resolved by AL/X alone."""
-        from alx.tools.continuity import (
-            RESOLVE_UNDELIVERED_RESPONSE, build_continuity_executors,
-        )
-
+        """One opening turn claims and resolves the unheard intention."""
         self._request()
         self._tick(Gateway("responded"), transport=False)
-        # Recorded as a fact she can see.
         self.assertEqual(len(self.ledger.undelivered()), 1)
-        # Nothing resolves it on its own, however many ticks pass.
-        for _ in range(5):
-            self._tick(Gateway())
-        self.assertEqual(len(self.ledger.undelivered()), 1)
-        # Only her explicit act closes it.
-        execute = build_continuity_executors(
-            self.store, 3650, lambda: "call-1", clock=lambda: NOW,
-            occasions=self.ledger,
-        )[RESOLVE_UNDELIVERED_RESPONSE]
-        result = execute({"opportunity_id": "self:r1"})
-        self.assertEqual(result.values["opportunity_id"], "self:r1")
+        claimed = self.ledger.claim_undelivered_responses()
+        self.assertEqual([item["opportunity_id"] for item in claimed], ["self:r1"])
+        self.ledger.resolve_claimed_responses(("self:r1",))
         self.assertEqual(self.ledger.undelivered(), ())
 
-    def test_resolving_an_unknown_occasion_fails_safely(self) -> None:
-        from alx.tools.continuity import (
-            RESOLVE_UNDELIVERED_RESPONSE, build_continuity_executors,
-        )
-
-        execute = build_continuity_executors(
-            self.store, 3650, lambda: "c", clock=lambda: NOW,
-            occasions=self.ledger,
-        )[RESOLVE_UNDELIVERED_RESPONSE]
-        result = execute({"opportunity_id": "self:nope"})
-        self.assertEqual(result.failure["code"], "occasion_not_found")
+    def test_a_failed_opening_turn_restores_the_intention(self) -> None:
+        self._request()
+        self._tick(Gateway("responded"), transport=False)
+        self.ledger.claim_undelivered_responses()
+        self.ledger.restore_claimed_responses(("self:r1",))
+        self.assertEqual(len(self.ledger.undelivered()), 1)
 
     def test_delivered_responses_reach_the_transport_exactly_once(self) -> None:
         self._request()

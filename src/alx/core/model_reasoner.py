@@ -225,12 +225,12 @@ appear in your most recent response, so a draft stated earlier and left behind
 cannot be released later by an answer to some other question. It constrains
 sending only. You may draft, reconsider, abandon a message, or ask anything you
 like in any order, and nothing needs permission except the send itself.
-undelivered_responses names autonomous occasions where you decided to say something
-and it was not heard: no one was there to hear it, or the person had already started
-a new turn, which owns the voice until you answer it. A response recorded in the
-conversation is not thereby heard. This record keeps no words, deliberately: decide afresh
-whether anything still matters, say it if so, and resolve the occasion either way
-through the capability. Nothing resolves or expires it for you.
+undelivered_responses appears only on the single fresh turn made when Friedl opens a
+session after autonomous responses went unheard. It contains intention evidence, never
+the earlier wording. Inspect the current inbox with your ordinary capabilities and judge
+what has already been deleted, filed or answered. If anything remains worth raising,
+raise at most the single most important open item and compose it afresh; otherwise finish
+silently. The successful turn resolves all of these offered intentions mechanically.
 pending_revisits lists later occasions you asked for with request_future_cognition
 and have not yet had, soonest first, each with the note you left yourself. Each
 will wake you once at or after its not_before. If one no longer serves a purpose,
@@ -896,11 +896,7 @@ def _context_payload(context: ReasoningContext) -> str:
                 "opportunity_id": item.get("opportunity_id"),
                 "origin": item.get("origin"),
                 "arose_at": item.get("arose_at"),
-                "references": [
-                    reference
-                    for reference in (item.get("refs") or "").split("\x1f")
-                    if reference
-                ],
+                "references": list(item.get("references") or ()),
             }
             for item in context.undelivered_responses
         ],

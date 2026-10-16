@@ -284,10 +284,8 @@ class StartupSmokeTest(unittest.TestCase):
     def test_the_context_suppliers_the_core_was_given_actually_work(self) -> None:
         """Composition passes lambdas; startup alone never calls them.
 
-        A mutation that pointed `undelivered_responses` at an undefined local
-        survived every other assertion here, because an unbound name inside a
-        lambda only raises when the lambda runs. So the smoke test calls what
-        composition handed the Core, which is the moment the wiring is real.
+        The smoke test calls each context supplier composition handed the Core,
+        which is the moment its closure is real.
         """
         captured: dict = {}
         from alx.core.loop import CoreAgent
@@ -320,10 +318,9 @@ class StartupSmokeTest(unittest.TestCase):
         # live turn died with a NameError: the supplier existed, and nothing
         # called it.
         self.assertGreaterEqual(
-            len(results), 3, f"expected the context suppliers, got {results}"
+            len(results), 2, f"expected the context suppliers, got {results}"
         )
-        for name in ("open_thoughts", "undelivered_responses",
-                     "open_notebook_threads"):
+        for name in ("open_thoughts", "open_notebook_threads"):
             self.assertIn(name, results, f"{name} must be supplied")
         for name, value in sorted(results.items()):
             with self.subTest(supplier=name):

@@ -28,7 +28,6 @@ def build_continuity_runtime(
     retention_days: int,
     call_id_source: Callable[[], str],
     conversation_id_source: Callable[[], str] | None = None,
-    occasions: object | None = None,
     autonomous_available: bool = False,
 ) -> ContinuityRuntime:
     """Build storage and bind both future-cognition primitives.
@@ -52,7 +51,6 @@ def build_continuity_runtime(
         build_continuity_executors(
             store, retention_days, call_id_source,
             conversation_id_source=conversation_id_source,
-            occasions=occasions,
             autonomous_available=autonomous_available,
         ),
         frozenset({CONTINUITY_PERMISSION}),

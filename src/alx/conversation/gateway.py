@@ -38,12 +38,14 @@ class ConversationGateway:
     def __init__(self, core: CoreAgent, conversation_store: DurableConversationStore,
                  identifier_factory: Callable[[], str] | None = None,
                  clock: Callable[[], datetime] | None = None,
-                 contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None) -> None:
+                 contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None,
+                 undelivered_responses: object | None = None) -> None:
         self._core = core
         self._conversation_store = conversation_store
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
+        self._undelivered_responses = undelivered_responses
 
     def _store_response(self, conversation_id: str, outcome: CoreOutcome,
                         retention_until: datetime) -> None:
@@ -74,61 +76,6 @@ class ConversationGateway:
                              text, self._clock(), provenance=provenance),
             retention_until, current.revision,
         )
-
-    def locate_reply(self, conversation_id: str,
-                     text: str) -> tuple[str, datetime | None] | None:
-        """The reply just stored in a thread with this text: (turn id, expiry).
-
-        Called when the reply is delivered, right after it was stored, so the
-        newest matching turn is that reply. From then on it is carried by its
-        turn id, never found by its text again.
-        """
-        try:
-            source = self._conversation_store.load(conversation_id)
-        except ConversationNotFound:
-            return None
-        for item in reversed(source.turns):
-            if item.origin is ConversationOrigin.ALX_RESPONSE and item.content == text:
-                expires = item.provenance.content_expires_at if item.provenance else None
-                return item.turn_id, expires
-        return None
-
-    def relay_response(self, source_conversation_id: str, source_turn_id: str,
-                       target_conversation_id: str) -> bool:
-        """Put a reply AL/X made in one thread into the thread Friedl is in (D-044).
-
-        She thinks about each mail thread in its own conversation, but tells
-        Friedl in his. Copying her stored reply there, with its own provenance
-        and so its own expiry, means that when he answers it, his thread holds
-        what he is answering. Stored once per source thread and turn. False
-        when that reply no longer exists (for example, it has expired).
-        """
-        if source_conversation_id == target_conversation_id:
-            return True
-        try:
-            source = self._conversation_store.load(source_conversation_id)
-        except ConversationNotFound:
-            return False
-        original = next((item for item in source.turns if item.turn_id == source_turn_id
-                         and item.origin is ConversationOrigin.ALX_RESPONSE), None)
-        if original is None:
-            return False
-        try:
-            target = self._conversation_store.load(target_conversation_id)
-        except ConversationNotFound:
-            target = self._conversation_store.create(
-                target_conversation_id, source.retention_until)
-        # Turn ids are unique within a conversation only, so the copy is named
-        # by both the thread and the turn it came from.
-        turn_id = f"relayed:{source_conversation_id}#{source_turn_id}"
-        if any(item.turn_id == turn_id for item in target.turns):
-            return True
-        self._conversation_store.append(
-            ConversationTurn(target_conversation_id, turn_id, ConversationOrigin.ALX_RESPONSE,
-                             original.content, self._clock(), provenance=original.provenance),
-            max(target.retention_until, source.retention_until), target.revision,
-        )
-        return True
 
     def _acknowledge(self, goal_id: str, turn_id: str) -> None:
         try:
@@ -268,4 +215,68 @@ class ConversationGateway:
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
             self._store_response(conversation_id, outcome, retention_until)
+        return outcome
+
+    def receive_session_open(
+        self,
+        conversation_id: str,
+        step_budget: int,
+        retention_until: datetime,
+    ) -> CoreOutcome | None:
+        """Offer claimed intentions through exactly one ordinary Core turn.
+
+        Audit rows are projected here, before the Core boundary, through the
+        four approved fields.  In particular, no generic row serialization can
+        carry stored response wording now or after a schema change.
+        """
+        if step_budget <= 0:
+            raise ValueError("step_budget must be positive")
+        lifecycle = self._undelivered_responses
+        if lifecycle is None:
+            return None
+        claimed = lifecycle.claim_undelivered_responses()
+        if not claimed:
+            return None
+        evidence = tuple(
+            {
+                "opportunity_id": item["opportunity_id"],
+                "origin": item["origin"],
+                "arose_at": item["arose_at"],
+                "references": tuple(
+                    reference for reference in (item.get("refs") or "").split("\x1f")
+                    if reference
+                ),
+            }
+            for item in claimed
+        )
+        identities = tuple(item["opportunity_id"] for item in evidence)
+        event = BackgroundEvent(
+            f"session-open:{self._identifier_factory()}",
+            "session.opened_with_undelivered_intentions",
+            self._clock(),
+            {"intention_count": len(evidence)},
+        )
+        try:
+            try:
+                conversation = self._conversation_store.load(conversation_id)
+            except ConversationNotFound:
+                conversation = self._conversation_store.create(
+                    conversation_id, retention_until
+                )
+            outcome = self._core.process(
+                self._with_contextual_events(conversation, event),
+                retention_until,
+                step_budget,
+                trigger_event_id=event.event_id,
+                undelivered_responses=evidence,
+            )
+            if outcome.state is CoreState.RESPONDED and outcome.response is not None:
+                self._store_response(conversation_id, outcome, retention_until)
+        except BaseException:
+            lifecycle.restore_claimed_responses(identities)
+            raise
+        if outcome.state in (CoreState.RESPONDED, CoreState.FINISHED_SILENTLY):
+            lifecycle.resolve_claimed_responses(identities)
+        else:
+            lifecycle.restore_claimed_responses(identities)
         return outcome

@@ -40,7 +40,6 @@ WITHDRAW_FUTURE_COGNITION = "withdraw_future_cognition"
 RECORD_CARRIED_THOUGHT = "record_carried_thought"
 WITHDRAW_CARRIED_THOUGHT = "withdraw_carried_thought"
 MARK_CARRIED_THOUGHT_RAISED = "mark_carried_thought_raised"
-RESOLVE_UNDELIVERED_RESPONSE = "resolve_undelivered_response"
 SET_OWN_TIME = "set_own_time"
 SET_PRESENCE = "set_presence"
 
@@ -211,23 +210,6 @@ MARK_RAISED_DEFINITION = CapabilityDefinition(
 )
 
 
-RESOLVE_UNDELIVERED_DEFINITION = CapabilityDefinition(
-    RESOLVE_UNDELIVERED_RESPONSE,
-    "Close an autonomous occasion whose response never reached Friedl, once "
-    "you have decided what to do about it. Say something now and resolve it, "
-    "or resolve it because it no longer matters. Nothing resolves it for you.",
-    StructuredSchema(
-        ValueKind.OBJECT, {"opportunity_id": _STRING}, ("opportunity_id",),
-        extra_properties=False,
-    ),
-    StructuredSchema(
-        ValueKind.OBJECT, {"opportunity_id": _STRING}, ("opportunity_id",),
-        extra_properties=False,
-    ),
-    SideEffect.NONE,
-    _FAILURES,
-)
-
 OWN_TIME_DEFINITION = CapabilityDefinition(
     SET_OWN_TIME,
     "Set the local times of day your own time comes round: occasions that are "
@@ -279,7 +261,6 @@ DEFINITIONS = (
     RECORD_THOUGHT_DEFINITION,
     WITHDRAW_THOUGHT_DEFINITION,
     MARK_RAISED_DEFINITION,
-    RESOLVE_UNDELIVERED_DEFINITION,
 )
 
 
@@ -289,7 +270,6 @@ def build_continuity_executors(
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
     conversation_id_source: Callable[[], str] | None = None,
-    occasions: Any = None,
     # Whether a matured request can become a Core turn in this runtime. A
     # fact about composition, reported so AL/X never tells anyone she will
     # look again at a time nothing will wake her.
@@ -411,32 +391,6 @@ def build_continuity_executors(
 
         return run
 
-    def resolve_undelivered(values: Mapping[str, Any]) -> CapabilityResult:
-        call_id = call_id_source()
-        try:
-            opportunity_id = str(values["opportunity_id"])
-            if occasions is None:
-                return _failed(
-                    call_id, RESOLVE_UNDELIVERED_RESPONSE, "occasion_not_found"
-                )
-            if not occasions.resolve_undelivered(opportunity_id):
-                return _failed(
-                    call_id, RESOLVE_UNDELIVERED_RESPONSE, "occasion_not_found"
-                )
-        except (KeyError, TypeError, ValueError):
-            return _failed(
-                call_id, RESOLVE_UNDELIVERED_RESPONSE, "arguments_unusable"
-            )
-        except Exception:
-            return _failed(call_id, RESOLVE_UNDELIVERED_RESPONSE, "storage_failed")
-        return CapabilityResult(
-            call_id,
-            RESOLVE_UNDELIVERED_RESPONSE,
-            CapabilityResultState.SUCCEEDED,
-            {"opportunity_id": opportunity_id},
-            durable_values={"opportunity_id": opportunity_id},
-        )
-
     def set_own_time(values: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
         try:
@@ -486,7 +440,6 @@ def build_continuity_executors(
     return {
         SET_OWN_TIME: set_own_time,
         SET_PRESENCE: set_presence,
-        RESOLVE_UNDELIVERED_RESPONSE: resolve_undelivered,
         REQUEST_FUTURE_COGNITION: request,
         WITHDRAW_FUTURE_COGNITION: withdraw,
         RECORD_CARRIED_THOUGHT: record_thought,

@@ -1,14 +1,4 @@
-"""D-044: what AL/X wants to tell Friedl reaches him.
-
-She thinks about each mail thread in its own conversation, and her reply used
-to be offered only to a listener on that thread, which no browser ever is: on
-2026-10-08 every message about the morning's mail was recorded as undelivered
-while Friedl's session was open all along. These tests prove a reply made in
-any thread reaches the session he has open and is recorded in his thread, a
-reply made while nobody is connected waits and is handed to his next session
-in order, a waiting reply is not reported as unheard, and nothing else about
-delivery changes.
-"""
+"""D-053: an unheard intention gets one fresh session-open Core turn."""
 
 from __future__ import annotations
 
@@ -18,278 +8,215 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from alx.continuity.pending_messages import SQLitePendingMessages  # noqa: E402
-from alx.contracts import ConversationOrigin, ConversationTurn, ResponseDelivery  # noqa: E402
-from alx.contracts.provenance import ContentOrigin, RetentionPolicy  # noqa: E402
+from alx.continuity.ledger import SQLiteOpportunityLedger  # noqa: E402
+from alx.contracts import CognitionOrigin, ResponseDelivery  # noqa: E402
 from alx.conversation.gateway import ConversationGateway  # noqa: E402
 from alx.conversation.store import SQLiteConversationStore  # noqa: E402
+from alx.core import CoreOutcome, CoreState  # noqa: E402
+from alx.interfaces.live_voice import VoiceSession  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 
-NOW = datetime(2026, 10, 8, 11, 53, tzinfo=UTC)
+NOW = datetime(2026, 10, 16, 8, 30, tzinfo=UTC)
+RETENTION = NOW + timedelta(days=30)
 MAIL = "mail-thread:<jlcpcb-123@mail>"
 FRIEDL = "6f528a72-0933-442c-be31-25778141a08a"
+STORED_PROSE = "VERBATIM SECRET RESPONSE THAT MUST NEVER RETURN"
 
 
-class _Session:
-    def __init__(self, busy=()):
-        self.busy = set(busy)
+class _Lifecycle:
+    def __init__(self, rows):
+        self.rows = tuple(rows)
+        self.claims = 0
+        self.resolved = []
+        self.restored = []
 
-    def admits_unprompted_speech(self, conversation_id):
-        return conversation_id not in self.busy
+    def claim_undelivered_responses(self):
+        self.claims += 1
+        rows, self.rows = self.rows, ()
+        return rows
 
+    def resolve_claimed_responses(self, identities):
+        self.resolved.append(tuple(identities))
 
-def _server(session=None, pending=None, relayed=None, relay=None,
-            expires=None):
-    def default_relay(source, turn, target):
-        if relayed is not None:
-            relayed.append((source, turn, target))
-        return True
-
-    server = LiveVoiceServer(session or _Session(), "127.0.0.1", 0, 16000, ROOT,
-                             relay=relay or default_relay,
-                             locate=lambda conversation, text: (f"turn-{text}", expires),
-                             pending=pending, clock=lambda: NOW)
-    return server
+    def restore_claimed_responses(self, identities):
+        self.restored.append(tuple(identities))
 
 
-def _connect(server, conversation_id, loop):
-    listener: asyncio.Queue[str] = asyncio.Queue()
-    server._delivery_queues.setdefault(conversation_id, []).append(listener)
-    server._live_conversations.append(conversation_id)
-    server._delivery_loop = loop
-    return listener
+class _Core:
+    def __init__(self, outcome=None, error=None):
+        self.outcome = outcome or CoreOutcome(CoreState.RESPONDED, response="Fresh answer.")
+        self.error = error
+        self.calls = []
+
+    def process(self, conversation, retention, budget, **values):
+        self.calls.append((conversation, retention, budget, values))
+        if self.error is not None:
+            raise self.error
+        return self.outcome
 
 
-def _drain(listener):
-    items = []
-    while not listener.empty():
-        items.append(listener.get_nowait())
-    return items
+def _row(identity, origin="external_event", refs="mail:1\x1fmail:2"):
+    return {
+        "opportunity_id": identity,
+        "origin": origin,
+        "arose_at": NOW.isoformat(),
+        "refs": refs,
+        "response": STORED_PROSE,
+        "text": STORED_PROSE,
+        "unapproved_nested": {"wording": STORED_PROSE},
+    }
 
 
-class RoutingTests(unittest.TestCase):
-    def test_a_mail_thread_reply_reaches_friedls_open_session(self) -> None:
-        relayed = []
-
-        async def scenario():
-            server = _server(relayed=relayed)
-            mine = _connect(server, FRIEDL, asyncio.get_running_loop())
-            result = await asyncio.to_thread(server.deliver, MAIL, "JLCPCB needs a choice")
-            return result, _drain(mine)
-
-        result, heard = asyncio.run(scenario())
-        self.assertIs(result, ResponseDelivery.DELIVERED)
-        self.assertEqual(heard, ["JLCPCB needs a choice"])
-        self.assertEqual(relayed, [(MAIL, "turn-JLCPCB needs a choice", FRIEDL)])
-
-    def test_a_reply_in_his_own_thread_is_not_copied(self) -> None:
-        relayed = []
-
-        async def scenario():
-            server = _server(relayed=relayed)
-            mine = _connect(server, FRIEDL, asyncio.get_running_loop())
-            result = await asyncio.to_thread(server.deliver, FRIEDL, "hello")
-            return result, _drain(mine)
-
-        result, heard = asyncio.run(scenario())
-        self.assertEqual((result, heard, relayed), (ResponseDelivery.DELIVERED, ["hello"], []))
-
-    def test_the_newest_open_session_hears_it(self) -> None:
-        async def scenario():
-            server = _server(relayed=[])
-            older = _connect(server, "older", asyncio.get_running_loop())
-            newer = _connect(server, FRIEDL, asyncio.get_running_loop())
-            await asyncio.to_thread(server.deliver, MAIL, "news")
-            return _drain(older), _drain(newer)
-
-        self.assertEqual(asyncio.run(scenario()), ([], ["news"]))
-
-    def test_his_pending_turn_still_owns_the_voice(self) -> None:
-        relayed = []
-
-        async def scenario():
-            server = _server(session=_Session(busy={FRIEDL}), relayed=relayed)
-            mine = _connect(server, FRIEDL, asyncio.get_running_loop())
-            result = await asyncio.to_thread(server.deliver, MAIL, "news")
-            return result, _drain(mine)
-
-        result, heard = asyncio.run(scenario())
-        self.assertEqual((result, heard, relayed), (ResponseDelivery.UNDELIVERABLE, [], []))
-
-
-class WaitingTests(unittest.TestCase):
-    def setUp(self) -> None:
+class SessionOpenGatewayTests(unittest.TestCase):
+    def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.pending = SQLitePendingMessages(Path(directory.name) / "pending.sqlite3")
-        self.addCleanup(self.pending.close)
+        self.store = SQLiteConversationStore(Path(directory.name) / "conversations.sqlite3")
+        self.addCleanup(self.store.close)
 
-    def test_with_nobody_connected_it_waits(self) -> None:
-        server = _server(pending=self.pending)
-        self.assertIs(server.deliver(MAIL, "JLCPCB needs a choice"), ResponseDelivery.QUEUED)
-        self.assertEqual(self.pending.count(), 1)
+    def gateway(self, core, lifecycle):
+        return ConversationGateway(
+            core, self.store, identifier_factory=lambda: "opening-1",
+            clock=lambda: NOW, undelivered_responses=lifecycle,
+        )
 
-    def test_without_a_store_nothing_changes(self) -> None:
-        self.assertIs(_server().deliver(MAIL, "x"), ResponseDelivery.UNDELIVERABLE)
+    def test_many_intentions_make_one_fresh_turn_with_allowlisted_evidence_only(self):
+        lifecycle = _Lifecycle((_row("occasion-1"), _row("occasion-2", refs="mail:3")))
+        core = _Core()
+        gateway = self.gateway(core, lifecycle)
 
-    def test_his_next_session_hears_what_waited_in_order(self) -> None:
-        relayed = []
-        server = _server(pending=self.pending, relayed=relayed)
-        server.deliver(MAIL, "first")
-        server.deliver("mail-thread:<other>", "second")
+        outcome = gateway.receive_session_open(FRIEDL, 8, RETENTION)
 
-        async def scenario():
-            listener: asyncio.Queue[str] = asyncio.Queue()
-            waiting = server._take_waiting(listener)
-            await server._record_waiting(waiting, FRIEDL)
-            return _drain(listener)
+        self.assertEqual(outcome.response, "Fresh answer.")
+        self.assertEqual(len(core.calls), 1)
+        evidence = core.calls[0][3]["undelivered_responses"]
+        self.assertEqual(
+            evidence,
+            (
+                {"opportunity_id": "occasion-1", "origin": "external_event",
+                 "arose_at": NOW.isoformat(), "references": ("mail:1", "mail:2")},
+                {"opportunity_id": "occasion-2", "origin": "external_event",
+                 "arose_at": NOW.isoformat(), "references": ("mail:3",)},
+            ),
+        )
+        self.assertNotIn(STORED_PROSE, repr(core.calls))
+        self.assertEqual(lifecycle.resolved, [("occasion-1", "occasion-2")])
+        self.assertEqual(lifecycle.restored, [])
 
-        self.assertEqual(asyncio.run(scenario()), ["first", "second"])
-        self.assertEqual(relayed, [(MAIL, "turn-first", FRIEDL),
-                                   ("mail-thread:<other>", "turn-second", FRIEDL)])
-        self.assertEqual(self.pending.count(), 0)
+    def test_no_intention_makes_no_core_turn(self):
+        lifecycle = _Lifecycle(())
+        core = _Core()
+        self.assertIsNone(self.gateway(core, lifecycle).receive_session_open(FRIEDL, 8, RETENTION))
+        self.assertEqual(core.calls, [])
 
-    def test_a_waiting_message_expires_with_mail_content(self) -> None:
-        self.pending.add(MAIL, "t", "old", NOW - timedelta(days=31))
-        self.assertEqual(self.pending.take_all(NOW), ())
+    def test_a_checkpoint_restores_the_claim(self):
+        lifecycle = _Lifecycle((_row("occasion-1"),))
+        core = _Core(CoreOutcome(CoreState.CHECKPOINTED, reason="budget_exceeded"))
+        self.gateway(core, lifecycle).receive_session_open(FRIEDL, 8, RETENTION)
+        self.assertEqual(lifecycle.resolved, [])
+        self.assertEqual(lifecycle.restored, [("occasion-1",)])
 
-    def test_it_never_outlives_the_reply_it_came_from(self) -> None:
-        server = _server(pending=self.pending, expires=NOW + timedelta(hours=2))
-        server.deliver(MAIL, "soon gone")
-        self.assertEqual(self.pending.take_all(NOW + timedelta(hours=3)), ())
+    def test_a_failed_turn_restores_the_claim(self):
+        lifecycle = _Lifecycle((_row("occasion-1"),))
+        gateway = self.gateway(_Core(error=RuntimeError("provider failed")), lifecycle)
+        with self.assertRaisesRegex(RuntimeError, "provider failed"):
+            gateway.receive_session_open(FRIEDL, 8, RETENTION)
+        self.assertEqual(lifecycle.resolved, [])
+        self.assertEqual(lifecycle.restored, [("occasion-1",)])
 
-    def test_unspoken_replies_go_back_to_waiting_when_the_session_closes(self) -> None:
-        server = _server(pending=self.pending)
-        server.deliver(MAIL, "first")
-        listener: asyncio.Queue[str] = asyncio.Queue()
-        handed = server._take_waiting(listener)
-        server._keep_unspoken(listener, FRIEDL, handed)
-        self.assertEqual(self.pending.take_all(NOW),
-                         ((MAIL, "turn-first", "first", NOW + timedelta(days=30)),))
+    def test_authoritative_silence_resolves_the_claim(self):
+        lifecycle = _Lifecycle((_row("occasion-1"),))
+        core = _Core(CoreOutcome(CoreState.FINISHED_SILENTLY))
+        self.gateway(core, lifecycle).receive_session_open(FRIEDL, 8, RETENTION)
+        self.assertEqual(lifecycle.resolved, [("occasion-1",)])
 
-    def test_identical_unspoken_replies_keep_their_own_origins(self) -> None:
-        self.pending.add(MAIL, "t1", "Same words", NOW)
-        self.pending.add("mail-thread:<other>", "t2", "Same words", NOW)
-        server = _server(pending=self.pending)
-        listener: asyncio.Queue[str] = asyncio.Queue()
-        server._keep_unspoken(listener, FRIEDL, server._take_waiting(listener))
-        self.assertEqual([(source, turn) for source, turn, _t, _e in self.pending.take_all(NOW)],
-                         [(MAIL, "t1"), ("mail-thread:<other>", "t2")])
 
-    def test_a_reply_handed_back_keeps_its_original_deadline(self) -> None:
-        deadline = NOW + timedelta(hours=2)
-        server = _server(pending=self.pending, expires=deadline)
-        server.deliver(MAIL, "first")
-        later = NOW + timedelta(hours=1)
-        server._now = lambda: later
-        for _ in range(3):  # sessions keep closing before it is spoken
-            listener: asyncio.Queue[str] = asyncio.Queue()
-            server._keep_unspoken(listener, FRIEDL, server._take_waiting(listener))
-        self.assertEqual(self.pending.take_all(later)[0][3], deadline)
-        self.assertEqual(self.pending.take_all(deadline + timedelta(minutes=1)), ())
+class LedgerLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.ledger = SQLiteOpportunityLedger(Path(directory.name) / "opportunities.sqlite3")
+        self.addCleanup(self.ledger.close)
+        opportunity = SimpleNamespace(
+            opportunity_id="occasion-1", origin=CognitionOrigin.EXTERNAL_EVENT,
+            arose_at=NOW, references=("mail:1",),
+        )
+        self.ledger.record_created(opportunity)
+        self.ledger.record_outcome("occasion-1", "responded")
+        self.ledger.mark_response_undelivered("occasion-1")
 
-    def test_a_failed_copy_is_kept_and_made_later(self) -> None:
-        attempts = []
+    def test_claim_is_exclusive_and_failure_can_restore_it(self):
+        self.assertEqual(len(self.ledger.claim_undelivered_responses()), 1)
+        self.assertEqual(self.ledger.claim_undelivered_responses(), ())
+        self.ledger.restore_claimed_responses(("occasion-1",))
+        self.assertEqual(len(self.ledger.claim_undelivered_responses()), 1)
 
-        def flaky(source, turn, target):
-            attempts.append(turn)
-            if len(attempts) == 1:
-                raise RuntimeError("database locked")
+    def test_success_consumes_the_intention(self):
+        self.ledger.claim_undelivered_responses()
+        self.ledger.resolve_claimed_responses(("occasion-1",))
+        self.assertEqual(self.ledger.undelivered(), ())
+
+    def test_restart_restores_a_claim_left_by_a_stopped_turn(self):
+        self.ledger.claim_undelivered_responses()
+        path = Path(self.ledger._connection.execute("PRAGMA database_list").fetchone()[2])
+        self.ledger.close()
+        recovered = SQLiteOpportunityLedger(path)
+        self.addCleanup(recovered.close)
+        self.assertEqual(len(recovered.claim_undelivered_responses()), 1)
+
+
+class FreshDeliveryTests(unittest.TestCase):
+    class Session:
+        def admits_unprompted_speech(self, _conversation_id):
             return True
 
-        server = _server(pending=self.pending, relay=flaky)
-        server._relay_into(MAIL, ("t1", None), FRIEDL)
-        self.assertEqual(len(self.pending.relays(NOW)), 1)
-        server._retry_relays()
-        self.assertEqual((attempts, self.pending.relays(NOW)), (["t1", "t1"], ()))
+    def server(self, phone=None):
+        return LiveVoiceServer(self.Session(), "127.0.0.1", 0, 16000, ROOT, phone=phone)
 
-    def test_waiting_replies_are_queued_before_the_session_takes_live_ones(self) -> None:
+    def test_fresh_response_reaches_an_already_open_session(self):
         async def scenario():
-            server = _server(pending=self.pending, relayed=[])
-            server.deliver(MAIL, "older")
-            listener: asyncio.Queue[str] = asyncio.Queue()
-            server._take_waiting(listener)
+            server = self.server()
+            listener = asyncio.Queue()
             server._delivery_queues[FRIEDL] = [listener]
             server._live_conversations.append(FRIEDL)
             server._delivery_loop = asyncio.get_running_loop()
-            await asyncio.to_thread(server.deliver, MAIL, "newer")
-            return _drain(listener)
+            result = await asyncio.to_thread(server.deliver, MAIL, "Fresh answer.")
+            return result, listener.get_nowait()
 
-        self.assertEqual(asyncio.run(scenario()), ["older", "newer"])
+        self.assertEqual(asyncio.run(scenario()), (ResponseDelivery.DELIVERED, "Fresh answer."))
 
-
-class SetupFailureTests(unittest.TestCase):
-    def test_a_connection_lost_during_setup_leaves_no_listener(self) -> None:
-        from types import SimpleNamespace
-
-        class Broken:
-            request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
-
-            async def send(self, _message):
-                raise ConnectionError("gone")
-
-            async def close(self, **_kwargs):
-                return None
-
-        server = _server()
-
-        async def scenario():
-            with self.assertRaises(ConnectionError):
-                await server._handle_voice(Broken())
-
-        asyncio.run(scenario())
-        self.assertEqual((server._live_conversations, server._delivery_queues), ([], {}))
-        self.assertIs(server.deliver(MAIL, "later"), ResponseDelivery.UNDELIVERABLE)
+    def test_with_no_session_the_words_are_not_queued(self):
+        self.assertIs(self.server().deliver(MAIL, STORED_PROSE), ResponseDelivery.UNDELIVERABLE)
 
 
-class RelayTests(unittest.TestCase):
-    def setUp(self) -> None:
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.store = SQLiteConversationStore(Path(directory.name) / "c.sqlite3")
-        self.gateway = ConversationGateway(object(), self.store, clock=lambda: NOW)
-        keep = NOW + timedelta(days=30)
-        mail = self.store.create(MAIL, keep)
-        provenance = RetentionPolicy().non_mail(ContentOrigin.ALX, NOW)
-        self.store.append(ConversationTurn(MAIL, "t1", ConversationOrigin.ALX_RESPONSE,
-                                           "JLCPCB needs a choice", NOW, provenance=provenance),
-                          keep, mail.revision)
+class VoiceSessionOpenTests(unittest.TestCase):
+    def test_session_open_uses_the_gateway_once(self):
+        calls = []
+        gateway = SimpleNamespace(
+            receive_session_open=lambda *arguments: calls.append(arguments) or None
+        )
+        session = VoiceSession(gateway, object(), None, "friedl", 8, 30, clock=lambda: NOW)
+        self.assertIsNone(asyncio.run(session.open_session(FRIEDL)))
+        self.assertEqual(len(calls), 1)
 
-    def test_the_reply_is_recorded_in_his_thread_with_its_provenance(self) -> None:
-        turn_id, _ = self.gateway.locate_reply(MAIL, "JLCPCB needs a choice")
-        self.assertTrue(self.gateway.relay_response(MAIL, turn_id, FRIEDL))
-        mine = self.store.load(FRIEDL)
-        self.assertEqual([(t.turn_id, t.origin, t.content) for t in mine.turns],
-                         [(f"relayed:{MAIL}#t1", ConversationOrigin.ALX_RESPONSE,
-                           "JLCPCB needs a choice")])
-        source = self.store.load(MAIL).turns[0]
-        self.assertEqual(mine.turns[0].provenance, source.provenance)
 
-    def test_it_is_recorded_once(self) -> None:
-        self.gateway.relay_response(MAIL, "t1", FRIEDL)
-        self.gateway.relay_response(MAIL, "t1", FRIEDL)
-        self.assertEqual(len(self.store.load(FRIEDL).turns), 1)
-
-    def test_identical_replies_keep_their_own_identity(self) -> None:
-        keep = NOW + timedelta(days=30)
-        snapshot = self.store.load(MAIL)
-        provenance = RetentionPolicy().non_mail(ContentOrigin.ALX, NOW)
-        self.store.append(ConversationTurn(MAIL, "t2", ConversationOrigin.ALX_RESPONSE,
-                                           "JLCPCB needs a choice", NOW, provenance=provenance),
-                          keep, snapshot.revision)
-        self.gateway.relay_response(MAIL, "t1", FRIEDL)
-        self.gateway.relay_response(MAIL, "t2", FRIEDL)
-        self.assertEqual([t.turn_id for t in self.store.load(FRIEDL).turns],
-                         [f"relayed:{MAIL}#t1", f"relayed:{MAIL}#t2"])
-
-    def test_a_reply_not_in_its_thread_is_not_invented(self) -> None:
-        self.assertFalse(self.gateway.relay_response(MAIL, "t9", FRIEDL))
-        self.assertFalse(self.gateway.relay_response("mail-thread:<none>", "t1", FRIEDL))
-        self.assertIsNone(self.gateway.locate_reply(MAIL, "something else"))
+class OneProductionPathTests(unittest.TestCase):
+    def test_the_verbatim_replay_path_is_absent(self):
+        self.assertFalse((ROOT / "src/alx/continuity/pending_messages.py").exists())
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "src/alx").rglob("*.py")
+        )
+        for fragment in (
+            "_take_waiting", "pending_messages", "relay_response", "_retry_relays",
+            "ResponseDelivery.QUEUED", "resolve_undelivered_response",
+        ):
+            self.assertNotIn(fragment, source)
 
 
 if __name__ == "__main__":

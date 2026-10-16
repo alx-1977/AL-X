@@ -233,9 +233,8 @@ class RemoteTurnTests(unittest.TestCase):
 
 
 class DeliveryTests(unittest.TestCase):
-    def server(self, phone, pending):
-        return LiveVoiceServer(Mock(), "127.0.0.1", 8765, 16000, ASSETS,
-                               pending=pending, phone=phone)
+    def server(self, phone):
+        return LiveVoiceServer(Mock(), "127.0.0.1", 8765, 16000, ASSETS, phone=phone)
 
     def phone(self, carries=True, sends=True):
         phone = Mock()
@@ -244,21 +243,19 @@ class DeliveryTests(unittest.TestCase):
         return phone
 
     def test_while_he_is_away_it_goes_to_his_phone(self) -> None:
-        phone, pending = self.phone(), Mock()
-        self.assertIs(self.server(phone, pending).deliver("mail-thread:x", "DHL invoice in."),
+        phone = self.phone()
+        self.assertIs(self.server(phone).deliver("mail-thread:x", "DHL invoice in."),
                       ResponseDelivery.DELIVERED)
         phone.send.assert_called_once_with("DHL invoice in.")
-        pending.add.assert_not_called()
 
-    def test_if_it_cannot_be_sent_it_waits_as_before(self) -> None:
-        phone, pending = self.phone(sends=False), Mock()
-        self.assertIs(self.server(phone, pending).deliver("mail-thread:x", "DHL invoice in."),
-                      ResponseDelivery.QUEUED)
-        pending.add.assert_called_once()
+    def test_if_it_cannot_be_sent_it_is_undeliverable(self) -> None:
+        phone = self.phone(sends=False)
+        self.assertIs(self.server(phone).deliver("mail-thread:x", "DHL invoice in."),
+                      ResponseDelivery.UNDELIVERABLE)
 
     def test_while_he_is_here_his_phone_is_left_alone(self) -> None:
-        phone, pending = self.phone(carries=False), Mock()
-        self.server(phone, pending).deliver("mail-thread:x", "DHL invoice in.")
+        phone = self.phone(carries=False)
+        self.server(phone).deliver("mail-thread:x", "DHL invoice in.")
         phone.send.assert_not_called()
 
 

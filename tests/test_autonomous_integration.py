@@ -744,7 +744,7 @@ class OccasionCostIsRecordedTests(unittest.TestCase):
 
 
 class UndeliveredReachesCoreTests(unittest.TestCase):
-    """The fact must be wired into the Core, not merely persisted.
+    """The fact must be wired into the Gateway, not merely persisted.
 
     A mutation that stopped supplying undelivered occasions to CoreAgent
     survived every other test: the state was written and never read, which was
@@ -752,21 +752,21 @@ class UndeliveredReachesCoreTests(unittest.TestCase):
     the ledger to the reasoning context.
     """
 
-    def test_composition_supplies_undelivered_occasions_to_the_core(self) -> None:
+    def test_composition_supplies_undelivered_occasions_to_the_gateway(self) -> None:
         import ast
 
         tree = ast.parse(COMPOSITION.read_text(encoding="utf-8"))
-        core = next(
+        gateway = next(
             node for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "CoreAgent"
+            and node.func.id == "ConversationGateway"
         )
         supplied = {
-            keyword.arg: ast.dump(keyword.value) for keyword in core.keywords
+            keyword.arg: ast.dump(keyword.value) for keyword in gateway.keywords
         }
         self.assertIn("undelivered_responses", supplied)
-        self.assertIn("undelivered", supplied["undelivered_responses"])
+        self.assertIn("opportunity_ledger", supplied["undelivered_responses"])
 
     def test_exactly_one_public_runner_entry_point_exists(self) -> None:
         """Law 0: one callable route through claim, Core, spend, persistence.
@@ -802,7 +802,7 @@ class UndeliveredReachesCoreTests(unittest.TestCase):
         from alx.core.loop import CoreAgent
 
         source = inspect.getsource(CoreAgent.process)
-        self.assertIn("undelivered_responses=self._undelivered_responses()", source)
+        self.assertIn("undelivered_responses=undelivered_responses", source)
 
 
 if __name__ == "__main__":

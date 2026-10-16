@@ -182,6 +182,18 @@ entry = "conversation/gateway.py::ConversationGateway.receive_conversation_turn"
 forbidden = []
 
 [[outcomes]]
+id = "conversation.session_open_offers_unheard_intentions"
+description = "One session open offers every unheard intention through one fresh ordinary Core turn."
+entry = "conversation/gateway.py::ConversationGateway.receive_session_open"
+# D-053 replaced stored-prose replay and every delayed copying route.  These
+# fragments name executable production structures, not historical prose.
+forbidden = [
+  "pending_messages", "class SQLitePendingMessages", "def _take_waiting",
+  "def _keep_unspoken", "def relay_response", "def _retry_relays",
+  "ResponseDelivery.QUEUED", "resolve_undelivered_response",
+]
+
+[[outcomes]]
 id = "repository.canonical_main_synchronizes"
 description = "The canonical checkout's local main fast-forwards from origin main."
 # D-030. Reachable through the Coding Agent and the repository runtime at once

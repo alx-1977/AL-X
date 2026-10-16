@@ -390,6 +390,30 @@ class VoiceSession:
             subsystem, status, label, conversation_id=conversation_id, **values,
         )
 
+    async def open_session(self, conversation_id: str):
+        """Run the one fresh continuity turn, if intentions are waiting.
+
+        This uses the same conversational Gateway, Core lock, model selection,
+        response persistence and later synthesis as a person turn.  It adds no
+        autonomous occasion and never reads future-cognition requests.
+        """
+        if not conversation_id.strip():
+            raise ValueError("conversation_id must not be blank")
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Voice clock must be timezone-aware")
+        async with self._core_turn_lock:
+            self._turn_origin_sink(True)
+            try:
+                return await run_core_worker(
+                    self._gateway.receive_session_open,
+                    conversation_id,
+                    self._step_budget,
+                    now + timedelta(days=self._retention_days),
+                )
+            finally:
+                self._turn_origin_sink(False)
+
     async def exchange(
         self,
         conversation_id: str,

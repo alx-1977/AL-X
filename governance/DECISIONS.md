@@ -2573,3 +2573,15 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Stopping a job.** `stop_coding_job` is admitted from the goal whose plan step is running the job. It was refused there as an in-flight call, so on 2026-10-15 a job could only be ended by killing its process.
 - **Signed out.** At start-up, a coding provider whose login is missing is named in her log.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-053 — A session open gets one fresh continuity turn, never a replay
+
+- **Date:** 2026-10-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-16.** Friedl approved replacing verbatim pending-message replay with one fresh ordinary Core reasoning turn when his session opens.
+- **One turn.** If one or more autonomous responses went unheard, opening Friedl's session claims all of their intentions and makes exactly one ordinary turn through the existing Conversation Gateway and Core. With none, opening a session makes no turn. Multiple intentions never create multiple opening turns.
+- **Evidence boundary.** The turn receives only each occasion's identifier, origin, time and references. Earlier response wording is neither stored for this purpose nor passed to Core, a prompt, speech, output, fallback or log. Core uses its existing inbox capabilities to inspect current reality, judges what was deleted, filed or answered, and raises at most the single most important item still open, in fresh words. Server code does not filter, rank or interpret the intentions.
+- **Offer once.** A successful response or authoritative silence resolves every intention claimed for that opening turn. An exception, error or checkpoint restores the claim for a later session. This extends the existing `undelivered_responses` lifecycle; it creates no queue.
+- **Removed path (amends D-044 and D-049).** `pending-messages.sqlite3`, verbatim waiting messages, `_take_waiting`, delayed relays, copying stored replies between conversations and queued delivery are removed. A fresh autonomous response may still reach an already-open session or Friedl's phone through the existing transport. If neither accepts it, only its intention evidence remains for the next session-open turn.
+- **Future cognition unchanged.** Session opening does not read, claim, consume or mature future-cognition requests. Their existing source remains the sole maturation path.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

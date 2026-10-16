@@ -89,7 +89,6 @@ from alx.interfaces.reader_tile import tile_source
 from alx.interfaces.phone import PHONE_CONVERSATION_ID, PhoneLink
 from alx.providers.imessage import IMessageChannel
 from alx.config.settings import phone_settings
-from alx.continuity.pending_messages import SQLitePendingMessages
 from alx.continuity.own_time_source import OwnTimeSource
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
@@ -528,9 +527,6 @@ async def run(repository_root: Path) -> None:
         # thread, and a thought would then be able to attach itself to a
         # conversation it did not arise in.
         conversation_id_source=current_conversation_id.get,
-        # So she can close an undelivered occasion once she has decided what
-        # to do about it. Only she may: nothing expires it.
-        occasions=opportunity_ledger,
         # The same condition that enables every occasion source below. When
         # it is false her requests are still kept, and each receipt says no
         # occasion will arise from it in this runtime.
@@ -1205,7 +1201,6 @@ async def run(repository_root: Path) -> None:
         open_notebook_threads=lambda: notebook_runtime.store.open_threads(
             OPEN_NOTEBOOK_THREAD_LIMIT
         ),
-        undelivered_responses=lambda: opportunity_ledger.undelivered(),
         # A refused goal proposal left no trace on 2026-09-04, so a live
         # rejection could not be diagnosed. Mechanical facts to the log only:
         # which references were cited, and which rule refused them.
@@ -1217,6 +1212,7 @@ async def run(repository_root: Path) -> None:
         core,
         conversation_store,
         contextual_events=mail_runtime.source.contextual_events,
+        undelivered_responses=opportunity_ledger,
     )
     # One Core-turn lock for the whole runtime. Person turns and autonomous
     # turns serialize through this same object: AL/X has one Core, so she has
@@ -1258,11 +1254,6 @@ async def run(repository_root: Path) -> None:
         reader_tile=None if reader_runtime is None else tile_source(
             reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch,
             display=ReaderSettings.from_environment(environment).display),
-        # D-044: replies made in a thread nobody listens on reach Friedl's
-        # session, and wait for his next one when none is open.
-        relay=gateway.relay_response,
-        locate=gateway.locate_reply,
-        pending=SQLitePendingMessages(storage_root / "pending-messages.sqlite3"),
         # Whether Friedl is here or away, for the icon on his screen.
         presence=continuity_runtime.store.presence,
         phone=phone_link,

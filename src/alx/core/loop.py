@@ -290,7 +290,6 @@ class CoreAgent:
                  open_thoughts: Callable[[], tuple] | None = None,
                  pending_revisits: Callable[[], tuple] | None = None,
                  open_notebook_threads: Callable[[], tuple] | None = None,
-                 undelivered_responses: Callable[[], tuple] | None = None,
                  record_goal_rejection: Callable[[Mapping[str, Any]], None] | None = None,
                  plan_continuation: bool = False,
                  bind_dispatch: Callable[[str], None] | None = None,
@@ -382,11 +381,6 @@ class CoreAgent:
         # assembled differently when nobody is watching would be a second
         # builder deciding what she is like unprompted.
         self._open_notebook_threads = open_notebook_threads or (lambda: ())
-        # Occasions whose response had nowhere to go. Supplied by the one
-        # opportunity ledger; the Core is shown that it happened and nothing
-        # deterministic decides whether it still matters.
-        self._undelivered_responses = undelivered_responses or (lambda: ())
-
     def _emit(self, subsystem: TraceSubsystem, status: TraceStatus, label: str,
               conversation_id: str | None = None, **values: Any) -> None:
         emit_trace(self._trace, subsystem, status, label,
@@ -426,7 +420,8 @@ class CoreAgent:
     def process(self, conversation: ConversationSnapshot, retention_until: datetime,
                 step_budget: int, trigger_event_id: str | None = None,
                 origin: CognitionOrigin = CognitionOrigin.PERSON_TURN,
-                resume_plan_goal_id: str | None = None) -> CoreOutcome:
+                resume_plan_goal_id: str | None = None,
+                undelivered_responses: tuple[Mapping[str, Any], ...] = ()) -> CoreOutcome:
         """Reason over one durable conversation and whichever of its goals AL/X selects.
 
         No goal is attached in advance. Every unfinished goal of the
@@ -582,7 +577,7 @@ class CoreAgent:
                     runtime=self._read_runtime_facts(),
                     pending_revisits=self._pending_revisits(),
                     open_notebook_threads=self._open_notebook_threads(),
-                    undelivered_responses=self._undelivered_responses(),
+                    undelivered_responses=undelivered_responses,
                     memory_conflicts=memory_conflicts,
                     refused_calls=refused_calls,
                     continuation_notices=continuation_notices,
