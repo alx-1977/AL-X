@@ -825,6 +825,11 @@ async def run(repository_root: Path) -> None:
         telemetry_sink=activity.publish_coding,
         repository=coding_repository,
         goal_state_source=current_goal_state.get,
+        # D-052a: the job reads the review it addresses itself, through the
+        # same reviewer provider AL/X reads it with.
+        review_reader=(
+            review_runtime.provider.read if review_runtime is not None else None
+        ),
     )
     if coding_runtime is not None:
         register(coding_runtime.definitions, TraceSubsystem.CODING)

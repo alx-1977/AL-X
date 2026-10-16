@@ -99,6 +99,9 @@ CODING_FAILURES = (
     "required_verification_failed",
     "sandbox_unusable",
     "session_failed",
+    # The review the job was asked to address could not be read for the
+    # exact revision the job starts from (D-052a).
+    "review_unavailable",
     "session_interrupted",
     "task_failed",
     "coding_cancelled",
@@ -324,6 +327,10 @@ class CodingRequest:
     # injected beside it from that job's durable record, never supplied.
     corrective_action: str = ""
     corrected_failure: dict[str, object] | None = None
+    # The pull request whose external review this job addresses (D-052a). The
+    # job reads that review for the exact revision it starts from and hands
+    # the reviewer's own words to the session, so nothing is lost in retelling.
+    review_pull_request: int | None = None
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -347,6 +354,12 @@ class CodingRequest:
                 raise ValueError("a requested check must be a bounded argv of non-blank strings")
         if len(self.corrective_action) > MAX_CONTEXT_CHARACTERS:
             raise ValueError("corrective_action exceeds the permitted size")
+        if self.review_pull_request is not None and (
+            not isinstance(self.review_pull_request, int)
+            or isinstance(self.review_pull_request, bool)
+            or self.review_pull_request <= 0
+        ):
+            raise ValueError("review_pull_request must be a positive integer")
         criteria = tuple(self.acceptance_criteria)
         object.__setattr__(self, "acceptance_criteria", criteria)
         if len(criteria) > MAX_CRITERIA:
