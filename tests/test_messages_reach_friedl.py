@@ -178,6 +178,44 @@ class SessionOpenGatewayTests(unittest.TestCase):
             "occasion-1",
         )
 
+    def test_same_conversation_omits_a_legacy_unheard_reply_by_occasion(self):
+        conversation = self.store.create(FRIEDL, RETENTION)
+        heard_reply = ConversationTurn(
+            FRIEDL, "heard-reply", ConversationOrigin.ALX_RESPONSE,
+            "Ordinary heard answer.", NOW,
+        )
+        conversation = self.store.append(
+            heard_reply, RETENTION, conversation.revision
+        )
+        unheard_reply = ConversationTurn(
+            FRIEDL, "legacy-occasion", ConversationOrigin.ALX_RESPONSE,
+            STORED_PROSE, NOW,
+        )
+        self.store.append(unheard_reply, RETENTION, conversation.revision)
+        legacy_row = _row("legacy-occasion")
+        legacy_row.pop("conversation_id")
+        legacy_row.pop("response_turn_id")
+        lifecycle = _Lifecycle((legacy_row,))
+        core = _Core()
+
+        self.gateway(core, lifecycle).receive_session_open(FRIEDL, 8, RETENTION)
+
+        opening = core.calls[0][0]
+        self.assertEqual(
+            tuple(turn.turn_id for turn in opening.turns),
+            ("heard-reply",),
+        )
+        self.assertNotIn(STORED_PROSE, repr(opening.turns))
+        self.assertEqual(
+            core.calls[0][3]["undelivered_responses"],
+            ({
+                "opportunity_id": "legacy-occasion",
+                "origin": "external_event",
+                "arose_at": NOW.isoformat(),
+                "references": ("mail:1", "mail:2"),
+            },),
+        )
+
     def test_a_checkpoint_restores_the_claim(self):
         lifecycle = _Lifecycle((_row("occasion-1"),))
         core = _Core(CoreOutcome(CoreState.CHECKPOINTED, reason="budget_exceeded"))

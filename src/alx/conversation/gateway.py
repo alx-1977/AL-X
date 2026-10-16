@@ -279,6 +279,13 @@ class ConversationGateway:
                 for item in claimed
                 if item.get("conversation_id", "") == conversation_id
                 and item.get("response_turn_id")
+            ) | frozenset(
+                # Before those identity columns existed, an autonomous reply
+                # was already stored under its durable occasion identity.
+                item["opportunity_id"]
+                for item in claimed
+                if not item.get("conversation_id")
+                and not item.get("response_turn_id")
             )
             # This is an ephemeral Core view.  The durable conversation stays
             # intact, but wording Friedl never heard cannot reach the fresh
