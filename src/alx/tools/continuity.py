@@ -252,9 +252,9 @@ OWN_TIME_DEFINITION = CapabilityDefinition(
 
 PRESENCE_DEFINITION = CapabilityDefinition(
     SET_PRESENCE,
-    "Record whether Friedl is here or away, when he tells you he is stepping "
-    "out or is back. state is \"here\" or \"away\". It sets the presence "
-    "icon on his screen.",
+    "Record whether Friedl is here or away, whenever you conclude from what "
+    "he says or does that he has left or come back; he need not announce it. "
+    "state is \"here\" or \"away\". It sets the presence icon on his screen.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"state": _STRING},

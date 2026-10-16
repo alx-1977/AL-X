@@ -68,6 +68,11 @@ class PresenceTests(unittest.TestCase):
         self.assertIn(SET_PRESENCE, [definition.capability_id for definition in DEFINITIONS])
         text = " ".join(PROTOCOL_INSTRUCTIONS.split())
         self.assertIn("runtime.presence says whether Friedl is here or away", text)
+        # 2026-10-16: "Good night" did not set him away, because she had been
+        # told to record it when he announced it. It is her judgement, and
+        # nothing lists what counts.
+        self.assertIn("your judgement from anything he says or does", text)
+        self.assertNotIn("tells you he is stepping out", text)
 
 
 class PresenceIconTests(unittest.TestCase):
