@@ -355,7 +355,9 @@ class SubscriptionCodingSession:
                     output_limit_bytes=MAX_SESSION_OUTPUT_BYTES,
                     env=self.child_environment(home),
                     cwd=str(worktree),
-                    **({"input": briefing} if self.briefing_on_stdin()
+                    # Bytes: the pipe is binary, so a str could not be encoded
+                    # onto it (found in the PR #145 review).
+                    **({"input": briefing.encode("utf-8")} if self.briefing_on_stdin()
                        else {"stdin": subprocess.DEVNULL}),
                     shell=False,
                     check=False,

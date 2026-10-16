@@ -396,3 +396,45 @@ class CodexCodingSessionTests(unittest.TestCase):
         (self.parent / ".codex").mkdir()
         (self.parent / ".codex" / "auth.json").write_text("{}")
         self.assertEqual(self.session.login_problem(), "")
+
+
+class CodexSessionThroughTheRealLaunchPathTests(unittest.TestCase):
+    """PR #145 review: the briefing must reach the CLI through the real pipe."""
+
+    def test_the_briefing_arrives_on_stdin_and_the_report_comes_back(self) -> None:
+        from dataclasses import replace as replace_request
+        from alx.contracts.coding import CodingRequest
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        parent = Path(directory.name).resolve()
+        worktree = parent / "repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        # A stand-in CLI: it echoes what arrived on stdin as its last message.
+        cli = parent / "bin" / "codex"
+        cli.parent.mkdir()
+        cli.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "text = sys.stdin.read()\n"
+            "for event in ({'type': 'turn.started'},\n"
+            "              {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': text}},\n"
+            "              {'type': 'turn.completed'}):\n"
+            "    print(json.dumps(event))\n",
+            encoding="utf-8",
+        )
+        cli.chmod(0o755)
+        session = CodexCodingSession(
+            "gpt-5.6-luna", executable=str(cli), stall_seconds=30,
+            environment={"PATH": "/bin:/usr/bin", "HOME": str(parent)},
+        )
+        request = replace_request(
+            CodingRequest(task="fix add", job_id="job-1", repair_branch="fix/a",
+                          commit_message="fix"),
+            worktree=str(worktree),
+        )
+        briefing = "Fix the DHL date. Ünïcode survives too.\n" * 2000
+        result = session.run_session(request, briefing)
+        self.assertTrue(result.completed)
+        self.assertEqual(result.report, briefing)
