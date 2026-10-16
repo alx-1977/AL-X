@@ -245,6 +245,39 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertEqual(subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip(), sha)
 
+    def test_a_commit_only_resume_does_not_ask_for_a_new_review(self):
+        """PR #148 review: after commit_created_but_unverified HEAD is the job's
+        own unpushed commit, which no review covers."""
+        from alx.contracts.review_content import ReviewContent
+        reads = []
+
+        def reader(request):
+            reads.append(request.head_sha)
+            return ReviewContent(request.pull_request_number, request.head_sha,
+                                 "greptile", True, summary="fix it", submitted_at=NOW)
+
+        session = RecordingSession(edits={"app.py": _FIXED})
+        original = coding_agent_module.commit_job_changes
+
+        def committed_then_unverified(*args, **kwargs):
+            created = original(*args, **kwargs)
+            raise CodingError("git_unavailable", reason_code="commit_created_but_unverified",
+                              commit_sha=created.commit_sha)
+
+        def agent():
+            return CodingAgent(PlanningModel(), session, repository=self.root,
+                               review_reader=reader)
+
+        request = replace(self.request, review_pull_request=147)
+        with patch.object(coding_agent_module, "commit_job_changes", committed_then_unverified):
+            first = agent().run(request)
+        self.assertEqual(len(reads), 1)
+        checkpoint = json.loads(first.checkpoint)
+        self.assertEqual(checkpoint["stage"], "commit")
+        second = agent().run(replace(request, job_id="job-2", resume_checkpoint=checkpoint))
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(len(reads), 1)
+
     def test_resume_refuses_changed_checkout_without_touching_it(self):
         broken = RecordingSession(edits={"app.py": "def add(a, b):\n    return a * b\n"})
         first = self._agent(session=broken).run(self.request)
