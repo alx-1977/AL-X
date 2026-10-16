@@ -82,24 +82,21 @@ class RuntimeConfigurationTests(unittest.TestCase):
                     XAI_API_KEY="coding-secret",
                 )
             )
-        missing_reviewer = RuntimeSettings.from_environment(
-            environment(
-                ALX_CODING_ENABLED="true",
-                ALX_CODING_PROVIDER="grok_subscription",
-                XAI_API_KEY="must-not-become-the-coding-credential",
-            )
-        )
-        self.assertFalse(missing_reviewer.coding.is_usable)
+        # D-052: one coding model, no reviewer to configure.
         enabled = RuntimeSettings.from_environment(
             environment(
                 ALX_CODING_ENABLED="true",
                 ALX_CODING_PROVIDER="grok_subscription",
-                ALX_CODING_REVIEWER_PROVIDER="grok_subscription",
-                ALX_CODING_REVIEWER_MODEL="grok-4.6",
                 XAI_API_KEY="must-not-become-the-coding-credential",
             )
         )
         self.assertTrue(enabled.coding.is_usable)
+        codex = RuntimeSettings.from_environment(
+            environment(ALX_CODING_ENABLED="true", ALX_CODING_PROVIDER="codex_subscription")
+        )
+        self.assertTrue(codex.coding.is_usable)
+        self.assertEqual(codex.coding.reasoning.provider, "codex_subscription")
+        self.assertEqual(codex.coding.reasoning.model, "gpt-5.6-luna")
         self.assertEqual(enabled.coding.reasoning.provider, "grok_subscription")
         self.assertEqual(enabled.coding.reasoning.api_key, "")
         self.assertEqual(enabled.reasoning.provider, "xai")

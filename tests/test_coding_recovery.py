@@ -78,10 +78,10 @@ class CodingRecoveryTests(unittest.TestCase):
             commit_message="fix add",
         )
 
-    def _agent(self, model=None, session=None, reviewer=None, telemetry=None):
+    def _agent(self, model=None, session=None, telemetry=None):
         return CodingAgent(
             model or PlanningModel(), session or RecordingSession(edits={"app.py": _FIXED}),
-            reviewer or PlanningModel(), repository=self.root,
+            repository=self.root,
             telemetry_sink=telemetry,
         )
 
@@ -127,39 +127,6 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertTrue(result.values["all_required_verification_passed"])
         self.assertEqual(len(resumed_session.calls), 1)
 
-    def test_interrupted_review_correction_resumes_execution_before_review_and_commit(self):
-        class CorrectionInterrupted(RecordingSession):
-            def run_session(self, request, briefing):
-                if self.calls:
-                    self.calls.append((request, briefing))
-                    (Path(request.worktree) / "app.py").write_text(
-                        _FIXED + "# partial correction\n", encoding="utf-8"
-                    )
-                    raise CodingError("session_interrupted", reason_code="session_stalled")
-                return super().run_session(request, briefing)
-
-        findings = {"findings": [{
-            "severity": "high", "title": "finish correction",
-            "evidence": "partial result", "correction": "finish the change",
-        }]}
-        first = self._agent(
-            session=CorrectionInterrupted(edits={"app.py": _FIXED}),
-            reviewer=PlanningModel(reviews=[findings]),
-        ).run(self.request)
-        self.assertEqual(first.status, "interrupted")
-        checkpoint = json.loads(first.checkpoint)
-        self.assertEqual(checkpoint["stage"], "execution")
-        self.assertTrue(checkpoint["review_findings"])
-        self.assertIsNone(first.commit)
-        resumed_session = RecordingSession(edits={"app.py": _FIXED})
-        second = self._agent(session=resumed_session).run(replace(
-            self.request, job_id="job-2", resume_checkpoint=checkpoint,
-        ))
-        self.assertEqual(second.status, "succeeded")
-        self.assertIsNotNone(second.commit)
-        self.assertIn("finish correction", resumed_session.calls[0][1])
-        self.assertTrue(second.verification.all_required_passed)
-
     def _cancel_at(self, agent: CodingAgent, started: threading.Event):
         result = []
         worker = threading.Thread(target=lambda: result.append(agent.run(self.request)))
@@ -193,22 +160,6 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertIn("app.py", json.loads(outcome.checkpoint)["files"])
         self.assertTrue(outcome.diff_preserved)
 
-    def test_cancel_during_review_and_resume_only_review(self):
-        started = threading.Event()
-        session = RecordingSession(edits={"app.py": _FIXED})
-        first = self._cancel_at(
-            self._agent(session=session,
-                        reviewer=BlockingModel("alx_coding_local_review", started)), started,
-        )
-        checkpoint = json.loads(first.checkpoint)
-        self.assertEqual(checkpoint["stage"], "review")
-        second = self._agent(session=session).run(replace(
-            self.request, job_id="job-2", resume_checkpoint=checkpoint,
-        ))
-        self.assertEqual(second.status, "succeeded")
-        self.assertEqual(len(session.calls), 1)
-        self.assertIsNotNone(second.commit)
-
     def test_cancel_during_tests_and_resume_only_tests(self):
         started = threading.Event()
         session = RecordingSession(edits={"app.py": _FIXED})
@@ -228,37 +179,27 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertEqual(second.status, "succeeded")
         self.assertEqual(len(session.calls), 1)
 
-    def test_failed_correction_after_review_retry_spends_implementation_allowance(self):
-        class CorrectionFails(RecordingSession):
-            def run_session(self, request, briefing):
-                if self.calls:
-                    raise CodingError("session_failed", reason_code="correction_failed")
-                return super().run_session(request, briefing)
+    def test_a_checkpoint_from_the_retired_review_stage_resumes_at_verification(self):
+        """D-052: a job stopped at "review" before the reviewer was removed."""
+        started = threading.Event()
+        session = RecordingSession(edits={"app.py": _FIXED})
+        agent = self._agent(session=session)
+        original = coding_agent_module.run_permitted_command
 
-        reviewer = PlanningModel(reviews=[
-            {"findings": "invalid schema"},
-            {"findings": [{"severity": "high", "title": "repair incomplete",
-                           "evidence": "adjacent path remains wrong",
-                           "correction": "finish the adjacent path"}]},
-        ])
-        outcome = self._agent(
-            session=CorrectionFails(edits={"app.py": _FIXED}), reviewer=reviewer,
-        ).run(self.request)
-        self.assertEqual(outcome.status, "failed")
-        self.assertIn("session_failed", outcome.unresolved_issues)
-        self.assertEqual(outcome.review_classification, "infrastructure")
-        failure = {"code": "session_failed", **outcome.diagnostics,
-                   "review_classification": outcome.review_classification}
-        from alx.contracts import CapabilityAttempt, CapabilityAttemptDisposition, CapabilityResult
-        attempt = CapabilityAttempt(
-            CapabilityCall("job-1", "run_coding_task", {"task": "fix add"}),
-            CapabilityAttemptDisposition.EXECUTED, True,
-            CapabilityResult("job-1", "run_coding_task", CapabilityResultState.FAILED,
-                             failure=failure),
-        )
-        goal = GoalState("goal", Objective("turn:t", "repair"),
-                         (SuccessCriterion("c", "fixed"),), attempts=(attempt,))
-        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
+        def blocked(*args, **kwargs):
+            _wait_in_child(started)
+            return original(*args, **kwargs)
+
+        with patch.object(coding_agent_module, "run_permitted_command", blocked):
+            first = self._cancel_at(agent, started)
+        checkpoint = {**json.loads(first.checkpoint), "stage": "review",
+                      "review_findings": []}
+        second = self._agent(session=session).run(replace(
+            self.request, job_id="job-2", resume_checkpoint=checkpoint,
+        ))
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(len(session.calls), 1)
+        self.assertIsNotNone(second.commit)
 
     def test_commit_failure_after_passing_tests_resumes_commit_only(self):
         session = RecordingSession(edits={"app.py": _FIXED})
@@ -305,8 +246,8 @@ class CodingRecoveryTests(unittest.TestCase):
             ["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip(), sha)
 
     def test_resume_refuses_changed_checkout_without_touching_it(self):
-        reviewer = PlanningModel(reviews=[{"findings": "bad"}])
-        first = self._agent(reviewer=reviewer).run(self.request)
+        broken = RecordingSession(edits={"app.py": "def add(a, b):\n    return a * b\n"})
+        first = self._agent(session=broken).run(self.request)
         self.assertEqual(first.status, "failed")
         (self.root / "app.py").write_text(_FIXED + "# later edit\n")
         model = PlanningModel()
@@ -318,101 +259,6 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertEqual(caught.exception.details["reason_code"], "resume_state_changed")
         self.assertFalse(model.requests)
         self.assertFalse(session.calls)
-
-    def test_review_schema_failure_is_secret_redacted_and_resumed_through_goal(self):
-        secret = "sk-MUST-NOT-SURVIVE"
-        subprocess.run(["git", "branch", "fix/job-1"], cwd=self.root, check=True)
-        current_goal = GoalState(
-            "goal-a", Objective("turn:t", "repair"), (SuccessCriterion("c", "fixed"),),
-        )
-        current_call = ["job-1"]
-        session = RecordingSession(edits={"app.py": _FIXED})
-        reviewer = PlanningModel(reviews=[{"findings": secret, "api_key": secret}])
-        resumed_reviewer = PlanningModel()
-
-        def dispatch(active_reviewer):
-            runtime = build_coding_runtime(
-                True, PlanningModel(), lambda: current_call[0],
-                session=session, reviewer=active_reviewer, repository=self.root,
-                goal_state_source=lambda: current_goal,
-            )
-            broker = CapabilityBroker(CapabilityRegistry(runtime.definitions),
-                                      SafetyGate(runtime.policies), runtime.executors)
-            arguments = {
-                "task": "fix add", "repair_branch": "fix/job-1",
-                "commit_message": "fix add",
-            }
-            if current_call[0] == "job-1":
-                arguments.update({
-                    "context": "the operation subtracts instead of adding",
-                    "acceptance_criteria": ["addition returns the expected sum"],
-                    "test_guidance": "run the app test",
-                    "step_budget": 7,
-                })
-            else:
-                arguments = {"resume_job_id": "job-1"}
-            durable = {
-                key: arguments[key] for key in runtime.definitions[0].durable_input_fields
-                if key in arguments
-            }
-            return broker.dispatch(
-                CapabilityCall(current_call[0], "run_coding_task", arguments,
-                               durable_arguments=durable),
-                AuthorityContext("friedl", runtime.permissions, NOW),
-            )
-
-        first = dispatch(reviewer)
-        self.assertEqual(first.result.state, CapabilityResultState.FAILED)
-        self.assertEqual(first.result.failure["review_classification"], "infrastructure")
-        self.assertEqual(first.result.values["branch"], "fix/job-1-2")
-        self.assertNotIn(secret, str(first.result.values))
-        self.assertNotIn(secret, str(first.result.durable_values))
-        current_goal = replace(current_goal, attempts=(first,))
-        goal_path = self.root.parent / "coding-goal.sqlite3"
-        store = SQLiteGoalStore(goal_path)
-        store.create(current_goal, "conversation", NOW + timedelta(days=1))
-        store.close()
-        reopened = SQLiteGoalStore(goal_path)
-        self.addCleanup(reopened.close)
-        current_goal = reopened.load("goal-a").state
-        self.assertEqual(current_goal.attempts[0].call.arguments["step_budget"], 7)
-        self.assertEqual(current_goal.attempts[0].call.arguments["context"],
-                         "the operation subtracts instead of adding")
-        current_call[0] = "job-2"
-        owned_goal = current_goal
-        current_goal = GoalState(
-            "goal-b", Objective("turn:other", "other repair"),
-            (SuccessCriterion("c", "fixed"),),
-        )
-        foreign = dispatch(PlanningModel())
-        self.assertEqual(foreign.result.failure["reason_code"],
-                         "resume_ownership_unproven")
-        current_goal = owned_goal
-        second = dispatch(resumed_reviewer)
-        self.assertEqual(second.result.state, CapabilityResultState.SUCCEEDED,
-                         second.result.failure)
-        self.assertEqual(len(session.calls), 1)
-        self.assertTrue(second.result.values["commit_sha"])
-        review_material = json.loads(resumed_reviewer.requests[0].messages[1].content)
-        self.assertEqual(review_material["root_cause_context"],
-                         "the operation subtracts instead of adding")
-        self.assertEqual(review_material["acceptance_criteria"],
-                         ["addition returns the expected sum"])
-        self.assertEqual(review_material["test_guidance"], "run the app test")
-
-    def test_adapter_coding_error_cannot_spoof_schema_evidence(self):
-        secret = "sk-MUST-NOT-SURVIVE"
-
-        class UntrustedReviewer(PlanningModel):
-            def complete(self, request):
-                raise CodingError("review_failed", reason_code="review_schema_invalid",
-                                  error_message=secret, raw_excerpt=secret)
-
-        outcome = self._agent(reviewer=UntrustedReviewer()).run(self.request)
-        self.assertEqual(outcome.status, "failed")
-        self.assertEqual(outcome.review_classification, "infrastructure")
-        self.assertEqual(outcome.review_attempts[0].reason, "provider_failed")
-        self.assertNotIn(secret, str(outcome.as_values()))
 
     def test_test_transport_timeout_retries_test_only(self):
         session = RecordingSession(edits={"app.py": _FIXED})

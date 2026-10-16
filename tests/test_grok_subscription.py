@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from alx.bootstrap.coding import build_coding_runtime  # noqa: E402
 from alx.bootstrap.providers import build_runtime_providers  # noqa: E402
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
+from alx.config import ConfigurationError  # noqa: E402
 from alx.config.settings import RuntimeSettings  # noqa: E402
 from alx.contracts import (  # noqa: E402
     CapabilityAttemptDisposition,
@@ -35,6 +36,7 @@ from alx.providers import (  # noqa: E402
     XAIReasoningModel,
 )
 from alx.providers.errors import ProviderError  # noqa: E402
+from alx.providers.coding_session import GrokCodingSession  # noqa: E402
 from alx.providers.grok_subscription import PROVIDER_NAME  # noqa: E402
 from alx.providers.coding_agent import PLAN_SCHEMA  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
@@ -155,8 +157,6 @@ def _environment(**changes: str) -> dict[str, str]:
         "ALX_CODING_ENABLED": "true",
         "ALX_CODING_PROVIDER": "grok_subscription",
         "ALX_CODING_MODEL": "grok-4.6",
-        "ALX_CODING_REVIEWER_PROVIDER": "grok_subscription",
-        "ALX_CODING_REVIEWER_MODEL": "grok-4.6",
     }
     values.update(changes)
     return values
@@ -280,9 +280,6 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         )
         runtime = build_coding_runtime(
             True, model, lambda: "call-1", session=_StubSession(root),
-            reviewer=GrokSubscriptionReasoningModel(
-                "grok-4.6", 30, runner=runner, environment={"PATH": "/bin"}
-            ),
             repository=root,
         )
         broker = CapabilityBroker(
@@ -418,51 +415,6 @@ class GrokCodingCompositionTests(unittest.TestCase):
         self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
         self.assertNotIn("XAI_API_KEY", providers.coding.child_environment())
 
-    def test_local_reviewer_is_a_distinct_instance_when_explicitly_configured(self) -> None:
-        with patch(
-            "alx.bootstrap.providers.subscription_cli_present", return_value=True
-        ):
-            providers = build_runtime_providers(
-                RuntimeSettings.from_environment(_environment())
-            )
-        self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
-        self.assertIsInstance(
-            providers.coding_reviewer, GrokSubscriptionReasoningModel
-        )
-        self.assertIsNot(providers.coding, providers.coding_reviewer)
-
-    def test_missing_reviewer_configuration_disables_coding_without_fallback(self) -> None:
-        environment = _environment()
-        environment.pop("ALX_CODING_REVIEWER_PROVIDER")
-        environment.pop("ALX_CODING_REVIEWER_MODEL")
-        settings = RuntimeSettings.from_environment(environment)
-        self.assertFalse(settings.coding.is_usable)
-        self.assertEqual(settings.coding.reviewer.provider, "none")
-        with patch(
-            "alx.bootstrap.providers.subscription_cli_present", return_value=True
-        ):
-            providers = build_runtime_providers(settings)
-        self.assertIsNone(providers.coding)
-        self.assertIsNone(providers.coding_reviewer)
-
-    def test_local_reviewer_can_use_a_different_provider_and_model(self) -> None:
-        with patch(
-            "alx.bootstrap.providers.subscription_cli_present", return_value=True
-        ):
-            providers = build_runtime_providers(RuntimeSettings.from_environment(
-                _environment(
-                    ALX_CODING_REVIEWER_PROVIDER="openai",
-                    ALX_CODING_REVIEWER_MODEL="reviewer-test",
-                    ALX_CODING_REVIEWER_API_KEY="reviewer-key",
-                    ALX_CODING_REVIEWER_EFFORT="high",
-                )
-            ))
-        self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
-        self.assertIsInstance(providers.coding_reviewer, OpenAIReasoningModel)
-        self.assertEqual(providers.coding_reviewer._model, "reviewer-test")
-        self.assertEqual(providers.coding_reviewer._api_key, "reviewer-key")
-        self.assertEqual(providers.coding_reviewer._reasoning_effort, "high")
-
     def test_a_present_xai_key_does_not_become_the_coding_transport(self) -> None:
         with patch(
             "alx.bootstrap.providers.subscription_cli_present", return_value=True
@@ -475,30 +427,29 @@ class GrokCodingCompositionTests(unittest.TestCase):
         self.assertNotIsInstance(providers.coding, XAIReasoningModel)
         with patch.dict("os.environ", {"XAI_API_KEY": "metered-secret"}):
             self.assertNotIn("XAI_API_KEY", providers.coding.child_environment())
+    def test_only_providers_with_a_coding_session_are_accepted(self) -> None:
+        """D-052: a coding provider that cannot carry its plan out is refused."""
+        for provider in ("openai", "claude_subscription"):
+            with self.subTest(provider=provider), self.assertRaises(ConfigurationError):
+                RuntimeSettings.from_environment(_environment(
+                    ALX_CODING_PROVIDER=provider, ALX_CODING_MODEL="any",
+                ))
 
-    def test_openai_coding_provider_is_selected_without_changing_core(self) -> None:
-        with patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
+    def test_a_reviewer_setting_left_in_the_environment_changes_nothing(self) -> None:
+        """D-052: there is no reviewer to configure; old lines are inert."""
+        with patch(
+            "alx.bootstrap.providers.subscription_cli_present", return_value=True
+        ):
             providers = build_runtime_providers(RuntimeSettings.from_environment(
                 _environment(
-                    ALX_CODING_PROVIDER="openai",
-                    ALX_CODING_MODEL="codex-test",
-                    ALX_CODING_API_KEY="coding-key",
+                    ALX_CODING_REVIEWER_PROVIDER="codex_subscription",
+                    ALX_CODING_REVIEWER_MODEL="gpt-5.6-luna",
                 )
             ))
-        self.assertIsInstance(providers.reasoning, ClaudeSubscriptionReasoningModel)
-        self.assertIsInstance(providers.coding, OpenAIReasoningModel)
-        self.assertEqual(providers.coding._api_key, "coding-key")
-
-    def test_claude_coding_provider_is_explicit_and_independent(self) -> None:
-        with patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
-            providers = build_runtime_providers(RuntimeSettings.from_environment(
-                _environment(
-                    ALX_CODING_PROVIDER="claude_subscription",
-                    ALX_CODING_MODEL="claude-test",
-                )
-            ))
-        self.assertIsInstance(providers.reasoning, ClaudeSubscriptionReasoningModel)
-        self.assertIsInstance(providers.coding, ClaudeSubscriptionReasoningModel)
+        self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
+        self.assertIsInstance(providers.coding_session, GrokCodingSession)
+        self.assertFalse(providers.coding_session.has_terminal)
+        self.assertFalse(hasattr(providers, "coding_reviewer"))
 
 
 if __name__ == "__main__":

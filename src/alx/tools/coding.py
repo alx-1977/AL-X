@@ -114,32 +114,6 @@ _COMMIT_RECORD = StructuredSchema(
     extra_properties=False,
 )
 
-# What the local reviewer said about this job's candidate. Advisory: a finding
-# is the reviewer's opinion for Core to weigh, not a verdict on the work.
-_REVIEW_ATTEMPT = StructuredSchema(
-    ValueKind.OBJECT,
-    {
-        "attempt": _INTEGER,
-        "reason": _STRING,
-        "error_message": _STRING,
-        "raw_excerpt": _STRING,
-    },
-    ("attempt", "reason", "error_message", "raw_excerpt"),
-    extra_properties=False,
-)
-
-_REVIEW_FINDING = StructuredSchema(
-    ValueKind.OBJECT,
-    {
-        "severity": _STRING,
-        "title": _STRING,
-        "evidence": _STRING,
-        "correction": _STRING,
-    },
-    ("severity", "title", "evidence", "correction"),
-    extra_properties=False,
-)
-
 _VERIFICATION_CHECK = StructuredSchema(
     ValueKind.OBJECT,
     {
@@ -213,33 +187,24 @@ DEFINITION = CapabilityDefinition(
     "must pass the command allowlist, and one that is refused, fails or never "
     "runs fails verification. test_guidance is prose for the session and runs "
     "nothing. summary is the coding session's own report, written before any "
-    "check ran: the session has no terminal, so it cannot have run them. "
+    "check ran: whatever the session ran for itself, only AL/X's checks count. "
     "verification, tests_run and commit record what actually ran and passed. "
     "A passed job is committed, "
     "returning branch and commit_sha. Only files this job changed are "
     "committed: the commit is refused rather than widened if the index or the "
     "resulting tree holds any path outside that authorised set. It still does "
     "not push, merge, deploy, or request an external review. "
-    "A local reviewer advises on the candidate and the job corrects what it "
-    "raises, but its findings never block the commit: findings it did not "
-    "resolve come back in review_findings with external_review_recommended "
-    "true and local_review_material_findings in unresolved_issues, so you "
-    "judge them against the committed work rather than being handed a refusal "
-    "in place of it. A reviewer schema, timeout, or provider failure is not a "
-    "finding: review_classification is infrastructure, that same diff is "
-    "reviewed again up to two more times. review_attempts carries each failed "
-    "attempt's reason, error_message, and bounded raw_excerpt, including when "
-    "a later attempt succeeds and the job commits. If those attempts are "
-    "exhausted the job stays uncommitted with diff_preserved and the branch "
-    "name. AL/X may supply only resume_job_id for a failed or cancelled call "
+    "No second model reviews the diff: the checks, and the external review "
+    "you request on the pull request, are the review. "
+    "AL/X may supply only resume_job_id for a failed or cancelled call "
     "from this active goal to retry only its recorded stage after the checkout "
     "matches the durable branch, HEAD, and full state digest. With a resume of "
-    "a failed job whose recorded stage is execution, review, or test, "
+    "a failed job whose recorded stage is execution or test, "
     "AL/X may add corrective_action: her diagnosis of that recorded failure and "
     "the specific repair she chose. The job then reruns its required checks on "
     "the exact checkout, hands the coding session the recorded failure, the "
     "reproduced check output, and her corrective_action, and continues through "
-    "review, verification, and commit unchanged. Repeating an attempt without "
+    "verification and commit unchanged. Repeating an attempt without "
     "a new diagnosis is bounded per failure episode, and each recorded failure "
     "admits a bounded number of distinct corrections. stop_coding_job stops "
     "the running job; cancellation preserves its branch and diff and returns "
@@ -278,16 +243,11 @@ DEFINITION = CapabilityDefinition(
             "commands": StructuredSchema(ValueKind.ARRAY, items=_COMMAND),
             "tests_run": _BOOLEAN,
             "tests_passed": _BOOLEAN,
-            "review_findings": StructuredSchema(
-                ValueKind.ARRAY, items=_REVIEW_FINDING
-            ),
-            "material_review_findings": _INTEGER,
             "verification": _VERIFICATION,
             "all_required_verification_passed": _BOOLEAN,
             "git_status": _STRING,
             "git_diff": _STRING,
             "unresolved_issues": _STRING_ARRAY,
-            "external_review_recommended": _BOOLEAN,
             "unresolved_count": _INTEGER,
             "diff_digest": _STRING,
             "finished_at": _STRING,
@@ -296,15 +256,8 @@ DEFINITION = CapabilityDefinition(
             "commit": _COMMIT_RECORD,
             "branch": _STRING,
             "commit_sha": _STRING,
-            # Set when a review attempt failed for schema, timeout, or provider
-            # reasons, including when a later attempt succeeded. Absent when
-            # the only review evidence is advisory findings.
-            "review_classification": _STRING,
             "diff_preserved": _BOOLEAN,
             "uncommitted": _BOOLEAN,
-            "review_attempts": StructuredSchema(
-                ValueKind.ARRAY, items=_REVIEW_ATTEMPT
-            ),
             "checkpoint": _STRING,
             "interruption_reason": _STRING,
         },
@@ -318,7 +271,6 @@ DEFINITION = CapabilityDefinition(
             "git_status",
             "git_diff",
             "unresolved_issues",
-            "external_review_recommended",
         ),
         extra_properties=False,
     ),
@@ -339,9 +291,9 @@ DEFINITION = CapabilityDefinition(
 # stop a job and bypassed her entirely.
 STOP_DEFINITION = CapabilityDefinition(
     STOP_CODING_JOB,
-    "Stop the coding job that is running now. Call it with no goal "
-    "selected: the goal whose plan runs the job admits no other call while "
-    "the job runs. job_id, when given, must name that job: the call_id of "
+    "Stop the coding job that is running now. It may be called from the goal "
+    "whose plan is running the job, which admits no other call while the job "
+    "runs, or with no goal selected. job_id, when given, must name that job: the call_id of "
     "its run_coding_task step. The stopped job keeps "
     "its branch and diff and its own result returns a checkpoint. stopped is "
     "false when no job is running, the named job is not the running one, or "
@@ -375,8 +327,6 @@ _OUTCOME_ISSUE_CODES = (
     "provider_failed",
     "plan_unusable",
     "planning_failed",
-    "review_failed",
-    "local_review_material_findings",
     "unrelated_changes_staged",
     "required_verification_failed",
     "git_refused",

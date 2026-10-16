@@ -15,8 +15,7 @@ class of check among several.
 Everything here is a pure function of the job's final changed-path set. It reads
 no task wording, no plan prose and no model output: a policy derived from what a
 model said it would change is a policy a model can talk its way around, and the
-only honest input is what is actually on disk after the local reviewer's
-corrections have landed.
+only honest input is what is actually on disk when the session has finished.
 
 The path taxonomies are not restated here. The governance gate already declares
 which documents are canonical and the architecture gate already declares which

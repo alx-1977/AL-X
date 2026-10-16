@@ -59,15 +59,8 @@ MAX_CRITERIA = 16
 MAX_CRITERION_CHARACTERS = 1_000
 MAX_BLOCKED_PATHS = 32
 MAX_BLOCKED_PATH_CHARACTERS = 512
-MAX_LOCAL_REVIEW_CYCLES = 2
-MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS = 16_000
-# Schema, timeout, and provider failures of the local reviewer. One attempt
-# plus two retries, against the same diff. Material findings are not in this
-# bound: they stay advisory and do not retry the review.
-MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS = 3
 MAX_TEST_INFRASTRUCTURE_ATTEMPTS = 3
 MAX_REPAIR_BRANCH_ATTEMPTS = 100
-MAX_REVIEW_RAW_EXCERPT_CHARACTERS = 2_000
 MAX_BRANCH_NAME_CHARACTERS = 200
 MAX_COMMIT_MESSAGE_CHARACTERS = 4_000
 # One commit per job. Staging is a named path list, and a job that touched
@@ -97,8 +90,6 @@ CODING_FAILURES = (
     "provider_failed",
     "plan_unusable",
     "planning_failed",
-    "review_failed",
-    "local_review_material_findings",
     "git_refused",
     "git_unavailable",
     "unrelated_changes_staged",
@@ -149,7 +140,6 @@ class CodingTelemetry:
     provider: str = ""
     model: str = ""
     attempt: int = 1
-    correction_cycle: int = 0
     in_flight: bool = False
     waiting: bool = False
     terminal: bool = False
@@ -164,8 +154,8 @@ class CodingTelemetry:
         _required(self.phase, "phase")
         for name in ("started_at", "phase_started_at", "last_activity_at"):
             _aware(getattr(self, name), name)
-        if self.attempt < 1 or self.correction_cycle < 0:
-            raise ValueError("telemetry attempt and correction cycle are bounded")
+        if self.attempt < 1:
+            raise ValueError("telemetry attempt is bounded")
 
 
 # A job identity reaching the filesystem becomes one path segment and part of
@@ -423,6 +413,10 @@ class CodingSession(Protocol):
     the coding job mattered; it returns what happened.
     """
 
+    #: Whether the session can run commands. Always inside its containment:
+    #: no network, git metadata and credentials denied (D-052).
+    has_terminal: bool
+
     def run_session(
         self, request: "CodingRequest", briefing: str
     ) -> CodingSessionResult: ...
@@ -487,91 +481,6 @@ class CodingCommit:
 
 
 @dataclass(frozen=True, slots=True)
-class LocalReviewFinding:
-    """One advisory finding from the job's local reviewer.
-
-    The reviewer is advisory: it reads the job's diff and says what it thinks
-    is wrong. It cannot edit, run a command, commit or merge. A finding is
-    therefore evidence for AL/X to weigh, never a verdict.
-
-    These used to exist only as a local variable inside the review loop. They
-    were computed, used to brief the coding session for a correction, and then
-    discarded — so when findings survived the bounded cycle, AL/X was told the
-    job had failed review and never told what the reviewer had said. The
-    severity filter was a lossy read of a value nothing retained.
-    """
-
-    severity: str
-    title: str
-    evidence: str
-    correction: str
-
-    def __post_init__(self) -> None:
-        _required(self.title, "title")
-        label = self.severity.strip().lower() if isinstance(self.severity, str) else ""
-        object.__setattr__(
-            self, "severity", label if label in ("low", "medium", "high") else "unknown"
-        )
-
-    @property
-    def material(self) -> bool:
-        """Whether this finding is one the reviewer considered substantive.
-
-        Known low findings remain advisory. An unknown label is treated as
-        potentially material so its text reaches AL/X instead of silently
-        making the review look clean. AL/X judges what matters under Law 3.
-        """
-        return self.severity in _MATERIAL_REVIEW_SEVERITIES
-
-    def as_values(self) -> dict[str, object]:
-        return {
-            "severity": self.severity,
-            "title": self.title,
-            "evidence": self.evidence,
-            "correction": self.correction,
-        }
-
-
-_MATERIAL_REVIEW_SEVERITIES = frozenset({"medium", "high", "unknown"})
-
-
-@dataclass(frozen=True, slots=True)
-class ReviewInfrastructureAttempt:
-    """One reviewer infrastructure failure against an unchanged working diff.
-
-    Distinct from a code-review finding. A finding is the reviewer's opinion.
-    This record is the reviewer failing to produce an opinion: schema
-    validation, a timeout, or the provider. Core gets the reason, the error
-    message, and a bounded excerpt of the output that failed validation.
-    """
-
-    attempt: int
-    reason: str
-    error_message: str
-    raw_excerpt: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.attempt, int) or isinstance(self.attempt, bool) or self.attempt < 1:
-            raise ValueError("review attempt must be a positive integer")
-        _required(self.reason, "reason")
-        if not isinstance(self.error_message, str) or not isinstance(self.raw_excerpt, str):
-            raise ValueError("review attempt evidence must be text")
-        if (
-            len(self.error_message) > MAX_REVIEW_RAW_EXCERPT_CHARACTERS
-            or len(self.raw_excerpt) > MAX_REVIEW_RAW_EXCERPT_CHARACTERS
-        ):
-            raise ValueError("review attempt evidence exceeds its bound")
-
-    def as_values(self) -> dict[str, object]:
-        return {
-            "attempt": self.attempt,
-            "reason": self.reason,
-            "error_message": self.error_message,
-            "raw_excerpt": self.raw_excerpt,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class CodingCommandRecord:
     """One development command the job actually ran."""
 
@@ -616,7 +525,6 @@ class CodingOutcome:
     git_status: str
     git_diff: str
     unresolved_issues: tuple[str, ...]
-    external_review_recommended: bool
     finished_at: datetime
     diff_digest: str = ""
     preexisting_dirty: tuple[str, ...] = ()
@@ -630,24 +538,10 @@ class CodingOutcome:
     # job may be committed. Absent on the failure paths that end before
     # verification is reached, where nothing was required and nothing ran.
     verification: "VerificationEvidence | None" = None
-    # What the local reviewer said about this job's final candidate, whatever
-    # the outcome. Findings that survived the bounded correction cycle travel
-    # here with the commit rather than replacing it: AL/X reads the SHA, the
-    # diff and the reviewer's own words together, and decides whether to
-    # revise, push, or stop. Low-severity findings on an otherwise clean
-    # review ride along too, because "the reviewer had nothing material to say"
-    # and "the reviewer said nothing" are different facts.
-    review_findings: tuple["LocalReviewFinding", ...] = ()
-    # Set when a review attempt failed for schema, timeout, or provider
-    # reasons. That includes a later attempt that did produce an opinion:
-    # the job can still commit, and Core still sees the infrastructure
-    # classification. Material findings alone leave this empty.
-    review_classification: str = ""
     # The branch and uncommitted diff remain after a failed, cancelled, or
     # interrupted stage. No later outcome may reset or delete them.
     diff_preserved: bool = False
     preserved_branch: str = ""
-    review_attempts: tuple["ReviewInfrastructureAttempt", ...] = ()
     checkpoint: str = ""
 
     def __post_init__(self) -> None:
@@ -661,19 +555,9 @@ class CodingOutcome:
         object.__setattr__(self, "unresolved_issues", tuple(self.unresolved_issues))
         object.__setattr__(self, "diagnostics", dict(self.diagnostics or {}))
         object.__setattr__(self, "plan_summary", str(self.plan_summary).strip())
-        object.__setattr__(self, "review_findings", tuple(self.review_findings))
-        object.__setattr__(self, "review_attempts", tuple(self.review_attempts))
         object.__setattr__(self, "preserved_branch", str(self.preserved_branch or ""))
-        if self.review_classification not in ("", "infrastructure"):
-            raise ValueError("review_classification must be infrastructure or absent")
         if self.diff_preserved and not self.preserved_branch:
             raise ValueError("a preserved diff needs its branch")
-        if any(
-            not isinstance(item, ReviewInfrastructureAttempt) for item in self.review_attempts
-        ):
-            raise ValueError("review attempts must be infrastructure records")
-        if self.review_attempts and self.review_classification != "infrastructure":
-            raise ValueError("review attempts are an infrastructure review outcome")
         if self.tests_passed is not None and not self.tests_run:
             raise ValueError("tests cannot have passed or failed if none ran")
 
@@ -697,7 +581,6 @@ class CodingOutcome:
             "file_count": len(self.files_changed),
             "command_count": len(self.commands),
             "tests_run": self.tests_run,
-            "external_review_recommended": self.external_review_recommended,
             "unresolved_count": len(self.unresolved_issues),
             "diff_digest": self.diff_digest,
             "finished_at": self.finished_at.isoformat(),
@@ -706,16 +589,6 @@ class CodingOutcome:
         }
         if self.tests_passed is not None:
             values["tests_passed"] = self.tests_passed
-        if self.review_findings:
-            # Durable, because "what did the reviewer actually say" is the
-            # question AL/X asks when she sees external_review_recommended,
-            # and a bare failure code never answered it.
-            values["review_findings"] = [
-                item.as_values() for item in self.review_findings
-            ]
-            values["material_review_findings"] = len(
-                [item for item in self.review_findings if item.material]
-            )
         if self.verification is not None:
             # Durable, because "which checks did this job have to pass"
             # is the question a later reader of a commit will ask, and the
@@ -745,17 +618,9 @@ class CodingOutcome:
             # No commit exists. The branch name is the checkout that still
             # holds the uncommitted diff, not a SHA Core can check out later.
             values["branch"] = self.preserved_branch
-        if self.review_classification == "infrastructure":
-            values["review_classification"] = self.review_classification
         if self.diff_preserved:
             values["diff_preserved"] = True
             values["uncommitted"] = True
-        # Failed attempts travel with a later successful review as well as
-        # with an exhausted, uncommitted one. Preservation is the second case.
-        if self.diff_preserved or self.review_attempts:
-            values["review_attempts"] = [
-                item.as_values() for item in self.review_attempts
-            ]
         if self.checkpoint:
             values["checkpoint"] = self.checkpoint
         return values
@@ -771,8 +636,6 @@ __all__ = [
     "CodingSession",
     "CodingSessionResult",
     "GitWorkspaceState",
-    "LocalReviewFinding",
-    "ReviewInfrastructureAttempt",
     "VerificationCheck",
     "VerificationEvidence",
     "VerificationPolicy",
@@ -785,10 +648,6 @@ __all__ = [
     "MAX_COMMAND_SECONDS",
     "MAX_DIFF_CHARACTERS",
     "MAX_FILE_CHARACTERS",
-    "MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS",
-    "MAX_LOCAL_REVIEW_CYCLES",
-    "MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS",
-    "MAX_REVIEW_RAW_EXCERPT_CHARACTERS",
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
     "MAX_STEP_BUDGET",

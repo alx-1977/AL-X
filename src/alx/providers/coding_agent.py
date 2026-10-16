@@ -12,12 +12,16 @@ multi-turn context. Containment moved from a per-operation Python check to the
 kernel, where a generated sandbox profile denies git metadata, credentials and
 every blocked path for every process the agent starts.
 
-What did not move is authority. The agent has no terminal in this iteration, so
-it cannot commit, push, merge, deploy or request a review, and it cannot run a
-test either. AL/X runs verification afterwards through the allowlisted command
-executor, which is the only site in this package that starts a development
-process. The agent's own report is treated as an account, never as evidence:
-the repository diff and the verification results are what Core is given.
+What did not move is authority. Git metadata is denied to the session, so it
+cannot commit, push, merge or deploy whatever tools it has. A session with a
+terminal (D-052) runs it inside that same kernel boundary, with no network, and
+may run tests for its own benefit; a session without one cannot. Either way
+AL/X runs verification afterwards through the allowlisted command executor, and
+only that verification counts. The agent's own report is treated as an
+account, never as evidence: the repository diff and the verification results
+are what Core is given. There is no second model reviewing the diff (D-052):
+the checks, and the external review AL/X requests on the pull request, are the
+review.
 
 What verification *means* is decided by `alx.contracts.coding_verification`
 from the job's final changed files, not by whether pytest happened to run.
@@ -43,11 +47,7 @@ from alx.contracts.coding import (
     MAX_COMMAND_OUTPUT_CHARACTERS,
     MAX_REPORTED_FILES,
     MAX_STAGED_FILES,
-    MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS,
-    MAX_LOCAL_REVIEW_CYCLES,
-    MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS,
     MAX_TEST_INFRASTRUCTURE_ATTEMPTS,
-    MAX_REVIEW_RAW_EXCERPT_CHARACTERS,
     MAX_VERIFICATION_COMMANDS,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
     FULL_SUITE_COMMAND_SECONDS,
@@ -60,8 +60,6 @@ from alx.contracts.coding import (
     CodingSessionResult,
     CodingTelemetry,
     GitWorkspaceState,
-    LocalReviewFinding,
-    ReviewInfrastructureAttempt,
 )
 from alx.contracts.coding_verification import (
     VerificationCheck,
@@ -107,8 +105,8 @@ PLAN_INSTRUCTION = (
     "requested structured plan. You will carry the plan out yourself in an "
     "assigned repository checkout using ordinary file reading, searching and "
     "editing, so "
-    "plan real code changes. You will not have a terminal: do not plan shell "
-    "commands. Verification is not yours to choose: AL/X derives the required "
+    "plan real code changes. Do not plan to commit, push or change branch: "
+    "git is not yours. Verification is not yours to choose: AL/X derives the required "
     "checks from the files the job actually changes and runs them herself. "
     "Every inspection_targets entry must be a repository-relative path. "
     # The planning call runs in a deliberately empty scratch directory; the
@@ -140,55 +138,6 @@ PLAN_SCHEMA: dict[str, Any] = {
     ],
     "additionalProperties": False,
 }
-
-LOCAL_REVIEW_INSTRUCTION = (
-    "You are an advisory local code reviewer for one bounded coding job. "
-    "You cannot edit files, run commands, commit, push, merge, deploy, or "
-    "request an external review. Inspect only the supplied task, diff, bounded "
-    "file context, and test evidence. changed_files are the files this diff "
-    "changes; inspected_files were only read for context and are unchanged. "
-    "Return findings only when the candidate "
-    "misses the stated cause, leaves an adjacent path violating the same "
-    "invariant, or lacks meaningful regression coverage. Do not make style-only "
-    "findings."
-)
-
-LOCAL_REVIEW_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "severity": {"type": ["string", "null"]},
-                    "title": {"type": "string"},
-                    "evidence": {"type": "string"},
-                    "correction": {"type": "string"},
-                },
-                "required": ["severity", "title", "evidence", "correction"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["findings"],
-    "additionalProperties": False,
-}
-
-_LOCAL_REVIEW_DETAIL_KEYS = frozenset({
-    "provider", "reason_code", "exit_status",
-    "stdout_characters", "stderr_characters",
-})
-_LOCAL_REVIEW_PARSE_CATEGORIES = {
-    "structured_output_missing": "empty_response",
-    "structured_output_not_object": "malformed_structured_output",
-    "response_event_invalid": "parser_failure",
-    "response_invalid": "parser_failure",
-    "review_schema_invalid": "schema_invalid",
-}
-_SAFE_DIAGNOSTIC_CODE = re.compile(r"[a-z0-9_]{1,96}")
-_SAFE_DIAGNOSTIC_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
-
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -223,15 +172,15 @@ _PYTEST_NOTHING_COLLECTED = 5
 
 def recorded_verification_proves(
     verification: VerificationEvidence, request: CodingRequest,
-    reviewed_files: tuple[str, ...], repository: Path,
+    job_files: tuple[str, ...], repository: Path,
 ) -> bool:
     """Whether recorded evidence passed exactly the checks this job requires.
 
-    The same combined set `_verify` runs: the checks derived from the reviewed
+    The same combined set `_verify` runs: the checks derived from the job's
     files and AL/X's requested commands. Comparing against the derived checks
     alone rejected a job that had passed a requested command.
     """
-    derived = required_verification(reviewed_files, repository).checks
+    derived = required_verification(job_files, repository).checks
     expected = derived + requested_verification(request, derived)
     return verification.all_required_passed and (
         tuple((check.name, check.argv, check.kind, check.reason)
@@ -299,105 +248,16 @@ def _strings(value: object) -> tuple[str, ...]:
     return tuple(str(item) for item in value if str(item).strip())
 
 
-def _bounded_review_excerpt(raw: object) -> str:
-    """Keep malformed output's shape and types, never its untrusted values."""
-    def shape(value: object, depth: int = 0) -> object:
-        if depth >= 5:
-            return "<depth-limit>"
-        if isinstance(value, Mapping):
-            return {
-                key if isinstance(key, str) and key in {
-                    "findings", "severity", "title", "evidence", "correction"
-                }
-                else "<redacted-key>": shape(item, depth + 1)
-                for key, item in list(value.items())[:16]
-            }
-        if isinstance(value, (list, tuple)):
-            return [shape(item, depth + 1) for item in value[:16]]
-        if isinstance(value, str):
-            return f"<redacted:string:{len(value)}>"
-        if value is None or isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return f"<redacted:{type(value).__name__}>"
-        return f"<redacted:{type(value).__name__}>"
-    try:
-        rendered = json.dumps(shape(raw), ensure_ascii=True)
-    except (TypeError, ValueError):
-        rendered = ""
-    rendered = rendered.replace("\x00", "")
-    return rendered[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS]
-
-
-def _infrastructure_review_diagnostics(
-    records: list[ReviewInfrastructureAttempt],
-) -> dict[str, object]:
-    """Failed reviewer attempts a later opinion still has to report.
-
-    A schema, timeout, or provider failure that a retry then overcomes is
-    still evidence. The job may commit; Core still sees why the first
-    attempts were not a review.
-    """
-    if not records:
-        return {}
-    return {
-        "phase": "local_review",
-        "review_classification": "infrastructure",
-        "review_attempts": [record.as_values() for record in records],
-    }
-
-
-def _review_infrastructure_attempts(
-    raw: object,
-) -> tuple[ReviewInfrastructureAttempt, ...]:
-    """Rebuild attempt records from the diagnostics already bounded at source."""
-    if not isinstance(raw, (list, tuple)):
-        return ()
-    records: list[ReviewInfrastructureAttempt] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            continue
-        attempt = item.get("attempt")
-        reason = item.get("reason")
-        message = item.get("error_message")
-        excerpt = item.get("raw_excerpt")
-        if (
-            not isinstance(attempt, int)
-            or isinstance(attempt, bool)
-            or not isinstance(reason, str)
-            or not isinstance(message, str)
-            or not isinstance(excerpt, str)
-        ):
-            continue
-        records.append(
-            ReviewInfrastructureAttempt(
-                attempt=attempt,
-                reason=reason,
-                error_message=message[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
-                raw_excerpt=excerpt[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
-            )
-        )
-    return tuple(records)
-
-
-def _reject_review_output(raw: object, message: str) -> None:
-    """The reviewer returned output that is not a review."""
-    raise CodingError(
-        "review_failed",
-        reason_code="review_schema_invalid",
-        error_message=message[:MAX_REVIEW_RAW_EXCERPT_CHARACTERS],
-        raw_excerpt=_bounded_review_excerpt(raw),
-    )
-
-
-def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
+def build_briefing(
+    request: CodingRequest, plan: Mapping[str, Any], terminal: bool = False,
+) -> str:
     """The human-language instruction handed to the native coding session.
 
     Written as prose because the agent is a coding agent, not a protocol
     endpoint. It states the task, the accepted plan and the boundaries it
-    cannot cross, including the two that are enforced elsewhere regardless of
-    what it reads here: it has no terminal, and denied paths are refused by the
-    operating system rather than by its own restraint.
+    cannot cross, including the ones enforced elsewhere regardless of what it
+    reads here: whether it has a terminal at all, and denied paths refused by
+    the operating system rather than by its own restraint.
     """
     lines = [
         "You are completing one assigned software-engineering task inside a git",
@@ -426,7 +286,7 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
     if request.test_guidance.strip():
         lines += ["", "# Test guidance", request.test_guidance.strip()]
     if request.requested_checks:
-        # The session has no terminal; these run after it, and must pass.
+        # These run after the session, through AL/X's executor, and must pass.
         lines += ["", "# Commands AL/X will run after your session, which must pass"]
         lines += [f"- {' '.join(argv)}" for argv in request.requested_checks]
     if request.repair_branch.strip():
@@ -444,9 +304,16 @@ def build_briefing(request: CodingRequest, plan: Mapping[str, Any]) -> str:
     lines += [
         "",
         "# Boundaries",
-        "- You have no terminal in this task. You cannot run commands or tests.",
-        "  AL/X runs the required checks after you finish and reads the results",
-        "  herself. Which checks those are follows from the files you changed.",
+        *((
+            "- You have a terminal, contained to this checkout with no network.",
+            "  Run the relevant tests yourself before you finish. AL/X still runs",
+            "  the required checks after you, and only hers count. Which checks",
+            "  those are follows from the files you changed.",
+        ) if terminal else (
+            "- You have no terminal in this task. You cannot run commands or tests.",
+            "  AL/X runs the required checks after you finish and reads the results",
+            "  herself. Which checks those are follows from the files you changed.",
+        )),
         "- Do not commit, push, merge, deploy, or request a code review. AL/X",
         "  manages the branch and the commit herself once every required check",
         "  has passed.",
@@ -516,7 +383,7 @@ class _JobState:
     """
 
     __slots__ = ("job_id", "branch", "telemetry", "activity", "cancellation",
-                 "stage", "plan", "files", "session_report", "review_findings",
+                 "stage", "plan", "files", "session_report",
                  "verification", "request", "preexisting_dirty", "commands",
                  "commit_candidate_sha", "deleted_files", "corrective_action",
                  "corrected_failure")
@@ -531,7 +398,6 @@ class _JobState:
         self.plan: Mapping[str, Any] | None = None
         self.files: tuple[str, ...] = ()
         self.session_report = ""
-        self.review_findings: tuple[LocalReviewFinding, ...] = ()
         self.verification: VerificationEvidence | None = None
         self.request: CodingRequest | None = None
         self.preexisting_dirty: tuple[str, ...] = ()
@@ -547,14 +413,13 @@ class CodingAgent:
 
     def __init__(
         self, model: ReasoningModel, session: CodingSession | None,
-        reviewer: ReasoningModel, activity_sink: Callable[[str], None] | None = None,
+        activity_sink: Callable[[str], None] | None = None,
         telemetry_sink: Callable[[CodingTelemetry], None] | None = None,
         clock: Callable[[], datetime] | None = None,
         repository: Path | None = None,
     ) -> None:
         self._model = model
         self._session = session
-        self._reviewer = reviewer
         self._activity_sink = activity_sink or (lambda _activity: None)
         self._telemetry_sink = telemetry_sink or (lambda _telemetry: None)
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -571,6 +436,10 @@ class CodingAgent:
         # second's checkout and report its elapsed time.
         # Nothing job-authoritative belongs on the agent itself.
 
+    def _session_has_terminal(self) -> bool:
+        """Whether the configured session runs commands, inside its containment."""
+        return getattr(self._session, "has_terminal", False) is True
+
     def _report_progress(self, state: "_JobState") -> None:
         """Republish the current phase with a fresh activity time, no transition."""
         current = state.telemetry
@@ -583,7 +452,7 @@ class CodingAgent:
     def _report_telemetry(
         self, state: "_JobState", phase: str, *, in_flight: bool = False,
         waiting: bool = False, terminal: bool = False, outcome: str = "",
-        transition: str = "", correction_cycle: int | None = None,
+        transition: str = "",
     ) -> None:
         """Publish a lifecycle fact; telemetry failure never changes the job."""
         now = self._clock()
@@ -606,8 +475,6 @@ class CodingAgent:
             started_at=started, phase_started_at=phase_started,
             last_activity_at=now, provider=provider, model=model,
             attempt=1,
-            correction_cycle=(previous.correction_cycle if previous is not None else 0)
-            if correction_cycle is None else correction_cycle,
             in_flight=in_flight, waiting=waiting, terminal=terminal,
             outcome=outcome, transition=transition,
             branch=state.branch,
@@ -840,7 +707,7 @@ class CodingAgent:
                 summary="the coding model did not produce a usable plan",
                 files=(), preexisting_dirty=preexisting_dirty, commands=commands,
                 tests_run=False, tests_passed=None, git_status=git_status,
-                git_diff=git_diff, issues=(issue,), review=False,
+                git_diff=git_diff, issues=(issue,),
                 failure_status=True,
                 diagnostics={
                     **planning_failure,
@@ -861,12 +728,14 @@ class CodingAgent:
                 summary="no coding session is configured to carry out the plan",
                 files=(), preexisting_dirty=preexisting_dirty, commands=commands,
                 tests_run=False, tests_passed=None, git_status=git_status,
-                git_diff=git_diff, issues=("coding_unavailable",), review=False,
+                git_diff=git_diff, issues=("coding_unavailable",),
                 failure_status=True, plan_summary=plan_summary,
                 diagnostics={"phase": "execution", "reason_code": "no_session"},
                 baseline=baseline,
             )
 
+        # "review" is a stage only checkpoints written before D-052 carry; it
+        # resumes at verification like "test".
         if resume_stage in {"review", "test", "commit"}:
             session = CodingSessionResult(True, state.session_report)
             session_files = state.files
@@ -875,15 +744,9 @@ class CodingAgent:
             self._report_activity(state, "coding")
             self._report_telemetry(state, "execution", in_flight=True, transition="EXECUTION started")
             try:
-                execution_briefing = build_briefing(request, plan)
-                if resume_stage == "execution":
-                    pending_findings = resume.get("review_findings", ())
-                    if isinstance(pending_findings, list) and pending_findings:
-                        execution_briefing += "\n\n# Local reviewer findings to correct\n" + "\n".join(
-                            f"- [{item.get('severity', '')}] {item.get('title', '')}: "
-                            f"{item.get('evidence', '')} Correction: {item.get('correction', '')}"
-                            for item in pending_findings if isinstance(item, Mapping)
-                        )
+                execution_briefing = build_briefing(
+                    request, plan, self._session_has_terminal()
+                )
                 if state.corrective_action:
                     # Reproduce the recorded failure on the exact checkout so
                     # the session repairs what fails now, then brief it. The
@@ -916,7 +779,7 @@ class CodingAgent:
                     "the coding session could not be started or completed",
                     files=state.files, preexisting_dirty=preexisting_dirty, commands=commands,
                     tests_run=False, tests_passed=None, git_status=git_status,
-                    git_diff=git_diff, issues=(error.code,), review=False,
+                    git_diff=git_diff, issues=(error.code,),
                     failure_status=not interrupted, plan_summary=plan_summary,
                     diagnostics={"phase": "execution", **error.details,
                                  "reason_code": error.details.get("reason_code", "")},
@@ -927,7 +790,7 @@ class CodingAgent:
                 )
 
             if session.completed:
-                state.stage = "review"
+                state.stage = "test"
             self._report_telemetry(state, "execution", transition="EXECUTION completed")
             state.session_report = session.report
             post_session_status, _ = self._git_evidence(workspace)
@@ -937,7 +800,7 @@ class CodingAgent:
             )
             state.files = session_files
             if session.completed and not session_files and not post_session_status and baseline is not None:
-                # No candidate exists for review, verification, or commit. Git
+                # No candidate exists for verification or commit. Git
                 # proves only that the session left the checkout unchanged;
                 # Core judges whether the task was already satisfied from the
                 # session's account and the recorded main commit.
@@ -966,7 +829,7 @@ class CodingAgent:
                             files=(), preexisting_dirty=preexisting_dirty,
                             commands=commands, tests_run=tests_run, tests_passed=tests_passed,
                             git_status="", git_diff="",
-                            issues=("required_verification_failed",), review=False,
+                            issues=("required_verification_failed",),
                             verification=verification, plan_summary=plan_summary,
                             baseline=baseline,
                             diagnostics={"phase": "test", "checkout_clean": True,
@@ -984,7 +847,7 @@ class CodingAgent:
                         # Named durably, so AL/X still knows after a restart
                         # which paths a check left behind. Deliberately not a
                         # resumable checkpoint: they are a test's side effects,
-                        # not coding work a later resume should review and commit.
+                        # not coding work a later resume should verify and commit.
                         left_behind = self._files_changed(
                             (), git_status, preexisting_dirty,
                             self._modified_preexisting(workspace, preexisting_fingerprints),
@@ -995,7 +858,7 @@ class CodingAgent:
                             files=left_behind, preexisting_dirty=preexisting_dirty,
                             commands=commands, tests_run=tests_run, tests_passed=tests_passed,
                             git_status=git_status, git_diff=git_diff,
-                            issues=("checkout_changed_by_verification",), review=False,
+                            issues=("checkout_changed_by_verification",),
                             verification=verification, plan_summary=plan_summary,
                             baseline=baseline,
                             diagnostics={"phase": "test", "checkout_clean": False,
@@ -1010,7 +873,7 @@ class CodingAgent:
                         files=(), preexisting_dirty=preexisting_dirty,
                         commands=commands, tests_run=unchanged_tests_run,
                         tests_passed=unchanged_tests_passed,
-                        git_status="", git_diff="", issues=(), review=False,
+                        git_status="", git_diff="", issues=(),
                         verification=unchanged_verification,
                         plan_summary=plan_summary, baseline=baseline,
                         diagnostics={
@@ -1019,99 +882,13 @@ class CodingAgent:
                             "branch": branch, "head_sha": current.head_sha,
                         },
                     )
-        review_failure: str | None = None
-        review_issues: tuple[str, ...] = ()
-        reviewed_files = session_files
-        review_diagnostics: dict[str, object] = {}
-        review_findings: tuple[LocalReviewFinding, ...] = ()
-        if resume_stage in {"test", "commit"}:
-            try:
-                review_findings = tuple(
-                    LocalReviewFinding(**item) for item in resume.get("review_findings", ())
-                )
-            except (TypeError, ValueError):
-                raise _before_implementation(CodingError("git_refused", reason_code="resume_review_invalid"))
-            state.review_findings = review_findings
-        # There is no candidate to review when the native session reports a
-        # failed execution. Preserve that failure for AL/X's normal outcome.
-        if session.completed and session_files and not (
-            resume_stage in {"test", "commit"}
-        ):
-            state.stage = "review"
-            try:
-                (
-                    review_failure, review_issues, reviewed_files,
-                    review_diagnostics, review_findings,
-                ) = self._local_review_loop(
-                    request, workspace, plan, session_files, preexisting_dirty,
-                    preexisting_fingerprints, state,
-                )
-            except CodingError as error:
-                if error.code != "session_interrupted":
-                    raise
-                git_status, git_diff = self._git_evidence(workspace)
-                state.files = self._files_changed(
-                    state.files, git_status, preexisting_dirty,
-                    self._modified_preexisting(workspace, preexisting_fingerprints),
-                )
-                return self._outcome(
-                    status="interrupted", summary="coding correction interrupted",
-                    files=state.files, preexisting_dirty=preexisting_dirty,
-                    commands=commands, tests_run=False, tests_passed=None,
-                    git_status=git_status, git_diff=git_diff,
-                    issues=(error.code,), review=False,
-                    review_findings=state.review_findings,
-                    plan_summary=plan_summary,
-                    diagnostics={"phase": "execution", **error.details},
-                    baseline=baseline, checkpoint=self._checkpoint(state),
-                    diff_preserved=bool(state.files),
-                    preserved_branch=branch if state.files else "",
-                )
-            state.files = reviewed_files
-            state.review_findings = review_findings
-        # Failed attempts stay on the result when a later attempt produced an
-        # opinion. Preservation is only the exhausted path: a commit still
-        # happens, and the branch is not reported as an uncommitted hold.
-        review_attempts = _review_infrastructure_attempts(
-            review_diagnostics.get("review_attempts")
-        )
-        preserved = (
-            review_diagnostics.get("review_classification") == "infrastructure"
-            and review_diagnostics.get("diff_preserved") is True
-        )
-        branch_name = review_diagnostics.get("branch")
-        if not isinstance(branch_name, str):
-            branch_name = ""
-        infrastructure = preserved or bool(review_attempts)
-        if review_failure is not None:
-            git_status, git_diff = self._git_evidence(workspace, reviewed_files)
-            return self._outcome(
-                status="failed", summary=review_failure, files=self._files_changed(
-                    (), git_status, preexisting_dirty,
-                    self._modified_preexisting(
-                        workspace, preexisting_fingerprints
-                    ),
-                ), preexisting_dirty=preexisting_dirty, commands=commands,
-                tests_run=False, tests_passed=None, git_status=git_status,
-                git_diff=git_diff, issues=tuple(review_issues),
-                review=bool([f for f in review_findings if f.material]),
-                review_findings=review_findings,
-                failure_status=True, plan_summary=plan_summary,
-                diagnostics=review_diagnostics or {"phase": "local_review"},
-                baseline=baseline,
-                review_classification="infrastructure" if infrastructure else "",
-                diff_preserved=preserved,
-                preserved_branch=branch_name if preserved else "",
-                review_attempts=review_attempts,
-                checkpoint=self._checkpoint(state),
-            )
+        job_files = session_files
         state.stage = "test"
 
-        # Verification is AL/X's, not the session's. The agent has no terminal,
-        # so every command below is chosen here and refused unless the
-        # allowlist already permits it. The scope is `reviewed_files`, the job's
-        # final file set: a reviewer correction can touch a file the initial
-        # session never did, and that file must select tests like any other.
+        # Verification is AL/X's, not the session's. Every command below is
+        # chosen here and refused unless the allowlist already permits it,
+        # whatever the session ran for itself. The scope is `job_files`,
+        # the job's final file set.
         if resume_stage == "commit":
             raw_verification = resume.get("verification")
             if not isinstance(raw_verification, Mapping) or not isinstance(raw_verification.get("checks"), list):
@@ -1128,7 +905,7 @@ class CodingAgent:
             except (KeyError, TypeError, ValueError):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_invalid"))
             if not recorded_verification_proves(
-                verification, request, reviewed_files, self._repository,
+                verification, request, job_files, self._repository,
             ):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_unproven"))
             tests_run = any(check.ran and check.name.startswith("pytest") for check in verification.checks)
@@ -1138,7 +915,7 @@ class CodingAgent:
             self._report_activity(state, "reasoning")
             self._report_telemetry(state, "test", in_flight=True, transition="TEST started")
             verification, tests_run, tests_passed = self._verify(
-                request, workspace, reviewed_files, commands
+                request, workspace, job_files, commands
             )
             self._report_telemetry(
                 state, "verify", transition="TEST completed" if verification.all_required_passed
@@ -1146,13 +923,12 @@ class CodingAgent:
             )
         state.verification = verification
 
-        git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+        git_status, git_diff = self._git_evidence(workspace, job_files)
         files = self._files_changed(
             state.files, git_status, preexisting_dirty,
             self._modified_preexisting(workspace, preexisting_fingerprints),
         )
         issues = list(_strings(session.diagnostics.get("unresolved_issues")))
-        issues.extend(review_issues)
         status = "succeeded"
         failure_class: dict[str, str] = {}
         if not session.completed:
@@ -1300,11 +1076,11 @@ class CodingAgent:
                                           "reason_code": reason})
                 else:
                     failure_class["reason_code"] = reason
-                git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+                git_status, git_diff = self._git_evidence(workspace, job_files)
             else:
                 # Re-read after the commit: the files are now in history, so
                 # the diff and status Core sees must describe what is left.
-                git_status, git_diff = self._git_evidence(workspace, reviewed_files)
+                git_status, git_diff = self._git_evidence(workspace, job_files)
                 self._report_telemetry(state, "commit", transition="COMMIT completed")
 
         summary = session.report.strip() or "the coding session returned no report"
@@ -1320,17 +1096,9 @@ class CodingAgent:
             git_status=git_status,
             git_diff=git_diff,
             issues=tuple(issues),
-            # D-028 declares `external_review_recommended` as returned
-            # evidence; it was hardcoded False at every site and never once
-            # populated. A material finding the correction cycle did not
-            # answer is exactly the case it exists for.
-            review=bool([f for f in review_findings if f.material]),
-            review_findings=review_findings,
             plan_summary=plan_summary,
             baseline=baseline,
             commit=commit,
-            review_classification="infrastructure" if infrastructure else "",
-            review_attempts=review_attempts,
             diagnostics={
                 "phase": state.stage,
                 "session_turns": session.turns,
@@ -1371,275 +1139,6 @@ class CodingAgent:
             for check in unpassed
         )
 
-    def _local_review_loop(
-        self, request: CodingRequest, workspace: CodingWorkspace,
-        plan: Mapping[str, Any], initial_files: tuple[str, ...],
-        preexisting_dirty: tuple[str, ...],
-        preexisting_fingerprints: Mapping[str, str | None],
-        state: "_JobState",
-    ) -> tuple[
-        str | None,
-        tuple[str, ...],
-        tuple[str, ...],
-        dict[str, object],
-        tuple[LocalReviewFinding, ...],
-    ]:
-        """Review a candidate once, then re-review one bounded correction.
-
-        Returns a hard failure only when the reviewer itself could not produce
-        a result after its bounded retries, or when the correction session
-        broke. A schema, timeout, or provider failure retries this review
-        against the same diff and, once exhausted, preserves the branch.
-        Findings the reviewer raised and the correction did not resolve are
-        *not* a failure: they are returned as advisory evidence and travel
-        with the job's commit.
-
-        That distinction is the point of this stage. The reviewer is advisory —
-        it cannot edit, run a command or commit — so a finding it raises is an
-        opinion for AL/X to weigh, not a verdict on the work. Blocking the
-        commit on one destroyed the artifact she needed in order to weigh it:
-        the candidate was left as an uncommitted diff,
-        which is the evidence-reconstruction problem D-029 exists to remove.
-        Infrastructure failure stays hard once its retries are exhausted,
-        because then there is no opinion at all and nothing was actually
-        reviewed. The diff stays in the worktree so that missing opinion can
-        still be judged against the repair.
-        """
-        reviewed_files = initial_files
-        # Across correction cycles. A failure on an earlier pass is still a
-        # review attempt after a later pass returns an opinion.
-        carried_failures: list[ReviewInfrastructureAttempt] = []
-        for cycle in range(MAX_LOCAL_REVIEW_CYCLES):
-            # The reviewer judges this job's diff, not the worktree's. Same
-            # scoping as the outcome evidence, so both see the same thing.
-            git_status, git_diff = self._git_evidence(workspace, reviewed_files)
-            changed_files = self._files_changed(
-                (), git_status, preexisting_dirty,
-                self._modified_preexisting(workspace, preexisting_fingerprints),
-            )
-            reviewed_files = tuple(dict.fromkeys((*reviewed_files, *changed_files)))
-            # Files the plan read for context. They go to the reviewer apart
-            # from the changed files: labelled as changed, an unchanged
-            # README.md drew a finding that the job had edited it.
-            inspected_files = tuple(dict.fromkeys(
-                name
-                for name in _strings(plan.get("inspection_targets"))
-                if name not in changed_files and name not in preexisting_dirty
-            ))
-            self._report_activity(state, "reviewing")
-            self._report_telemetry(state, "review", in_flight=True, transition="REVIEW started", correction_cycle=cycle)
-            # Same diff, same files. A schema, timeout, or provider failure
-            # retries this call only. Planning and implementation do not run
-            # again, and a material finding is not a failure of this kind.
-            findings: tuple[LocalReviewFinding, ...] | None = None
-            last_error: CodingError | None = None
-            for _attempt in range(1, MAX_REVIEW_INFRASTRUCTURE_ATTEMPTS + 1):
-                try:
-                    # changed_files is what the diff changes now. reviewed_files
-                    # keeps every path ever touched, so a file a correction
-                    # restored would otherwise still be labelled changed.
-                    findings = self._review(
-                        request, workspace, plan, changed_files,
-                        inspected_files, git_diff,
-                    )
-                except CodingError as error:
-                    if error.code == "coding_cancelled":
-                        raise
-                    last_error = error
-                    carried_failures.append(
-                        self._review_attempt_record(len(carried_failures) + 1, error)
-                    )
-                    continue
-                break
-            if findings is None:
-                # Retries exhausted. Leave the branch and the uncommitted diff
-                # where they are: resetting, cleaning, or deleting the branch
-                # would destroy the repair the reviewer never managed to judge.
-                if last_error is None:
-                    last_error = CodingError(
-                        "review_failed", reason_code="review_schema_invalid",
-                        error_message="the local reviewer produced no result",
-                    )
-                diagnostics = self._local_review_diagnostics(last_error)
-                diagnostics["review_classification"] = "infrastructure"
-                diagnostics["diff_preserved"] = True
-                diagnostics["uncommitted"] = True
-                diagnostics["branch"] = request.repair_branch
-                diagnostics["review_attempts"] = [
-                    record.as_values() for record in carried_failures
-                ]
-                return (
-                    "the local reviewer could not produce a usable result; "
-                    "the branch and uncommitted diff were preserved",
-                    ("review_failed",), reviewed_files, diagnostics, (),
-                )
-            # The opinion stands. Earlier infrastructure failures stay attached
-            # so a commit does not erase them.
-            carried = _infrastructure_review_diagnostics(carried_failures)
-            material = [item for item in findings if item.material]
-            self._report_telemetry(state, "review", transition="REVIEW completed", correction_cycle=cycle)
-            if not material:
-                # Nothing material. Any low-severity findings still travel with
-                # the job: "nothing worth blocking on" and "nothing said" are
-                # different facts, and only AL/X should collapse them.
-                return None, (), reviewed_files, carried, findings
-            if cycle + 1 == MAX_LOCAL_REVIEW_CYCLES:
-                # Findings survived the bounded cycle. Advisory, not fatal:
-                # the job continues to verification and its commit, and these
-                # go to AL/X with the SHA so she can judge them against the
-                # actual artifact.
-                return (
-                    None, ("local_review_material_findings",), reviewed_files,
-                    carried, findings,
-                )
-            before = (git_status, git_diff)
-            briefing = build_briefing(request, plan) + "\n\n# Local reviewer findings\n" + "\n".join(
-                f"- [{item.severity}] {item.title}: {item.evidence} Correction: {item.correction}"
-                for item in material
-            )
-            self._report_activity(state, "coding")
-            self._report_telemetry(state, "correction", in_flight=True, transition="CORRECTION cycle", correction_cycle=cycle + 1)
-            state.stage = "execution"
-            state.review_findings = findings
-            try:
-                correction = self._session.run_session(request, briefing)
-            except CodingError as error:
-                if error.code == "coding_cancelled":
-                    raise
-                if error.code == "session_interrupted":
-                    raise
-                # The session broke. That is infrastructure, not an opinion.
-                return (
-                    "the coding session could not correct local review findings",
-                    ("session_failed",), reviewed_files, carried, findings,
-                )
-            if not correction.completed:
-                return (
-                    "the coding session could not correct local review findings",
-                    (correction.failure_code or "session_failed",), reviewed_files,
-                    carried, findings,
-                )
-            self._report_telemetry(state, "correction", transition="CORRECTION completed", correction_cycle=cycle + 1)
-            state.stage = "review"
-            # Scoped exactly as `before` was. Comparing a narrowed diff with a
-            # whole-worktree one would never match, so a correction that
-            # changed nothing would read as progress.
-            post_correction_status, _ = self._git_evidence(workspace)
-            corrected_files = self._files_changed(
-                (), post_correction_status, preexisting_dirty,
-                self._modified_preexisting(workspace, preexisting_fingerprints),
-            )
-            next_files = tuple(dict.fromkeys((*reviewed_files, *corrected_files)))
-            after = self._git_evidence(workspace, next_files)
-            if after == before:
-                # The correction changed nothing, so the findings stand
-                # unanswered. Same disposition as surviving them by exhausting
-                # the cycle: advisory evidence, and the job carries on.
-                return (
-                    None, ("local_review_material_findings",), reviewed_files,
-                    carried, findings,
-                )
-            reviewed_files = next_files
-        raise AssertionError("local review loop must return within its bound")
-
-    def _local_review_diagnostics(self, error: CodingError) -> dict[str, object]:
-        """Project a reviewer failure into durable, non-sensitive evidence."""
-        details = dict(error.details)
-        values: dict[str, object] = {"phase": "local_review"}
-        for key in _LOCAL_REVIEW_DETAIL_KEYS:
-            value = details.get(key)
-            if key in ("exit_status", "stdout_characters", "stderr_characters"):
-                if isinstance(value, int) and value >= 0:
-                    values[key] = value
-            elif isinstance(value, str) and value.strip():
-                candidate = value.strip()
-                pattern = _SAFE_DIAGNOSTIC_CODE if key == "reason_code" else _SAFE_DIAGNOSTIC_ID
-                if pattern.fullmatch(candidate):
-                    values[key] = candidate
-        provider = values.get("provider")
-        model = getattr(self._reviewer, "_model", "")
-        if (provider and isinstance(model, str) and _SAFE_DIAGNOSTIC_ID.fullmatch(model.strip())):
-            values["model"] = model.strip()
-        reason = values.get("reason_code")
-        if not isinstance(reason, str) or not reason:
-            reason = error.code
-            values["reason_code"] = reason
-        if reason == "reasoning_timeout":
-            values["timed_out"] = True
-        category = _LOCAL_REVIEW_PARSE_CATEGORIES.get(reason)
-        if category is not None:
-            values["parse_category"] = category
-        return values
-
-    def _review_attempt_record(
-        self, attempt: int, error: CodingError
-    ) -> ReviewInfrastructureAttempt:
-        """Retain only safe schema detail and coded provider diagnostics."""
-        details = error.details
-        reason = details.get("reason_code")
-        if not isinstance(reason, str) or _SAFE_DIAGNOSTIC_CODE.fullmatch(reason) is None:
-            reason = error.code
-        message = details.get("error_message") if error.code == "review_failed" else None
-        if not isinstance(message, str) or not message.strip():
-            provider = details.get("provider")
-            if isinstance(provider, str) and _SAFE_DIAGNOSTIC_ID.fullmatch(provider):
-                message = f"{provider} provider failure: {reason}"
-            else:
-                message = reason
-        excerpt = details.get("raw_excerpt") if error.code == "review_failed" else None
-        if not isinstance(excerpt, str):
-            excerpt = ""
-        limit = MAX_REVIEW_RAW_EXCERPT_CHARACTERS
-        return ReviewInfrastructureAttempt(
-            attempt=attempt,
-            reason=reason,
-            error_message=message[:limit],
-            raw_excerpt=excerpt[:limit],
-        )
-
-    def _review(
-        self, request: CodingRequest, workspace: CodingWorkspace,
-        plan: Mapping[str, Any], changed_files: tuple[str, ...],
-        inspected_files: tuple[str, ...], git_diff: str,
-    ) -> tuple[LocalReviewFinding, ...]:
-        """Ask the configured coding model for bounded advisory findings only."""
-        remaining = MAX_LOCAL_REVIEW_CONTEXT_CHARACTERS
-        context: dict[str, str] = {}
-        for name in (*changed_files, *inspected_files):
-            if remaining <= 0:
-                break
-            try:
-                workspace.validate_inspection_target(name)
-                text = workspace.resolve(name).read_text(encoding="utf-8")
-            except (CodingError, OSError, UnicodeDecodeError):
-                continue
-            context[name] = text[:remaining]
-            remaining -= len(context[name])
-        values = self._complete(LOCAL_REVIEW_INSTRUCTION, {
-            "task": request.task, "root_cause_context": request.context,
-            "acceptance_criteria": list(request.acceptance_criteria),
-            "plan": dict(plan), "git_diff": git_diff,
-            "changed_files": list(changed_files),
-            "inspected_files": list(inspected_files), "file_context": context,
-            "test_guidance": request.test_guidance,
-        }, "alx_coding_local_review", LOCAL_REVIEW_SCHEMA, model=self._reviewer)
-        raw = values.get("findings")
-        if not isinstance(raw, (list, tuple)):
-            _reject_review_output(values, "findings is not a list")
-        findings: list[LocalReviewFinding] = []
-        for item in raw:
-            if not isinstance(item, Mapping):
-                _reject_review_output(values, "finding is not an object")
-            finding = {key: str(item.get(key, "")).strip() for key in ("title", "evidence", "correction")}
-            if not all(finding.values()):
-                _reject_review_output(values, "finding is missing a required field")
-            finding["severity"] = item.get("severity")
-            try:
-                findings.append(LocalReviewFinding(**finding))
-            except ValueError as error:
-                _reject_review_output(values, str(error))
-        return tuple(findings)
-
     def _verify(
         self,
         request: CodingRequest,
@@ -1656,8 +1155,8 @@ class CodingAgent:
         content-free: a failed pytest check records only the identifiers of
         the tests that failed.
 
-        The policy is derived from `changed_files` — the set after the local
-        reviewer's corrections landed — and from nothing else. Task wording and
+        The policy is derived from `changed_files` — the job's final file set —
+        and from nothing else. Task wording and
         the model's own plan used to seed candidate commands here; they no
         longer do. A required check is one the repository's rules attach to a
         path that actually changed, which is a fact, whereas a command parsed
@@ -1833,7 +1332,7 @@ class CodingAgent:
             "blocked_paths": list(request.blocked_paths),
             "execution_model": {
                 "tools": "native file reading, searching and editing",
-                "terminal": False,
+                "terminal": self._session_has_terminal(),
                 "tests_run_by": "alx_after_session",
             },
             "planning_feedback": feedback[-2:],
@@ -2005,7 +1504,6 @@ class CodingAgent:
             "job_id": state.job_id, "stage": state.stage,
             **repository,
             "plan": dict(state.plan or {}), "files": list(state.files),
-            "review_findings": [item.as_values() for item in state.review_findings],
             "verification": state.verification.as_values() if state.verification else None,
             "commit_candidate_sha": state.commit_candidate_sha,
             "deleted_files": list(state.deleted_files),
@@ -2028,8 +1526,7 @@ class CodingAgent:
             files=files, preexisting_dirty=state.preexisting_dirty,
             commands=state.commands, tests_run=False, tests_passed=None,
             git_status=git_status, git_diff=git_diff,
-            issues=("coding_cancelled",), review=False,
-            review_findings=state.review_findings,
+            issues=("coding_cancelled",),
             diagnostics={"phase": state.stage, "cancelled_stage": state.stage,
                          "diff_preserved": bool(files), "branch": state.branch},
             plan_summary=str((state.plan or {}).get("problem_understanding", "")),
@@ -2077,18 +1574,14 @@ class CodingAgent:
         git_status: str,
         git_diff: str,
         issues: tuple[str, ...],
-        review: bool,
-        review_findings: tuple[LocalReviewFinding, ...] = (),
         verification: VerificationEvidence | None = None,
         failure_status: bool = False,
         diagnostics: dict[str, object] | None = None,
         plan_summary: str = "",
         baseline: GitWorkspaceState | None = None,
         commit: CodingCommit | None = None,
-        review_classification: str = "",
         diff_preserved: bool = False,
         preserved_branch: str = "",
-        review_attempts: tuple[ReviewInfrastructureAttempt, ...] = (),
         checkpoint: str = "",
     ) -> CodingOutcome:
         if status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled", "interrupted"):
@@ -2139,7 +1632,6 @@ class CodingAgent:
             git_status,
             git_diff,
             issues,
-            review,
             datetime.now(UTC),
             diff_digest,
             preexisting_dirty,
@@ -2148,10 +1640,7 @@ class CodingAgent:
             baseline,
             commit,
             verification,
-            review_findings,
-            review_classification=review_classification,
             diff_preserved=diff_preserved,
             preserved_branch=preserved_branch,
-            review_attempts=review_attempts,
             checkpoint=checkpoint,
         )

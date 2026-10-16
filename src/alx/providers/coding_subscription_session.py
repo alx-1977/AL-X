@@ -171,6 +171,11 @@ class SubscriptionCodingSession:
     home_environment_key: str = ""
     #: The login file copied into the per-job home, if the CLI keeps one.
     auth_file_name: str = ""
+    #: The login file whose presence `login_problem` checks, when the CLI
+    #: keeps one but it is not copied. Defaults to `auth_file_name`.
+    login_file_name: str = ""
+    #: Whether the session can run commands, inside its containment.
+    has_terminal: bool = False
 
     def __init__(
         self,
@@ -249,6 +254,14 @@ class SubscriptionCodingSession:
                 break
             kept.append(line.rstrip("\n"))
         return "\n".join(kept)
+
+    def briefing_on_stdin(self) -> bool:
+        """Whether the CLI reads the briefing from stdin rather than a file.
+
+        Either way it never enters the argument vector. False by default: the
+        CLI is handed `prompt_path` in `command` and stdin is closed.
+        """
+        return False
 
     def failure_output(self, stdout: str) -> str:
         """The part of stdout that may explain a failed exit.
@@ -342,7 +355,10 @@ class SubscriptionCodingSession:
                     output_limit_bytes=MAX_SESSION_OUTPUT_BYTES,
                     env=self.child_environment(home),
                     cwd=str(worktree),
-                    stdin=subprocess.DEVNULL,
+                    # Bytes: the pipe is binary, so a str could not be encoded
+                    # onto it (found in the PR #145 review).
+                    **({"input": briefing.encode("utf-8")} if self.briefing_on_stdin()
+                       else {"stdin": subprocess.DEVNULL}),
                     shell=False,
                     check=False,
                 )
@@ -389,6 +405,19 @@ class SubscriptionCodingSession:
         destination = home / self.auth_file_name
         shutil.copy2(source, destination)
         destination.chmod(0o600)
+
+    def login_problem(self) -> str:
+        """Empty when the CLI's login file is present; otherwise a reason code.
+
+        Presence only: whether the login still works is learnt when it is
+        used. An adapter whose CLI can say more overrides this.
+        """
+        name = self.login_file_name or self.auth_file_name
+        if not name:
+            return ""
+        if (self.auth_home() / name).is_file():
+            return ""
+        return "subscription_unauthenticated"
 
     def auth_home(self) -> Path:
         """Where this CLI keeps its real login, honouring its home variable."""
