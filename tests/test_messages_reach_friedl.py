@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
@@ -14,7 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from alx.continuity.ledger import SQLiteOpportunityLedger  # noqa: E402
-from alx.contracts import CognitionOrigin, ResponseDelivery  # noqa: E402
+from alx.contracts import (  # noqa: E402
+    CognitionOrigin, ConversationOrigin, ConversationTurn, ResponseDelivery,
+)
 from alx.conversation.gateway import ConversationGateway  # noqa: E402
 from alx.conversation.store import SQLiteConversationStore  # noqa: E402
 from alx.core import CoreOutcome, CoreState  # noqa: E402
@@ -60,12 +63,15 @@ class _Core:
         return self.outcome
 
 
-def _row(identity, origin="external_event", refs="mail:1\x1fmail:2"):
+def _row(identity, origin="external_event", refs="mail:1\x1fmail:2",
+         conversation_id=FRIEDL, response_turn_id=None):
     return {
         "opportunity_id": identity,
         "origin": origin,
         "arose_at": NOW.isoformat(),
         "refs": refs,
+        "conversation_id": conversation_id,
+        "response_turn_id": response_turn_id or identity,
         "response": STORED_PROSE,
         "text": STORED_PROSE,
         "unapproved_nested": {"wording": STORED_PROSE},
@@ -114,6 +120,64 @@ class SessionOpenGatewayTests(unittest.TestCase):
         self.assertIsNone(self.gateway(core, lifecycle).receive_session_open(FRIEDL, 8, RETENTION))
         self.assertEqual(core.calls, [])
 
+    def test_an_autonomous_reply_uses_its_content_free_opportunity_identity(self):
+        core = _Core()
+        opportunity = SimpleNamespace(
+            opportunity_id="occasion-1",
+            origin=CognitionOrigin.SELF_REQUESTED,
+            arose_at=NOW,
+            note=None,
+            provenance=None,
+            references=(),
+        )
+
+        self.gateway(core, _Lifecycle(())).receive_cognition_opportunity(
+            FRIEDL, opportunity, 8, RETENTION
+        )
+
+        stored = self.store.load(FRIEDL)
+        self.assertEqual(stored.turns[-1].turn_id, "occasion-1")
+        self.assertEqual(stored.turns[-1].content, "Fresh answer.")
+
+    def test_same_conversation_omits_only_the_claimed_unheard_reply(self):
+        conversation = self.store.create(FRIEDL, RETENTION)
+        heard_person = ConversationTurn(
+            FRIEDL, "heard-person", ConversationOrigin.TYPED,
+            "Ordinary heard question.", NOW, "friedl",
+        )
+        conversation = self.store.append(
+            heard_person, RETENTION, conversation.revision
+        )
+        heard_reply = ConversationTurn(
+            FRIEDL, "heard-reply", ConversationOrigin.ALX_RESPONSE,
+            "Ordinary heard answer.", NOW,
+        )
+        conversation = self.store.append(
+            heard_reply, RETENTION, conversation.revision
+        )
+        unheard_reply = ConversationTurn(
+            FRIEDL, "occasion-1", ConversationOrigin.ALX_RESPONSE,
+            STORED_PROSE, NOW,
+        )
+        self.store.append(unheard_reply, RETENTION, conversation.revision)
+        lifecycle = _Lifecycle((_row("occasion-1"),))
+        core = _Core()
+
+        self.gateway(core, lifecycle).receive_session_open(FRIEDL, 8, RETENTION)
+
+        opening = core.calls[0][0]
+        self.assertEqual(
+            tuple(turn.turn_id for turn in opening.turns),
+            ("heard-person", "heard-reply"),
+        )
+        self.assertIn("Ordinary heard question.", repr(opening.turns))
+        self.assertIn("Ordinary heard answer.", repr(opening.turns))
+        self.assertNotIn(STORED_PROSE, repr(opening.turns))
+        self.assertEqual(
+            core.calls[0][3]["undelivered_responses"][0]["opportunity_id"],
+            "occasion-1",
+        )
+
     def test_a_checkpoint_restores_the_claim(self):
         lifecycle = _Lifecycle((_row("occasion-1"),))
         core = _Core(CoreOutcome(CoreState.CHECKPOINTED, reason="budget_exceeded"))
@@ -144,14 +208,17 @@ class LedgerLifecycleTests(unittest.TestCase):
         self.addCleanup(self.ledger.close)
         opportunity = SimpleNamespace(
             opportunity_id="occasion-1", origin=CognitionOrigin.EXTERNAL_EVENT,
-            arose_at=NOW, references=("mail:1",),
+            arose_at=NOW, references=("mail:1",), conversation_id=FRIEDL,
         )
         self.ledger.record_created(opportunity)
         self.ledger.record_outcome("occasion-1", "responded")
-        self.ledger.mark_response_undelivered("occasion-1")
+        self.ledger.mark_response_undelivered("occasion-1", FRIEDL, "occasion-1")
 
     def test_claim_is_exclusive_and_failure_can_restore_it(self):
-        self.assertEqual(len(self.ledger.claim_undelivered_responses()), 1)
+        claimed = self.ledger.claim_undelivered_responses()
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(claimed[0]["conversation_id"], FRIEDL)
+        self.assertEqual(claimed[0]["response_turn_id"], "occasion-1")
         self.assertEqual(self.ledger.claim_undelivered_responses(), ())
         self.ledger.restore_claimed_responses(("occasion-1",))
         self.assertEqual(len(self.ledger.claim_undelivered_responses()), 1)
@@ -203,6 +270,106 @@ class VoiceSessionOpenTests(unittest.TestCase):
         session = VoiceSession(gateway, object(), None, "friedl", 8, 30, clock=lambda: NOW)
         self.assertIsNone(asyncio.run(session.open_session(FRIEDL)))
         self.assertEqual(len(calls), 1)
+
+
+class SessionOpenFailureRecoveryTests(unittest.TestCase):
+    class Connection:
+        def __init__(self):
+            self.request = SimpleNamespace(
+                path=f"/voice?conversation_id={FRIEDL}"
+            )
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(payload)
+
+        async def close(self, **_values):
+            pass
+
+    class Session:
+        def __init__(self, gateway):
+            self.gateway = gateway
+            self.exchanges = 0
+            self.delivery_sizes = []
+
+        async def open_session(self, conversation_id):
+            return self.gateway.receive_session_open(
+                conversation_id, 8, RETENTION
+            )
+
+        async def exchange(
+            self, _conversation_id, _audio, deliveries=None, _typed=None
+        ):
+            self.exchanges += 1
+            self.delivery_sizes.append(deliveries.qsize())
+            if False:  # pragma: no cover - makes this an empty async generator
+                yield None
+
+    def run_outcome(self, state, reason):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = SQLiteConversationStore(
+            Path(directory.name) / "conversations.sqlite3"
+        )
+        self.addCleanup(store.close)
+        lifecycle = _Lifecycle((_row("occasion-1"),))
+        gateway = ConversationGateway(
+            _Core(CoreOutcome(
+                state, response="must not be queued", reason=reason
+            )),
+            store,
+            identifier_factory=lambda: "opening-1",
+            clock=lambda: NOW,
+            undelivered_responses=lifecycle,
+        )
+        session = self.Session(gateway)
+        server = LiveVoiceServer(
+            session, "127.0.0.1", 0, 16000, ROOT
+        )
+        connection = self.Connection()
+
+        asyncio.run(server._handle_voice(connection))
+
+        messages = [json.loads(item) for item in connection.sent]
+        return lifecycle, session, messages
+
+    def test_error_uses_existing_diagnostic_restores_claim_and_keeps_session(self):
+        lifecycle, session, messages = self.run_outcome(
+            CoreState.ERROR, "reasoner_error"
+        )
+
+        self.assertIn(
+            {
+                "type": "diagnostic",
+                "code": "session.open_continuity_failed",
+                "state": "error",
+                "reason": "reasoner_error",
+            },
+            messages,
+        )
+        self.assertEqual(lifecycle.restored, [("occasion-1",)])
+        self.assertEqual(session.exchanges, 1)
+        self.assertEqual(session.delivery_sizes, [0])
+        self.assertFalse(any(item["type"] == "alx.text" for item in messages))
+
+    def test_checkpoint_uses_existing_diagnostic_restores_claim_and_keeps_session(self):
+        lifecycle, session, messages = self.run_outcome(
+            CoreState.CHECKPOINTED, "budget_exceeded"
+        )
+
+        self.assertIn(
+            {
+                "type": "diagnostic",
+                "code": "session.open_continuity_failed",
+                "state": "checkpointed",
+                "reason": "budget_exceeded",
+            },
+            messages,
+        )
+        self.assertEqual(lifecycle.restored, [("occasion-1",)])
+        self.assertEqual(session.exchanges, 1)
+        self.assertEqual(session.delivery_sizes, [0])
+        self.assertFalse(any(item["type"] == "alx.text" for item in messages))
 
 
 class OneProductionPathTests(unittest.TestCase):

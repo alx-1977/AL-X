@@ -318,21 +318,34 @@ class LiveVoiceServer:
             # One session open, one ordinary Core turn when intentions are
             # waiting.  Only its fresh response enters the existing delivery
             # and synthesis path; no stored wording is loaded or replayed.
+            opening_diagnostic = None
             try:
                 outcome = await self._session.open_session(conversation_id)
+                if outcome is not None and outcome.state.value in (
+                    "error",
+                    "checkpointed",
+                ):
+                    opening_diagnostic = {
+                        "state": outcome.state.value,
+                        "reason": outcome.reason,
+                    }
+                    outcome = None
             except Exception as error:  # noqa: BLE001 - the live session remains usable
                 LOGGER.warning(
                     "Session-open continuity turn failed: %s", type(error).__name__
                 )
+                opening_diagnostic = {}
+                outcome = None
+            if opening_diagnostic is not None:
                 await connection.send(
                     json.dumps(
                         {
                             "type": "diagnostic",
                             "code": "session.open_continuity_failed",
+                            **opening_diagnostic,
                         }
                     )
                 )
-                outcome = None
             if outcome is not None and outcome.response is not None:
                 deliveries.put_nowait(outcome.response)
             # A transcription transport can drop while the person is simply silent.

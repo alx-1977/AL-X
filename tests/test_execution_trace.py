@@ -623,8 +623,12 @@ class OneTurnOneAnswerTests(unittest.IsolatedAsyncioTestCase):
             def record_outcome(self, opportunity_id, state, **_values):
                 recorded["state"] = state
 
-            def mark_response_undelivered(self, opportunity_id):
-                recorded["undelivered"] = opportunity_id
+            def mark_response_undelivered(
+                self, opportunity_id, _conversation_id, _response_turn_id
+            ):
+                recorded["undelivered"] = (
+                    opportunity_id, _conversation_id, _response_turn_id
+                )
 
             def record_reserved(self, *_args):
                 pass
@@ -652,7 +656,10 @@ class OneTurnOneAnswerTests(unittest.IsolatedAsyncioTestCase):
             origin=CognitionOrigin.WORK_COMPLETED,
         )
         self.assertTrue(runner.run_one(opportunity))
-        self.assertEqual(recorded["undelivered"], "occasion-1")
+        self.assertEqual(
+            recorded["undelivered"],
+            ("occasion-1", "conversation-1", "occasion-1"),
+        )
         self.assertEqual(
             [(item.label, item.status) for item in traced],
             [("Completed work received", TraceStatus.STARTED),

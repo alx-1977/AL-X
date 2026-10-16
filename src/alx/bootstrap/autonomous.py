@@ -171,6 +171,7 @@ class AutonomousCognitionRunner:
         # what the reasoning boundary spends lands on the right ledger row.
         spend = _OccasionSpend()
         undelivered = False
+        response_turn_id = None
         if self._spend_observer is not None:
             self._spend_observer.watch(spend, opportunity.opportunity_id)
         emit_trace(
@@ -197,6 +198,10 @@ class AutonomousCognitionRunner:
             # so nothing can replay them, and no rule here decides whether it
             # still matters. She sees the fact on a later turn and chooses.
             if outcome_state == "responded":
+                response_turn_id = (
+                    getattr(outcome, "response_turn_id", None)
+                    or opportunity.opportunity_id
+                )
                 # Delivered means the transport accepted it for synthesis, not
                 # that a socket exists. Anything else is undelivered, including
                 # a transport that failed while accepting.
@@ -241,8 +246,11 @@ class AutonomousCognitionRunner:
                     usage=self._usage_of(),
                 )
                 if undelivered:
+                    assert response_turn_id is not None
                     self._ledger.mark_response_undelivered(
-                        opportunity.opportunity_id
+                        opportunity.opportunity_id,
+                        opportunity.conversation_id,
+                        response_turn_id,
                     )
             except Exception as error:
                 LOGGER.warning(

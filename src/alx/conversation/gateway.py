@@ -48,11 +48,13 @@ class ConversationGateway:
         self._undelivered_responses = undelivered_responses
 
     def _store_response(self, conversation_id: str, outcome: CoreOutcome,
-                        retention_until: datetime) -> None:
+                        retention_until: datetime,
+                        ordinary_turn_id: str | None = None) -> None:
         """Store her reply. A plan's finish or cancel reply keeps its fixed id,
         and any earlier one the plan still holds is stored before it."""
         if outcome.response_turn_id is None or outcome.snapshot is None:
-            self._append_reply(conversation_id, self._identifier_factory(),
+            self._append_reply(conversation_id,
+                               ordinary_turn_id or self._identifier_factory(),
                                outcome.response, outcome.response_provenance,
                                retention_until)
             return
@@ -214,7 +216,16 @@ class ConversationGateway:
             ),
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            self._store_response(conversation_id, outcome, retention_until)
+            # The opportunity identity gives an ordinary autonomous reply a
+            # stable, content-free identity.  If delivery fails, the ledger can
+            # therefore name exactly which durable turn was unheard without
+            # retaining or comparing its wording.
+            self._store_response(
+                conversation_id,
+                outcome,
+                retention_until,
+                ordinary_turn_id=opportunity.opportunity_id,
+            )
         return outcome
 
     def receive_session_open(
@@ -263,8 +274,24 @@ class ConversationGateway:
                 conversation = self._conversation_store.create(
                     conversation_id, retention_until
                 )
+            unheard_turn_ids = frozenset(
+                item.get("response_turn_id", "")
+                for item in claimed
+                if item.get("conversation_id", "") == conversation_id
+                and item.get("response_turn_id")
+            )
+            # This is an ephemeral Core view.  The durable conversation stays
+            # intact, but wording Friedl never heard cannot reach the fresh
+            # opening turn by way of history as well as structured evidence.
+            opening_conversation = replace(
+                conversation,
+                turns=tuple(
+                    turn for turn in conversation.turns
+                    if turn.turn_id not in unheard_turn_ids
+                ),
+            )
             outcome = self._core.process(
-                self._with_contextual_events(conversation, event),
+                self._with_contextual_events(opening_conversation, event),
                 retention_until,
                 step_budget,
                 trigger_event_id=event.event_id,

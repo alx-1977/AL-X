@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from alx.contracts.storage import serialized_store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @serialized_store
@@ -60,7 +60,9 @@ class SQLiteOpportunityLedger:
                     -- RESPONDED with no live transport to deliver it. A fact
                     -- about the occasion, not a stored message: the prose is
                     -- deliberately not kept, so nothing can replay it.
-                    response_undelivered INTEGER NOT NULL DEFAULT 0
+                    response_undelivered INTEGER NOT NULL DEFAULT 0,
+                    conversation_id TEXT NOT NULL DEFAULT '',
+                    response_turn_id TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -74,6 +76,16 @@ class SQLiteOpportunityLedger:
                 self._connection.execute(
                     "ALTER TABLE cognition_opportunities "
                     "ADD COLUMN response_undelivered INTEGER NOT NULL DEFAULT 0"
+                )
+            if "conversation_id" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE cognition_opportunities "
+                    "ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "response_turn_id" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE cognition_opportunities "
+                    "ADD COLUMN response_turn_id TEXT NOT NULL DEFAULT ''"
                 )
             # A claimed intention exists only while one synchronous Gateway
             # turn owns it.  Opening the store after a stopped process proves
@@ -103,7 +115,8 @@ class SQLiteOpportunityLedger:
             with self._connection:
                 self._connection.execute(
                     "INSERT INTO cognition_opportunities(opportunity_id, origin, "
-                    "arose_at, refs, outcome, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    "arose_at, refs, outcome, recorded_at, conversation_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         opportunity.opportunity_id,
                         opportunity.origin.value,
@@ -111,6 +124,11 @@ class SQLiteOpportunityLedger:
                         "\x1f".join(opportunity.references),
                         "created",
                         datetime.now(UTC).isoformat(),
+                        (
+                            opportunity.conversation_id
+                            if isinstance(opportunity.conversation_id, str)
+                            else ""
+                        ),
                     ),
                 )
         except sqlite3.IntegrityError:
@@ -254,7 +272,9 @@ class SQLiteOpportunityLedger:
             )
 
 
-    def mark_response_undelivered(self, opportunity_id: str) -> None:
+    def mark_response_undelivered(
+        self, opportunity_id: str, conversation_id: str, response_turn_id: str
+    ) -> None:
         """Record that an autonomous response had nowhere to go.
 
         The fact, never the prose. Keeping the words would be a delivery queue
@@ -267,9 +287,10 @@ class SQLiteOpportunityLedger:
         """
         with self._connection:
             self._connection.execute(
-                "UPDATE cognition_opportunities SET response_undelivered = 1 "
+                "UPDATE cognition_opportunities SET response_undelivered = 1, "
+                "conversation_id = ?, response_turn_id = ? "
                 "WHERE opportunity_id = ?",
-                (opportunity_id,),
+                (conversation_id, response_turn_id, opportunity_id),
             )
 
     def claim_undelivered_responses(self) -> tuple[dict[str, Any], ...]:
