@@ -1224,9 +1224,12 @@ class CodingAgent:
                         # A command AL/X required is hers to size: on
                         # 2026-10-16 her full suite timed out three times at
                         # the default bound and the job could not be corrected.
+                        # Matched by argv, because one the policy also derives
+                        # runs once under the derived name.
                         timeout_seconds=(
                             FULL_SUITE_COMMAND_SECONDS
-                            if check.name == "pytest_full" or check.name.startswith("requested_")
+                            if check.name == "pytest_full"
+                            or check.argv in request.requested_checks
                             else DEFAULT_VERIFICATION_COMMAND_SECONDS
                         ),
                         blocked_paths=workspace.blocked_paths,
