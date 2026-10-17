@@ -28,10 +28,10 @@ _FAILURES = (
 
 DEFINITION = CapabilityDefinition(
     TRACK_SHIPMENT,
-    "Return Ship24's current shipment status and full event history for one "
-    "tracking number, with an optional Ship24 courier code. The first call "
-    "may create a tracker and consume shipment quota. Reports Ship24's facts "
-    "without deciding what they mean.",
+    "Look up Ship24's current shipment status and full event history for one "
+    "tracking number, with an optional Ship24 courier code. Each call is one "
+    "per-call lookup billed by Ship24 that fetches tracking from the courier "
+    "directly. Reports Ship24's facts without deciding what they mean.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"tracking_number": _STRING, "courier_code": _STRING},

@@ -1,4 +1,4 @@
-"""Compose Ship24 tracking under Friedl's standing free-plan authority (D-056)."""
+"""Compose Ship24 per-call tracking under Friedl's allowance authority (D-056)."""
 
 from __future__ import annotations
 
