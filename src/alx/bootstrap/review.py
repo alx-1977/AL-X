@@ -9,7 +9,7 @@ through GitHub, and its profile supplies what is particular to it: the name,
 the trigger comment, the bot account and its check run.
 
 Each review is paid for, so the ones AL/X asks for are counted against
-Friedl's allowance (three a pull request, twelve a month). Past it, an
+Friedl's allowance (three a pull request). Past it, an
 ordinary request is refused before anything is posted, and the separate
 beyond-allowance capability asks for one more under his approval of that exact
 call.

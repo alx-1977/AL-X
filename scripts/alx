@@ -60,9 +60,16 @@ PATTERN="alx.bootstrap.live_voice"
 # any clone on the machine, so a restart here would kill a second checkout's
 # process. Each candidate is kept only when its own working directory is this
 # repository, which is the property that actually identifies it.
+# macOS pgrep leaves out its own ancestors unless asked (-a). When AL/X
+# restarts herself (D-055) this launcher is her descendant, so without -a it
+# could not see her and reported "not running" (2026-10-17). Linux pgrep's -a
+# means something else and never excludes ancestors, so it is macOS only.
+PGREP_ANCESTORS=""
+[ "$(uname -s)" = "Darwin" ] && PGREP_ANCESTORS="-a"
+
 pids() {
   local candidate
-  for candidate in $(pgrep -f "$PATTERN" 2>/dev/null); do
+  for candidate in $(pgrep $PGREP_ANCESTORS -f "$PATTERN" 2>/dev/null); do
     if [ "$(lsof -a -p "$candidate" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')" = "$ROOT" ]; then
       printf '%s\n' "$candidate"
     fi
@@ -99,6 +106,13 @@ stop() {
 start() {
   if [ -n "$(pids)" ]; then
     echo "already running: $(pids | tr '\n' ' ')"
+    return 1
+  fi
+  # Something already answering here is not this start's runtime. Starting
+  # anyway, the new one cannot bind the port and dies, and the health check
+  # below would read the old one's answer as "up" (2026-10-17).
+  if healthy; then
+    echo "something is already serving $URL; not starting a second runtime"
     return 1
   fi
   local code; code="$(runtime_code)" || return 1

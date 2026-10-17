@@ -163,6 +163,71 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         self.assertTrue(marker.is_file())
 
 
+class TheLauncherFindsTheRuntimeThatStartedIt(unittest.TestCase):
+    """2026-10-17: restart_self started the launcher as AL/X's descendant, and
+    macOS pgrep leaves out its own ancestors, so the launcher reported "not
+    running", started a second runtime that could not bind the port, and
+    read the old runtime's answer as "up"."""
+
+    def test_a_child_finds_its_parent_only_with_ancestors_included(self) -> None:
+        import platform
+        import subprocess
+        if platform.system() != "Darwin":
+            self.skipTest("the ancestor rule is macOS pgrep's")
+        tag = "alx-launcher-ancestor-probe"
+        # Only the parent's command line carries the tag; the child reads it
+        # from its environment, so nothing else can match.
+        probe = ('printf "%s|%s" "$(pgrep -f "$TAG" | tr "\\n" " ")" '
+                 '"$(pgrep -a -f "$TAG" | tr "\\n" " ")"')
+        parent = ("import os,subprocess,sys; print(subprocess.run(['/bin/bash','-c',sys.argv[1]],"
+                  "env={**os.environ,'TAG':sys.argv[2]},capture_output=True,text=True,"
+                  "start_new_session=True).stdout)")
+        result = subprocess.run([sys.executable, "-c", parent, probe, tag],
+                                capture_output=True, text=True, check=True)
+        without, with_ancestors = result.stdout.strip().split("|")
+        stray = [pid for pid in without.split() if pid]
+        details = [subprocess.run(["ps", "-o", "pid=,ppid=,command=", "-p", pid],
+                                  capture_output=True, text=True).stdout.strip() for pid in stray]
+        self.assertEqual(stray, [], details)
+        self.assertTrue(with_ancestors.strip())
+
+    def test_the_launcher_includes_ancestors_on_macos(self) -> None:
+        launcher = (ROOT / "scripts" / "alx").read_text()
+        self.assertIn('[ "$(uname -s)" = "Darwin" ] && PGREP_ANCESTORS="-a"', launcher)
+        self.assertIn('pgrep $PGREP_ANCESTORS -f "$PATTERN"', launcher)
+
+    def _start_with(self, answering: bool) -> tuple[int, str]:
+        """Run the launcher's own start() with nothing of ours running.
+
+        Sourced, so its real function runs; only the probes it depends on are
+        replaced. runtime_code() is the first step of an actual start.
+        """
+        import subprocess
+        script = (
+            f'source "{ROOT / "scripts" / "alx"}"\n'
+            "pids() { :; }\n"
+            f"healthy() {{ return {0 if answering else 1}; }}\n"
+            'runtime_code() { echo "RUNTIME_CODE_CALLED" >&2; return 1; }\n'
+            "start; echo \"rc=$?\"\n"
+        )
+        result = subprocess.run(["/bin/bash", "-c", script], cwd=ROOT,
+                                capture_output=True, text=True, timeout=60)
+        output = result.stdout + result.stderr
+        code = int(output.rsplit("rc=", 1)[1].split()[0])
+        return code, output
+
+    def test_a_taken_port_refuses_before_anything_starts(self) -> None:
+        """PR #152 review: prove the guard stops a start, not that its text exists."""
+        code, output = self._start_with(answering=True)
+        self.assertEqual(code, 1, output)
+        self.assertIn("not starting a second runtime", output)
+        self.assertNotIn("RUNTIME_CODE_CALLED", output)
+        # With the port free, the same start goes on to the runtime code, so it
+        # is the guard, and only the guard, that stopped the first one.
+        _code, free = self._start_with(answering=False)
+        self.assertIn("RUNTIME_CODE_CALLED", free)
+
+
 class TempRepositoriesIgnoreTheCallersGit(unittest.TestCase):
     def test_inherited_git_location_cannot_redirect_a_temp_repository(self) -> None:
         # A decoy stands in for the caller's repository, so a regression
