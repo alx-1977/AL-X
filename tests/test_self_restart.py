@@ -21,12 +21,20 @@ from alx.tools.self_restart import RESTART_SELF, build_self_restart_executors  #
 
 
 class RestartSelfTests(unittest.TestCase):
-    def build(self, running="a" * 40, main="b" * 40, coding=False):
-        self.restarts = []
+    def build(self, running="a" * 40, main="b" * 40, coding=False, launch=None):
+        self.restarts, self.released = [], []
         return build_self_restart_executors(
-            lambda: running, lambda: main, lambda: coding,
-            lambda: self.restarts.append(1), lambda: "call-1",
+            lambda: running, lambda: main, lambda: not coding,
+            lambda: self.released.append(1),
+            launch or (lambda: self.restarts.append(1)), lambda: "call-1",
         )[RESTART_SELF]
+
+    def test_a_restart_that_cannot_start_lets_jobs_run_again(self) -> None:
+        def broken():
+            raise OSError("no launcher")
+        result = self.build(launch=broken)({})
+        self.assertEqual(result.failure["code"], "unavailable")
+        self.assertEqual(self.released, [1])
 
     def test_merged_code_not_yet_running_is_restarted_onto(self) -> None:
         result = self.build()({})
@@ -56,6 +64,46 @@ class RestartSelfTests(unittest.TestCase):
             environment = restart_environment()
         self.assertNotIn("ALX_LAUNCHER_COMMITTED", environment)
         self.assertEqual(environment["PATH"], "/bin")
+
+
+class RestartAndCodingExcludeEachOtherTests(unittest.TestCase):
+    """PR #150 review: a planned coding job could start in the launcher's
+    five seconds and be cut off."""
+
+    def agent(self):
+        import subprocess, tempfile
+        from tests.test_coding_agent import PlanningModel, RecordingSession, _worktree
+        from alx.providers.coding_agent import CodingAgent
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = _worktree(Path(directory.name))
+        self.session = RecordingSession()
+        return CodingAgent(PlanningModel(), self.session, repository=self.root,
+                           protected_paths=(self.root / "runtime-data",))
+
+    def test_no_job_starts_once_a_restart_is_reserved(self) -> None:
+        from alx.contracts.coding import CodingError, CodingRequest
+        agent = self.agent()
+        self.assertTrue(agent.reserve_for_restart())
+        with self.assertRaises(CodingError) as refused:
+            agent.run(CodingRequest(task="t", job_id="j", repair_branch="fix/j",
+                                    commit_message="m"))
+        self.assertEqual(refused.exception.details["reason_code"], "restart_pending")
+        self.assertEqual(self.session.calls, [])
+        agent.release_restart()
+        agent.run(CodingRequest(task="t", job_id="j2", repair_branch="fix/j2",
+                                commit_message="m"))
+        self.assertEqual(len(self.session.calls), 1)
+
+    def test_storage_configured_anywhere_in_the_checkout_is_blocked(self) -> None:
+        """PR #150 review: a storage root other than .alx stayed reachable."""
+        from alx.contracts.coding import CodingRequest
+        agent = self.agent()
+        agent.run(CodingRequest(task="t", job_id="j", repair_branch="fix/j",
+                                commit_message="m"))
+        request, briefing = self.session.calls[0]
+        self.assertIn("runtime-data", request.blocked_paths)
+        self.assertIn("runtime-data", briefing)
 
 
 class SheKnowsTests(unittest.TestCase):

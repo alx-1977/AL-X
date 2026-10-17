@@ -824,6 +824,23 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertNotIn("hidden", text)
         self.assertNotIn("note", text)
 
+    def test_a_comment_holding_code_marks_still_does_not_leak(self) -> None:
+        """PR #150 review: backticks or a fence inside a hidden comment."""
+        from alx.contracts.review_content import ReviewContent
+        content = ReviewContent(
+            7, "a" * 40, "greptile", True,
+            summary=("Visible one.\n<!-- secret `not code`\nstill secret -->\n"
+                     "Visible two `List<int>`.\n<!--\n```\nfenced secret\n```\n-->\n"
+                     "```py\nx = a < b  # <!-- kept -->\n```\nEnd."),
+            submitted_at=NOW,
+        )
+        text = coding_agent_module.render_review(content)
+        for visible in ("Visible one.", "Visible two `List<int>`.",
+                        "x = a < b  # <!-- kept -->", "End."):
+            self.assertIn(visible, text)
+        for hidden in ("secret", "not code", "fenced secret"):
+            self.assertNotIn(hidden, text)
+
     def test_the_planner_is_told_a_review_is_advice(self) -> None:
         """PR #148 review: the plan is handed to the session as accepted."""
         text = " ".join(coding_agent_module.PLAN_INSTRUCTION.split())

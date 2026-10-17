@@ -838,6 +838,8 @@ async def run(repository_root: Path) -> None:
         # What each coding session was told, kept beside her other records.
         briefing_sink=lambda job_id, text: keep_briefing(
             storage_root / "coding-briefings", job_id, text),
+        # Her records, wherever configured, are never a coding job's to touch.
+        protected_paths=(storage_root, repository_root / ".alx"),
     )
     # D-055: she restarts herself onto code she has merged. Composed only
     # where she can read main and is running from the launcher's snapshot.
@@ -849,7 +851,8 @@ async def run(repository_root: Path) -> None:
         executors.update(build_self_restart_executors(
             lambda: running_commit_of(CODE_ROOT, repository_runtime.authority),
             repository_runtime.authority.main_commit,
-            lambda: coding_runtime is not None and coding_runtime.agent.is_running(),
+            lambda: coding_runtime is None or coding_runtime.agent.reserve_for_restart(),
+            lambda: coding_runtime is not None and coding_runtime.agent.release_restart(),
             lambda: start_restart(repository_root),
             current_call_id.get,
         ))

@@ -50,7 +50,8 @@ DEFINITION = CapabilityDefinition(
 def build_self_restart_executors(
     running_commit: Callable[[], str],
     main_commit: Callable[[], str],
-    coding_job_running: Callable[[], bool],
+    reserve: Callable[[], bool],
+    release: Callable[[], None],
     restart: Callable[[], None],
     call_id_source: Callable[[], str],
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
@@ -67,13 +68,16 @@ def build_self_restart_executors(
             return failed("unavailable", reason="commit_unknown")
         if running == main:
             return failed("nothing_new_to_run", running_commit=running)
-        if coding_job_running():
-            # A restart would stop the job's session mid-edit. Its checkpoint
-            # survives, but nothing is gained by forcing it.
+        # Atomic with starting a coding job: either a job is running and the
+        # restart is refused, or no job may start until the process stops. A
+        # check alone left the launcher's few seconds for a planned job to
+        # begin and be cut off (PR #150 review).
+        if not reserve():
             return failed("coding_job_running")
         try:
             restart()
         except Exception as error:  # noqa: BLE001 - reported, not raised
+            release()
             return failed("unavailable", reason=type(error).__name__)
         return CapabilityResult(
             call_id_source(), RESTART_SELF, CapabilityResultState.SUCCEEDED,

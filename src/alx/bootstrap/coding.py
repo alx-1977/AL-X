@@ -67,6 +67,7 @@ def build_coding_runtime(
     goal_state_source: Callable[[], GoalState | None] = lambda: None,
     review_reader: Callable[..., Any] | None = None,
     briefing_sink: Callable[[str, str], None] | None = None,
+    protected_paths: tuple[Path, ...] = (),
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
 
@@ -90,7 +91,7 @@ def build_coding_runtime(
         selected = agent or CodingAgent(
             model, session, activity_sink, telemetry_sink,
             repository=repository, review_reader=review_reader,
-            briefing_sink=briefing_sink,
+            briefing_sink=briefing_sink, protected_paths=protected_paths,
         )
     except CodingError as error:
         LOGGER.warning(
