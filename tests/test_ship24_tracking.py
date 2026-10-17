@@ -95,6 +95,44 @@ class Ship24TrackingTests(unittest.TestCase):
             self.assertEqual(result.failure["code"], "tracking_allowance_exhausted")
             post.assert_not_called()
 
+    def test_fixed_subscription_can_retry_after_restart(self) -> None:
+        for status, code in ((403, "subscription_required"),
+                             (402, "subscription_expired"),
+                             (403, "subscription_not_found"),
+                             (403, "no_active_subscription"),
+                             (403, "per_call_subscription_required")):
+            with self.subTest(status=status, code=code), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "ship24.sqlite3"
+                runtime = build_ship24_runtime(
+                    lambda: "call-1", {"SHIP24_API_KEY": "example-token"}, path
+                )
+                with patch("alx.providers.ship24.httpx.post", return_value=response(
+                    status, {"errors": [{"code": code}]}
+                )) as post:
+                    first = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "A"})
+                self.assertEqual(first.failure["code"], "tracking_allowance_exhausted")
+                post.assert_called_once()
+
+                restarted = build_ship24_runtime(
+                    lambda: "call-2", {"SHIP24_API_KEY": "example-token"}, path
+                )
+                with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
+                    second = restarted.executors[TRACK_SHIPMENT]({"tracking_number": "A"})
+                self.assertIs(second.state, CapabilityResultState.SUCCEEDED)
+                post.assert_called_once()
+
+    def test_fixed_subscription_can_retry_without_restart(self) -> None:
+        runtime = build_ship24_runtime(lambda: "call-1", {"SHIP24_API_KEY": "example-token"})
+        with patch("alx.providers.ship24.httpx.post", side_effect=(
+            response(403, {"errors": [{"code": "subscription_required"}]}),
+            response(200, TRACKED),
+        )) as post:
+            first = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "A"})
+            second = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "A"})
+        self.assertEqual(first.failure["code"], "tracking_allowance_exhausted")
+        self.assertIs(second.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(post.call_count, 2)
+
     def test_last_successful_lookup_uses_allowance_and_blocks_next(self) -> None:
         runtime = build_ship24_runtime(lambda: "call-1", {"SHIP24_API_KEY": "example-token"})
         last = response(200, TRACKED)

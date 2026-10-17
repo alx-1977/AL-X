@@ -18,6 +18,8 @@ _URL = "https://api.ship24.com/public/v1/tracking/search"
 _EXHAUSTED_CODES = frozenset({
     "plan_limit_exceeded", "quota_exceeded", "monthly_quota_exceeded",
     "tracking_limit_exceeded", "subscription_limit_exceeded",
+})
+_SUBSCRIPTION_SETUP_CODES = frozenset({
     "subscription_required", "subscription_expired", "subscription_not_found",
     "no_active_subscription", "per_call_subscription_required",
 })
@@ -121,21 +123,28 @@ class Ship24Provider:
         return datetime.now(UTC).strftime("%Y-%m")
 
     @staticmethod
-    def _allowance_exhausted(response: httpx.Response) -> bool:
+    def _allowance_status(response: httpx.Response) -> str | None:
         # A transient 429 is not necessarily the per-call plan limit.
-        if response.status_code == 402:
-            return True
-        remaining = response.headers.get("x-ship24-monthly-remaining")
-        if remaining is not None and remaining.strip() == "0":
-            return True
         try:
             errors = _object(response.json()).get("errors")
         except (ValueError, Ship24Error):
-            return False
-        return isinstance(errors, list) and any(
-            isinstance(item, Mapping) and item.get("code") in _EXHAUSTED_CODES
-            for item in errors
-        )
+            errors = None
+        codes: set[str] = set()
+        if isinstance(errors, list):
+            for item in errors:
+                if isinstance(item, Mapping):
+                    code = item.get("code")
+                    if isinstance(code, str):
+                        codes.add(code)
+        # A corrected subscription can be retried; it is not evidence that
+        # the monthly allowance has been consumed, even on HTTP 402.
+        if codes & _SUBSCRIPTION_SETUP_CODES:
+            return "subscription_setup"
+        remaining = response.headers.get("x-ship24-monthly-remaining")
+        if (response.status_code == 402 or (remaining is not None and remaining.strip() == "0")
+                or codes & _EXHAUSTED_CODES):
+            return "exhausted"
+        return None
 
     def track(self, tracking_number: str, courier_code: str | None = None) -> dict[str, Any]:
         token = self._environment.get("SHIP24_API_KEY", "").strip()
@@ -152,7 +161,10 @@ class Ship24Provider:
                 if self._blocked_month == month:
                     raise Ship24Error("tracking_allowance_exhausted")
                 response = self._post(token, payload)
-                if self._allowance_exhausted(response):
+                allowance_status = self._allowance_status(response)
+                if allowance_status == "subscription_setup":
+                    raise Ship24Error("tracking_allowance_exhausted")
+                if allowance_status == "exhausted":
                     self._blocked_month = month
                     if response.status_code >= 400:
                         raise Ship24Error("tracking_allowance_exhausted")
@@ -165,7 +177,10 @@ class Ship24Provider:
                     if blocked and blocked[0]:
                         raise Ship24Error("tracking_allowance_exhausted")
                     response = self._post(token, payload)
-                    if self._allowance_exhausted(response):
+                    allowance_status = self._allowance_status(response)
+                    if allowance_status == "subscription_setup":
+                        raise Ship24Error("tracking_allowance_exhausted")
+                    if allowance_status == "exhausted":
                         connection.execute(
                             "INSERT OR REPLACE INTO ship24_per_call_allowance VALUES (?, 1)", (month,)
                         )
