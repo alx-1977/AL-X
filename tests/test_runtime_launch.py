@@ -191,11 +191,41 @@ class TheLauncherFindsTheRuntimeThatStartedIt(unittest.TestCase):
         self.assertEqual(stray, [], details)
         self.assertTrue(with_ancestors.strip())
 
-    def test_the_launcher_includes_ancestors_on_macos_and_refuses_a_taken_port(self) -> None:
+    def test_the_launcher_includes_ancestors_on_macos(self) -> None:
         launcher = (ROOT / "scripts" / "alx").read_text()
         self.assertIn('[ "$(uname -s)" = "Darwin" ] && PGREP_ANCESTORS="-a"', launcher)
         self.assertIn('pgrep $PGREP_ANCESTORS -f "$PATTERN"', launcher)
-        self.assertIn("not starting a second runtime", launcher)
+
+    def _start_with(self, answering: bool) -> tuple[int, str]:
+        """Run the launcher's own start() with nothing of ours running.
+
+        Sourced, so its real function runs; only the probes it depends on are
+        replaced. runtime_code() is the first step of an actual start.
+        """
+        import subprocess
+        script = (
+            f'source "{ROOT / "scripts" / "alx"}"\n'
+            "pids() { :; }\n"
+            f"healthy() {{ return {0 if answering else 1}; }}\n"
+            'runtime_code() { echo "RUNTIME_CODE_CALLED" >&2; return 1; }\n'
+            "start; echo \"rc=$?\"\n"
+        )
+        result = subprocess.run(["/bin/bash", "-c", script], cwd=ROOT,
+                                capture_output=True, text=True, timeout=60)
+        output = result.stdout + result.stderr
+        code = int(output.rsplit("rc=", 1)[1].split()[0])
+        return code, output
+
+    def test_a_taken_port_refuses_before_anything_starts(self) -> None:
+        """PR #152 review: prove the guard stops a start, not that its text exists."""
+        code, output = self._start_with(answering=True)
+        self.assertEqual(code, 1, output)
+        self.assertIn("not starting a second runtime", output)
+        self.assertNotIn("RUNTIME_CODE_CALLED", output)
+        # With the port free, the same start goes on to the runtime code, so it
+        # is the guard, and only the guard, that stopped the first one.
+        _code, free = self._start_with(answering=False)
+        self.assertIn("RUNTIME_CODE_CALLED", free)
 
 
 class TempRepositoriesIgnoreTheCallersGit(unittest.TestCase):
