@@ -2614,3 +2614,13 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Improving herself.** Her instructions say the capabilities around her Core, how they work and what is missing, are hers to improve: noticing where she or Friedl lose time, repeat work or get things wrong, and where a capability she lacks would help him, first in their work but not only there. Within the authority she already holds she builds it herself (coding task, pull request, merge at a clean review under D-046). Something that would let her do what she cannot do today, such as reach someone new or spend money, she brings to Friedl as a proposal first.
 - **Restarting herself.** `restart_self` restarts her onto committed main through the repository's launcher (`scripts/alx restart`), started detached a few seconds after the call returns. It refuses when she already runs main's commit (`nothing_new_to_run`) and while a coding job is running (`coding_job_running`). Plain permission (`runtime.restart`), no approval. She is told to restart once nothing she is doing would suffer from a short pause, and to tell Friedl what went live.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty. New authority still comes only from Friedl.
+
+## D-052b — Coding sessions never reach AL/X's storage; what they are told is kept
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17** ("ok", to the briefing record and the review-markup fix; the storage denial closes a gap found while adding them). Amends D-052 and D-052a.
+- **Storage denied.** AL/X's runtime storage (`.alx/` at the checkout root: goals, memories, conversations, trace, logs) is denied for read and write to every coding session, Grok's and Codex's, and refused by her own workspace checks. Until now a session could read and write it; no job is known to have done so.
+- **Briefings kept.** The exact briefing each coding session receives, including a reviewer's own words, is kept in her storage under `coding-briefings/`, the newest 30.
+- **Review markup.** Markup in a review is removed a run of lines at a time, so a comment spanning lines no longer leaks its contents to the coding model; code in it is still kept exactly.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

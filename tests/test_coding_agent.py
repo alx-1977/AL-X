@@ -744,6 +744,31 @@ class NativeExecutionTests(unittest.TestCase):
         material = json.loads(model.requests[0].messages[1].content)
         self.assertIn("Old replies still reach Core", material["external_review"])
 
+    def test_the_exact_briefing_is_kept(self) -> None:
+        """So Friedl can see what the coding model was actually told."""
+        worktree = _worktree(self.root)
+        _head, _seen, reader = self._review(worktree, summary="Fix the lock release.")
+        kept = []
+        session = RecordingSession(edits={"app.py": _FIXED})
+        runtime = build_coding_runtime(
+            True, PlanningModel(), lambda: "call-1", session=session,
+            repository=worktree, review_reader=reader,
+            briefing_sink=lambda job_id, text: kept.append((job_id, text)),
+        )
+        CapabilityBroker(
+            CapabilityRegistry(runtime.definitions), SafetyGate(runtime.policies),
+            runtime.executors,
+        ).dispatch(
+            CapabilityCall("call-1", RUN_CODING_TASK, {
+                "task": "address the review", "repair_branch": "fix/call-1",
+                "commit_message": "fix", "review_pull_request": 147,
+            }),
+            AuthorityContext("friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW),
+        )
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0][1], session.calls[0][1])
+        self.assertIn("Fix the lock release.", kept[0][1])
+
     def test_no_review_of_the_starting_revision_refuses_before_any_change(self) -> None:
         worktree = _worktree(self.root)
         _head, _seen, reader = self._review(worktree, available=False)
@@ -784,6 +809,20 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIn("done", text)
         self.assertNotIn("<p>", text)
         self.assertNotIn("<b>", text)
+
+    def test_a_comment_spanning_lines_does_not_leak_into_the_review(self) -> None:
+        """PR #148 second review: per-line parsing exposed a hidden comment."""
+        from alx.contracts.review_content import ReviewContent
+        content = ReviewContent(
+            7, "a" * 40, "greptile", True,
+            summary="<p>Real finding.</p>\n<!-- hidden\nnote -->\nAfter `x<y>`.",
+            submitted_at=NOW,
+        )
+        text = coding_agent_module.render_review(content)
+        self.assertIn("Real finding.", text)
+        self.assertIn("After `x<y>`.", text)
+        self.assertNotIn("hidden", text)
+        self.assertNotIn("note", text)
 
     def test_the_planner_is_told_a_review_is_advice(self) -> None:
         """PR #148 review: the plan is handed to the session as accepted."""
@@ -1672,6 +1711,18 @@ class SandboxProfileTests(unittest.TestCase):
         worktree = _worktree(self.root)
         entries = coding_containment.deny_entries(worktree, ())
         self.assertIn(str(worktree / ".git"), entries)
+
+    def test_alx_runtime_storage_is_denied_to_every_session(self) -> None:
+        """2026-10-17: her goals, memories and conversations sit in .alx/ in
+        the checkout, and a coding session could read and write them."""
+        worktree = _worktree(self.root)
+        (worktree / ".alx" / "runtime").mkdir(parents=True)
+        entries = coding_containment.deny_entries(worktree, ())
+        self.assertIn(str(worktree / ".alx"), entries)
+        workspace = CodingWorkspace(str(worktree), ())
+        with self.assertRaises(CodingError):
+            workspace.validate_inspection_target(".alx/runtime/goals.sqlite3")
+        self.assertNotIn(".alx", workspace.list_dir("."))
 
     def test_git_metadata_is_denied_through_a_linked_worktree(self) -> None:
         """9. A linked worktree's .git is a file pointing at the real store."""

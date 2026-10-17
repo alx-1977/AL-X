@@ -288,9 +288,24 @@ def _without_markup(text: str) -> str:
 def _readable(markup: str) -> str:
     """The body as text. Code is kept exactly: fenced blocks and inline spans
     are never parsed as markup, so `List<int>` or a suggested fix survives
-    (PR #148 review)."""
+    (PR #148 review). Markup outside code is removed a whole run of lines at
+    a time, so a comment spanning lines goes with it rather than leaking its
+    inside (PR #148 second review)."""
     out: list[str] = []
+    prose: list[str] = []
     fence = ""
+
+    def flush() -> None:
+        if not prose:
+            return
+        # Between backticks is code; everything else may carry markup.
+        pieces = "\n".join(prose).split("`")
+        out.append("`".join(
+            piece if index % 2 else _without_markup(piece)
+            for index, piece in enumerate(pieces)
+        ))
+        prose.clear()
+
     for line in markup.splitlines():
         stripped = line.lstrip()
         if fence:
@@ -299,15 +314,12 @@ def _readable(markup: str) -> str:
                 fence = ""
             continue
         if stripped.startswith("```"):
+            flush()
             fence = stripped[:len(stripped) - len(stripped.lstrip("`"))]
             out.append(line)
             continue
-        # Between backticks is code; everything else may carry markup.
-        pieces = line.split("`")
-        out.append("`".join(
-            piece if index % 2 else _without_markup(piece)
-            for index, piece in enumerate(pieces)
-        ))
+        prose.append(line)
+    flush()
     lines = [line.rstrip() for line in "\n".join(out).splitlines()]
     kept: list[str] = []
     for line in lines:
@@ -520,10 +532,14 @@ class CodingAgent:
         clock: Callable[[], datetime] | None = None,
         repository: Path | None = None,
         review_reader: Callable[[ReviewContentRequest], ReviewContent] | None = None,
+        briefing_sink: Callable[[str, str], None] | None = None,
     ) -> None:
         self._model = model
         self._session = session
         self._review_reader = review_reader
+        # Where the exact briefing each session receives is kept, so Friedl
+        # and AL/X can see what the coding model was actually told.
+        self._briefing_sink = briefing_sink
         self._activity_sink = activity_sink or (lambda _activity: None)
         self._telemetry_sink = telemetry_sink or (lambda _telemetry: None)
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -628,6 +644,15 @@ class CodingAgent:
             )
             return
         state.activity = activity
+
+    def _keep_briefing(self, state: "_JobState", briefing: str) -> None:
+        """Keep the briefing; a failure to keep it never affects the job."""
+        if self._briefing_sink is None:
+            return
+        try:
+            self._briefing_sink(state.job_id, briefing)
+        except Exception as error:  # noqa: BLE001 - a record, not the job
+            LOGGER.warning("Could not keep the coding briefing (%s)", type(error).__name__)
 
     def is_running(self) -> bool:
         """Whether a coding job is running on this agent now."""
@@ -883,6 +908,7 @@ class CodingAgent:
                         recorded if isinstance(recorded, Mapping) else None,
                         observed, outputs,
                     )
+                self._keep_briefing(state, execution_briefing)
                 session = self._session.run_session(
                     request, execution_briefing
                 )

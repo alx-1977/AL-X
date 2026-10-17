@@ -176,6 +176,30 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
     return list(entries), matched > limit
 
 
+# How many coding briefings are kept, newest first.
+MAX_KEPT_BRIEFINGS = 30
+
+
+def keep_briefing(directory: Path, job_id: str, text: str,
+                  keep: int = MAX_KEPT_BRIEFINGS) -> Path:
+    """Write one coding job's briefing, and drop all but the newest `keep`.
+
+    The briefing is what the coding model was told: the task, the plan and,
+    when the job addresses a review, the reviewer's own words. Kept in AL/X's
+    runtime storage, which coding sessions cannot read.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    name = "".join(c if c.isalnum() or c in "._-" else "_" for c in job_id)[:120] or "job"
+    path = directory / f"{name}.txt"
+    path.write_text(text, encoding="utf-8")
+    kept = sorted(directory.glob("*.txt"), key=lambda item: item.stat().st_mtime,
+                  reverse=True)
+    for old in kept[keep:]:
+        old.unlink(missing_ok=True)
+    return path
+
+
 def _moment(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -186,4 +210,5 @@ def _moment(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-__all__ = ["MAX_RECORDS", "PROBLEM_STATUSES", "SQLiteTraceRecord", "read_log"]
+__all__ = ["MAX_KEPT_BRIEFINGS", "MAX_RECORDS", "PROBLEM_STATUSES", "SQLiteTraceRecord",
+           "keep_briefing", "read_log"]

@@ -115,7 +115,7 @@ from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
 from alx.observability.usage import bill_budget_for
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
-from alx.observability.self_record import SQLiteTraceRecord, read_log
+from alx.observability.self_record import SQLiteTraceRecord, keep_briefing, read_log
 from alx.providers.self_restart import start_restart
 from alx.tools.self_restart import (
     DEFINITION as SELF_RESTART_DEFINITION,
@@ -835,6 +835,9 @@ async def run(repository_root: Path) -> None:
         review_reader=(
             review_runtime.provider.read if review_runtime is not None else None
         ),
+        # What each coding session was told, kept beside her other records.
+        briefing_sink=lambda job_id, text: keep_briefing(
+            storage_root / "coding-briefings", job_id, text),
     )
     # D-055: she restarts herself onto code she has merged. Composed only
     # where she can read main and is running from the launcher's snapshot.

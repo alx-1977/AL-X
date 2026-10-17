@@ -173,6 +173,24 @@ class CapabilityTests(unittest.TestCase):
         self.assertIn("never fill a gap with what seems likely", text)
 
 
+class BriefingRecordTests(unittest.TestCase):
+    """What the coding model was told is kept, newest 30 (2026-10-17)."""
+
+    def test_briefings_are_kept_and_the_oldest_dropped(self) -> None:
+        import os
+        from alx.observability.self_record import keep_briefing
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "coding-briefings"
+            for number in range(5):
+                path = keep_briefing(root, f"plan-{number}", f"briefing {number}", keep=3)
+                os.utime(path, (1_000_000 + number, 1_000_000 + number))
+            kept = sorted(item.name for item in root.glob("*.txt"))
+            self.assertEqual(kept, ["plan-2.txt", "plan-3.txt", "plan-4.txt"])
+            self.assertEqual((root / "plan-4.txt").read_text(), "briefing 4")
+            odd = keep_briefing(root, "../../escape", "x")
+            self.assertEqual(odd.parent, root)
+
+
 class PollingNoiseTests(unittest.TestCase):
     """The page's five-second polls are not written to her log (2026-10-16)."""
 

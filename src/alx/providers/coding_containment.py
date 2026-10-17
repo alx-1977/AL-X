@@ -30,6 +30,9 @@ from alx.contracts.coding import CodingError, lexical_repository_path
 
 PROFILE_NAME = "alx_coding_job"
 
+# The directory, at the checkout root, that holds AL/X's runtime storage.
+RUNTIME_STORAGE_NAME = ".alx"
+
 # Credential shapes that must never be readable by a coding job, independent of
 # what Core listed. A job that legitimately edits code has no reason to read a
 # private key, and a repository that happens to contain one must not leak it.
@@ -120,6 +123,12 @@ def deny_entries(
     descendants, which the CLI's directory semantics already provide.
     """
     entries: list[str] = list(git_metadata_paths(worktree))
+    # AL/X's own runtime storage lives in the checkout, gitignored: goals,
+    # memories, conversations, trace and logs. No coding job has a reason to
+    # read or write it, and the job was able to until 2026-10-17.
+    storage = worktree / RUNTIME_STORAGE_NAME
+    if storage.exists() or storage.is_symlink():
+        entries.append(str(storage))
     entries.extend(CREDENTIAL_DENY_GLOBS)
     for item in blocked_paths:
         if any(character in item for character in _UNSUPPORTED_GLOB_CHARACTERS):
@@ -176,6 +185,7 @@ def write_profile(
 __all__ = [
     "CREDENTIAL_DENY_GLOBS",
     "PROFILE_NAME",
+    "RUNTIME_STORAGE_NAME",
     "deny_entries",
     "git_metadata_paths",
     "render_profile",
