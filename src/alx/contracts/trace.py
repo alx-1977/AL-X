@@ -42,6 +42,7 @@ class TraceSubsystem(str, Enum):
     THOUGHTS = "thoughts"
     XERO = "xero"
     DHL = "dhl"
+    SHIP24 = "ship24"
     READERS = "readers"
     SANDBOX = "sandbox"
     VOICE = "voice"

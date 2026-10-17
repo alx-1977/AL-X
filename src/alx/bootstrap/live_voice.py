@@ -56,6 +56,7 @@ from alx.bootstrap.xero import (
     build_xero_runtime,
 )
 from alx.bootstrap.dhl import build_dhl_runtime
+from alx.bootstrap.ship24 import build_ship24_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     merge_settings,
@@ -480,6 +481,13 @@ async def run(repository_root: Path) -> None:
     policies = dict(mail_runtime.policies)
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
+    ship24_runtime = build_ship24_runtime(
+        current_call_id.get, environment, storage_root / "ship24-allowance.sqlite3"
+    )
+    register(ship24_runtime.definitions, TraceSubsystem.SHIP24)
+    policies.update(ship24_runtime.policies)
+    executors.update(ship24_runtime.executors)
+    permissions.update(ship24_runtime.permissions)
 
     def notebook_provenance(source_references, _recorded_at):
         """Resolve cited goal artifacts without copying their evidence.
@@ -1123,6 +1131,8 @@ async def run(repository_root: Path) -> None:
                  "Accounting API", "src/alx/providers/xero.py", xero_composed),
                 ("DHL", "import duty bills from DHL's emails and documents",
                  "src/alx/providers/dhl.py", xero_composed),
+                ("Ship24", "tracking shipments across supported couriers",
+                 "src/alx/providers/ship24.py", True),
                 ("LlamaParse", "reading invoices and other documents",
                  "src/alx/providers/llamaparse.py", documents_composed),
                 ("Particle", "the BHL readers: Cloud API, event streams and "

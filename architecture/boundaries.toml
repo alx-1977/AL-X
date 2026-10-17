@@ -322,6 +322,13 @@ entry = "tools/particle.py::build_particle_executors.<locals>.read_usage"
 forbidden = []
 
 [[outcomes]]
+id = "shipment.status_and_history_are_tracked"
+description = "Ship24 returns current status and event history for one shipment."
+# New outcome. No earlier tracking path exists.
+entry = "tools/ship24.py::build_ship24_executors.<locals>.track"
+forbidden = []
+
+[[outcomes]]
 id = "coding.job_runs_and_is_verified"
 description = "One coding job is planned, carried out by one native session, and verified by AL/X."
 entry = "providers/coding_agent.py::CodingAgent.run"
