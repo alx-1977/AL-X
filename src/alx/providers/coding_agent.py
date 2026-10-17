@@ -629,6 +629,11 @@ class CodingAgent:
             return
         state.activity = activity
 
+    def is_running(self) -> bool:
+        """Whether a coding job is running on this agent now."""
+        with self._active_lock:
+            return self._active is not None
+
     def cancel(self, job_id: str | None = None) -> bool:
         """Stop only the active job's child process; preserve its checkout."""
         with self._active_lock:

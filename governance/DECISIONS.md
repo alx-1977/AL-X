@@ -2605,3 +2605,12 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Checked, not assumed.** Anything she states as fact about herself, her work or his comes from what she has looked at, and she says where she looked. What she has not checked she checks first, or says plainly she has not; she never fills a gap with what seems likely.
 - **Her own time.** She is told her trace over today shows what her day held, if she wants it. Nothing is chosen or summarised for her: D-024's own time still suggests nothing.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-055 — AL/X improves what is around her Core, and restarts onto it herself
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17** ("both please"). His words: "ALX should be able to improve things around the core for sure", "she needs to first consider capabilities relevant to the work we do but not limited to for sure as there might be things I am not even aware of that can help", and "we can rather limit her if we see she adds the wrong things".
+- **Improving herself.** Her instructions say the capabilities around her Core, how they work and what is missing, are hers to improve: noticing where she or Friedl lose time, repeat work or get things wrong, and where a capability she lacks would help him, first in their work but not only there. Within the authority she already holds she builds it herself (coding task, pull request, merge at a clean review under D-046). Something that would let her do what she cannot do today, such as reach someone new or spend money, she brings to Friedl as a proposal first.
+- **Restarting herself.** `restart_self` restarts her onto committed main through the repository's launcher (`scripts/alx restart`), started detached a few seconds after the call returns. It refuses when she already runs main's commit (`nothing_new_to_run`) and while a coding job is running (`coding_job_running`). Plain permission (`runtime.restart`), no approval. She is told to restart once nothing she is doing would suffer from a short pause, and to tell Friedl what went live.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty. New authority still comes only from Friedl.

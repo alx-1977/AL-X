@@ -153,6 +153,12 @@ REPOSITORY_AUTHORITY_SITE = (
     PRODUCTION_ROOT / "providers" / "repository_authority.py"
 )
 
+# D-055: AL/X restarts herself onto committed main by starting the repository's
+# own launcher, `scripts/alx restart`, detached. One fixed argv with no model
+# input, asserted below; it runs nothing AL/X authored and is not a Sandbox
+# experiment.
+SELF_RESTART_SITE = PRODUCTION_ROOT / "providers" / "self_restart.py"
+
 
 def _sandbox_modules() -> list[Path]:
     named = set(PRODUCTION_ROOT.rglob("*sandbox*.py"))
@@ -715,6 +721,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 path in EXECUTION_SITES
                 or path in CODING_PROCESS_SITES
                 or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_AUTHORITY_SITE}
+                or path == SELF_RESTART_SITE
             ):
                 continue
             tree = ast.parse(path.read_text())
@@ -745,6 +752,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 path in EXECUTION_SITES
                 or path in CODING_PROCESS_SITES
                 or path in {REPOSITORY_RUNTIME_SITE, REPOSITORY_AUTHORITY_SITE}
+                or path == SELF_RESTART_SITE
             ):
                 continue
             tree = ast.parse(path.read_text())
@@ -781,6 +789,23 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 }:
                     offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}")
         self.assertEqual(offenders, [], f"a second execution path appeared: {offenders}")
+
+    def test_the_self_restart_site_starts_only_the_launcher(self) -> None:
+        """D-055: one Popen, fixed argv, its own session, no shell."""
+        tree = ast.parse(SELF_RESTART_SITE.read_text())
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute)
+                 and isinstance(node.func.value, ast.Name)
+                 and node.func.value.id == "subprocess"]
+        self.assertEqual([call.func.attr for call in calls], ["Popen"])
+        keywords = {item.arg: item.value for item in calls[0].keywords}
+        self.assertIs(keywords["shell"].value, False)
+        self.assertIs(keywords["start_new_session"].value, True)
+        from alx.providers.self_restart import restart_command
+        argv = restart_command(Path("/repo"))
+        self.assertEqual(argv[:3], ["/bin/bash", "-c", 'sleep "$1"; exec /bin/bash "$0" restart'])
+        self.assertEqual(argv[3], "/repo/scripts/alx")
+        self.assertTrue(argv[4].isdigit())
 
     def test_no_production_module_imports_the_launcher(self) -> None:
         """The launcher is run, never called.

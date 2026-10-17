@@ -191,7 +191,7 @@ env = load_environment(Path(".env"))
 c = _coding_settings(env)
 print(f"  coding: provider={c.reasoning.provider} model={c.reasoning.model} "
       f"plan_timeout={c.reasoning.timeout_seconds}s "
-      f"session_timeout={c.session_timeout_seconds}s")
+      f"session_stall={c.session_stall_seconds}s")
 PY
 }
 
