@@ -685,7 +685,7 @@ async def run(repository_root: Path) -> None:
 
     # Requesting an external review is effectful and spends paid reviews, so
     # the ones AL/X asks for are counted against Friedl's allowance (three a
-    # pull request, twelve a month); past it, one more needs his approval.
+    # pull request); past it, one more needs his approval.
     # Compose the sole waiter before publishing the capabilities. The callback
     # runs only after composition; neither a holder nor a second observer is needed.
     review_runtime = build_review_runtime(

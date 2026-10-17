@@ -2634,3 +2634,11 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Authority.** AL/X may call the Ship24 tracking capability whenever it helps, without per-call approval, while usage remains inside Ship24's free plan. The first call for a parcel may create a quota-consuming tracker.
 - **Limit.** Once Ship24 reports the plan or monthly tracking quota exhausted, or reports no monthly allowance remaining, tracking stops for that allowance period. The capability returns `tracking_allowance_exhausted` and makes no further quota-consuming request until a renewed monthly allowance. AL/X must never upgrade a plan, buy tracking, or incur paid usage under this authority.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-046a — No monthly review limit
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17.** When the twelve-a-month count refused AL/X a review of PR #152 (the launcher fix her self-restart needs), Friedl: "remove this limit please". Amends D-046.
+- **The allowance.** AL/X may ask for up to three Greptile reviews of one pull request under `review.request`. There is no monthly count. Past three on a pull request, `request_external_review_beyond_allowance` still needs his approval of that exact call.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

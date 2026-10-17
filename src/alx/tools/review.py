@@ -77,9 +77,8 @@ DEFINITION = CapabilityDefinition(
     "If the reviewer is already reviewing, or has reviewed, that exact revision, "
     "nothing new is requested (requested is false) and the wait attaches to that "
     "review. "
-    "Each review is paid for: Friedl allows three a pull request and twelve a "
-    "month. Past either, nothing is requested and review_allowance_reached "
-    "returns the counts. "
+    "Each review is paid for: Friedl allows three a pull request. Past that, "
+    "nothing is requested and review_allowance_reached returns the count. "
     "Read the completed review to judge it; never request another review to poll.",
     _ARGUMENTS,
     _RESULT,

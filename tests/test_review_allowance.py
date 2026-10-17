@@ -47,15 +47,14 @@ class LedgerTests(unittest.TestCase):
         # Another pull request still has its own three.
         self.assertFalse(ledger.state(8, NOW).reached)
 
-    def test_twelve_reviews_in_a_month_reach_it(self) -> None:
+    def test_there_is_no_monthly_limit(self) -> None:
+        """Friedl, 2026-10-17: "remove this limit please" (D-046a)."""
         ledger = self.ledger()
-        for number in range(12):
+        for number in range(40):
             ledger.reserve(100 + number, HEAD, NOW)
         state = ledger.state(200, NOW)
-        self.assertEqual(state.month_reviews, 12)
-        self.assertTrue(state.reached)
-        # A new month starts again.
-        self.assertFalse(ledger.state(200, NOW + timedelta(days=31)).reached)
+        self.assertFalse(state.reached)
+        self.assertNotIn("month_reviews", state.as_values())
 
     def test_the_counts_survive_a_restart(self) -> None:
         directory = tempfile.TemporaryDirectory()

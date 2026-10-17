@@ -32,7 +32,7 @@ REVIEW_FAILURES = (
     "review_unavailable",
     # The reviewer or the transport refused the request.
     "review_refused",
-    # Friedl's review allowance is used: three a pull request, twelve a month.
+    # Friedl's review allowance is used: three a pull request.
     # Nothing was asked for; another review needs his word.
     "review_allowance_reached",
 )
