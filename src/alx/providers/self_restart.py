@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import subprocess  # noqa: S404 - the one self-restart launch site
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 # Long enough for the turn that asked for the restart to finish and be heard.
@@ -38,13 +40,20 @@ def restart_environment() -> dict[str, str]:
             if key != "ALX_LAUNCHER_COMMITTED"}
 
 
-def start_restart(repository_root: Path) -> None:
-    """Start the restart detached, its output in the runtime directory."""
+def start_restart(repository_root: Path,
+                  on_failure: Callable[[], None] | None = None) -> None:
+    """Start the restart detached, its output in the runtime directory.
+
+    A successful restart stops this process before the launcher exits. If the
+    launcher exits while this process is still alive, the restart did not
+    happen, and `on_failure` runs so work held for it may continue (PR #150
+    review).
+    """
     root = Path(repository_root)
     log = root / ".alx" / "runtime" / "self-restart.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as output:
-        subprocess.Popen(  # noqa: S603 - fixed argv, no model input
+        child = subprocess.Popen(  # noqa: S603 - fixed argv, no model input
             restart_command(root),
             cwd=str(root),
             env=restart_environment(),
@@ -54,6 +63,11 @@ def start_restart(repository_root: Path) -> None:
             start_new_session=True,
             shell=False,
         )
+    if on_failure is not None:
+        def watch() -> None:
+            child.wait()
+            on_failure()
+        threading.Thread(target=watch, name="alx-self-restart-watch", daemon=True).start()
 
 
 __all__ = ["RESTART_DELAY_SECONDS", "restart_command", "restart_environment", "start_restart"]

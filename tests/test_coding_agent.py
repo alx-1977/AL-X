@@ -841,6 +841,17 @@ class NativeExecutionTests(unittest.TestCase):
         for hidden in ("secret", "not code", "fenced secret"):
             self.assertNotIn(hidden, text)
 
+    def test_a_code_span_running_onto_the_next_line_is_kept(self) -> None:
+        """PR #150 review: a span closing on the next line lost its tag."""
+        from alx.contracts.review_content import ReviewContent
+        content = ReviewContent(
+            7, "a" * 40, "greptile", True,
+            summary="Use `Map<str,\nList<int>>` here.\n\n<b>Done</b>", submitted_at=NOW)
+        text = coding_agent_module.render_review(content)
+        self.assertIn("`Map<str,\nList<int>>`", text)
+        self.assertIn("Done", text)
+        self.assertNotIn("<b>", text)
+
     def test_the_planner_is_told_a_review_is_advice(self) -> None:
         """PR #148 review: the plan is handed to the session as accepted."""
         text = " ".join(coding_agent_module.PLAN_INSTRUCTION.split())

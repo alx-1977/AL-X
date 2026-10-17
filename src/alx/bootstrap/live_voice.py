@@ -853,7 +853,11 @@ async def run(repository_root: Path) -> None:
             repository_runtime.authority.main_commit,
             lambda: coding_runtime is None or coding_runtime.agent.reserve_for_restart(),
             lambda: coding_runtime is not None and coding_runtime.agent.release_restart(),
-            lambda: start_restart(repository_root),
+            lambda: start_restart(
+                repository_root,
+                on_failure=lambda: coding_runtime is not None
+                and coding_runtime.agent.release_restart(),
+            ),
             current_call_id.get,
         ))
     if coding_runtime is not None:

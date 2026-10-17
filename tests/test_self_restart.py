@@ -106,6 +106,30 @@ class RestartAndCodingExcludeEachOtherTests(unittest.TestCase):
         self.assertIn("runtime-data", briefing)
 
 
+class LauncherExitingEarlyTests(unittest.TestCase):
+    def test_a_launcher_that_exits_while_she_runs_releases_the_hold(self) -> None:
+        """PR #150 review: a launcher failing after it started left coding
+        blocked for the rest of the process."""
+        import tempfile, threading
+        from alx.providers import self_restart
+        released = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "alx").write_text("exit 1\n")
+            with patch.object(self_restart, "RESTART_DELAY_SECONDS", 0):
+                self_restart.start_restart(root, on_failure=released.set)
+            self.assertTrue(released.wait(10))
+
+    def test_a_full_caller_allowance_still_takes_the_protected_paths(self) -> None:
+        """PR #150 review: 32 named paths plus her storage was refused."""
+        from alx.contracts.coding import MAX_BLOCKED_PATHS, MAX_PROTECTED_PATHS, CodingRequest
+        paths = tuple(f"dir{number}" for number in range(MAX_BLOCKED_PATHS + MAX_PROTECTED_PATHS))
+        CodingRequest(task="t", job_id="j", blocked_paths=paths)
+        with self.assertRaises(ValueError):
+            CodingRequest(task="t", job_id="j", blocked_paths=(*paths, "one-more"))
+
+
 class SheKnowsTests(unittest.TestCase):
     def test_she_restarts_herself_and_improves_around_her_core(self) -> None:
         text = " ".join(PROTOCOL_INSTRUCTIONS.split())

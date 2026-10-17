@@ -54,6 +54,7 @@ from alx.contracts.coding import (
     MAX_COMMAND_OUTPUT_CHARACTERS,
     MAX_REPORTED_FILES,
     MAX_STAGED_FILES,
+    MAX_PROTECTED_PATHS,
     MAX_TEST_INFRASTRUCTURE_ATTEMPTS,
     MAX_VERIFICATION_COMMANDS,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
@@ -336,9 +337,11 @@ def _segments(markup: str) -> list[tuple[bool, str]]:
             continue
         character = markup[position]
         if character == "`":
+            # A code span may run onto the next line, never past a paragraph
+            # break (PR #150 review).
             close = markup.find("`", position + 1)
-            newline = markup.find("\n", position + 1)
-            if close > 0 and (newline < 0 or close < newline):
+            paragraph = markup.find("\n\n", position + 1)
+            if close > 0 and (paragraph < 0 or close < paragraph):
                 emit(True, markup[position:close + 1])
                 position = close + 1
                 at_line_start = False
@@ -587,11 +590,13 @@ class CodingAgent:
         # AL/X's own records, wherever they are configured. Any of them inside
         # the checkout is blocked for every job, so the session's containment
         # and her workspace checks both refuse it (PR #150 review).
-        self._protected = tuple(
+        self._protected = tuple(dict.fromkeys(
             lexical for lexical in (
                 self._relative_inside(Path(path)) for path in protected_paths
             ) if lexical
-        )
+        ))
+        if len(self._protected) > MAX_PROTECTED_PATHS:
+            raise ValueError("too many protected paths")
         self._active_lock = Lock()
         self._active: _JobState | None = None
         # Jobs between their start and their end, and whether a restart has

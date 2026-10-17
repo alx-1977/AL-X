@@ -58,6 +58,9 @@ MAX_CONTEXT_CHARACTERS = 16_000
 MAX_CRITERIA = 16
 MAX_CRITERION_CHARACTERS = 1_000
 MAX_BLOCKED_PATHS = 32
+# Paths the runtime itself blocks for every job (AL/X's own storage), on top
+# of the ones the caller may name, so a caller's full allowance stays usable.
+MAX_PROTECTED_PATHS = 4
 MAX_BLOCKED_PATH_CHARACTERS = 512
 MAX_TEST_INFRASTRUCTURE_ATTEMPTS = 3
 MAX_REPAIR_BRANCH_ATTEMPTS = 100
@@ -377,7 +380,9 @@ class CodingRequest:
             raise ValueError("step_budget must be within the permitted bound")
         blocked = tuple(self.blocked_paths)
         object.__setattr__(self, "blocked_paths", blocked)
-        if len(blocked) > MAX_BLOCKED_PATHS:
+        # The caller's own limit is enforced where the request is parsed; the
+        # runtime's protected paths are added beyond it (PR #150 review).
+        if len(blocked) > MAX_BLOCKED_PATHS + MAX_PROTECTED_PATHS:
             raise ValueError("too many blocked paths")
         if any(
             not isinstance(item, str)
@@ -671,6 +676,7 @@ __all__ = [
     "MAX_INSPECTED_ENTRIES",
     "MAX_STAGED_FILES",
     "MAX_BLOCKED_PATHS",
+    "MAX_PROTECTED_PATHS",
     "MAX_BLOCKED_PATH_CHARACTERS",
     "MAX_JOB_ID_CHARACTERS",
     "job_id_permitted",
