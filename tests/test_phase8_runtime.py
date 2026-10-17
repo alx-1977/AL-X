@@ -70,13 +70,15 @@ class _Transport:
     def __init__(self, accepts) -> None:
         self.accepts = accepts
         self.delivered: list[str] = []
+        self.occasion_ids: list[str | None] = []
 
-    def deliver(self, conversation_id, response):
+    def deliver(self, conversation_id, response, opportunity_id=None):
         from alx.contracts import ResponseDelivery
 
         if not self.accepts:
             return ResponseDelivery.UNDELIVERABLE
         self.delivered.append(response)
+        self.occasion_ids.append(opportunity_id)
         return ResponseDelivery.DELIVERED
 
 
@@ -630,6 +632,8 @@ class EndToEndContinuityTests(Harness):
         )
         asyncio.run(producer.tick())
         self.assertEqual(len(transport.delivered), 1)
+        self.assertEqual(len(transport.occasion_ids), 1)
+        self.assertIsNotNone(transport.occasion_ids[0])
         self.assertEqual(self.ledger.undelivered(), ())
 
 

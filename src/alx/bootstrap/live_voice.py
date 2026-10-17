@@ -1271,6 +1271,7 @@ async def run(repository_root: Path) -> None:
         # Whether Friedl is here or away, for the icon on his screen.
         presence=continuity_runtime.store.presence,
         phone=phone_link,
+        mark_undelivered=opportunity_ledger.mark_response_undelivered,
     )
     if phone_link is not None:
         phone_link.fallback = lambda text: server.deliver(PHONE_CONVERSATION_ID, text)

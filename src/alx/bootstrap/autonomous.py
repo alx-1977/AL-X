@@ -206,6 +206,7 @@ class AutonomousCognitionRunner:
                         delivered = self._response_transport.deliver(
                             opportunity.conversation_id,
                             outcome.response or "",
+                            opportunity.opportunity_id,
                         )
                     except Exception as error:
                         LOGGER.warning(
