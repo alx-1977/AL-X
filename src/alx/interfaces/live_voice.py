@@ -289,6 +289,7 @@ class VoiceSession:
         core_turn_lock: asyncio.Lock | None = None,
         turn_origin_sink: Callable[[bool], None] | None = None,
         activity: VoiceActivityStatus | None = None,
+        undelivered: Callable[[], tuple] | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")
@@ -317,11 +318,28 @@ class VoiceSession:
         # knowledge stays in the transport.
         self._turn_origin_sink = turn_origin_sink or (lambda _person: None)
         self._activity = activity or VoiceActivityStatus()
+        self._undelivered = undelivered or (lambda: ())
         # Person inputs received and not yet answered, by conversation. From
         # the moment a final transcript or typed line arrives until its Core
         # turn returns, the voice belongs to that turn. Touched only on the
         # event loop, which is also where a delivery is admitted.
         self._pending_person_turns: dict[str, int] = {}
+
+    async def session_open_response(self, conversation_id: str) -> str | None:
+        """One fresh Core turn when unheard occasions exist at connection time."""
+        async with self._core_turn_lock:
+            if not self._undelivered():
+                return None
+            self._turn_origin_sink(True)
+            try:
+                outcome = await run_core_worker(
+                    self._gateway.receive_session_open, conversation_id,
+                    self._step_budget,
+                    self._clock() + timedelta(days=self._retention_days),
+                )
+            finally:
+                self._turn_origin_sink(False)
+        return outcome.response if outcome.state.value == "responded" else None
 
     async def remote_turn(self, conversation_id: str, content: str,
                           turn_id: str | None = None) -> Any:

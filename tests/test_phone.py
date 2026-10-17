@@ -250,11 +250,11 @@ class DeliveryTests(unittest.TestCase):
         phone.send.assert_called_once_with("DHL invoice in.")
         pending.add.assert_not_called()
 
-    def test_if_it_cannot_be_sent_it_waits_as_before(self) -> None:
+    def test_if_it_cannot_be_sent_the_occasion_is_undelivered(self) -> None:
         phone, pending = self.phone(sends=False), Mock()
         self.assertIs(self.server(phone, pending).deliver("mail-thread:x", "DHL invoice in."),
-                      ResponseDelivery.QUEUED)
-        pending.add.assert_called_once()
+                      ResponseDelivery.UNDELIVERABLE)
+        pending.add.assert_not_called()
 
     def test_while_he_is_here_his_phone_is_left_alone(self) -> None:
         phone, pending = self.phone(carries=False), Mock()

@@ -2584,3 +2584,13 @@ This grants no authority a single goal update lacks: completion still requires s
 - **A test first.** For each finding it judges real, and for a correction that is not already a failing test, the session first writes a test that reproduces it and fails, then fixes the code.
 - **The full suite once.** A session with a terminal runs the tests for what it changed and leaves the full suite to AL/X's verification, which is the only check that counts.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-053 — An open session prompts fresh reasoning about unheard occasions
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17.** Friedl approved replacing the pending-message replay mechanism with one fresh Core turn when his session opens.
+- **Session open (amends D-044 and D-049).** Replies made while Friedl cannot hear them are never stored for later delivery. Their occasions are recorded without wording. When a session opens and unheard occasions exist, the single AL/X Core receives them as contextual evidence for one fresh reasoning turn. She composes anything she says anew and may use the existing mail capabilities to check the inbox as it is now. She decides whether mail has been deleted, filed, answered, or still needs attention; no code filters or ranks it by sender, subject, keywords, or status.
+- **One at a time.** She raises at most the most important open item in that turn and waits for Friedl's answer. Other unresolved occasions remain available to later turns. AL/X alone resolves an occasion after judging it settled.
+- **Upgrade.** Replies in the old `pending_messages` table are discarded once, without converting their text to evidence. The verbatim queue and all replay delivery steps are removed. Retry of a copy of a reply already delivered into Friedl's conversation remains a separate mechanical record, without queued response text.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

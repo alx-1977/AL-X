@@ -269,3 +269,27 @@ class ConversationGateway:
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
             self._store_response(conversation_id, outcome, retention_until)
         return outcome
+
+    def receive_session_open(self, conversation_id: str, step_budget: int,
+                             retention_until: datetime) -> CoreOutcome:
+        """Offer undelivered occasions to the sole Core on a fresh session.
+
+        The Core's usual context loader supplies the occasions. This event
+        supplies only the reason for the turn; no stored reply enters it.
+        """
+        if step_budget <= 0:
+            raise ValueError("step_budget must be positive")
+        try:
+            conversation = self._conversation_store.load(conversation_id)
+        except ConversationNotFound:
+            conversation = self._conversation_store.create(conversation_id, retention_until)
+        event = BackgroundEvent(
+            self._identifier_factory(), "session.opened", self._clock(), {},
+        )
+        outcome = self._core.process(
+            self._with_contextual_events(conversation, event), retention_until,
+            step_budget, trigger_event_id=event.event_id,
+        )
+        if outcome.state is CoreState.RESPONDED and outcome.response is not None:
+            self._store_response(conversation_id, outcome, retention_until)
+        return outcome

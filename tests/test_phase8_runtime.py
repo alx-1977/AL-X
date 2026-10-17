@@ -74,8 +74,6 @@ class _Transport:
     def deliver(self, conversation_id, response):
         from alx.contracts import ResponseDelivery
 
-        if self.accepts == "queued":
-            return ResponseDelivery.QUEUED
         if not self.accepts:
             return ResponseDelivery.UNDELIVERABLE
         self.delivered.append(response)
@@ -209,13 +207,6 @@ class UndeliveredResponseTests(Harness):
     def test_responded_with_transport_is_not_undelivered(self) -> None:
         self._request()
         self._tick(Gateway("responded"), transport=True)
-        self.assertEqual(self.ledger.undelivered(), ())
-
-    def test_kept_for_friedls_next_session_is_not_undelivered(self) -> None:
-        # D-044: it will be shown to him, so she is not told it went unheard
-        # and does not say it a second time.
-        self._request()
-        self._tick(Gateway("responded"), transport="queued")
         self.assertEqual(self.ledger.undelivered(), ())
 
     def test_finished_silently_is_never_undelivered(self) -> None:
