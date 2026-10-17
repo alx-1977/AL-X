@@ -20,12 +20,12 @@ from alx.continuity.pending_relays import SQLitePendingRelays  # noqa: E402
 from alx.core import CoreOutcome, CoreState  # noqa: E402
 from alx.contracts.core import ReasoningContext  # noqa: E402
 from alx.core.model_reasoner import _context_payload  # noqa: E402
-from alx.contracts import ConversationOrigin, ConversationTurn, ResponseDelivery  # noqa: E402
+from alx.contracts import AudioChunk, ConversationOrigin, ConversationTurn, ResponseDelivery  # noqa: E402
 from alx.contracts.provenance import ContentOrigin, RetentionPolicy  # noqa: E402
 from alx.conversation.gateway import ConversationGateway  # noqa: E402
 from alx.conversation.store import SQLiteConversationStore  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
-from alx.interfaces.live_voice import VoiceActivityStatus, VoiceSession  # noqa: E402
+from alx.interfaces.live_voice import VoiceActivityStatus, VoiceEventKind, VoiceSession  # noqa: E402
 
 NOW = datetime(2026, 10, 8, 11, 53, tzinfo=UTC)
 MAIL = "mail-thread:<jlcpcb-123@mail>"
@@ -124,6 +124,137 @@ class RoutingTests(unittest.TestCase):
 
 
 class SessionOpenTests(unittest.TestCase):
+    def test_close_during_speech_start_send_preserves_autonomous_occasion(self) -> None:
+        from types import SimpleNamespace
+
+        marked = []
+
+        class Connection:
+            request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+            def __init__(self):
+                self.ready = asyncio.Event()
+
+            async def send(self, frame):
+                if isinstance(frame, str):
+                    message = json.loads(frame)
+                    if message.get("type") == "session.ready":
+                        self.ready.set()
+                    if message.get("value") == "speaking":
+                        raise ConnectionError("closed before speech started")
+
+            async def __aiter__(self):
+                await asyncio.Event().wait()
+                yield b""
+
+        class Transcriber:
+            async def transcribe(self, _audio):
+                await asyncio.Event().wait()
+                yield None
+
+        class Synthesizer:
+            async def synthesize(self, _response, _conversation_id):
+                yield AudioChunk(b"sound", "audio/pcm")
+
+        async def scenario():
+            session = VoiceSession(object(), Transcriber(), Synthesizer(),
+                                   "friedl", 3, 30)
+            server = _server(session=session)
+            server._mark_undelivered = marked.append
+            connection = Connection()
+            handling = asyncio.create_task(server._handle_voice(connection))
+            await connection.ready.wait()
+            result = await asyncio.to_thread(server.deliver, MAIL, "fresh", "occasion-1")
+            await asyncio.wait_for(handling, timeout=2)
+            return result
+
+        self.assertIs(asyncio.run(scenario()), ResponseDelivery.DELIVERED)
+        self.assertEqual(marked, ["occasion-1"])
+
+    def test_progress_send_failure_keeps_core_owned_until_worker_finishes(self) -> None:
+        working = threading.Event()
+        release = threading.Event()
+        remote_started = threading.Event()
+        activity = VoiceActivityStatus()
+
+        class Gateway:
+            def receive_session_open(self, *_args):
+                activity.set("coding")
+                working.set()
+                release.wait(timeout=3)
+                return CoreOutcome(CoreState.RESPONDED, None, response="fresh")
+
+            def receive_conversation_turn(self, *_args):
+                remote_started.set()
+                return CoreOutcome(CoreState.FINISHED_SILENTLY, None)
+
+        async def scenario():
+            session = VoiceSession(Gateway(), object(), object(), "friedl", 3, 30,
+                                   activity=activity, undelivered=lambda: ({"id": "one"},))
+
+            async def progress(event):
+                if event.kind is VoiceEventKind.ACTIVITY:
+                    raise ConnectionError("browser disconnected")
+
+            opening = asyncio.create_task(session.session_open_response(FRIEDL, progress))
+            await asyncio.to_thread(working.wait, 2)
+            try:
+                for _ in range(100):
+                    if opening.done():
+                        break
+                    await asyncio.sleep(0.01)
+                remote = asyncio.create_task(session.remote_turn(FRIEDL, "phone"))
+                await asyncio.sleep(0.05)
+                self.assertTrue(session._core_turn_lock.locked())
+                self.assertFalse(remote_started.is_set())
+            finally:
+                release.set()
+            with self.assertRaises(ConnectionError):
+                await opening
+            await remote
+            self.assertTrue(remote_started.is_set())
+
+        asyncio.run(scenario())
+
+    def test_cancelled_session_open_keeps_core_owned_until_worker_finishes(self) -> None:
+        working = threading.Event()
+        release = threading.Event()
+        remote_started = threading.Event()
+
+        class Gateway:
+            def receive_session_open(self, *_args):
+                working.set()
+                release.wait(timeout=3)
+                return CoreOutcome(CoreState.RESPONDED, None, response="fresh")
+
+            def receive_conversation_turn(self, *_args):
+                remote_started.set()
+                return CoreOutcome(CoreState.FINISHED_SILENTLY, None)
+
+        async def scenario():
+            session = VoiceSession(Gateway(), object(), object(), "friedl", 3, 30,
+                                   undelivered=lambda: ({"id": "one"},))
+            opening = asyncio.create_task(session.session_open_response(FRIEDL))
+            await asyncio.to_thread(working.wait, 2)
+            opening.cancel()
+            remote = asyncio.create_task(session.remote_turn(FRIEDL, "phone"))
+            try:
+                await asyncio.sleep(0.05)
+                self.assertTrue(session._core_turn_lock.locked())
+                self.assertFalse(remote_started.is_set())
+                opening.cancel()  # A second disconnect signal during cleanup.
+                await asyncio.sleep(0.05)
+                self.assertTrue(session._core_turn_lock.locked())
+                self.assertFalse(remote_started.is_set())
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await opening
+            await remote
+            self.assertTrue(remote_started.is_set())
+
+        asyncio.run(scenario())
+
     def test_close_before_speech_restores_the_occasion_without_words(self) -> None:
         from types import SimpleNamespace
 

@@ -351,6 +351,8 @@ class VoiceSession:
             unsubscribe = self._activity.subscribe(
                 lambda value: loop.call_soon_threadsafe(updates.put_nowait, value)
             )
+            core_task: asyncio.Task[Any] | None = None
+            update_task: asyncio.Task[str] | None = None
             try:
                 if progress is not None:
                     await progress(VoiceEvent(VoiceEventKind.THINKING))
@@ -371,7 +373,7 @@ class VoiceSession:
                     finally:
                         self._turn_origin_sink(False)
 
-                core_task: asyncio.Task[Any] | None = asyncio.create_task(run_turn())
+                core_task = asyncio.create_task(run_turn())
                 while not core_task.done():
                     update_task = asyncio.create_task(updates.get())
                     done, _ = await asyncio.wait(
@@ -384,6 +386,7 @@ class VoiceSession:
                     if update_task not in done:
                         update_task.cancel()
                         await asyncio.gather(update_task, return_exceptions=True)
+                    update_task = None
                 outcome = await core_task
                 while not updates.empty() and progress is not None:
                     await progress(VoiceEvent(
@@ -391,6 +394,27 @@ class VoiceSession:
                     ))
             finally:
                 unsubscribe()
+                # A failed progress send or cancelled socket must not release
+                # the shared Core lock while its worker still writes stores.
+                # Waiting on the task set does not cancel the worker when this
+                # caller is cancelled, just as run_core_worker does internally.
+                cancelled_during_cleanup = False
+                while core_task is not None and not core_task.done():
+                    try:
+                        await asyncio.wait({core_task})
+                    except asyncio.CancelledError:
+                        # Repeated cancellation may interrupt cleanup, but
+                        # cannot shorten the worker's ownership of Core.
+                        cancelled_during_cleanup = True
+                if core_task is not None:
+                    # If progress failed first, retrieve a later worker error
+                    # without replacing the transport failure.
+                    await asyncio.gather(core_task, return_exceptions=True)
+                if update_task is not None and not update_task.done():
+                    update_task.cancel()
+                    await asyncio.gather(update_task, return_exceptions=True)
+                if cancelled_during_cleanup:
+                    raise asyncio.CancelledError
         return outcome.response if outcome.state.value == "responded" else None
 
     async def remote_turn(self, conversation_id: str, content: str,
@@ -548,10 +572,14 @@ class VoiceSession:
                     # decided both that this was worth saying and how to say
                     # it; nothing here rewords it.
                     async for speech_event in self._speak(conversation_id, response, feed):
+                        yield speech_event
                         if (isinstance(delivery, QueuedDelivery)
                                 and speech_event.kind is VoiceEventKind.SPEAKING):
+                            # The exchange resumes only after its consumer
+                            # successfully sends the speech-start phase. A
+                            # close during that send leaves the occasion
+                            # available for fresh reasoning.
                             delivery.mark_started()
-                        yield speech_event
                 if not input_waiter.done():
                     continue
                 kind, item = input_waiter.result()

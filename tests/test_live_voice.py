@@ -303,6 +303,11 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs((await exchange.__anext__()).kind, VoiceEventKind.TEXT)
         self.assertFalse(delivery.started)
         self.assertIs((await exchange.__anext__()).kind, VoiceEventKind.SPEAKING)
+        # A browser may close before it accepts this phase. The generator has
+        # offered speech, but the transport has not acknowledged its start.
+        self.assertFalse(delivery.started)
+        self.assertEqual(delivery.response, "fresh words")
+        self.assertIs((await exchange.__anext__()).kind, VoiceEventKind.AUDIO)
         self.assertTrue(delivery.started)
         self.assertEqual(delivery.response, "")
         await exchange.aclose()
