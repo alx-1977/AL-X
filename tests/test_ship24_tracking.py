@@ -21,12 +21,11 @@ from alx.tools.ship24 import DEFINITION, TRACK_SHIPMENT  # noqa: E402
 
 
 def response(status: int, body: object) -> httpx.Response:
-    return httpx.Response(status, json=body, request=httpx.Request("POST", "https://api.ship24.com/public/v1/trackers/track"))
+    return httpx.Response(status, json=body, request=httpx.Request("POST", "https://api.ship24.com/public/v1/tracking/search"))
 
 
 TRACKED = {
     "data": {"trackings": [{
-        "tracker": {"trackingNumber": "1Z999AA10123456784", "courierCode": ["ups"]},
         "shipment": {
             "statusCode": "delivery_delivered", "statusMilestone": "delivered",
             "delivery": {"estimatedDeliveryDate": "2026-10-18T18:00:00Z"},
@@ -67,6 +66,16 @@ class Ship24TrackingTests(unittest.TestCase):
         self.assertIn("D-056 — AL/X tracks parcels within Ship24's free plan", decision)
         self.assertIn("D-056", ship24.__doc__)
         self.assertIn("tracking_allowance_exhausted", DEFINITION.possible_failure_codes)
+        self.assertIn("per-call lookup billed by Ship24", DEFINITION.purpose)
+        self.assertIn("fetches tracking from the courier directly", DEFINITION.purpose)
+
+    def test_no_production_reference_to_tracker_endpoints(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "src" / "alx"
+        for path in source_root.rglob("*.py"):
+            with self.subTest(path=path):
+                source = path.read_text()
+                self.assertNotIn("/public/v1/trackers", source)
+                self.assertNotIn("/trackers/track", source)
 
     def test_exhausted_allowance_is_durable_and_stops_http(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -86,7 +95,7 @@ class Ship24TrackingTests(unittest.TestCase):
             self.assertEqual(result.failure["code"], "tracking_allowance_exhausted")
             post.assert_not_called()
 
-    def test_last_successful_tracking_uses_allowance_and_blocks_next(self) -> None:
+    def test_last_successful_lookup_uses_allowance_and_blocks_next(self) -> None:
         runtime = build_ship24_runtime(lambda: "call-1", {"SHIP24_API_KEY": "example-token"})
         last = response(200, TRACKED)
         last.headers["x-ship24-monthly-remaining"] = "0"
@@ -122,6 +131,8 @@ class Ship24TrackingTests(unittest.TestCase):
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(DEFINITION.output_schema.accepts(result.values))
         self.assertEqual(result.values["status"], "delivery_delivered")
+        self.assertEqual(result.values["tracking_number"], "1Z999AA10123456784")
+        self.assertEqual(result.values["courier"], "ups")
         self.assertEqual(result.values["status_milestone"], "delivered")
         self.assertEqual(result.values["estimated_delivery"], "2026-10-18T18:00:00Z")
         self.assertEqual(result.values["last_update"], "2026-10-17T12:00:00Z")
@@ -129,15 +140,27 @@ class Ship24TrackingTests(unittest.TestCase):
         self.assertEqual(result.values["events"][0]["description"], "Delivered to recipient")
         self.assertNotIn("location", result.values["events"][1])
         args, kwargs = post.call_args
-        self.assertEqual(args, ("https://api.ship24.com/public/v1/trackers/track",))
+        self.assertEqual(args, ("https://api.ship24.com/public/v1/tracking/search",))
         self.assertEqual(kwargs["headers"], {"Authorization": "Bearer example-token"})
         self.assertEqual(kwargs["json"], {"trackingNumber": "1Z999AA10123456784", "courierCode": ["ups"]})
         self.assertGreaterEqual(kwargs["timeout"], 60)
 
     @patch.dict("os.environ", {"SHIP24_API_KEY": "example-token"})
+    def test_each_lookup_calls_tracking_search_even_for_the_same_number(self) -> None:
+        with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
+            first = self.execute({"tracking_number": "1Z999AA10123456784"})
+            second = self.execute({"tracking_number": "1Z999AA10123456784"})
+        self.assertIs(first.state, CapabilityResultState.SUCCEEDED)
+        self.assertIs(second.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in post.call_args_list],
+            ["https://api.ship24.com/public/v1/tracking/search"] * 2,
+        )
+
+    @patch.dict("os.environ", {"SHIP24_API_KEY": "example-token"})
     def test_courier_omitted_and_pending_is_success(self) -> None:
         pending = {"data": {"trackings": [{
-            "tracker": {"trackingNumber": "SHIP24_SAMPLE_PENDING_000", "courierCode": []},
             "shipment": {"statusMilestone": "pending", "delivery": {}},
             "events": [],
         }]}}
@@ -183,18 +206,22 @@ class Ship24TrackingTests(unittest.TestCase):
             (401, {"errors": []}, "authentication_failed"),
             (403, {"errors": []}, "authentication_failed"),
             (429, {"errors": []}, "rate_limited"),
+            (402, {"errors": []}, "tracking_allowance_exhausted"),
+            (403, {"errors": [{"code": "subscription_required"}]}, "tracking_allowance_exhausted"),
+            (429, {"errors": [{"code": "subscription_limit_exceeded"}]}, "tracking_allowance_exhausted"),
             (404, {"errors": [{"code": "parcel_not_found"}]}, "tracking_not_found"),
             (422, {"errors": [{"code": "validation_error"}]}, "provider_failed"),
             (500, {"errors": [{"code": "processing_error"}]}, "provider_failed"),
         )
         for status, body, expected in cases:
+            runtime = build_ship24_runtime(lambda: "call-1", {"SHIP24_API_KEY": "example-token"})
             with self.subTest(status=status), patch("alx.providers.ship24.httpx.post", return_value=response(status, body)):
-                result = self.execute({"tracking_number": "1Z999AA10123456784"})
+                result = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "1Z999AA10123456784"})
                 self.assertEqual(result.failure["code"], expected)
 
     @patch.dict("os.environ", {"SHIP24_API_KEY": "example-token"})
     def test_network_error_is_distinct(self) -> None:
-        request = httpx.Request("POST", "https://api.ship24.com/public/v1/trackers/track")
+        request = httpx.Request("POST", "https://api.ship24.com/public/v1/tracking/search")
         with patch("alx.providers.ship24.httpx.post", side_effect=httpx.ConnectError("offline", request=request)):
             result = self.execute({"tracking_number": "1Z999AA10123456784"})
         self.assertEqual(result.failure["code"], "connection_failed")

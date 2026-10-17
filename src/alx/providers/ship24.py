@@ -1,9 +1,4 @@
-"""Ship24's one HTTP boundary for tracking one shipment.
-
-POST /trackers/track is idempotent only for an identical payload. It may create
-a quota-consuming tracker on the first call. The provider returns Ship24 facts
-without classifying shipment meaning.
-"""
+"""Ship24's per-call HTTP boundary for looking up one shipment."""
 
 from __future__ import annotations
 
@@ -19,10 +14,12 @@ from typing import Any
 import httpx
 
 
-_URL = "https://api.ship24.com/public/v1/trackers/track"
+_URL = "https://api.ship24.com/public/v1/tracking/search"
 _EXHAUSTED_CODES = frozenset({
     "plan_limit_exceeded", "quota_exceeded", "monthly_quota_exceeded",
-    "tracking_limit_exceeded", "trackers_limit_exceeded", "subscription_limit_exceeded",
+    "tracking_limit_exceeded", "subscription_limit_exceeded",
+    "subscription_required", "subscription_expired", "subscription_not_found",
+    "no_active_subscription", "per_call_subscription_required",
 })
 
 
@@ -60,7 +57,7 @@ def _latest_event_time(events: list[dict[str, str]]) -> str | None:
         return None
 
 
-def _parse(payload: Any) -> dict[str, Any]:
+def _parse(payload: Any, tracking_number: str, courier_code: str | None) -> dict[str, Any]:
     body = _object(payload)
     data = _object(body.get("data"))
     trackings = data.get("trackings")
@@ -69,11 +66,9 @@ def _parse(payload: Any) -> dict[str, Any]:
         # Choosing one of several would be a business judgment.
         raise Ship24Error("tracking_ambiguous" if isinstance(trackings, list) and trackings else "provider_failed")
     tracking = _object(trackings[0])
-    tracker = _object(tracking.get("tracker"))
     shipment = _object(tracking.get("shipment"))
-    number = _text(tracker.get("trackingNumber"))
     milestone = _text(shipment.get("statusMilestone"))
-    if not number or not milestone:
+    if not milestone:
         raise Ship24Error("provider_failed")
     raw_events = tracking.get("events")
     if not isinstance(raw_events, list):
@@ -90,19 +85,13 @@ def _parse(payload: Any) -> dict[str, Any]:
                 ("courier_code", _text(event.get("courierCode"))),
             ) if value is not None
         })
-    courier_codes = tracker.get("courierCode")
-    courier = None
-    if isinstance(courier_codes, list) and len(courier_codes) == 1:
-        courier = _text(courier_codes[0])
-    else:
-        found_codes = {event["courier_code"] for event in events if "courier_code" in event}
-        if len(found_codes) == 1:
-            courier = next(iter(found_codes))
+    found_codes = {event["courier_code"] for event in events if "courier_code" in event}
+    courier = next(iter(found_codes)) if len(found_codes) == 1 else courier_code
     delivery = shipment.get("delivery")
     estimate = _text(_object(delivery).get("estimatedDeliveryDate")) if delivery is not None else None
     # Preserve the provider's event order and the exact timestamp strings.
     return {key: value for key, value in {
-        "tracking_number": number,
+        "tracking_number": tracking_number,
         "courier": courier,
         "status": _text(shipment.get("statusCode")),
         "status_milestone": milestone,
@@ -122,7 +111,7 @@ class Ship24Provider:
         if allowance_path is not None:
             with closing(sqlite3.connect(allowance_path)) as connection:
                 connection.execute(
-                    "CREATE TABLE IF NOT EXISTS ship24_allowance "
+                    "CREATE TABLE IF NOT EXISTS ship24_per_call_allowance "
                     "(month TEXT PRIMARY KEY, exhausted INTEGER NOT NULL)"
                 )
                 connection.commit()
@@ -133,7 +122,9 @@ class Ship24Provider:
 
     @staticmethod
     def _allowance_exhausted(response: httpx.Response) -> bool:
-        # A transient 429 is not necessarily the monthly plan limit.
+        # A transient 429 is not necessarily the per-call plan limit.
+        if response.status_code == 402:
+            return True
         remaining = response.headers.get("x-ship24-monthly-remaining")
         if remaining is not None and remaining.strip() == "0":
             return True
@@ -155,7 +146,7 @@ class Ship24Provider:
             payload["courierCode"] = [courier_code]
         month = self._month()
         # Hold the ledger transaction over the request so concurrent processes
-        # cannot send another tracker after this one learns the quota is gone.
+        # cannot send another call after this one learns the allowance is gone.
         with self._lock:
             if self._allowance_path is None:
                 if self._blocked_month == month:
@@ -169,14 +160,14 @@ class Ship24Provider:
                 with closing(sqlite3.connect(self._allowance_path, timeout=80)) as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     blocked = connection.execute(
-                        "SELECT exhausted FROM ship24_allowance WHERE month = ?", (month,)
+                        "SELECT exhausted FROM ship24_per_call_allowance WHERE month = ?", (month,)
                     ).fetchone()
                     if blocked and blocked[0]:
                         raise Ship24Error("tracking_allowance_exhausted")
                     response = self._post(token, payload)
                     if self._allowance_exhausted(response):
                         connection.execute(
-                            "INSERT OR REPLACE INTO ship24_allowance VALUES (?, 1)", (month,)
+                            "INSERT OR REPLACE INTO ship24_per_call_allowance VALUES (?, 1)", (month,)
                         )
                         connection.commit()
                         if response.status_code >= 400:
@@ -199,7 +190,7 @@ class Ship24Provider:
                 raise Ship24Error("tracking_not_found")
             raise Ship24Error("provider_failed")
         try:
-            return _parse(response.json())
+            return _parse(response.json(), tracking_number, courier_code)
         except ValueError:
             raise Ship24Error("provider_failed") from None
 

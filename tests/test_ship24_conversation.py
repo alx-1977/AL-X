@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -49,12 +48,6 @@ def conversation(wording, turn="turn-1"):
 def goal():
     return GoalProposal(GoalMutationKind.CREATE, "Find parcel status", (
         SuccessCriterion("criterion-1", "the parcel status is checked"),))
-
-
-def tracked(number):
-    body = deepcopy(TRACKED)
-    body["data"]["trackings"][0]["tracker"]["trackingNumber"] = number
-    return body
 
 
 class Ship24ConversationTests(unittest.TestCase):
@@ -124,7 +117,7 @@ class Ship24ConversationTests(unittest.TestCase):
         post.assert_not_called()
         correction = Queued(AgentDecision(call=self.call("CORRECTED", "call-2"), goal_id="goal-1"),
                             AgentDecision(response="I checked the corrected number."))
-        with patch("alx.providers.ship24.httpx.post", return_value=response(200, tracked("CORRECTED"))) as post:
+        with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
             self.agent(correction, reopened).process(conversation("Sorry, use CORRECTED", "turn-3"), RETENTION, 3)
         self.assertEqual(post.call_args.kwargs["json"]["trackingNumber"], "CORRECTED")
         self.assertEqual(len(reopened.list_goals()), 1)
@@ -203,7 +196,7 @@ class Ship24ConversationTests(unittest.TestCase):
                           AgentDecision(response="The corrected parcel was delivered."))
         with patch("alx.providers.ship24.httpx.post", side_effect=[
                 response(404, {"errors": [{"code": "parcel_not_found"}]}),
-                response(200, tracked("CORRECTED"))]) as post:
+                response(200, TRACKED)]) as post:
             outcome = self.agent(reasoner).process(
                 conversation("Check parcel 1Z999AA10123456784"), RETENTION, 4)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
