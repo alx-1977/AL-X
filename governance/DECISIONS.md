@@ -2594,3 +2594,14 @@ This grants no authority a single goal update lacks: completion still requires s
 - **One at a time.** She raises at most the most important open item in that turn and waits for Friedl's answer. Other unresolved occasions remain available to later turns. AL/X alone resolves an occasion after judging it settled.
 - **Upgrade.** Replies in the old `pending_messages` table are discarded once, without converting their text to evidence. The verbatim queue and all replay delivery steps are removed. Retry of a copy of a reply already delivered into Friedl's conversation remains a separate mechanical record, without queued response text.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-054 — What AL/X tells Friedl comes from what she checked
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17.** After AL/X told him her 10:00 own time had not fired when it had, Friedl: "ALX should have complete oversight into everything she does and needs to do", "I need to be able to rely on ALX so when she gives me info, I do not want to have to double check that info, else I could have just done it", and "let's build this first". Amends D-050.
+- **Why.** Her trace returned times in UTC while everything else she sees is local. Her 10:09 own time reached her as 08:09, and she reported it as not having fired.
+- **Local times.** `read_own_trace` and `read_own_log` give every time in local time with its offset. A window given without an offset is local.
+- **Checked, not assumed.** Anything she states as fact about herself, her work or his comes from what she has looked at, and she says where she looked. What she has not checked she checks first, or says plainly she has not; she never fills a gap with what seems likely.
+- **Her own time.** She is told her trace over today shows what her day held, if she wants it. Nothing is chosen or summarised for her: D-024's own time still suggests nothing.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
