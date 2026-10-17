@@ -238,6 +238,27 @@ class ModelReasonerTests(unittest.TestCase):
                 with self.assertRaisesRegex(DecisionValidationError, message):
                     reasoner.decide(self.context())
 
+    def test_a_planned_read_may_carry_its_bound_and_a_refusal_names_the_field(self) -> None:
+        """2026-10-17: a planned web read with max_characters was refused as
+        "not durable", unnamed, and she sent the same plan back twice."""
+        from dataclasses import replace as replace_context
+        from alx.tools.web import DEFINITION as PAGE, SEARCH_DEFINITION as SEARCH
+        context = replace_context(self.context(), capabilities=(CAPABILITY, PAGE, SEARCH))
+        read = dict(self.plan_step(), capability_id="ask_web_page", arguments_json=json.dumps(
+            {"page_id": "p1", "url": "https://example.com", "max_characters": 4000}))
+        search = dict(self.plan_step(), call_id="call-2", capability_id="ask_web_search",
+                      arguments_json=json.dumps(
+                          {"search_id": "s1", "subject": "parcel", "max_results": 5}))
+        decision = ModelReasoner(FakeModel(self.plan_output(read, search)),
+                                 "laws", "identity").decide(context)
+        self.assertEqual(decision.plan_update.plan.steps[0].call.arguments["max_characters"], 4000)
+        extra = dict(read, arguments_json=json.dumps(
+            {"page_id": "p1", "url": "https://example.com", "question": "where is it"}))
+        with self.assertRaisesRegex(
+                DecisionValidationError,
+                "ask_web_page may be planned only with page_id, url, max_characters; remove question"):
+            ModelReasoner(FakeModel(self.plan_output(extra)), "laws", "identity").decide(context)
+
     def test_plan_schema_leaves_objective_and_source_turn_to_the_runtime(self) -> None:
         install = decision_schema()["properties"]["plan_update"]["anyOf"][1]
         plan = install["properties"]["plan"]

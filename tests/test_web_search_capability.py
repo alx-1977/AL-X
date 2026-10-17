@@ -361,7 +361,7 @@ class ProvenanceTests(unittest.TestCase):
         from alx.tools.web import SEARCH_DEFINITION
 
         self.assertEqual(
-            SEARCH_DEFINITION.durable_input_fields, ("search_id", "subject")
+            SEARCH_DEFINITION.durable_input_fields, ("search_id", "subject", "max_results")
         )
 
     def test_nothing_is_recorded_automatically(self) -> None:

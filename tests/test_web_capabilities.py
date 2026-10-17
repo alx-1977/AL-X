@@ -150,7 +150,7 @@ class DurableStateTests(unittest.TestCase):
     def test_the_url_is_durable_input_so_a_restart_knows_what_was_asked(self) -> None:
         from alx.tools.web import DEFINITION
 
-        self.assertEqual(DEFINITION.durable_input_fields, ("page_id", "url"))
+        self.assertEqual(DEFINITION.durable_input_fields, ("page_id", "url", "max_characters"))
 
 
 class FailureTests(unittest.TestCase):

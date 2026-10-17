@@ -1144,9 +1144,16 @@ def _plan_update(update: Mapping[str, Any] | None,
         )
         if capability is None:
             raise ValueError("plan capability is absent from catalogue")
-        if (capability.durable_input_fields is not None
-                and set(arguments) - set(capability.durable_input_fields)):
-            raise ValueError("planned arguments are not durable")
+        if capability.durable_input_fields is not None:
+            extra = sorted(set(arguments) - set(capability.durable_input_fields))
+            if extra:
+                # Named, so she can correct it on the one retry she has: on
+                # 2026-10-17 the bare reason sent the same plan back twice.
+                raise ValueError(
+                    f"planned arguments are not durable: {item['capability_id']} "
+                    f"may be planned only with {', '.join(capability.durable_input_fields)}; "
+                    f"remove {', '.join(extra)}"
+                )
         steps.append(ExecutionStep(
             CapabilityCall(item["call_id"], item["capability_id"],
                            arguments, item["approval_id"]),
