@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections import deque
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -60,8 +60,15 @@ class SQLiteTraceRecord:
             self._connection.commit()
 
     def between(self, start: datetime, end: datetime, problems_only: bool = False,
-                subsystem: str = "", limit: int = MAX_RECORDS) -> tuple[list[dict], bool]:
-        """Steps in [start, end), oldest first, and whether more were cut off."""
+                subsystem: str = "", limit: int = MAX_RECORDS,
+                zone: tzinfo | None = None) -> tuple[list[dict], bool]:
+        """Steps in [start, end), oldest first, and whether more were cut off.
+
+        `at` is given in local time with its offset (`zone`, the machine's own
+        unless a test names one). Stored in UTC, it was returned in UTC, and on
+        2026-10-17 AL/X read her 10:09 own time as 08:09 and told Friedl it had
+        not fired: everything else she sees is local.
+        """
         query = "SELECT at, " + ", ".join(_TRACE_FIELDS) + " FROM trace WHERE at >= ? AND at < ?"
         params: list[Any] = [start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()]
         if problems_only:
@@ -78,6 +85,10 @@ class SQLiteTraceRecord:
             {key: value for key, value in zip(("at", *_TRACE_FIELDS), row) if value is not None}
             for row in rows[:limit]
         ]
+        for step in steps:
+            moment = _moment(step["at"])
+            if moment is not None:
+                step["at"] = moment.astimezone(zone).isoformat(timespec="seconds")
         return steps, len(rows) > limit
 
     def close(self) -> None:
@@ -156,11 +167,37 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
                 at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
                 if not local_start <= at < local_end:
                     continue
-                current = {"at": match.group(1), "level": match.group(2),
+                # Local, as the log writes it, now with its offset stated.
+                current = {"at": at.astimezone().isoformat(timespec="seconds"),
+                           "level": match.group(2),
                            "source": match.group(3), "message": match.group(4)[:MAX_LINE_CHARACTERS]}
         keep(current)
         current = None
     return list(entries), matched > limit
+
+
+# How many coding briefings are kept, newest first.
+MAX_KEPT_BRIEFINGS = 30
+
+
+def keep_briefing(directory: Path, job_id: str, text: str,
+                  keep: int = MAX_KEPT_BRIEFINGS) -> Path:
+    """Write one coding job's briefing, and drop all but the newest `keep`.
+
+    The briefing is what the coding model was told: the task, the plan and,
+    when the job addresses a review, the reviewer's own words. Kept in AL/X's
+    runtime storage, which coding sessions cannot read.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    name = "".join(c if c.isalnum() or c in "._-" else "_" for c in job_id)[:120] or "job"
+    path = directory / f"{name}.txt"
+    path.write_text(text, encoding="utf-8")
+    kept = sorted(directory.glob("*.txt"), key=lambda item: item.stat().st_mtime,
+                  reverse=True)
+    for old in kept[keep:]:
+        old.unlink(missing_ok=True)
+    return path
 
 
 def _moment(value: Any) -> datetime | None:
@@ -173,4 +210,5 @@ def _moment(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-__all__ = ["MAX_RECORDS", "PROBLEM_STATUSES", "SQLiteTraceRecord", "read_log"]
+__all__ = ["MAX_KEPT_BRIEFINGS", "MAX_RECORDS", "PROBLEM_STATUSES", "SQLiteTraceRecord",
+           "keep_briefing", "read_log"]

@@ -53,6 +53,18 @@ class TraceRecordTests(unittest.TestCase):
         everything, _ = self.record.between(NOW - timedelta(hours=1), NOW)
         self.assertEqual(len(everything), 2)
 
+    def test_times_come_back_local_with_their_offset(self) -> None:
+        """2026-10-17: her 10:09 own time reached her as 08:09+00:00, and she
+        told Friedl it had not fired."""
+        from datetime import timezone
+        sast = timezone(timedelta(hours=2))
+        own_time = datetime(2026, 10, 17, 8, 9, 39, tzinfo=UTC)
+        self.record.record(event(own_time, label="Own time", subsystem="core"))
+        steps, _ = self.record.between(own_time - timedelta(minutes=1),
+                                       own_time + timedelta(minutes=1), zone=sast)
+        self.assertEqual(steps[0]["at"], "2026-10-17T10:09:39+02:00")
+        self.assertEqual(datetime.fromisoformat(steps[0]["at"]), own_time)
+
     def test_a_subsystem_and_a_limit_narrow_it(self) -> None:
         for minute in range(5):
             self.record.record(event(NOW - timedelta(minutes=minute), subsystem="mail"))
@@ -79,6 +91,11 @@ class LogTests(unittest.TestCase):
             entries, truncated = read_log((path,), NOW - timedelta(hours=1), NOW, "WARNING")
         self.assertFalse(truncated)
         self.assertEqual([entry["level"] for entry in entries], ["ERROR", "WARNING"])
+        # Local, with the offset stated, the same instant the log wrote.
+        stated = datetime.fromisoformat(entries[0]["at"])
+        self.assertIsNotNone(stated.tzinfo)
+        self.assertEqual(stated.replace(tzinfo=None),
+                         (local + timedelta(minutes=-5)).replace(tzinfo=None, microsecond=0))
         self.assertIn("Traceback", entries[0]["message"])
         self.assertIn("site-packages/websockets/server.py", entries[0]["message"])
         self.assertIn("token=[masked]", entries[1]["message"])
@@ -145,6 +162,33 @@ class CapabilityTests(unittest.TestCase):
         text = " ".join(PROTOCOL_INSTRUCTIONS.split())
         self.assertIn("read_own_trace lists every step you took", text)
         self.assertIn("look there before you answer", text)
+        self.assertIn("Both give times in local time with their offset", text)
+
+    def test_what_she_states_comes_from_what_she_checked(self) -> None:
+        """Friedl, 2026-10-17: "when she gives me info, I do not want to have
+        to double check that info, else I could have just done it." """
+        text = " ".join(PROTOCOL_INSTRUCTIONS.split())
+        self.assertIn("Friedl relies on what you tell him without checking it himself", text)
+        self.assertIn("you say where you looked", text)
+        self.assertIn("never fill a gap with what seems likely", text)
+
+
+class BriefingRecordTests(unittest.TestCase):
+    """What the coding model was told is kept, newest 30 (2026-10-17)."""
+
+    def test_briefings_are_kept_and_the_oldest_dropped(self) -> None:
+        import os
+        from alx.observability.self_record import keep_briefing
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "coding-briefings"
+            for number in range(5):
+                path = keep_briefing(root, f"plan-{number}", f"briefing {number}", keep=3)
+                os.utime(path, (1_000_000 + number, 1_000_000 + number))
+            kept = sorted(item.name for item in root.glob("*.txt"))
+            self.assertEqual(kept, ["plan-2.txt", "plan-3.txt", "plan-4.txt"])
+            self.assertEqual((root / "plan-4.txt").read_text(), "briefing 4")
+            odd = keep_briefing(root, "../../escape", "x")
+            self.assertEqual(odd.parent, root)
 
 
 class PollingNoiseTests(unittest.TestCase):

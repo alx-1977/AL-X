@@ -97,8 +97,9 @@ DEFINITION = CapabilityDefinition(
     # The page body is deliberately not durable. Goal state carries the
     # identity of what was read so a restart can still cite it; the text
     # itself belongs to the turn that reasoned over it, and persisting every
-    # retrieved page would make the goal store a second evidence store.
-    durable_input_fields=("page_id", "url"),
+    # retrieved page would make the goal store a second evidence store. The
+    # size bound is a number, kept so a planned read can carry it.
+    durable_input_fields=("page_id", "url", "max_characters"),
 )
 
 
@@ -245,7 +246,7 @@ SEARCH_DEFINITION = CapabilityDefinition(
     # is recorded: what was disclosed to a third party is a durable fact about
     # the day, not a transient detail. The candidate list is not durable; it
     # is a working set for the turn that chooses among it.
-    durable_input_fields=("search_id", "subject"),
+    durable_input_fields=("search_id", "subject", "max_results"),
 )
 
 

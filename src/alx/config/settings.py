@@ -622,6 +622,10 @@ def _specialist_settings(
     )
 
 
+# How long one research question on the Claude subscription may take.
+SUBSCRIPTION_RESEARCH_TIMEOUT_SECONDS = 600
+
+
 def _tier_settings(
     environment: Mapping[str, str], tier: str, specialist: "ReasoningSettings"
 ) -> "ReasoningSettings":
@@ -652,8 +656,13 @@ def _tier_settings(
             model=model,
             api_key="",
             base_url="",
+            # Not the specialist's bound: a research question on the
+            # subscription searches and reads before it answers, and at the
+            # specialist's 60 s every one timed out (2026-10-17). A ceiling,
+            # not a measurement; the tier's own setting still overrides it.
             timeout_seconds=_positive_integer(
-                environment, f"{prefix}_TIMEOUT_SECONDS", specialist.timeout_seconds
+                environment, f"{prefix}_TIMEOUT_SECONDS",
+                SUBSCRIPTION_RESEARCH_TIMEOUT_SECONDS,
             ),
             streaming=False,
             service_tier="default",

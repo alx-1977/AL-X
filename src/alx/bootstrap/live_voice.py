@@ -115,7 +115,12 @@ from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
 from alx.observability.usage import bill_budget_for
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
-from alx.observability.self_record import SQLiteTraceRecord, read_log
+from alx.observability.self_record import SQLiteTraceRecord, keep_briefing, read_log
+from alx.providers.self_restart import start_restart
+from alx.tools.self_restart import (
+    DEFINITION as SELF_RESTART_DEFINITION,
+    build_self_restart_executors,
+)
 from alx.tools.self_diagnosis import (
     DEFINITIONS as SELF_DIAGNOSIS_DEFINITIONS,
     build_self_diagnosis_executors,
@@ -830,7 +835,31 @@ async def run(repository_root: Path) -> None:
         review_reader=(
             review_runtime.provider.read if review_runtime is not None else None
         ),
+        # What each coding session was told, kept beside her other records.
+        briefing_sink=lambda job_id, text: keep_briefing(
+            storage_root / "coding-briefings", job_id, text),
+        # Her records, wherever configured, are never a coding job's to touch.
+        protected_paths=(storage_root, repository_root / ".alx"),
     )
+    # D-055: she restarts herself onto code she has merged. Composed only
+    # where she can read main and is running from the launcher's snapshot.
+    if repository_runtime is not None:
+        register((SELF_RESTART_DEFINITION,), TraceSubsystem.CORE)
+        policies[SELF_RESTART_DEFINITION.capability_id] = AuthorityPolicy(
+            frozenset({"runtime.restart"}))
+        permissions.add("runtime.restart")
+        executors.update(build_self_restart_executors(
+            lambda: running_commit_of(CODE_ROOT, repository_runtime.authority),
+            repository_runtime.authority.main_commit,
+            lambda: coding_runtime is None or coding_runtime.agent.reserve_for_restart(),
+            lambda: coding_runtime is not None and coding_runtime.agent.release_restart(),
+            lambda: start_restart(
+                repository_root,
+                on_failure=lambda: coding_runtime is not None
+                and coding_runtime.agent.release_restart(),
+            ),
+            current_call_id.get,
+        ))
     if coding_runtime is not None:
         register(coding_runtime.definitions, TraceSubsystem.CODING)
         policies.update(coding_runtime.policies)

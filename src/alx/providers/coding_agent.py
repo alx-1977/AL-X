@@ -54,6 +54,7 @@ from alx.contracts.coding import (
     MAX_COMMAND_OUTPUT_CHARACTERS,
     MAX_REPORTED_FILES,
     MAX_STAGED_FILES,
+    MAX_PROTECTED_PATHS,
     MAX_TEST_INFRASTRUCTURE_ATTEMPTS,
     MAX_VERIFICATION_COMMANDS,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
@@ -285,29 +286,80 @@ def _without_markup(text: str) -> str:
     return "".join(parser.parts)
 
 
-def _readable(markup: str) -> str:
-    """The body as text. Code is kept exactly: fenced blocks and inline spans
-    are never parsed as markup, so `List<int>` or a suggested fix survives
-    (PR #148 review)."""
-    out: list[str] = []
-    fence = ""
-    for line in markup.splitlines():
-        stripped = line.lstrip()
+def _segments(markup: str) -> list[tuple[bool, str]]:
+    """The body as (is_code, text) runs, with every HTML comment removed.
+
+    One scan over the whole body, so a comment is removed wherever it ends:
+    backticks or a fenced block inside it are part of the comment, not code
+    (PR #150 review). Outside a comment, a fenced block or an inline span is
+    code and kept exactly, so `List<int>` or a suggested fix survives.
+    """
+    runs: list[tuple[bool, str]] = []
+    text = ""
+    is_code = False
+
+    def emit(code: bool, piece: str) -> None:
+        nonlocal text, is_code
+        if not piece:
+            return
+        if code != is_code and text:
+            runs.append((is_code, text))
+            text = ""
+        is_code = code
+        text += piece
+
+    position, length = 0, len(markup)
+    fence = ""          # the backtick run that opened the current fenced block
+    at_line_start = True
+    while position < length:
         if fence:
-            out.append(line)
-            if stripped.startswith(fence):
+            end = markup.find("\n", position)
+            line = markup[position:] if end < 0 else markup[position:end + 1]
+            emit(True, line)
+            if line.lstrip().startswith(fence):
                 fence = ""
+            position += len(line)
+            at_line_start = True
             continue
-        if stripped.startswith("```"):
-            fence = stripped[:len(stripped) - len(stripped.lstrip("`"))]
-            out.append(line)
+        if at_line_start:
+            end = markup.find("\n", position)
+            line = markup[position:] if end < 0 else markup[position:end + 1]
+            stripped = line.lstrip()
+            if stripped.startswith("```"):
+                fence = stripped[:len(stripped) - len(stripped.lstrip("`"))]
+                emit(True, line)
+                position += len(line)
+                continue
+        if markup.startswith("<!--", position):
+            close = markup.find("-->", position + 4)
+            position = length if close < 0 else close + 3
+            at_line_start = position > 0 and markup[position - 1] == "\n"
             continue
-        # Between backticks is code; everything else may carry markup.
-        pieces = line.split("`")
-        out.append("`".join(
-            piece if index % 2 else _without_markup(piece)
-            for index, piece in enumerate(pieces)
-        ))
+        character = markup[position]
+        if character == "`":
+            # A code span may run onto the next line, never past a paragraph
+            # break (PR #150 review).
+            close = markup.find("`", position + 1)
+            paragraph = markup.find("\n\n", position + 1)
+            if close > 0 and (paragraph < 0 or close < paragraph):
+                emit(True, markup[position:close + 1])
+                position = close + 1
+                at_line_start = False
+                continue
+        emit(False, character)
+        position += 1
+        at_line_start = character == "\n"
+    if text:
+        runs.append((is_code, text))
+    return runs
+
+
+def _readable(markup: str) -> str:
+    """The body as text: comments removed, code kept, other markup stripped."""
+    out = ["".join(
+        piece if code else _without_markup(piece)
+        for code, piece in _segments(markup)
+    )]
     lines = [line.rstrip() for line in "\n".join(out).splitlines()]
     kept: list[str] = []
     for line in lines:
@@ -520,18 +572,38 @@ class CodingAgent:
         clock: Callable[[], datetime] | None = None,
         repository: Path | None = None,
         review_reader: Callable[[ReviewContentRequest], ReviewContent] | None = None,
+        briefing_sink: Callable[[str, str], None] | None = None,
+        protected_paths: tuple[Path, ...] = (),
     ) -> None:
         self._model = model
         self._session = session
         self._review_reader = review_reader
+        # Where the exact briefing each session receives is kept, so Friedl
+        # and AL/X can see what the coding model was actually told.
+        self._briefing_sink = briefing_sink
         self._activity_sink = activity_sink or (lambda _activity: None)
         self._telemetry_sink = telemetry_sink or (lambda _telemetry: None)
         self._clock = clock or (lambda: datetime.now(UTC))
         if repository is None:
             raise ValueError("coding agent requires the canonical repository")
         self._repository = canonical_repository_root(repository)
+        # AL/X's own records, wherever they are configured. Any of them inside
+        # the checkout is blocked for every job, so the session's containment
+        # and her workspace checks both refuse it (PR #150 review).
+        self._protected = tuple(dict.fromkeys(
+            lexical for lexical in (
+                self._relative_inside(Path(path)) for path in protected_paths
+            ) if lexical
+        ))
+        if len(self._protected) > MAX_PROTECTED_PATHS:
+            raise ValueError("too many protected paths")
         self._active_lock = Lock()
         self._active: _JobState | None = None
+        # Jobs between their start and their end, and whether a restart has
+        # been scheduled. A restart may be scheduled only with no job running,
+        # and once it is, no job may start (PR #150 review).
+        self._running = 0
+        self._restart_pending = False
         # Per-run state lives in `_JobState`, created by `run` and threaded
         # explicitly from there. It used to live here, as three instance
         # attributes, which meant two overlapping jobs on one agent shared a
@@ -629,6 +701,40 @@ class CodingAgent:
             return
         state.activity = activity
 
+    def _keep_briefing(self, state: "_JobState", briefing: str) -> None:
+        """Keep the briefing; a failure to keep it never affects the job."""
+        if self._briefing_sink is None:
+            return
+        try:
+            self._briefing_sink(state.job_id, briefing)
+        except Exception as error:  # noqa: BLE001 - a record, not the job
+            LOGGER.warning("Could not keep the coding briefing (%s)", type(error).__name__)
+
+    def is_running(self) -> bool:
+        """Whether a coding job is running on this agent now."""
+        with self._active_lock:
+            return self._running > 0 or self._active is not None
+
+    def reserve_for_restart(self) -> bool:
+        """Hold off new jobs for a restart, if none is running. Atomic."""
+        with self._active_lock:
+            if self._running > 0 or self._active is not None:
+                return False
+            self._restart_pending = True
+            return True
+
+    def release_restart(self) -> None:
+        """The restart did not start after all: jobs may run again."""
+        with self._active_lock:
+            self._restart_pending = False
+
+    def _relative_inside(self, path: Path) -> str:
+        """`path` relative to the checkout, or "" when it lies outside."""
+        try:
+            return path.expanduser().resolve().relative_to(self._repository).as_posix()
+        except ValueError:
+            return ""
+
     def cancel(self, job_id: str | None = None) -> bool:
         """Stop only the active job's child process; preserve its checkout."""
         with self._active_lock:
@@ -641,6 +747,18 @@ class CodingAgent:
 
     def run(self, request: CodingRequest) -> CodingOutcome:
         """Run one job and never leave runtime telemetry at a worker state."""
+        with self._active_lock:
+            if self._restart_pending:
+                raise _before_implementation(CodingError(
+                    "coding_unavailable", reason_code="restart_pending"))
+            self._running += 1
+        try:
+            return self._run_counted(request)
+        finally:
+            with self._active_lock:
+                self._running -= 1
+
+    def _run_counted(self, request: CodingRequest) -> CodingOutcome:
         outcome: CodingOutcome | None = None
         # One state object per call, so nothing this run touches is reachable
         # from another run on the same agent.
@@ -696,6 +814,9 @@ class CodingAgent:
             self._report_activity(state, "reasoning")
 
     def _run(self, request: CodingRequest, state: "_JobState") -> CodingOutcome:
+        if self._protected:
+            request = replace(request, blocked_paths=tuple(dict.fromkeys(
+                (*request.blocked_paths, *self._protected))))
         # D-033: under the repository lock, prepare a new feature branch
         # or verify a goal-owned continuation before any implementation.
         # Validate the checkout shape first so a linked checkout cannot be
@@ -878,6 +999,7 @@ class CodingAgent:
                         recorded if isinstance(recorded, Mapping) else None,
                         observed, outputs,
                     )
+                self._keep_briefing(state, execution_briefing)
                 session = self._session.run_session(
                     request, execution_briefing
                 )

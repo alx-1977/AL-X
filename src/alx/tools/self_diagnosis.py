@@ -37,7 +37,9 @@ TRACE_DEFINITION = CapabilityDefinition(
     READ_OWN_TRACE,
     "Read your own execution trace: every step you took, as shown on Friedl's screen "
     "(subsystem, status, label, capability or goal reference, reason code, duration). "
-    "Window from/to, ISO 8601; default the last 24 hours, kept for 30 days. "
+    "Each step's time is local, with its offset. "
+    "Window from/to, ISO 8601 (a time without an offset is local); default the "
+    "last 24 hours, kept for 30 days. "
     "problems_only returns only failed and refused steps; subsystem narrows to one "
     "(core, mail, notebook, research, readers, xero, coding, review ...). Up to 500, "
     "oldest first; truncated says when more exist.",

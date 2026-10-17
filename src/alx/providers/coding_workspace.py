@@ -145,7 +145,8 @@ class CodingWorkspace:
 
     def _blocked_name(self, name: str) -> bool:
         folded = name.casefold()
-        if folded == ".git":
+        if folded in (".git", ".alx"):
+            # .alx is AL/X's own runtime storage, never code (2026-10-17).
             return True
         if folded in _BLOCKED_ENV_NAMES or folded.startswith(".env."):
             return True

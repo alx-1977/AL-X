@@ -2594,3 +2594,34 @@ This grants no authority a single goal update lacks: completion still requires s
 - **One at a time.** She raises at most the most important open item in that turn and waits for Friedl's answer. Other unresolved occasions remain available to later turns. AL/X alone resolves an occasion after judging it settled.
 - **Upgrade.** Replies in the old `pending_messages` table are discarded once, without converting their text to evidence. The verbatim queue and all replay delivery steps are removed. Retry of a copy of a reply already delivered into Friedl's conversation remains a separate mechanical record, without queued response text.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-054 — What AL/X tells Friedl comes from what she checked
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17.** After AL/X told him her 10:00 own time had not fired when it had, Friedl: "ALX should have complete oversight into everything she does and needs to do", "I need to be able to rely on ALX so when she gives me info, I do not want to have to double check that info, else I could have just done it", and "let's build this first". Amends D-050.
+- **Why.** Her trace returned times in UTC while everything else she sees is local. Her 10:09 own time reached her as 08:09, and she reported it as not having fired.
+- **Local times.** `read_own_trace` and `read_own_log` give every time in local time with its offset. A window given without an offset is local.
+- **Checked, not assumed.** Anything she states as fact about herself, her work or his comes from what she has looked at, and she says where she looked. What she has not checked she checks first, or says plainly she has not; she never fills a gap with what seems likely.
+- **Her own time.** She is told her trace over today shows what her day held, if she wants it. Nothing is chosen or summarised for her: D-024's own time still suggests nothing.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-055 — AL/X improves what is around her Core, and restarts onto it herself
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17** ("both please"). His words: "ALX should be able to improve things around the core for sure", "she needs to first consider capabilities relevant to the work we do but not limited to for sure as there might be things I am not even aware of that can help", and "we can rather limit her if we see she adds the wrong things".
+- **Improving herself.** Her instructions say the capabilities around her Core, how they work and what is missing, are hers to improve: noticing where she or Friedl lose time, repeat work or get things wrong, and where a capability she lacks would help him, first in their work but not only there. Within the authority she already holds she builds it herself (coding task, pull request, merge at a clean review under D-046). Something that would let her do what she cannot do today, such as reach someone new or spend money, she brings to Friedl as a proposal first.
+- **Restarting herself.** `restart_self` restarts her onto committed main through the repository's launcher (`scripts/alx restart`), started detached a few seconds after the call returns. It refuses when she already runs main's commit (`nothing_new_to_run`) and while a coding job is running (`coding_job_running`). Scheduling a restart and starting a coding job exclude each other: once a restart is scheduled, a job refuses with `restart_pending`. Plain permission (`runtime.restart`), no approval. She is told to restart once nothing she is doing would suffer from a short pause, and to tell Friedl what went live.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty. New authority still comes only from Friedl.
+
+## D-052b — Coding sessions never reach AL/X's storage; what they are told is kept
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17** ("ok", to the briefing record and the review-markup fix; the storage denial closes a gap found while adding them). Amends D-052 and D-052a.
+- **Storage denied.** AL/X's runtime storage, wherever `ALX_RUNTIME_STORAGE_ROOT` puts it inside the checkout, and `.alx/` (goals, memories, conversations, trace, logs) is a blocked path of every coding job, so every session's containment, Grok's and Codex's, denies it for read and write and her own workspace checks refuse it. Until now a session could read and write it; no job is known to have done so.
+- **Briefings kept.** The exact briefing each coding session receives, including a reviewer's own words, is kept in her storage under `coding-briefings/`, the newest 30.
+- **Review markup.** Markup in a review is removed a run of lines at a time, so a comment spanning lines no longer leaks its contents to the coding model; code in it is still kept exactly.
+- **Two faults found the same afternoon while she tracked a parcel.** Research questions on her Claude subscription inherited the specialist's 60-second bound and every one timed out; a subscription research tier now defaults to 600 seconds, and its own `ALX_RESEARCH_<TIER>_TIMEOUT_SECONDS` still overrides it. A planned web read or search was refused because its size bound (`max_characters`, `max_results`) was not among the arguments a plan may carry; both may now be planned, and a refused planned argument is named with the capability and what it may carry, so she can correct it on her one retry.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

@@ -112,6 +112,22 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertIn("ALX_CODING_EFFORT", str(raised.exception))
         self.assertNotIn("ALX_REASONING_EFFORT", str(raised.exception))
 
+    def test_subscription_research_is_not_held_to_the_specialist_bound(self) -> None:
+        """2026-10-17: every research question timed out at the specialist's 60 s."""
+        values = dict(
+            ALX_RESEARCH_ENABLED_TIERS="survey",
+            ALX_RESEARCH_SURVEY_PROVIDER="claude_subscription",
+            ALX_RESEARCH_SURVEY_MODEL="claude-haiku-5-5",
+            ALX_RESEARCH_DAILY_CALLS="30",
+            ALX_SPECIALIST_TIMEOUT_SECONDS="60",
+            ALX_CLAUDE_ACCOUNT="core@example.invalid",
+        )
+        settings = RuntimeSettings.from_environment(environment(**values))
+        self.assertEqual(settings.research.survey.timeout_seconds, 600)
+        tuned = RuntimeSettings.from_environment(
+            environment(ALX_RESEARCH_SURVEY_TIMEOUT_SECONDS="240", **values))
+        self.assertEqual(tuned.research.survey.timeout_seconds, 240)
+
     def test_every_provider_and_model_is_configuration(self) -> None:
         settings = RuntimeSettings.from_environment(environment())
         self.assertEqual(settings.reasoning.provider, "xai")
