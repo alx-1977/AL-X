@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -60,6 +61,59 @@ class Ship24TrackingTests(unittest.TestCase):
         self.assertEqual(entry["side_effect"], "effectful")
         self.assertEqual(entry["input_schema"]["required"], ["tracking_number"])
         self.assertIn("events", entry["result_fields"])
+        from alx.bootstrap import ship24
+        from pathlib import Path
+        decision = (Path(__file__).resolve().parents[1] / "governance/DECISIONS.md").read_text()
+        self.assertIn("D-056 — AL/X tracks parcels within Ship24's free plan", decision)
+        self.assertIn("D-056", ship24.__doc__)
+        self.assertIn("tracking_allowance_exhausted", DEFINITION.possible_failure_codes)
+
+    def test_exhausted_allowance_is_durable_and_stops_http(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ship24.sqlite3"
+            runtime = build_ship24_runtime(lambda: "call-1", {"SHIP24_API_KEY": "example-token"}, path)
+            with patch("alx.providers.ship24.httpx.post", return_value=response(
+                429, {"errors": [{"code": "plan_limit_exceeded", "message": "Monthly tracking quota exhausted"}]}
+            )) as post:
+                first = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "A"})
+                second = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "B"})
+            self.assertEqual(first.failure["code"], "tracking_allowance_exhausted")
+            self.assertEqual(second.failure["code"], "tracking_allowance_exhausted")
+            post.assert_called_once()
+            restarted = build_ship24_runtime(lambda: "call-2", {"SHIP24_API_KEY": "example-token"}, path)
+            with patch("alx.providers.ship24.httpx.post") as post:
+                result = restarted.executors[TRACK_SHIPMENT]({"tracking_number": "C"})
+            self.assertEqual(result.failure["code"], "tracking_allowance_exhausted")
+            post.assert_not_called()
+
+    def test_last_successful_tracking_uses_allowance_and_blocks_next(self) -> None:
+        runtime = build_ship24_runtime(lambda: "call-1", {"SHIP24_API_KEY": "example-token"})
+        last = response(200, TRACKED)
+        last.headers["x-ship24-monthly-remaining"] = "0"
+        with patch("alx.providers.ship24.httpx.post", return_value=last) as post:
+            first = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "A"})
+            second = runtime.executors[TRACK_SHIPMENT]({"tracking_number": "B"})
+        self.assertIs(first.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(second.failure["code"], "tracking_allowance_exhausted")
+        post.assert_called_once()
+
+    def test_new_month_allows_tracking_after_prior_month_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ship24.sqlite3"
+            runtime = build_ship24_runtime(lambda: "call-1", {"SHIP24_API_KEY": "example-token"}, path)
+            with patch.object(Ship24Provider, "_month", return_value="2026-10"), patch(
+                "alx.providers.ship24.httpx.post",
+                return_value=response(429, {"errors": [{"code": "quota_exceeded"}]}),
+            ):
+                self.assertEqual(runtime.executors[TRACK_SHIPMENT]({"tracking_number": "A"}).failure["code"],
+                                 "tracking_allowance_exhausted")
+            restarted = build_ship24_runtime(lambda: "call-2", {"SHIP24_API_KEY": "example-token"}, path)
+            with patch.object(Ship24Provider, "_month", return_value="2026-11"), patch(
+                "alx.providers.ship24.httpx.post", return_value=response(200, TRACKED),
+            ) as post:
+                result = restarted.executors[TRACK_SHIPMENT]({"tracking_number": "A"})
+            self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+            post.assert_called_once()
 
     @patch.dict("os.environ", {"SHIP24_API_KEY": "example-token"})
     def test_documented_request_and_response(self) -> None:

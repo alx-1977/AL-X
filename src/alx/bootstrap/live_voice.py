@@ -481,7 +481,9 @@ async def run(repository_root: Path) -> None:
     policies = dict(mail_runtime.policies)
     executors = dict(mail_runtime.executors)
     permissions = set(mail_runtime.permissions)
-    ship24_runtime = build_ship24_runtime(current_call_id.get, environment)
+    ship24_runtime = build_ship24_runtime(
+        current_call_id.get, environment, storage_root / "ship24-allowance.sqlite3"
+    )
     register(ship24_runtime.definitions, TraceSubsystem.SHIP24)
     policies.update(ship24_runtime.policies)
     executors.update(ship24_runtime.executors)

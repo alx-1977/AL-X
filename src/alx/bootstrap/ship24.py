@@ -1,9 +1,10 @@
-"""Compose the single Ship24 tracking path into the capability broker."""
+"""Compose Ship24 tracking under Friedl's standing free-plan authority (D-056)."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
@@ -25,8 +26,9 @@ class Ship24Runtime:
 
 def build_ship24_runtime(
     call_id_source: Callable[[], str], environment: Mapping[str, str] | None = None,
+    allowance_path: Path | None = None,
 ) -> Ship24Runtime:
-    provider = Ship24Provider(environment)
+    provider = Ship24Provider(environment, allowance_path)
     return Ship24Runtime(
         (DEFINITION,),
         {TRACK_SHIPMENT: AuthorityPolicy(frozenset({SHIP24_TRACK_PERMISSION}))},

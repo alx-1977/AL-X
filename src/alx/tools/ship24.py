@@ -22,7 +22,7 @@ _EVENT = StructuredSchema(
 )
 _FAILURES = (
     "arguments_unusable", "not_configured", "authentication_failed",
-    "rate_limited", "tracking_not_found", "tracking_ambiguous",
+    "rate_limited", "tracking_allowance_exhausted", "tracking_not_found", "tracking_ambiguous",
     "provider_failed", "connection_failed",
 )
 

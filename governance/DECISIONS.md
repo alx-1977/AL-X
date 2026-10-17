@@ -2625,3 +2625,12 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Review markup.** Markup in a review is removed a run of lines at a time, so a comment spanning lines no longer leaks its contents to the coding model; code in it is still kept exactly.
 - **Two faults found the same afternoon while she tracked a parcel.** Research questions on her Claude subscription inherited the specialist's 60-second bound and every one timed out; a subscription research tier now defaults to 600 seconds, and its own `ALX_RESEARCH_<TIER>_TIMEOUT_SECONDS` still overrides it. A planned web read or search was refused because its size bound (`max_characters`, `max_results`) was not among the arguments a plan may carry; both may now be planned, and a refused planned argument is named with the capability and what it may carry, so she can correct it on her one retry.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-056 — AL/X tracks parcels within Ship24's free plan
+
+- **Date:** 2026-10-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-17.** In conversation turn `turn:91efdc47-0a04-4367-afff-c44585a0419c`, Friedl said: "Yes, track parcels whenever it helps, within the free plan's limit. Record that as a decision and stop when the month's allowance is used up."
+- **Authority.** AL/X may call the Ship24 tracking capability whenever it helps, without per-call approval, while usage remains inside Ship24's free plan. The first call for a parcel may create a quota-consuming tracker.
+- **Limit.** Once Ship24 reports the plan or monthly tracking quota exhausted, or reports no monthly allowance remaining, tracking stops for that allowance period. The capability returns `tracking_allowance_exhausted` and makes no further quota-consuming request until a renewed monthly allowance. AL/X must never upgrade a plan, buy tracking, or incur paid usage under this authority.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.

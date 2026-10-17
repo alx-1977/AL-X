@@ -8,14 +8,22 @@ without classifying shipment meaning.
 from __future__ import annotations
 
 import os
+import sqlite3
+import threading
 from collections.abc import Mapping
-from datetime import datetime
+from contextlib import closing
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 
 _URL = "https://api.ship24.com/public/v1/trackers/track"
+_EXHAUSTED_CODES = frozenset({
+    "plan_limit_exceeded", "quota_exceeded", "monthly_quota_exceeded",
+    "tracking_limit_exceeded", "trackers_limit_exceeded", "subscription_limit_exceeded",
+})
 
 
 class Ship24Error(Exception):
@@ -105,8 +113,38 @@ def _parse(payload: Any) -> dict[str, Any]:
 
 
 class Ship24Provider:
-    def __init__(self, environment: Mapping[str, str] | None = None) -> None:
+    def __init__(self, environment: Mapping[str, str] | None = None,
+                 allowance_path: Path | None = None) -> None:
         self._environment = environment if environment is not None else os.environ
+        self._allowance_path = allowance_path
+        self._lock = threading.Lock()
+        self._blocked_month: str | None = None
+        if allowance_path is not None:
+            with closing(sqlite3.connect(allowance_path)) as connection:
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS ship24_allowance "
+                    "(month TEXT PRIMARY KEY, exhausted INTEGER NOT NULL)"
+                )
+                connection.commit()
+
+    @staticmethod
+    def _month() -> str:
+        return datetime.now(UTC).strftime("%Y-%m")
+
+    @staticmethod
+    def _allowance_exhausted(response: httpx.Response) -> bool:
+        # A transient 429 is not necessarily the monthly plan limit.
+        remaining = response.headers.get("x-ship24-monthly-remaining")
+        if remaining is not None and remaining.strip() == "0":
+            return True
+        try:
+            errors = _object(response.json()).get("errors")
+        except (ValueError, Ship24Error):
+            return False
+        return isinstance(errors, list) and any(
+            isinstance(item, Mapping) and item.get("code") in _EXHAUSTED_CODES
+            for item in errors
+        )
 
     def track(self, tracking_number: str, courier_code: str | None = None) -> dict[str, Any]:
         token = self._environment.get("SHIP24_API_KEY", "").strip()
@@ -115,15 +153,36 @@ class Ship24Provider:
         payload: dict[str, Any] = {"trackingNumber": tracking_number}
         if courier_code:
             payload["courierCode"] = [courier_code]
-        try:
-            response = httpx.post(
-                _URL,
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-                timeout=75.0,
-            )
-        except httpx.RequestError:
-            raise Ship24Error("connection_failed") from None
+        month = self._month()
+        # Hold the ledger transaction over the request so concurrent processes
+        # cannot send another tracker after this one learns the quota is gone.
+        with self._lock:
+            if self._allowance_path is None:
+                if self._blocked_month == month:
+                    raise Ship24Error("tracking_allowance_exhausted")
+                response = self._post(token, payload)
+                if self._allowance_exhausted(response):
+                    self._blocked_month = month
+                    if response.status_code >= 400:
+                        raise Ship24Error("tracking_allowance_exhausted")
+            else:
+                with closing(sqlite3.connect(self._allowance_path, timeout=80)) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    blocked = connection.execute(
+                        "SELECT exhausted FROM ship24_allowance WHERE month = ?", (month,)
+                    ).fetchone()
+                    if blocked and blocked[0]:
+                        raise Ship24Error("tracking_allowance_exhausted")
+                    response = self._post(token, payload)
+                    if self._allowance_exhausted(response):
+                        connection.execute(
+                            "INSERT OR REPLACE INTO ship24_allowance VALUES (?, 1)", (month,)
+                        )
+                        connection.commit()
+                        if response.status_code >= 400:
+                            raise Ship24Error("tracking_allowance_exhausted")
+                    else:
+                        connection.commit()
         if response.status_code in (401, 403):
             raise Ship24Error("authentication_failed")
         if response.status_code == 429:
@@ -143,3 +202,13 @@ class Ship24Provider:
             return _parse(response.json())
         except ValueError:
             raise Ship24Error("provider_failed") from None
+
+    @staticmethod
+    def _post(token: str, payload: dict[str, Any]) -> httpx.Response:
+        try:
+            return httpx.post(
+                _URL, headers={"Authorization": f"Bearer {token}"},
+                json=payload, timeout=75.0,
+            )
+        except httpx.RequestError:
+            raise Ship24Error("connection_failed") from None
