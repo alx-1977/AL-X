@@ -163,6 +163,41 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         self.assertTrue(marker.is_file())
 
 
+class TheLauncherFindsTheRuntimeThatStartedIt(unittest.TestCase):
+    """2026-10-17: restart_self started the launcher as AL/X's descendant, and
+    macOS pgrep leaves out its own ancestors, so the launcher reported "not
+    running", started a second runtime that could not bind the port, and
+    read the old runtime's answer as "up"."""
+
+    def test_a_child_finds_its_parent_only_with_ancestors_included(self) -> None:
+        import platform
+        import subprocess
+        if platform.system() != "Darwin":
+            self.skipTest("the ancestor rule is macOS pgrep's")
+        tag = "alx-launcher-ancestor-probe"
+        # Only the parent's command line carries the tag; the child reads it
+        # from its environment, so nothing else can match.
+        probe = ('printf "%s|%s" "$(pgrep -f "$TAG" | tr "\\n" " ")" '
+                 '"$(pgrep -a -f "$TAG" | tr "\\n" " ")"')
+        parent = ("import os,subprocess,sys; print(subprocess.run(['/bin/bash','-c',sys.argv[1]],"
+                  "env={**os.environ,'TAG':sys.argv[2]},capture_output=True,text=True,"
+                  "start_new_session=True).stdout)")
+        result = subprocess.run([sys.executable, "-c", parent, probe, tag],
+                                capture_output=True, text=True, check=True)
+        without, with_ancestors = result.stdout.strip().split("|")
+        stray = [pid for pid in without.split() if pid]
+        details = [subprocess.run(["ps", "-o", "pid=,ppid=,command=", "-p", pid],
+                                  capture_output=True, text=True).stdout.strip() for pid in stray]
+        self.assertEqual(stray, [], details)
+        self.assertTrue(with_ancestors.strip())
+
+    def test_the_launcher_includes_ancestors_on_macos_and_refuses_a_taken_port(self) -> None:
+        launcher = (ROOT / "scripts" / "alx").read_text()
+        self.assertIn('[ "$(uname -s)" = "Darwin" ] && PGREP_ANCESTORS="-a"', launcher)
+        self.assertIn('pgrep $PGREP_ANCESTORS -f "$PATTERN"', launcher)
+        self.assertIn("not starting a second runtime", launcher)
+
+
 class TempRepositoriesIgnoreTheCallersGit(unittest.TestCase):
     def test_inherited_git_location_cannot_redirect_a_temp_repository(self) -> None:
         # A decoy stands in for the caller's repository, so a regression
