@@ -37,7 +37,7 @@ from alx.interfaces import (  # noqa: E402
     VoiceEventKind,
     VoiceSession,
 )
-from alx.interfaces.live_voice import VoiceEvent  # noqa: E402
+from alx.interfaces.live_voice import QueuedDelivery, VoiceEvent  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.core import CoreState
 from alx.core.loop import CoreOutcome  # noqa: E402
@@ -284,6 +284,34 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
 
 
 class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_occasion_is_started_only_when_speech_begins(self) -> None:
+        class QuietTranscriber:
+            async def transcribe(self, _audio):
+                await asyncio.Event().wait()
+                yield None
+
+        async def audio():
+            await asyncio.Event().wait()
+            yield AudioChunk(b"", "audio/pcm")
+
+        delivery = QueuedDelivery("fresh words", "occasion-1")
+        queued = asyncio.Queue()
+        queued.put_nowait(delivery)
+        session = VoiceSession(FakeGateway(()), QuietTranscriber(),
+                               FakeSynthesizer(), "friedl", 8, 30)
+        exchange = session.exchange("conversation-1", audio(), queued)
+        self.assertIs((await exchange.__anext__()).kind, VoiceEventKind.TEXT)
+        self.assertFalse(delivery.started)
+        self.assertIs((await exchange.__anext__()).kind, VoiceEventKind.SPEAKING)
+        # A browser may close before it accepts this phase. The generator has
+        # offered speech, but the transport has not acknowledged its start.
+        self.assertFalse(delivery.started)
+        self.assertEqual(delivery.response, "fresh words")
+        self.assertIs((await exchange.__anext__()).kind, VoiceEventKind.AUDIO)
+        self.assertTrue(delivery.started)
+        self.assertEqual(delivery.response, "")
+        await exchange.aclose()
+
     async def test_queued_coding_transitions_are_emitted_in_order(self) -> None:
         # Coding status travels the live feed, the one route it has whether or
         # not a person turn is running.

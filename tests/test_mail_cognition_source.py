@@ -476,7 +476,7 @@ class NoSessionIsRequired(Fixture):
             def __init__(self) -> None:
                 self.delivered = []
 
-            def deliver(self, conversation_id, response):
+            def deliver(self, conversation_id, response, opportunity_id=None):
                 self.delivered.append((conversation_id, response))
                 return ResponseDelivery.DELIVERED
 

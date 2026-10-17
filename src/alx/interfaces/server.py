@@ -21,7 +21,7 @@ from typing import Any
 
 from alx.interfaces.phone import PHONE_CONVERSATION_ID
 from alx.contracts import AudioChunk, ResponseDelivery
-from alx.interfaces.live_voice import VoiceEventKind, VoiceSession
+from alx.interfaces.live_voice import QueuedDelivery, VoiceEventKind, VoiceSession
 
 
 LOGGER = logging.getLogger(__name__)
@@ -92,8 +92,7 @@ class LiveVoiceServer:
         sample_rate_hz: int,
         asset_root: Path,
         reader_tile: Callable[[], dict[str, Any] | None] | None = None,
-        # D-044: copies a reply from the thread it was made in into the thread
-        # Friedl is in, and keeps replies for when nobody is connected.
+        # Copies a delivered reply into the conversation Friedl is in.
         relay: Callable[[str, str, str], bool] | None = None,
         locate: Callable[[str, str], tuple[str, Any] | None] | None = None,
         pending: Any = None,
@@ -102,9 +101,11 @@ class LiveVoiceServer:
         presence: Callable[[], tuple[str, datetime | None]] | None = None,
         # D-049: his phone, for what she says while he is away.
         phone: Any = None,
+        mark_undelivered: Callable[[str], None] | None = None,
     ) -> None:
         self._presence = presence
         self._phone = phone
+        self._mark_undelivered = mark_undelivered
         self._session = session
         self._relay = relay
         self._locate = locate
@@ -127,6 +128,7 @@ class LiveVoiceServer:
         # handed to a real listener or it is undelivered; a count of open
         # sockets cannot tell the difference.
         self._delivery_queues: dict[str, list[Any]] = {}
+        self._queued_occasions: dict[Any, list[QueuedDelivery]] = {}
         # Typed lines waiting to become person turns. Separate from delivery
         # because one carries input and the other carries output; conflating
         # them is how a console starts inferring where text should go.
@@ -135,7 +137,8 @@ class LiveVoiceServer:
         # Delivery from a worker thread has to hand the work back to it.
         self._delivery_loop: Any = None
 
-    def deliver(self, conversation_id: str, response: str) -> ResponseDelivery:
+    def deliver(self, conversation_id: str, response: str,
+                opportunity_id: str | None = None) -> ResponseDelivery:
         """Speak an autonomous response through the one existing synthesis path.
 
         Called from the Core worker thread, while the event loop owns the
@@ -145,11 +148,12 @@ class LiveVoiceServer:
         because the loop is closing would otherwise report success while her
         words were lost, which is the failure this whole path exists to avoid.
 
-        DELIVERED therefore means one live listener actually received it.
+        DELIVERED therefore means one live listener accepted it for synthesis.
         Everything else — no listener, a listener that vanished between lookup
         and enqueue, a closing loop, a queue that refused, or a person turn on
         the conversation already waiting for the voice — is UNDELIVERABLE, and
-        the occasion records the fact.
+        the occasion records the fact. If that listener closes before speech
+        starts, its occasion is marked undelivered during connection cleanup.
 
         There is deliberately no second speech implementation here. The audio
         is produced by the same synthesizer the person-turn path uses, and the
@@ -170,23 +174,12 @@ class LiveVoiceServer:
         registered = self._delivery_queues.get(conversation_id) or []
         identity = None if registered else self._identify(conversation_id, response)
         if not registered:
-            # D-044: she made this reply in a thread nobody listens on (each
-            # mail thread is its own conversation). Friedl hears it in the
-            # session he has open; with none open, it waits for his next one.
+            # A mail thread has no listener of its own. An absent session
+            # makes this occasion undelivered evidence for a later Core turn.
             live = [item for item in getattr(self, "_live_conversations", [])
                     if self._delivery_queues.get(item)]
             if not live:
-                pending = getattr(self, "_pending", None)
-                if pending is None:
-                    return ResponseDelivery.UNDELIVERABLE
-                turn_id, expires = identity or ("", None)
-                try:
-                    pending.add(source_conversation_id, turn_id, response,
-                                self._clock_now(), expires)
-                except Exception as error:  # noqa: BLE001 - recorded as unheard
-                    LOGGER.warning("Could not keep a reply for later: %s", type(error).__name__)
-                    return ResponseDelivery.UNDELIVERABLE
-                return ResponseDelivery.QUEUED
+                return ResponseDelivery.UNDELIVERABLE
             conversation_id = live[-1]
             registered = self._delivery_queues.get(conversation_id) or []
         # Snapshot: the listener may go away while this runs, which the loop
@@ -212,13 +205,18 @@ class LiveVoiceServer:
                 acknowledged.put(accepted)
                 return
             current = self._delivery_queues.get(conversation_id) or []
-            for waiting in listeners:
+            for waiting in reversed(listeners):
                 if waiting not in current:
                     # Detached between lookup and here.
                     continue
                 try:
-                    waiting.put_nowait(response)
+                    delivery = (QueuedDelivery(response, opportunity_id)
+                                if opportunity_id is not None else response)
+                    waiting.put_nowait(delivery)
+                    if isinstance(delivery, QueuedDelivery):
+                        self._queued_occasions.setdefault(waiting, []).append(delivery)
                     accepted = True
+                    break
                 except Exception:
                     continue
             acknowledged.put(accepted)
@@ -300,58 +298,6 @@ class LiveVoiceServer:
             if not done:
                 LOGGER.info("A kept relay's reply no longer exists")
 
-    def _take_waiting(self, deliveries: "asyncio.Queue[str]") -> tuple:
-        """Move every waiting reply onto a session's queue, oldest first.
-
-        Runs on the event loop with no await, immediately before the session
-        is registered for live delivery, so nothing newer can arrive between
-        the waiting replies and it, and nothing is taken without being given.
-        """
-        pending = getattr(self, "_pending", None)
-        if pending is None:
-            return ()
-        try:
-            waiting = pending.take_all(self._clock_now())
-        except Exception as error:  # noqa: BLE001 - nothing taken, nothing lost
-            LOGGER.warning("Could not read waiting replies: %s", type(error).__name__)
-            return ()
-        for _source, _turn, text, _expires in waiting:
-            deliveries.put_nowait(text)
-        if waiting:
-            LOGGER.info("Handed %d waiting replies to the new session", len(waiting))
-        return waiting
-
-    def _keep_unspoken(self, deliveries: "asyncio.Queue[str]", conversation_id: str,
-                       handed: tuple) -> None:
-        """Return replies a closing session never spoke to the waiting store."""
-        pending = getattr(self, "_pending", None)
-        if pending is None:
-            return
-        # Several waiting replies can share a text, so each text keeps its own
-        # origins in the order they were handed over, and each unspoken reply
-        # takes the first one left.
-        origins: dict[str, list[tuple[str, str, Any]]] = {}
-        for source, turn, text, expires in handed:
-            origins.setdefault(text, []).append((source, turn, expires))
-        while not deliveries.empty():
-            text = deliveries.get_nowait()
-            matches = origins.get(text) or []
-            source, turn, expires = matches.pop(0) if matches else (conversation_id, "", None)
-            try:
-                # Back to waiting with the deadline it already had.
-                pending.add(source, turn, text, self._clock_now(), expires)
-            except Exception as error:  # noqa: BLE001
-                LOGGER.warning("Could not keep an unspoken reply: %s", type(error).__name__)
-
-    async def _record_waiting(self, waiting: tuple, conversation_id: str) -> None:
-        """Copy the replies just handed over into his thread, then any kept copies."""
-        def work() -> None:
-            for source, turn_id, _text, expires in waiting:
-                if source != conversation_id:
-                    self._relay_into(source, (turn_id, expires), conversation_id)
-            self._retry_relays()
-        await asyncio.to_thread(work)
-
     # A typed line is at most this long. Not a judgement about what is worth
     # saying: a bound so one frame cannot exhaust memory or the input ceiling.
     MAX_TYPED_CHARACTERS = 8_000
@@ -431,11 +377,7 @@ class LiveVoiceServer:
         # Registered while this connection can actually carry speech, so an
         # autonomous response is offered to a live listener rather than to a
         # socket count that cannot say whether anyone took it.
-        deliveries: asyncio.Queue[str] = asyncio.Queue()
-        # D-044: replies that waited for this session go first, and are put on
-        # its queue in the same step as it is registered, so a reply arriving
-        # now cannot overtake them.
-        waiting = self._take_waiting(deliveries)
+        deliveries: asyncio.Queue[str | QueuedDelivery] = asyncio.Queue()
         self._delivery_queues.setdefault(conversation_id, []).append(deliveries)
         typed: asyncio.Queue[str] = asyncio.Queue()
         self._typed_queues.setdefault(conversation_id, []).append(typed)
@@ -447,7 +389,7 @@ class LiveVoiceServer:
         # connection lost during setup cannot leave a dead listener that
         # later replies would be "delivered" to.
         try:
-            await self._record_waiting(waiting, conversation_id)
+            await asyncio.to_thread(self._retry_relays)
             await connection.send(
                 json.dumps(
                     {
@@ -457,6 +399,35 @@ class LiveVoiceServer:
                     }
                 )
             )
+            async def forward_progress(event) -> None:
+                if event.kind is VoiceEventKind.ACTIVITY:
+                    await connection.send(json.dumps({
+                        "type": "activity", "value": event.activity,
+                    }))
+                else:
+                    await connection.send(json.dumps({
+                        "type": "phase", "value": event.kind.value,
+                    }))
+
+            session_open_failed = False
+            try:
+                fresh_response = await self._session.session_open_response(
+                    conversation_id, progress=forward_progress
+                )
+            except Exception as error:  # noqa: BLE001 - one turn failed; keep listening
+                session_open_failed = True
+                LOGGER.error("Session-open Core turn failed: %s", type(error).__name__)
+                await connection.send(json.dumps({
+                    "type": "phase", "value": VoiceEventKind.ERROR.value,
+                    "reason": "session_open_reasoning_error",
+                }))
+                fresh_response = None
+            if fresh_response is not None:
+                deliveries.put_nowait(fresh_response)
+            elif not session_open_failed:
+                await connection.send(json.dumps({
+                    "type": "phase", "value": VoiceEventKind.LISTENING.value,
+                }))
             # A transcription transport can drop while the person is simply silent.
             # That ends one exchange but not the conversation, so it is re-entered on
             # the same durable conversation while the browser socket stays open.
@@ -464,6 +435,13 @@ class LiveVoiceServer:
                 LOGGER.info("Resuming voice session on the same conversation")
 
         finally:
+            for delivery in self._queued_occasions.pop(deliveries, []):
+                if not delivery.started and self._mark_undelivered is not None:
+                    try:
+                        self._mark_undelivered(delivery.opportunity_id)
+                    except Exception as error:  # noqa: BLE001 - cleanup continues
+                        LOGGER.error("Could not mark unheard occasion: %s",
+                                     type(error).__name__)
             if conversation_id in self._live_conversations:
                 self._live_conversations.remove(conversation_id)
             queues = self._delivery_queues.get(conversation_id, [])
@@ -471,9 +449,6 @@ class LiveVoiceServer:
                 queues.remove(deliveries)
             if not queues:
                 self._delivery_queues.pop(conversation_id, None)
-            # Anything still on the queue was never spoken: it waits for his
-            # next session rather than ending with this one.
-            self._keep_unspoken(deliveries, conversation_id, waiting)
             typed_waiting = self._typed_queues.get(conversation_id, [])
             if typed in typed_waiting:
                 typed_waiting.remove(typed)

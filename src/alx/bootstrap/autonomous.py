@@ -206,15 +206,13 @@ class AutonomousCognitionRunner:
                         delivered = self._response_transport.deliver(
                             opportunity.conversation_id,
                             outcome.response or "",
+                            opportunity.opportunity_id,
                         )
                     except Exception as error:
                         LOGGER.warning(
                             "Autonomous response delivery failed: %s", error
                         )
-                # Queued for Friedl's next session is not lost (D-044): it
-                # will be shown to him, so she is not told it went unheard.
-                undelivered = delivered not in (
-                    ResponseDelivery.DELIVERED, ResponseDelivery.QUEUED)
+                undelivered = delivered is not ResponseDelivery.DELIVERED
         except Exception as error:
             LOGGER.warning("Autonomous cognition turn failed: %s", error)
         finally:

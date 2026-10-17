@@ -1,20 +1,14 @@
-"""D-044: what AL/X wants to tell Friedl reaches him.
-
-She thinks about each mail thread in its own conversation, and her reply used
-to be offered only to a listener on that thread, which no browser ever is: on
-2026-10-08 every message about the morning's mail was recorded as undelivered
-while Friedl's session was open all along. These tests prove a reply made in
-any thread reaches the session he has open and is recorded in his thread, a
-reply made while nobody is connected waits and is handed to his next session
-in order, a waiting reply is not reported as unheard, and nothing else about
-delivery changes.
-"""
+"""Delivered replies reach Friedl; unheard occasions reach fresh Core reasoning."""
 
 from __future__ import annotations
 
 import asyncio
+import ast
+import json
+import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,12 +16,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from alx.continuity.pending_messages import SQLitePendingMessages  # noqa: E402
-from alx.contracts import ConversationOrigin, ConversationTurn, ResponseDelivery  # noqa: E402
+from alx.continuity.pending_relays import SQLitePendingRelays  # noqa: E402
+from alx.core import CoreOutcome, CoreState  # noqa: E402
+from alx.contracts.core import ReasoningContext  # noqa: E402
+from alx.core.model_reasoner import _context_payload  # noqa: E402
+from alx.contracts import AudioChunk, ConversationOrigin, ConversationTurn, ResponseDelivery  # noqa: E402
 from alx.contracts.provenance import ContentOrigin, RetentionPolicy  # noqa: E402
 from alx.conversation.gateway import ConversationGateway  # noqa: E402
 from alx.conversation.store import SQLiteConversationStore  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
+from alx.interfaces.live_voice import VoiceActivityStatus, VoiceEventKind, VoiceSession  # noqa: E402
 
 NOW = datetime(2026, 10, 8, 11, 53, tzinfo=UTC)
 MAIL = "mail-thread:<jlcpcb-123@mail>"
@@ -120,106 +118,361 @@ class RoutingTests(unittest.TestCase):
         result, heard = asyncio.run(scenario())
         self.assertEqual((result, heard, relayed), (ResponseDelivery.UNDELIVERABLE, [], []))
 
+    def test_with_no_session_the_reply_is_undeliverable(self) -> None:
+        self.assertIs(_server().deliver(MAIL, "stale words"),
+                      ResponseDelivery.UNDELIVERABLE)
 
-class WaitingTests(unittest.TestCase):
-    def setUp(self) -> None:
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.pending = SQLitePendingMessages(Path(directory.name) / "pending.sqlite3")
-        self.addCleanup(self.pending.close)
 
-    def test_with_nobody_connected_it_waits(self) -> None:
-        server = _server(pending=self.pending)
-        self.assertIs(server.deliver(MAIL, "JLCPCB needs a choice"), ResponseDelivery.QUEUED)
-        self.assertEqual(self.pending.count(), 1)
+class SessionOpenTests(unittest.TestCase):
+    def test_close_during_speech_start_send_preserves_autonomous_occasion(self) -> None:
+        from types import SimpleNamespace
 
-    def test_without_a_store_nothing_changes(self) -> None:
-        self.assertIs(_server().deliver(MAIL, "x"), ResponseDelivery.UNDELIVERABLE)
+        marked = []
 
-    def test_his_next_session_hears_what_waited_in_order(self) -> None:
-        relayed = []
-        server = _server(pending=self.pending, relayed=relayed)
-        server.deliver(MAIL, "first")
-        server.deliver("mail-thread:<other>", "second")
+        class Connection:
+            request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+            def __init__(self):
+                self.ready = asyncio.Event()
+
+            async def send(self, frame):
+                if isinstance(frame, str):
+                    message = json.loads(frame)
+                    if message.get("type") == "session.ready":
+                        self.ready.set()
+                    if message.get("value") == "speaking":
+                        raise ConnectionError("closed before speech started")
+
+            async def __aiter__(self):
+                await asyncio.Event().wait()
+                yield b""
+
+        class Transcriber:
+            async def transcribe(self, _audio):
+                await asyncio.Event().wait()
+                yield None
+
+        class Synthesizer:
+            async def synthesize(self, _response, _conversation_id):
+                yield AudioChunk(b"sound", "audio/pcm")
 
         async def scenario():
-            listener: asyncio.Queue[str] = asyncio.Queue()
-            waiting = server._take_waiting(listener)
-            await server._record_waiting(waiting, FRIEDL)
-            return _drain(listener)
+            session = VoiceSession(object(), Transcriber(), Synthesizer(),
+                                   "friedl", 3, 30)
+            server = _server(session=session)
+            server._mark_undelivered = marked.append
+            connection = Connection()
+            handling = asyncio.create_task(server._handle_voice(connection))
+            await connection.ready.wait()
+            result = await asyncio.to_thread(server.deliver, MAIL, "fresh", "occasion-1")
+            await asyncio.wait_for(handling, timeout=2)
+            return result
 
-        self.assertEqual(asyncio.run(scenario()), ["first", "second"])
-        self.assertEqual(relayed, [(MAIL, "turn-first", FRIEDL),
-                                   ("mail-thread:<other>", "turn-second", FRIEDL)])
-        self.assertEqual(self.pending.count(), 0)
+        self.assertIs(asyncio.run(scenario()), ResponseDelivery.DELIVERED)
+        self.assertEqual(marked, ["occasion-1"])
 
-    def test_a_waiting_message_expires_with_mail_content(self) -> None:
-        self.pending.add(MAIL, "t", "old", NOW - timedelta(days=31))
-        self.assertEqual(self.pending.take_all(NOW), ())
+    def test_progress_send_failure_keeps_core_owned_until_worker_finishes(self) -> None:
+        working = threading.Event()
+        release = threading.Event()
+        remote_started = threading.Event()
+        activity = VoiceActivityStatus()
 
-    def test_it_never_outlives_the_reply_it_came_from(self) -> None:
-        server = _server(pending=self.pending, expires=NOW + timedelta(hours=2))
-        server.deliver(MAIL, "soon gone")
-        self.assertEqual(self.pending.take_all(NOW + timedelta(hours=3)), ())
+        class Gateway:
+            def receive_session_open(self, *_args):
+                activity.set("coding")
+                working.set()
+                release.wait(timeout=3)
+                return CoreOutcome(CoreState.RESPONDED, None, response="fresh")
 
-    def test_unspoken_replies_go_back_to_waiting_when_the_session_closes(self) -> None:
-        server = _server(pending=self.pending)
-        server.deliver(MAIL, "first")
-        listener: asyncio.Queue[str] = asyncio.Queue()
-        handed = server._take_waiting(listener)
-        server._keep_unspoken(listener, FRIEDL, handed)
-        self.assertEqual(self.pending.take_all(NOW),
-                         ((MAIL, "turn-first", "first", NOW + timedelta(days=30)),))
+            def receive_conversation_turn(self, *_args):
+                remote_started.set()
+                return CoreOutcome(CoreState.FINISHED_SILENTLY, None)
 
-    def test_identical_unspoken_replies_keep_their_own_origins(self) -> None:
-        self.pending.add(MAIL, "t1", "Same words", NOW)
-        self.pending.add("mail-thread:<other>", "t2", "Same words", NOW)
-        server = _server(pending=self.pending)
-        listener: asyncio.Queue[str] = asyncio.Queue()
-        server._keep_unspoken(listener, FRIEDL, server._take_waiting(listener))
-        self.assertEqual([(source, turn) for source, turn, _t, _e in self.pending.take_all(NOW)],
-                         [(MAIL, "t1"), ("mail-thread:<other>", "t2")])
-
-    def test_a_reply_handed_back_keeps_its_original_deadline(self) -> None:
-        deadline = NOW + timedelta(hours=2)
-        server = _server(pending=self.pending, expires=deadline)
-        server.deliver(MAIL, "first")
-        later = NOW + timedelta(hours=1)
-        server._now = lambda: later
-        for _ in range(3):  # sessions keep closing before it is spoken
-            listener: asyncio.Queue[str] = asyncio.Queue()
-            server._keep_unspoken(listener, FRIEDL, server._take_waiting(listener))
-        self.assertEqual(self.pending.take_all(later)[0][3], deadline)
-        self.assertEqual(self.pending.take_all(deadline + timedelta(minutes=1)), ())
-
-    def test_a_failed_copy_is_kept_and_made_later(self) -> None:
-        attempts = []
-
-        def flaky(source, turn, target):
-            attempts.append(turn)
-            if len(attempts) == 1:
-                raise RuntimeError("database locked")
-            return True
-
-        server = _server(pending=self.pending, relay=flaky)
-        server._relay_into(MAIL, ("t1", None), FRIEDL)
-        self.assertEqual(len(self.pending.relays(NOW)), 1)
-        server._retry_relays()
-        self.assertEqual((attempts, self.pending.relays(NOW)), (["t1", "t1"], ()))
-
-    def test_waiting_replies_are_queued_before_the_session_takes_live_ones(self) -> None:
         async def scenario():
-            server = _server(pending=self.pending, relayed=[])
-            server.deliver(MAIL, "older")
-            listener: asyncio.Queue[str] = asyncio.Queue()
-            server._take_waiting(listener)
-            server._delivery_queues[FRIEDL] = [listener]
-            server._live_conversations.append(FRIEDL)
-            server._delivery_loop = asyncio.get_running_loop()
-            await asyncio.to_thread(server.deliver, MAIL, "newer")
-            return _drain(listener)
+            session = VoiceSession(Gateway(), object(), object(), "friedl", 3, 30,
+                                   activity=activity, undelivered=lambda: ({"id": "one"},))
 
-        self.assertEqual(asyncio.run(scenario()), ["older", "newer"])
+            async def progress(event):
+                if event.kind is VoiceEventKind.ACTIVITY:
+                    raise ConnectionError("browser disconnected")
+
+            opening = asyncio.create_task(session.session_open_response(FRIEDL, progress))
+            await asyncio.to_thread(working.wait, 2)
+            try:
+                for _ in range(100):
+                    if opening.done():
+                        break
+                    await asyncio.sleep(0.01)
+                remote = asyncio.create_task(session.remote_turn(FRIEDL, "phone"))
+                await asyncio.sleep(0.05)
+                self.assertTrue(session._core_turn_lock.locked())
+                self.assertFalse(remote_started.is_set())
+            finally:
+                release.set()
+            with self.assertRaises(ConnectionError):
+                await opening
+            await remote
+            self.assertTrue(remote_started.is_set())
+
+        asyncio.run(scenario())
+
+    def test_cancelled_session_open_keeps_core_owned_until_worker_finishes(self) -> None:
+        working = threading.Event()
+        release = threading.Event()
+        remote_started = threading.Event()
+
+        class Gateway:
+            def receive_session_open(self, *_args):
+                working.set()
+                release.wait(timeout=3)
+                return CoreOutcome(CoreState.RESPONDED, None, response="fresh")
+
+            def receive_conversation_turn(self, *_args):
+                remote_started.set()
+                return CoreOutcome(CoreState.FINISHED_SILENTLY, None)
+
+        async def scenario():
+            session = VoiceSession(Gateway(), object(), object(), "friedl", 3, 30,
+                                   undelivered=lambda: ({"id": "one"},))
+            opening = asyncio.create_task(session.session_open_response(FRIEDL))
+            await asyncio.to_thread(working.wait, 2)
+            opening.cancel()
+            remote = asyncio.create_task(session.remote_turn(FRIEDL, "phone"))
+            try:
+                await asyncio.sleep(0.05)
+                self.assertTrue(session._core_turn_lock.locked())
+                self.assertFalse(remote_started.is_set())
+                opening.cancel()  # A second disconnect signal during cleanup.
+                await asyncio.sleep(0.05)
+                self.assertTrue(session._core_turn_lock.locked())
+                self.assertFalse(remote_started.is_set())
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await opening
+            await remote
+            self.assertTrue(remote_started.is_set())
+
+        asyncio.run(scenario())
+
+    def test_close_before_speech_restores_the_occasion_without_words(self) -> None:
+        from types import SimpleNamespace
+
+        marked = []
+
+        class Connection:
+            request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+            async def send(self, _frame):
+                return None
+
+        class Session(_Session):
+            async def session_open_response(self, _conversation_id, progress=None):
+                return None
+
+        async def scenario(start_speech, take_without_start=False):
+            server = _server(session=Session())
+            server._mark_undelivered = marked.append
+            ready = asyncio.Event()
+            close = asyncio.Event()
+
+            async def exchange(_connection, _conversation_id):
+                ready.set()
+                await close.wait()
+                if start_speech or take_without_start:
+                    delivery = server._delivery_queue(FRIEDL).get_nowait()
+                    if start_speech:
+                        delivery.mark_started()
+                return False
+
+            server._exchange_once = exchange
+            task = asyncio.create_task(server._handle_voice(Connection()))
+            await ready.wait()
+            result = await asyncio.to_thread(server.deliver, MAIL, "do not retain", "occasion-1")
+            close.set()
+            await task
+            return result, server._delivery_queues
+
+        result, queues = asyncio.run(scenario(False))
+        self.assertIs(result, ResponseDelivery.DELIVERED)
+        self.assertEqual(marked, ["occasion-1"])
+        self.assertEqual(queues, {})
+
+        marked.clear()
+        result, _ = asyncio.run(scenario(False, take_without_start=True))
+        self.assertIs(result, ResponseDelivery.DELIVERED)
+        self.assertEqual(marked, ["occasion-1"])
+
+        marked.clear()
+        result, _ = asyncio.run(scenario(True))
+        self.assertIs(result, ResponseDelivery.DELIVERED)
+        self.assertEqual(marked, [])
+
+    def test_slow_session_open_forwards_thinking_and_activity_live(self) -> None:
+        from types import SimpleNamespace
+
+        working = threading.Event()
+        release = threading.Event()
+        activity = VoiceActivityStatus()
+
+        class Core:
+            def process(self, conversation, retention, budget, **keywords):
+                activity.set("coding")
+                working.set()
+                release.wait(timeout=2)
+                return CoreOutcome(CoreState.RESPONDED, None, response="fresh words")
+
+        class Connection:
+            request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+            def __init__(self):
+                self.frames = []
+
+            async def send(self, frame):
+                self.frames.append(json.loads(frame))
+
+        async def scenario():
+            with tempfile.TemporaryDirectory() as directory:
+                store = SQLiteConversationStore(Path(directory) / "conversation.sqlite3")
+                gateway = ConversationGateway(Core(), store, clock=lambda: NOW)
+                session = VoiceSession(gateway, object(), object(), "friedl", 3, 30,
+                                       clock=lambda: NOW,
+                                       undelivered=lambda: ({"opportunity_id": "one"},),
+                                       activity=activity)
+                server = _server(session=session)
+                connection = Connection()
+
+                async def exchange(_connection, _conversation_id):
+                    self.assertEqual(server._delivery_queue(FRIEDL).get_nowait(),
+                                     "fresh words")
+                    return False
+
+                server._exchange_once = exchange
+                task = asyncio.create_task(server._handle_voice(connection))
+                await asyncio.to_thread(working.wait, 2)
+                for _ in range(100):
+                    if any(frame.get("type") == "activity" for frame in connection.frames):
+                        break
+                    await asyncio.sleep(0.01)
+                frames_while_working = list(connection.frames)
+                release.set()
+                await task
+                store.close()
+                return frames_while_working
+
+        frames = asyncio.run(scenario())
+        self.assertEqual(frames[0]["type"], "session.ready")
+        self.assertIn({"type": "phase", "value": "thinking"}, frames)
+        self.assertIn({"type": "activity", "value": "coding"}, frames)
+
+    def test_server_hands_one_fresh_core_response_to_the_existing_voice_path(self) -> None:
+        from types import SimpleNamespace
+
+        class Session:
+            calls = 0
+
+            async def session_open_response(self, conversation_id, progress=None):
+                self.calls += 1
+                self.conversation_id = conversation_id
+                return "newly composed"
+
+        class Connection:
+            request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+            def __init__(self):
+                self.frames = []
+
+            async def send(self, frame):
+                self.frames.append(frame)
+
+        session = Session()
+        server = _server(session=session)
+        connection = Connection()
+
+        async def observe(_connection, conversation_id):
+            self.assertEqual(conversation_id, FRIEDL)
+            self.assertEqual(server._delivery_queue(FRIEDL).get_nowait(),
+                             "newly composed")
+            return False
+
+        server._exchange_once = observe
+        asyncio.run(server._handle_voice(connection))
+        self.assertEqual(session.calls, 1)
+        self.assertEqual((server._delivery_queues, server._live_conversations),
+                         ({}, []))
+
+    def test_core_evidence_contains_references_but_no_saved_words(self) -> None:
+        payload = json.loads(_context_payload(ReasoningContext(
+            None, (), (), conversation_id=FRIEDL, undelivered_responses=(
+                {"opportunity_id": "first", "origin": "external_event",
+                 "arose_at": NOW.isoformat(), "refs": "mail:1",
+                 "text": "outdated reply"},
+            ),
+        )))
+        self.assertEqual(payload["undelivered_responses"][0]["references"], ["mail:1"])
+        self.assertNotIn("outdated reply", json.dumps(payload))
+
+    def test_one_core_turn_receives_the_occasion_evidence(self) -> None:
+        occasions = ({"opportunity_id": "first", "refs": "mail:1"},
+                     {"opportunity_id": "second", "refs": "mail:2"})
+        calls = []
+
+        class Core:
+            def process(self, conversation, retention, budget, **keywords):
+                calls.append((conversation, keywords))
+                return CoreOutcome(CoreState.RESPONDED, None,
+                                   response="A fresh question about one item")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteConversationStore(Path(directory) / "conversation.sqlite3")
+            gateway = ConversationGateway(Core(), store, clock=lambda: NOW)
+            session = VoiceSession(gateway, object(), object(), "friedl", 3, 30,
+                                   clock=lambda: NOW, undelivered=lambda: occasions)
+            self.assertEqual(asyncio.run(session.session_open_response(FRIEDL)),
+                             "A fresh question about one item")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0].events[-1].kind, "session.opened")
+            self.assertEqual(occasions[1]["opportunity_id"], "second")
+            self.assertEqual(store.load(FRIEDL).turns[-1].content,
+                             "A fresh question about one item")
+            store.close()
+
+    def test_no_occasion_means_no_core_turn(self) -> None:
+        class Gateway:
+            def receive_session_open(self, *arguments):
+                raise AssertionError("Core must not be called")
+
+        session = VoiceSession(Gateway(), object(), object(), "friedl", 3, 30,
+                               undelivered=lambda: ())
+        self.assertIsNone(asyncio.run(session.session_open_response(FRIEDL)))
+
+
+class LegacyCleanupTests(unittest.TestCase):
+    def test_old_reply_text_is_discarded_on_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pending-messages.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE pending_messages (text TEXT)")
+                connection.execute("INSERT INTO pending_messages VALUES ('stale words')")
+            pending = SQLitePendingRelays(path)
+            self.assertEqual(pending.relays(NOW), ())
+            pending.close()
+            with sqlite3.connect(path) as connection:
+                self.assertIsNone(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'pending_messages'"
+                ).fetchone())
+
+    def test_no_competing_replay_entry_point_remains(self) -> None:
+        source = ROOT / "src/alx"
+        self.assertFalse((source / "continuity/pending_messages.py").exists())
+        forbidden = {"_take_waiting", "_keep_unspoken", "_record_waiting",
+                     "SQLitePendingMessages", "take_all"}
+        for path in source.rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            names = {node.name for node in ast.walk(tree)
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                          ast.ClassDef))}
+            self.assertFalse(names & forbidden, path)
 
 
 class SetupFailureTests(unittest.TestCase):

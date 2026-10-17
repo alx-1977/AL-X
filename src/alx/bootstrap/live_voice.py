@@ -89,7 +89,7 @@ from alx.interfaces.reader_tile import tile_source
 from alx.interfaces.phone import PHONE_CONVERSATION_ID, PhoneLink
 from alx.providers.imessage import IMessageChannel
 from alx.config.settings import phone_settings
-from alx.continuity.pending_messages import SQLitePendingMessages
+from alx.continuity.pending_relays import SQLitePendingRelays
 from alx.continuity.own_time_source import OwnTimeSource
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
@@ -1238,6 +1238,7 @@ async def run(repository_root: Path) -> None:
         core_turn_lock=core_turn_lock,
         turn_origin_sink=lambda person: person_turn_in_progress.__setitem__(0, person),
         activity=activity,
+        undelivered=opportunity_ledger.undelivered,
     )
     # D-043: keeps the readers on their schedules and records every step.
     reader_watch = None if reader_runtime is None else reader_monitor(
@@ -1263,14 +1264,14 @@ async def run(repository_root: Path) -> None:
         reader_tile=None if reader_runtime is None else tile_source(
             reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch,
             display=ReaderSettings.from_environment(environment).display),
-        # D-044: replies made in a thread nobody listens on reach Friedl's
-        # session, and wait for his next one when none is open.
+        # Retry copies of delivered replies into Friedl's conversation.
         relay=gateway.relay_response,
         locate=gateway.locate_reply,
-        pending=SQLitePendingMessages(storage_root / "pending-messages.sqlite3"),
+        pending=SQLitePendingRelays(storage_root / "pending-messages.sqlite3"),
         # Whether Friedl is here or away, for the icon on his screen.
         presence=continuity_runtime.store.presence,
         phone=phone_link,
+        mark_undelivered=opportunity_ledger.mark_response_undelivered,
     )
     if phone_link is not None:
         phone_link.fallback = lambda text: server.deliver(PHONE_CONVERSATION_ID, text)

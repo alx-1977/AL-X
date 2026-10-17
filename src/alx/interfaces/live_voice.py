@@ -272,6 +272,19 @@ class _ExchangeFeed:
             await asyncio.gather(self._waiter, return_exceptions=True)
 
 
+class QueuedDelivery:
+    """Ephemeral words and the durable occasion they came from."""
+
+    def __init__(self, response: str, opportunity_id: str) -> None:
+        self.response = response
+        self.opportunity_id = opportunity_id
+        self.started = False
+
+    def mark_started(self) -> None:
+        self.started = True
+        self.response = ""
+
+
 class VoiceSession:
     """Move audio and Core outcomes; never infer intent or select capabilities."""
 
@@ -289,6 +302,7 @@ class VoiceSession:
         core_turn_lock: asyncio.Lock | None = None,
         turn_origin_sink: Callable[[bool], None] | None = None,
         activity: VoiceActivityStatus | None = None,
+        undelivered: Callable[[], tuple] | None = None,
     ) -> None:
         if not person_id.strip():
             raise ValueError("person_id must not be blank")
@@ -317,11 +331,91 @@ class VoiceSession:
         # knowledge stays in the transport.
         self._turn_origin_sink = turn_origin_sink or (lambda _person: None)
         self._activity = activity or VoiceActivityStatus()
+        self._undelivered = undelivered or (lambda: ())
         # Person inputs received and not yet answered, by conversation. From
         # the moment a final transcript or typed line arrives until its Core
         # turn returns, the voice belongs to that turn. Touched only on the
         # event loop, which is also where a delivery is admitted.
         self._pending_person_turns: dict[str, int] = {}
+
+    async def session_open_response(
+        self, conversation_id: str,
+        progress: Callable[[VoiceEvent], Any] | None = None,
+    ) -> str | None:
+        """One fresh Core turn when unheard occasions exist at connection time."""
+        async with self._core_turn_lock:
+            if not self._undelivered():
+                return None
+            loop = asyncio.get_running_loop()
+            updates: asyncio.Queue[str] = asyncio.Queue()
+            unsubscribe = self._activity.subscribe(
+                lambda value: loop.call_soon_threadsafe(updates.put_nowait, value)
+            )
+            core_task: asyncio.Task[Any] | None = None
+            update_task: asyncio.Task[str] | None = None
+            try:
+                if progress is not None:
+                    await progress(VoiceEvent(VoiceEventKind.THINKING))
+                self._activity.set("reasoning")
+
+                async def run_turn() -> Any:
+                    assert core_task is not None
+                    self._activity.set_coding_owner_alive(
+                        lambda task=core_task: not task.done()
+                    )
+                    self._turn_origin_sink(True)
+                    try:
+                        return await run_core_worker(
+                            self._gateway.receive_session_open, conversation_id,
+                            self._step_budget,
+                            self._clock() + timedelta(days=self._retention_days),
+                        )
+                    finally:
+                        self._turn_origin_sink(False)
+
+                core_task = asyncio.create_task(run_turn())
+                while not core_task.done():
+                    update_task = asyncio.create_task(updates.get())
+                    done, _ = await asyncio.wait(
+                        (core_task, update_task), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if update_task in done and progress is not None:
+                        await progress(VoiceEvent(
+                            VoiceEventKind.ACTIVITY, activity=update_task.result()
+                        ))
+                    if update_task not in done:
+                        update_task.cancel()
+                        await asyncio.gather(update_task, return_exceptions=True)
+                    update_task = None
+                outcome = await core_task
+                while not updates.empty() and progress is not None:
+                    await progress(VoiceEvent(
+                        VoiceEventKind.ACTIVITY, activity=updates.get_nowait()
+                    ))
+            finally:
+                unsubscribe()
+                # A failed progress send or cancelled socket must not release
+                # the shared Core lock while its worker still writes stores.
+                # Waiting on the task set does not cancel the worker when this
+                # caller is cancelled, just as run_core_worker does internally.
+                cancelled_during_cleanup = False
+                while core_task is not None and not core_task.done():
+                    try:
+                        await asyncio.wait({core_task})
+                    except asyncio.CancelledError:
+                        # Repeated cancellation may interrupt cleanup, but
+                        # cannot shorten the worker's ownership of Core.
+                        cancelled_during_cleanup = True
+                if core_task is not None:
+                    # If progress failed first, retrieve a later worker error
+                    # without replacing the transport failure.
+                    await asyncio.gather(core_task, return_exceptions=True)
+                if update_task is not None and not update_task.done():
+                    update_task.cancel()
+                    await asyncio.gather(update_task, return_exceptions=True)
+                if cancelled_during_cleanup:
+                    raise asyncio.CancelledError
+        return outcome.response if outcome.state.value == "responded" else None
 
     async def remote_turn(self, conversation_id: str, content: str,
                           turn_id: str | None = None) -> Any:
@@ -394,7 +488,7 @@ class VoiceSession:
         self,
         conversation_id: str,
         audio: AsyncIterable[AudioChunk],
-        deliveries: "asyncio.Queue[str] | None" = None,
+        deliveries: "asyncio.Queue[str | QueuedDelivery] | None" = None,
         typed: "asyncio.Queue[str] | None" = None,
     ) -> AsyncIterator[VoiceEvent]:
         if not conversation_id.strip():
@@ -443,7 +537,7 @@ class VoiceSession:
         # transport when an autonomous turn returns RESPONDED and spoken here
         # through the same synthesis a person turn uses. Read directly rather
         # than relayed, so nothing sits in flight between admission and here.
-        delivery_waiter: asyncio.Future[str] | None = None
+        delivery_waiter: asyncio.Future[str | QueuedDelivery] | None = None
         try:
             while True:
                 if input_waiter is None:
@@ -460,13 +554,15 @@ class VoiceSession:
                 # so any delivery waiting here was admitted before every person
                 # input now queued. It is spoken first, which keeps what was
                 # heard in the order the conversation recorded it.
-                spoken: list[str] = []
+                spoken: list[str | QueuedDelivery] = []
                 if delivery_waiter is not None and delivery_waiter.done():
                     spoken.append(delivery_waiter.result())
                     delivery_waiter = None
                 while deliveries is not None and not deliveries.empty():
                     spoken.append(deliveries.get_nowait())
-                for response in spoken:
+                for delivery in spoken:
+                    response = (delivery.response if isinstance(delivery, QueuedDelivery)
+                                else delivery)
                     # The console mirrors this exactly as it mirrors an
                     # answer to Friedl. Going straight to synthesis left her
                     # unprompted speech audible with no transcript line: the
@@ -477,6 +573,13 @@ class VoiceSession:
                     # it; nothing here rewords it.
                     async for speech_event in self._speak(conversation_id, response, feed):
                         yield speech_event
+                        if (isinstance(delivery, QueuedDelivery)
+                                and speech_event.kind is VoiceEventKind.SPEAKING):
+                            # The exchange resumes only after its consumer
+                            # successfully sends the speech-start phase. A
+                            # close during that send leaves the occasion
+                            # available for fresh reasoning.
+                            delivery.mark_started()
                 if not input_waiter.done():
                     continue
                 kind, item = input_waiter.result()

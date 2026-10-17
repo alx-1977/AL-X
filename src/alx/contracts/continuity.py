@@ -285,9 +285,6 @@ class ResponseDelivery(str, Enum):
 
     DELIVERED = "delivered"
     UNDELIVERABLE = "undeliverable"
-    # D-044: nobody was connected, so it is kept and delivered, in order, the
-    # next time Friedl opens AL/X. Not lost, so not undelivered.
-    QUEUED = "queued"
 
 
 class AutonomousResponseTransport(Protocol):
@@ -299,7 +296,8 @@ class AutonomousResponseTransport(Protocol):
     and the "who may author AL/X's words" clarification both forbid.
     """
 
-    def deliver(self, conversation_id: str, response: str) -> ResponseDelivery: ...
+    def deliver(self, conversation_id: str, response: str,
+                opportunity_id: str | None = None) -> ResponseDelivery: ...
 
 
 async def run_core_worker(operation: Any, *arguments: Any) -> Any:
