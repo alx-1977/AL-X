@@ -159,6 +159,42 @@ class FinishedHistoryTests(unittest.TestCase):
         self.assertTrue(bounded.values["truncated"])
         self.assertEqual([g["goal_id"] for g in bounded.values["goals"]], ["completed", "cancelled"])
 
+    def test_search_casefolds_unicode_names_and_stored_text_after_restart(self):
+        states = (
+            replace(shipment("name"), referents=(
+                Referent("recipient", {"name": "MÜLLER"}),
+            )),
+            replace(shipment("objective"), objective=Objective("event:reminder", "ÜBER delivery")),
+            replace(shipment("context"), context={"address": "ZÜRICH", "optional": None}),
+            replace(shipment("progress"), progress=(ProgressRecord("checked", "ÉTUDIÉ shipment"),)),
+            replace(shipment("evidence"), evidence=(Evidence(
+                "tracking", "shipment_status", {"street": "Straße"},
+                ("tracked",), ("event:reminder",),
+            ),)),
+            shipment("ÄUFTRAG"),
+        )
+        for state in states:
+            self.store.create(state, "c1", RETENTION)
+        for restarted in (False, True):
+            if restarted:
+                self.store.close()
+                self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+            for identifier, queries in (
+                ("name", ("müller", "MÜLLER")),
+                ("objective", ("über", "ÜBER")),
+                ("context", ("zürich", "ZÜRICH")),
+                ("progress", ("étudié", "ÉTUDIÉ")),
+                ("evidence", ("STRASSE", "straße")),
+                ("ÄUFTRAG", ("äuftrag", "ÄUFTRAG")),
+            ):
+                for query in queries:
+                    with self.subTest(restarted=restarted, query=query):
+                        result = self.read(query=query)
+                        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+                        self.assertEqual([g["goal_id"] for g in result.values["goals"]], [identifier])
+            self.assertEqual(self.read(goal_id="ÄUFTRAG").values["goals"][0]["goal_id"], "ÄUFTRAG")
+            self.assertEqual(self.read(goal_id="äuftrag").failure["code"], "goal_not_found")
+
     def test_id_read_is_full_and_read_only(self):
         state = shipment(status=GoalStatus.COMPLETED)
         saved = self.store.create(state, "c1", RETENTION)

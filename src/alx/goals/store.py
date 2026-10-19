@@ -357,6 +357,12 @@ class SQLiteGoalStore:
         # Core turns execute on one serialized worker so blocking provider I/O
         # cannot stall the asyncio voice transport.
         self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
+        # SQLite's built-in lower() folds ASCII only. Register on every new
+        # connection so history searches also match Unicode after a restart.
+        self._connection.create_function(
+            "casefold", 1, lambda value: None if value is None else value.casefold(),
+            deterministic=True,
+        )
         self._connection.execute("PRAGMA foreign_keys = ON")
         # Owned here rather than threaded through six call sites. `updated_at`
         # records when the row was written, which is a storage fact; asking the
@@ -708,10 +714,10 @@ class SQLiteGoalStore:
             raise ValueError("contains or goal_id must not be blank")
         now = _time_to_data(self._now())
         predicate = "goal_id = ?" if goal_id is not None else (
-            "(instr(lower(goal_id), lower(?)) > 0 OR EXISTS "
+            "(instr(casefold(goal_id), casefold(?)) > 0 OR EXISTS "
             "(SELECT 1 FROM json_tree(goals.state_json) "
             "WHERE type IN ('text', 'integer', 'real') "
-            "AND instr(lower(CAST(atom AS TEXT)), lower(?)) > 0))"
+            "AND instr(casefold(CAST(atom AS TEXT)), casefold(?)) > 0))"
         )
         arguments = (value,) if goal_id is not None else (value, value)
         ids = self._connection.execute(
