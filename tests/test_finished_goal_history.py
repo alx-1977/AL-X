@@ -16,7 +16,7 @@ from alx.contracts import (
     AgentDecision, CapabilityCall, CapabilityResultState, ConversationOrigin, ConversationSnapshot,
     ConversationTurn, Evidence, GoalMutationKind, GoalProposal, GoalState, GoalStatus,
     GoalStopReason, MailReference, Objective,
-    ProgressRecord, Referent, RetentionPolicy, SideEffect, SuccessCriterion,
+    ProgressRecord, Referent, RetentionPolicy, SideEffect, SuccessCriterion, ContentOrigin,
 )
 from alx.core import CoreAgent, CoreState
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
@@ -89,6 +89,121 @@ class FinishedHistoryTests(unittest.TestCase):
         outcome = core.process(conversation, RETENTION, 5)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         return reasoner.contexts
+
+    def assert_shipment_visible(self):
+        for arguments in ({"query": "878504110311"}, {"goal_id": "e8b6"}):
+            with self.subTest(arguments=arguments):
+                result = self.read(**arguments)
+                self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+                self.assertEqual([g["goal_id"] for g in result.values["goals"]], ["e8b6a256"])
+        with self.subTest(surface="recent_finished"):
+            self.assertEqual([g.state.goal_id for g in self.store.list_recent_finished("c1", 5)],
+                             ["e8b6a256"])
+
+    def test_old_email_does_not_expire_a_new_finished_goal(self):
+        policy = RetentionPolicy()
+        email = policy.direct_mail(NOW - timedelta(days=41), (MailReference("INBOX", "42", "1"),))
+        derived = policy.derive(ContentOrigin.ALX, NOW, (email,))
+        self.assertLess(derived.content_expires_at, NOW)
+        saved = self.store.create(shipment(), "c1", RETENTION, derived)
+        self.store.replace(shipment(status=GoalStatus.COMPLETED), RETENTION, saved.revision)
+        self.assert_shipment_visible()
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, RETENTION)
+
+    def test_invalid_stored_expiry_is_repaired_once_without_renewing_valid_rows(self):
+        policy = RetentionPolicy()
+        provenance = policy.direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
+        self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
+        valid = self.store.create(replace(shipment("valid", GoalStatus.COMPLETED), context={}),
+                                  "elsewhere", RETENTION, provenance)
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("UPDATE goals SET content_expires_at = ? WHERE goal_id = ?",
+                               ((NOW - timedelta(days=11)).isoformat(), "e8b6a256"))
+            connection.execute("PRAGMA user_version = 9")
+        self.now += timedelta(days=1)
+        for _ in range(2):
+            self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+            self.assert_shipment_visible()
+            repaired = self.store.load("e8b6a256")
+            self.assertEqual(repaired.provenance.content_expires_at, RETENTION)
+            self.assertEqual(self.store.load("valid"), valid)
+            self.store.close()
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.now = RETENTION
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+
+    def test_goal_retention_clock_on_mail_introduction_and_subsequent_updates(self):
+        policy = RetentionPolicy()
+        for origin in (ContentOrigin.PERSON, ContentOrigin.ALX, ContentOrigin.EXTERNAL):
+            with self.subTest(origin=origin):
+                identifier = origin.value
+                self.now = NOW
+                saved = self.store.create(shipment(identifier), "c1", RETENTION,
+                                          policy.non_mail(origin, NOW))
+                self.assertIsNone(saved.provenance.content_expires_at)
+                self.now += timedelta(days=2)
+                email = policy.direct_mail(NOW - timedelta(days=41),
+                                            (MailReference("INBOX", "42", "1"),))
+                supplied = policy.derive(ContentOrigin.ALX, self.now, (saved.provenance, email))
+                updated = self.store.replace(saved.state, RETENTION, saved.revision, supplied)
+                self.assertEqual(updated.provenance.recorded_at, self.now)
+                self.assertEqual(updated.provenance.content_expires_at, RETENTION)
+                self.now += timedelta(days=3)
+                supplied = policy.derive(ContentOrigin.ALX, self.now, (updated.provenance, email))
+                rewritten = self.store.replace(updated.state, RETENTION, updated.revision, supplied)
+                self.assertEqual(rewritten.provenance, updated.provenance)
+                fresh_email = policy.direct_mail(self.now, (MailReference("INBOX", "42", "2"),))
+                supplied = policy.derive(ContentOrigin.ALX, self.now, (rewritten.provenance, fresh_email))
+                rewritten = self.store.replace(rewritten.state, RETENTION, rewritten.revision, supplied)
+                self.assertEqual(rewritten.provenance.content_expires_at, RETENTION)
+                self.assertEqual(set(rewritten.provenance.mail_references),
+                                 set((*email.mail_references, *fresh_email.mail_references)))
+
+    def test_goal_deadline_respects_own_horizon_and_creation_lower_bound(self):
+        email = RetentionPolicy().direct_mail(NOW - timedelta(days=41),
+                                              (MailReference("INBOX", "42", "1"),))
+        for horizon, expected in ((-1, 0), (2, 2), (90, 30)):
+            with self.subTest(horizon=horizon):
+                saved = self.store.create(shipment(str(horizon)), "c1",
+                                          NOW + timedelta(days=horizon), email)
+                self.assertEqual(saved.provenance.recorded_at, NOW)
+                self.assertEqual(saved.provenance.content_expires_at,
+                                 NOW + timedelta(days=expected))
+
+    def test_legacy_repair_uses_record_time_and_preserves_real_expiration(self):
+        policy = RetentionPolicy()
+        provenance = policy.direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
+        self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("ALTER TABLE goals DROP COLUMN created_at")
+            connection.execute("UPDATE goals SET content_recorded_at = ?, content_expires_at = ?",
+                               (NOW.isoformat().replace("+00:00", "Z"),
+                                (NOW - timedelta(days=11)).isoformat()))
+            connection.execute("PRAGMA user_version = 9")
+        self.now = RETENTION + timedelta(days=1)
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, RETENTION)
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+
+    def test_history_deadlines_are_compared_as_instants(self):
+        provenance = RetentionPolicy().direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
+        self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
+        # Equivalent legacy ISO timestamps must not disappear two hours early.
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("UPDATE goals SET retention_until = ?, content_expires_at = ?",
+                               ("2026-11-18T06:00:00-02:00", "2026-11-18T06:00:00-02:00"))
+        self.now = RETENTION - timedelta(minutes=30)
+        self.assert_shipment_visible()
+        self.now = RETENTION
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
 
     def test_reminder_completion_then_follow_up_after_restart(self):
         self.store.create(shipment(), "c1", RETENTION)

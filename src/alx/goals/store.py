@@ -21,6 +21,7 @@ from alx.contracts import (
 )
 from alx.contracts.provenance import (
     ContentProvenance,
+    RetentionPolicy,
     provenance_from_storage,
     provenance_to_storage,
 )
@@ -32,13 +33,41 @@ from alx.contracts.scope import (
 from alx.contracts.storage import serialized_store
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
     "content_expires_at",
     "mail_references",
 )
+
+# Both history surfaces apply the same deadlines, including legacy ISO times
+# with offsets or a Z suffix (lexical ordering is not chronological ordering).
+RETAINED_GOAL = (
+    "julianday(retention_until) > julianday(?) AND "
+    "(content_expires_at IS NULL OR julianday(content_expires_at) > julianday(?))"
+)
+
+
+def _goal_provenance(
+    provenance: ContentProvenance | None,
+    recorded_at: datetime,
+    retention_until: datetime,
+) -> ContentProvenance | None:
+    """Stamp goal-owned retention, never a source record's deadline.
+
+    Call at creation or when mail first enters a goal; existing logical
+    records keep their original clock on replacement. Migration uses the
+    persisted record timestamp, never the time the repair happens to run.
+    """
+    if provenance is None or not provenance.governed_by_retention():
+        return provenance
+    return replace(
+        provenance, recorded_at=recorded_at,
+        content_expires_at=max(recorded_at, min(
+            retention_until, RetentionPolicy().expires_at(recorded_at),
+        )),
+    )
 
 
 class GoalStoreError(Exception):
@@ -419,6 +448,10 @@ class SQLiteGoalStore:
             # takes its real place the first time it is actually written.
             if "updated_at" not in columns:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN updated_at TEXT")
+            if "created_at" not in columns:
+                # Unknown legacy creation times remain unknown. Provenance's
+                # own write timestamp is sufficient to repair its bad deadline.
+                self._connection.execute("ALTER TABLE goals ADD COLUMN created_at TEXT")
             # Completion is a transition fact, distinct from later writes.
             # Legacy finished goals have unknown completion time (NULL).
             if "finished_at" not in columns:
@@ -479,6 +512,24 @@ class SQLiteGoalStore:
                     self._connection.execute(
                         f'ALTER TABLE goals ADD COLUMN "{column}" TEXT'
                     )
+            for row in self._connection.execute(
+                "SELECT goal_id, retention_until, created_at, content_origins, "
+                "content_recorded_at, content_expires_at, mail_references FROM goals "
+                "WHERE content_expires_at IS NOT NULL"
+            ).fetchall():
+                provenance = provenance_from_storage(*row[3:])
+                assert provenance is not None
+                created_at = _time_from_data(row[2]) or provenance.recorded_at
+                if provenance.content_expires_at < created_at:
+                    repaired = _goal_provenance(
+                        provenance, max(created_at, provenance.recorded_at),
+                        _time_from_data(row[1]),
+                    )
+                    self._connection.execute(
+                        "UPDATE goals SET content_origins = ?, content_recorded_at = ?, "
+                        "content_expires_at = ?, mail_references = ? WHERE goal_id = ?",
+                        (*provenance_to_storage(repaired), row[0]),
+                    )
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS conversation_turns (goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, turn_id TEXT NOT NULL, turn_json TEXT NOT NULL, PRIMARY KEY(goal_id, ordinal), UNIQUE(goal_id, turn_id))"
             )
@@ -516,12 +567,13 @@ class SQLiteGoalStore:
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
         written_at = self._now()
+        provenance = _goal_provenance(provenance, written_at, retention_until)
         try:
             with self._connection:
                 encoded = provenance_to_storage(provenance)
                 self._connection.execute(
-                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope, updated_at, unfinished, project_id, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope), _time_to_data(written_at), _is_unfinished(state), None if scope is None else scope.project_id, None if _is_unfinished(state) else _time_to_data(written_at.astimezone(UTC))),
+                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope, updated_at, unfinished, project_id, finished_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope), _time_to_data(written_at), _is_unfinished(state), None if scope is None else scope.project_id, None if _is_unfinished(state) else _time_to_data(written_at.astimezone(UTC)), _time_to_data(written_at)),
                 )
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
@@ -695,8 +747,7 @@ class SQLiteGoalStore:
             arguments += (json.dumps(response_goal_ids),)
         ids = self._connection.execute(
             "SELECT goal_id FROM goals WHERE unfinished = 0 AND (" + association + ") "
-            "AND retention_until > ? "
-            "AND (content_expires_at IS NULL OR content_expires_at > ?) "
+            "AND " + RETAINED_GOAL + " "
             "ORDER BY finished_at DESC, goal_id DESC LIMIT ?",
             (*arguments, now, now, limit),
         ).fetchall()
@@ -730,8 +781,7 @@ class SQLiteGoalStore:
         ordering = "(goal_id = ?) DESC, " if goal_id is not None else ""
         ids = self._connection.execute(
             "SELECT goal_id FROM goals WHERE " + predicate +
-            " AND retention_until > ? "
-            "AND (content_expires_at IS NULL OR content_expires_at > ?) "
+            " AND " + RETAINED_GOAL + " "
             "ORDER BY " + ordering + "updated_at DESC, goal_id DESC LIMIT ?",
             (*arguments, now, now, *((value,) if goal_id is not None else ()),
              2 if goal_id is not None else limit + 1),
@@ -962,16 +1012,15 @@ class SQLiteGoalStore:
                 raise ValueError("goal replacement cannot discard provenance origins")
             if not set(existing.mail_references).issubset(provenance.mail_references):
                 raise ValueError("goal replacement cannot discard mail references")
-            if (
-                existing.content_expires_at is not None
-                and (
-                    provenance.content_expires_at is None
-                    or provenance.content_expires_at > existing.content_expires_at
-                )
-            ):
-                raise ValueError("goal replacement cannot extend content retention")
-        encoded = provenance_to_storage(retained)
         written_at = self._now()
+        if existing is not None and existing.governed_by_retention():
+            # New input deadlines describe sources, not this goal. Preserve
+            # this logical record's clock while retaining the union of sources.
+            retained = replace(retained, recorded_at=existing.recorded_at,
+                               content_expires_at=existing.content_expires_at)
+        else:
+            retained = _goal_provenance(retained, written_at, retention_until)
+        encoded = provenance_to_storage(retained)
         updated = self._connection.execute(
             "UPDATE goals SET revision = revision + 1, retention_until = ?, "
             "state_json = ?, content_origins = ?, content_recorded_at = ?, "

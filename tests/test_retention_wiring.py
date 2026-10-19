@@ -66,7 +66,7 @@ class AuthoritativePathTests(unittest.TestCase):
             goals_path = runtime / "goals.sqlite3"
             memories_path = runtime / "memories.sqlite3"
             conversations = SQLiteConversationStore(conversations_path)
-            goals = SQLiteGoalStore(goals_path)
+            goals = SQLiteGoalStore(goals_path, clock=lambda: CORE_TIME)
             memories = SQLiteMemoryStore(memories_path)
             goal_proposal = GoalProposal(
                 GoalMutationKind.CREATE,
@@ -144,12 +144,13 @@ class AuthoritativePathTests(unittest.TestCase):
                     goals.load("goal-1").provenance,
                     memories.load("memory-1").current.provenance,
                 )
-                for provenance in provenances:
+                for index, provenance in enumerate(provenances):
                     self.assertIsNotNone(provenance)
                     self.assertIn(ContentOrigin.MAIL_MESSAGE, provenance.origins)
                     self.assertEqual(provenance.mail_references, (REFERENCE,))
                     self.assertEqual(
-                        provenance.content_expires_at, NOW + timedelta(days=30)
+                        provenance.content_expires_at,
+                        (CORE_TIME if index == 1 else NOW) + timedelta(days=30)
                     )
                 records = survey(runtime)
                 self.assertEqual(len(records), 3)
@@ -166,9 +167,9 @@ class AuthoritativePathTests(unittest.TestCase):
 
 
 class StoreInvariantTests(unittest.TestCase):
-    def test_goal_store_preserves_provenance_and_rejects_renewal(self) -> None:
+    def test_goal_store_preserves_its_clock_and_rejects_origin_removal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3", clock=lambda: NOW)
             original = RetentionPolicy().direct_mail(NOW, (REFERENCE,))
             try:
                 saved = store.create(
@@ -183,19 +184,19 @@ class StoreInvariantTests(unittest.TestCase):
                 renewed = RetentionPolicy().direct_mail(
                     NOW + timedelta(days=1), (REFERENCE,)
                 )
-                with self.assertRaises(ValueError):
-                    store.replace(
-                        preserved.state,
-                        preserved.retention_until,
-                        preserved.revision,
-                        renewed,
-                    )
+                unchanged = store.replace(
+                    preserved.state,
+                    preserved.retention_until,
+                    preserved.revision,
+                    renewed,
+                )
+                self.assertEqual(unchanged.provenance, original)
                 stripped = RetentionPolicy().non_mail(ContentOrigin.ALX, CORE_TIME)
                 with self.assertRaises(ValueError):
                     store.replace(
                         preserved.state,
                         preserved.retention_until,
-                        preserved.revision,
+                        unchanged.revision,
                         stripped,
                     )
             finally:
@@ -271,7 +272,7 @@ class CapabilityResultProvenanceTests(unittest.TestCase):
         policy = RetentionPolicy()
         with tempfile.TemporaryDirectory() as directory:
             goals_path = Path(directory) / "goals.sqlite3"
-            goals = SQLiteGoalStore(goals_path)
+            goals = SQLiteGoalStore(goals_path, clock=lambda: CORE_TIME)
             try:
                 # A goal that owes nothing to mail: AL/X's own work so far.
                 snapshot = goals.create(
@@ -323,7 +324,7 @@ class CapabilityResultProvenanceTests(unittest.TestCase):
         self.assertIn(ContentOrigin.MAIL_MESSAGE, folded.provenance.origins)
         self.assertEqual(folded.provenance.mail_references, (REFERENCE,))
         self.assertEqual(
-            folded.provenance.content_expires_at, NOW + timedelta(days=30)
+            folded.provenance.content_expires_at, CORE_TIME + timedelta(days=30)
         )
 
 
