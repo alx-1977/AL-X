@@ -152,6 +152,7 @@ REASONING_TURN_WINDOW = 12
 # would eventually carry every goal AL/X has ever left unfinished. The cap is
 # on the final projection, not on each source that feeds it.
 UNFINISHED_GOAL_CANDIDATES = 10
+RECENT_FINISHED_GOALS = 5
 # Plans that need AL/X, listed beside those candidates in their own bound so
 # that neither can crowd the other out.
 PLAN_ATTENTION_CANDIDATES = 5
@@ -533,6 +534,13 @@ class CoreAgent:
                 # A newly created goal is already known in full this turn.
                 selected_goals.add(snapshot.state.goal_id)
             summaries = self._selectable_goals(conversation_id, snapshot)
+            finished_goals = self._store.list_recent_finished(
+                conversation_id, RECENT_FINISHED_GOALS,
+            )
+            prior_goal_provenance = (*prior_goal_provenance, *(
+                item.provenance for item in finished_goals
+                if item.provenance is not None and item.provenance not in prior_goal_provenance
+            ))
             # Read before provenance is derived: what she is shown is a
             # reasoning input, so a mail-derived memory's deadline must carry
             # into whatever she writes from it.
@@ -575,6 +583,7 @@ class CoreAgent:
                     conversation_id=conversation_id,
                     trigger_event_id=trigger_event_id,
                     unfinished_goals=summaries,
+                    recent_finished_goals=finished_goals,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
                     relationship_memories=relationship_memories,
@@ -1524,6 +1533,9 @@ class CoreAgent:
             active_goal=state,
             turns=project_turns_for_reasoning(conversation.turns, state),
             unfinished_goals=self._selectable_goals(conversation_id, snapshot),
+            recent_finished_goals=self._store.list_recent_finished(
+                conversation_id, RECENT_FINISHED_GOALS,
+            ),
             transient_attempts=transient_attempts,
             response_only_reason=reason,
             refused_calls=refused_calls or context.refused_calls,

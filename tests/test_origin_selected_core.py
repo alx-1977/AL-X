@@ -63,7 +63,7 @@ class OriginSelectionTests(unittest.TestCase):
         seen_sol, seen_luna = self.sol.contexts[0], self.luna.contexts[0]
         for field in (
             "active_goal", "turns", "capabilities", "memories", "events",
-            "transient_attempts", "conversation_id", "unfinished_goals",
+            "transient_attempts", "conversation_id", "unfinished_goals", "recent_finished_goals",
         ):
             with self.subTest(field=field):
                 self.assertEqual(

@@ -50,6 +50,9 @@ class NullGoalStore:
     def list_unfinished(self, conversation_id=None, *, project_id=None, limit=None):
         return ()
 
+    def list_recent_finished(self, conversation_id, limit):
+        return ()
+
     def list_needing_core(self, limit, exclude=frozenset()):
         return ()
 

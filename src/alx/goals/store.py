@@ -32,7 +32,7 @@ from alx.contracts.scope import (
 from alx.contracts.storage import serialized_store
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -413,6 +413,10 @@ class SQLiteGoalStore:
             # takes its real place the first time it is actually written.
             if "updated_at" not in columns:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN updated_at TEXT")
+            # Completion is a transition fact, distinct from later writes.
+            # Legacy finished goals have unknown completion time (NULL).
+            if "finished_at" not in columns:
+                self._connection.execute("ALTER TABLE goals ADD COLUMN finished_at TEXT")
             # Two projections of facts the goal already holds, promoted into
             # columns so the candidate query can be answered from an index
             # instead of by decoding every goal that was ever stored.
@@ -460,6 +464,10 @@ class SQLiteGoalStore:
                 "CREATE INDEX IF NOT EXISTS goals_open_by_recency "
                 "ON goals(unfinished, updated_at DESC, goal_id DESC)"
             )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS goals_finished_by_conversation "
+                "ON goals(unfinished, conversation_id, finished_at DESC, goal_id DESC)"
+            )
             for column in PROVENANCE_COLUMNS:
                 if column not in columns:
                     self._connection.execute(
@@ -501,12 +509,13 @@ class SQLiteGoalStore:
         _aware(retention_until, "retention_until")
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
+        written_at = self._now()
         try:
             with self._connection:
                 encoded = provenance_to_storage(provenance)
                 self._connection.execute(
-                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope, updated_at, unfinished, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope), _time_to_data(self._now()), _is_unfinished(state), None if scope is None else scope.project_id),
+                    "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope, updated_at, unfinished, project_id, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope), _time_to_data(written_at), _is_unfinished(state), None if scope is None else scope.project_id, None if _is_unfinished(state) else _time_to_data(written_at.astimezone(UTC))),
                 )
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
@@ -658,6 +667,81 @@ class SQLiteGoalStore:
             if len(found) >= limit:
                 break
         return tuple(found)
+
+    def list_recent_finished(
+        self, conversation_id: str, limit: int,
+    ) -> tuple[GoalSnapshot, ...]:
+        """Terminal goals of this conversation, latest completion first.
+
+        Unknown legacy times sort last; ids break ties. Full snapshots keep
+        the same content and provenance as load().
+        """
+        if not conversation_id.strip():
+            raise ValueError("conversation_id must not be blank")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive int")
+        now = _time_to_data(self._now())
+        ids = self._connection.execute(
+            "SELECT goal_id FROM goals WHERE unfinished = 0 AND conversation_id = ? "
+            "AND retention_until > ? "
+            "AND (content_expires_at IS NULL OR content_expires_at > ?) "
+            "ORDER BY finished_at DESC, goal_id DESC LIMIT ?",
+            (conversation_id, now, now, limit),
+        ).fetchall()
+        return tuple(self.load(item[0]) for item in ids)
+
+    def read_history(
+        self, *, contains: str | None = None, goal_id: str | None = None, limit: int = 10,
+    ) -> tuple[dict[str, Any], tuple[ContentProvenance, ...]]:
+        """Read retained history using the authoritative stored serializer.
+
+        Literal case-insensitive substring search across stored JSON values,
+        including nested context, referents, progress, attempts and evidence.
+        Search returns bounded identities; exact id reads all stored content.
+        """
+        if (contains is None) == (goal_id is None):
+            raise ValueError("provide exactly one of contains or goal_id")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
+            raise ValueError("limit must be 1 to 50")
+        value = contains if contains is not None else goal_id
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("contains or goal_id must not be blank")
+        now = _time_to_data(self._now())
+        predicate = "goal_id = ?" if goal_id is not None else (
+            "(instr(lower(goal_id), lower(?)) > 0 OR EXISTS "
+            "(SELECT 1 FROM json_tree(goals.state_json) "
+            "WHERE type IN ('text', 'integer', 'real') "
+            "AND instr(lower(CAST(atom AS TEXT)), lower(?)) > 0))"
+        )
+        arguments = (value,) if goal_id is not None else (value, value)
+        ids = self._connection.execute(
+            "SELECT goal_id FROM goals WHERE " + predicate +
+            " AND retention_until > ? "
+            "AND (content_expires_at IS NULL OR content_expires_at > ?) "
+            "ORDER BY updated_at DESC, goal_id DESC LIMIT ?",
+            (*arguments, now, now, 1 if goal_id is not None else limit + 1),
+        ).fetchall()
+        snapshots = tuple(self.load(item[0]) for item in ids[:limit])
+        records = []
+        for item in snapshots:
+            record = {
+                "goal_id": item.state.goal_id,
+                "conversation_id": item.conversation_id,
+                "objective": item.state.objective.summary,
+                "status": item.state.status.value,
+            }
+            if goal_id is not None:
+                record.update(
+                    revision=item.revision,
+                    retention_until=_time_to_data(item.retention_until),
+                    scope=None if item.scope is None else json.loads(scope_to_storage(item.scope)),
+                    state=_goal_to_data(item.state),
+                )
+            records.append(record)
+        return (
+            {"goals": records, "truncated": goal_id is None and len(ids) > limit},
+            tuple(item.provenance for item in snapshots if item.provenance is not None),
+        )
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]:
         identifiers = self._connection.execute("SELECT goal_id FROM goals ORDER BY rowid").fetchall()
@@ -867,19 +951,23 @@ class SQLiteGoalStore:
             ):
                 raise ValueError("goal replacement cannot extend content retention")
         encoded = provenance_to_storage(retained)
+        written_at = self._now()
         updated = self._connection.execute(
             "UPDATE goals SET revision = revision + 1, retention_until = ?, "
             "state_json = ?, content_origins = ?, content_recorded_at = ?, "
             "content_expires_at = ?, mail_references = ?, updated_at = ?, "
             # Rewritten from the same state this statement stores, so the
             # projection cannot lag the status it describes.
-            "unfinished = ? "
+            "finished_at = CASE WHEN ? = 1 THEN NULL "
+            "WHEN unfinished = 1 THEN ? ELSE finished_at END, unfinished = ? "
             "WHERE goal_id = ? AND revision = ?",
             (
                 _time_to_data(retention_until),
                 json.dumps(_goal_to_data(state), separators=(",", ":")),
                 *encoded,
-                _time_to_data(self._now()),
+                _time_to_data(written_at),
+                _is_unfinished(state),
+                _time_to_data(written_at.astimezone(UTC)),
                 _is_unfinished(state),
                 state.goal_id,
                 expected_revision,

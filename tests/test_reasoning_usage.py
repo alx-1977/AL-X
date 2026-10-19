@@ -491,6 +491,9 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
             def list_unfinished(self, _conversation_id=None, *, project_id=None, limit=None):
                 return ()
 
+            def list_recent_finished(self, conversation_id, limit):
+                return ()
+
             def list_needing_core(self, limit, exclude=frozenset()):
                 return ()
 

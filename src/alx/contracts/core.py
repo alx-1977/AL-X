@@ -225,6 +225,8 @@ class ReasoningContext:
     # Every unfinished goal of the conversation, compactly. `active_goal` is
     # the full state of the one the Core has selected this turn, if any.
     unfinished_goals: tuple[GoalSummary, ...] = ()
+    # Full retained terminal work in this conversation, bounded, newest first.
+    recent_finished_goals: tuple[GoalSnapshot, ...] = ()
     # Where this turn came from. Provenance only: it says nobody asked, or that
     # Friedl did. Nothing may be derived from it about what to think about.
     origin: CognitionOrigin = CognitionOrigin.PERSON_TURN
@@ -288,6 +290,7 @@ class ReasoningContext:
     def __post_init__(self) -> None:
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
+        object.__setattr__(self, "recent_finished_goals", tuple(self.recent_finished_goals))
         object.__setattr__(self, "carried_thoughts", tuple(self.carried_thoughts))
         object.__setattr__(
             self, "relationship_memories", tuple(self.relationship_memories)
@@ -443,6 +446,14 @@ class DurableGoalStore(Protocol):
         project_id: str | None = None,
         limit: int | None = None,
     ) -> tuple[GoalSummary, ...]: ...
+
+    def list_recent_finished(
+        self, conversation_id: str, limit: int,
+    ) -> tuple[GoalSnapshot, ...]: ...
+
+    def read_history(
+        self, *, contains: str | None = None, goal_id: str | None = None, limit: int = 10,
+    ) -> tuple[dict[str, Any], tuple[ContentProvenance, ...]]: ...
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]: ...
 

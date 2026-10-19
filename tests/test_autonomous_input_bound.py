@@ -222,6 +222,9 @@ class CoreNamesTheRefusalTests(unittest.TestCase):
             def list_unfinished(self, *args, **kwargs):
                 return ()
 
+            def list_recent_finished(self, conversation_id, limit):
+                return ()
+
             def list_needing_core(self, *args, **kwargs):
                 return ()
 
