@@ -35,6 +35,7 @@ from alx.contracts import (
     AgentDecision,
     ApprovalProposal,
     ApprovalScope,
+    BackgroundEvent,
     CapabilityAttempt,
     CapabilityAttemptDisposition,
     CapabilityCall,
@@ -46,6 +47,8 @@ from alx.contracts import (
     ConversationTurn,
     GoalMutationKind,
     GoalProposal,
+    GoalState,
+    Objective,
     SideEffect,
     StructuredSchema,
     SuccessCriterion,
@@ -227,6 +230,110 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
              "body": body},
             approval_id="approve-m1",
         )
+
+    def source_conversation(self, subject: str) -> ConversationSnapshot:
+        base = conversation(spoken="The parts arrive Tuesday.", asked="send it")
+        return ConversationSnapshot(
+            base.conversation_id, base.turns, base.revision, base.retention_until,
+            (BackgroundEvent("mail:1:2", "mail.message_arrived", NOW,
+                             {"mailbox_id": "INBOX", "uid_validity": "1",
+                              "uid": "2", "subject": subject}),),
+        )
+
+    def test_reply_prefixed_source_subject_sends_with_heard_body(self) -> None:
+        source = "2026 Tax Calculation for Approval for Submission"
+        call = self.send_call("The parts arrive Tuesday.")
+        call = CapabilityCall(call.call_id, call.capability_id,
+                              {**call.arguments, "subject": f"RE: {source}"},
+                              call.approval_id)
+        reasoner = Queued(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="Sent."),
+        )
+        outcome = self.agent(reasoner, (SEND_REPLY_DEFINITION,)).process(
+            self.source_conversation(source), RETENTION, 4,
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.dispatched, [SEND_MAIL_REPLY])
+
+    def test_unchanged_source_subject_sends_with_heard_body(self) -> None:
+        call = self.send_call("The parts arrive Tuesday.")
+        reasoner = Queued(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="Sent."),
+        )
+        self.agent(reasoner, (SEND_REPLY_DEFINITION,)).process(
+            self.source_conversation("Re: parts"), RETENTION, 4,
+        )
+        self.assertEqual(self.dispatched, [SEND_MAIL_REPLY])
+
+    def test_changed_source_subject_is_refused_even_with_heard_body(self) -> None:
+        call = self.send_call("The parts arrive Tuesday.")
+        reasoner = Queued(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="The subject changed, so I could not send it."),
+        )
+        outcome = self.agent(reasoner, (SEND_REPLY_DEFINITION,)).process(
+            self.source_conversation("Original parts"), RETENTION, 4,
+        )
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[-1].refused_calls[0]["reason"],
+                         "approval_covers_unheard_text")
+
+    def test_existing_reply_prefix_case_and_whitespace_are_copied(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        source = self.source_conversation("  Re:  Tax   Calculation ")
+        call = self.send_call("The parts arrive Tuesday.")
+        call = CapabilityCall(call.call_id, call.capability_id,
+                              {**call.arguments, "subject": "RE: re: tax calculation"},
+                              call.approval_id)
+        self.assertFalse(CoreAgent._unheard_authored_text(source, call))
+
+    def test_read_result_supplies_the_source_subject_for_the_same_uid(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        source = conversation(spoken="The parts arrive Tuesday.", asked="send it")
+        call = self.send_call("The parts arrive Tuesday.")
+        read_call = CapabilityCall("read-1", "read_mail_message",
+                                   {"mailbox_id": "INBOX", "uid_validity": "1",
+                                    "uid": "2"})
+        result = CapabilityResult("read-1", "read_mail_message",
+                                  CapabilityResultState.SUCCEEDED,
+                                  {"subject": "parts"})
+        goal = GoalState("goal-1", Objective("turn:turn-2", "Reply"),
+                         (SuccessCriterion("criterion-1", "sent"),),
+                         attempts=(CapabilityAttempt(
+                             read_call, CapabilityAttemptDisposition.EXECUTED,
+                             True, result),))
+        self.assertFalse(CoreAgent._unheard_authored_text(source, call, goal))
+        wrong_uid = CapabilityCall("read-2", "read_mail_message",
+                                   {"mailbox_id": "INBOX", "uid_validity": "1",
+                                    "uid": "3"})
+        other_goal = GoalState("goal-2", Objective("turn:turn-2", "Reply"),
+                               goal.success_criteria,
+                               attempts=(CapabilityAttempt(
+                                   wrong_uid, CapabilityAttemptDisposition.EXECUTED,
+                                   True, CapabilityResult(
+                                       "read-2", "read_mail_message",
+                                       CapabilityResultState.SUCCEEDED,
+                                       {"subject": "parts"})),))
+        self.assertTrue(CoreAgent._unheard_authored_text(source, call, other_goal))
+
+    def test_send_arguments_cannot_claim_an_original_subject(self) -> None:
+        from alx.core.loop import CoreAgent
+
+        call = self.send_call("The parts arrive Tuesday.")
+        call = CapabilityCall(call.call_id, call.capability_id,
+                              {**call.arguments, "source_subject": "Re: parts"},
+                              call.approval_id)
+        self.assertTrue(CoreAgent._unheard_authored_text(
+            self.source_conversation("Different source"), call,
+        ))
 
     def test_unheard_mail_text_is_still_refused(self) -> None:
         call = self.send_call("Wording Friedl has never heard me say.")
@@ -627,20 +734,19 @@ class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
         self.assertEqual(rejected[0].reason_code, "approval_covers_unheard_text")
 
     def test_repeated_refusals_no_longer_consume_the_budget(self) -> None:
-        """The incident shape: ten refusals used to buy eleven reasoning calls.
-
-        One refusal is explained; a second ends the turn with its reason. She
-        keeps a full step to choose something else, and loses only the steps
-        she would have spent against a wall that cannot move.
-        """
+        """A second refused send gives the Core one response-only decision."""
         decisions = []
-        for index in range(1, 11):
+        for index in range(1, 3):
             call = self.refused_send(index)
             decisions.append(
                 AgentDecision(call=call, approval_proposal=self.approved(call),
                               goal_proposal=self.goal())
             )
-        decisions.append(AgentDecision(response="giving up"))
+        explanation = (
+            "I could not send the reply because the wording was not in "
+            "the draft you heard."
+        )
+        decisions.append(AgentDecision(response=explanation))
 
         reasoner, outcome = self.run_once(
             *decisions, budget=12,
@@ -650,10 +756,29 @@ class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
             len(reasoner.contexts), 3,
             f"the turn still spent {len(reasoner.contexts)} reasoning calls",
         )
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
-        self.assertEqual(outcome.reason, "approval_covers_unheard_text")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, explanation)
+        self.assertEqual(reasoner.contexts[-1].response_only_reason,
+                         "approval_covers_unheard_text")
+        self.assertEqual(reasoner.contexts[-1].refused_calls[0]["reason"],
+                         "approval_covers_unheard_text")
         self.assertEqual(self.dispatched, [])
         self.assertEqual(len(self.store.list_goals()), 0)
+
+    def test_refusal_on_last_regular_step_still_gets_a_core_response(self) -> None:
+        call = self.refused_send()
+        reasoner, outcome = self.run_once(
+            AgentDecision(call=call, approval_proposal=self.approved(call),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="I could not send the unheard draft."),
+            budget=1,
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response,
+                         "I could not send the unheard draft.")
+        self.assertEqual(reasoner.contexts[-1].response_only_reason,
+                         "approval_covers_unheard_text")
+        self.assertEqual(self.dispatched, [])
 
     def test_she_may_still_do_something_different_after_a_refusal(self) -> None:
         """The stop prevents pointless repetition, never recovery."""
