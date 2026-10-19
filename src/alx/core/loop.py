@@ -534,9 +534,7 @@ class CoreAgent:
                 # A newly created goal is already known in full this turn.
                 selected_goals.add(snapshot.state.goal_id)
             summaries = self._selectable_goals(conversation_id, snapshot)
-            finished_goals = self._store.list_recent_finished(
-                conversation_id, RECENT_FINISHED_GOALS,
-            )
+            finished_goals = self._recent_finished_goals(conversation)
             prior_goal_provenance = (*prior_goal_provenance, *(
                 item.provenance for item in finished_goals
                 if item.provenance is not None and item.provenance not in prior_goal_provenance
@@ -1533,9 +1531,7 @@ class CoreAgent:
             active_goal=state,
             turns=project_turns_for_reasoning(conversation.turns, state),
             unfinished_goals=self._selectable_goals(conversation_id, snapshot),
-            recent_finished_goals=self._store.list_recent_finished(
-                conversation_id, RECENT_FINISHED_GOALS,
-            ),
+            recent_finished_goals=self._recent_finished_goals(conversation),
             transient_attempts=transient_attempts,
             response_only_reason=reason,
             refused_calls=refused_calls or context.refused_calls,
@@ -1773,6 +1769,23 @@ class CoreAgent:
                        conversation.conversation_id,
                        reference=_short_reference(candidate.goal_id))
         return written
+
+    def _recent_finished_goals(self, conversation: ConversationSnapshot) -> tuple[GoalSnapshot, ...]:
+        # A delivered reply carries the exact goal identity from the Core
+        # outcome. Never expose every goal of its source conversation: only
+        # the work actually answered here joins this conversation's history.
+        now = self._clock()
+        response_goal_ids = tuple(dict.fromkeys(
+            turn.response_goal_id for turn in conversation.turns
+            if turn.origin is ConversationOrigin.ALX_RESPONSE
+            and turn.response_goal_id is not None
+            and conversation.retention_until > now
+            and (turn.provenance is None or not turn.provenance.is_expired(now))
+        ))
+        return self._store.list_recent_finished(
+            conversation.conversation_id, RECENT_FINISHED_GOALS,
+            **({"response_goal_ids": response_goal_ids} if response_goal_ids else {}),
+        )
 
     def _selectable_goals(self, conversation_id: str,
                           snapshot: GoalSnapshot | None) -> tuple[GoalSummary, ...]:

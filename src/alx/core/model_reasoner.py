@@ -303,10 +303,10 @@ capabilities you have, and close what is already done. A goal
 untouched for weeks is open work you can offer to resume, not something you were doing.
 project_id says which work a goal belongs to; nothing about being listed means it is
 relevant now, and that judgement is yours.
-recent_finished_goals contains retained finished work from this conversation,
+recent_finished_goals contains retained finished work begun or answered in this conversation,
 most recent completion first, bounded by count, with context and evidence.
 read_own_goals searches retained goals across conversations by text, or reads a
-goal in full by id; it includes finished and unfinished work.
+goal in full by exact id or unambiguous id prefix; it includes finished and unfinished work.
 
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have

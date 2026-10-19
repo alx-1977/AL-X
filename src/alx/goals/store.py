@@ -675,24 +675,30 @@ class SQLiteGoalStore:
         return tuple(found)
 
     def list_recent_finished(
-        self, conversation_id: str, limit: int,
+        self, conversation_id: str, limit: int, *, response_goal_ids: tuple[str, ...] = (),
     ) -> tuple[GoalSnapshot, ...]:
-        """Terminal goals of this conversation, latest completion first.
+        """Terminal goals begun or answered in this conversation, latest completion first.
 
         Unknown legacy times sort last; ids break ties. Full snapshots keep
-        the same content and provenance as load().
+        the same content and provenance as load(). Response ids come only
+        from retained gateway-authored reply turns, including relayed replies.
         """
         if not conversation_id.strip():
             raise ValueError("conversation_id must not be blank")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be a positive int")
         now = _time_to_data(self._now())
+        association = "conversation_id = ?"
+        arguments = (conversation_id,)
+        if response_goal_ids:
+            association += " OR goal_id IN (SELECT value FROM json_each(?))"
+            arguments += (json.dumps(response_goal_ids),)
         ids = self._connection.execute(
-            "SELECT goal_id FROM goals WHERE unfinished = 0 AND conversation_id = ? "
+            "SELECT goal_id FROM goals WHERE unfinished = 0 AND (" + association + ") "
             "AND retention_until > ? "
             "AND (content_expires_at IS NULL OR content_expires_at > ?) "
             "ORDER BY finished_at DESC, goal_id DESC LIMIT ?",
-            (conversation_id, now, now, limit),
+            (*arguments, now, now, limit),
         ).fetchall()
         return tuple(self.load(item[0]) for item in ids)
 
@@ -703,7 +709,8 @@ class SQLiteGoalStore:
 
         Literal case-insensitive substring search across stored JSON values,
         including nested context, referents, progress, attempts and evidence.
-        Search returns bounded identities; exact id reads all stored content.
+        Search returns bounded identities; exact or unambiguous prefix id
+        reads all stored content. Exact ids take precedence over prefixes.
         """
         if (contains is None) == (goal_id is None):
             raise ValueError("provide exactly one of contains or goal_id")
@@ -713,20 +720,27 @@ class SQLiteGoalStore:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("contains or goal_id must not be blank")
         now = _time_to_data(self._now())
-        predicate = "goal_id = ?" if goal_id is not None else (
+        predicate = "(goal_id = ? OR substr(goal_id, 1, length(?)) = ?)" if goal_id is not None else (
             "(instr(casefold(goal_id), casefold(?)) > 0 OR EXISTS "
             "(SELECT 1 FROM json_tree(goals.state_json) "
             "WHERE type IN ('text', 'integer', 'real') "
             "AND instr(casefold(CAST(atom AS TEXT)), casefold(?)) > 0))"
         )
-        arguments = (value,) if goal_id is not None else (value, value)
+        arguments = (value, value, value) if goal_id is not None else (value, value)
+        ordering = "(goal_id = ?) DESC, " if goal_id is not None else ""
         ids = self._connection.execute(
             "SELECT goal_id FROM goals WHERE " + predicate +
             " AND retention_until > ? "
             "AND (content_expires_at IS NULL OR content_expires_at > ?) "
-            "ORDER BY updated_at DESC, goal_id DESC LIMIT ?",
-            (*arguments, now, now, 1 if goal_id is not None else limit + 1),
+            "ORDER BY " + ordering + "updated_at DESC, goal_id DESC LIMIT ?",
+            (*arguments, now, now, *((value,) if goal_id is not None else ()),
+             2 if goal_id is not None else limit + 1),
         ).fetchall()
+        if goal_id is not None:
+            if ids and ids[0][0] == goal_id:
+                ids = ids[:1]
+            elif len(ids) > 1:
+                raise ValueError("ambiguous goal id prefix")
         snapshots = tuple(self.load(item[0]) for item in ids[:limit])
         records = []
         for item in snapshots:

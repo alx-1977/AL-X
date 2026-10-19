@@ -78,6 +78,9 @@ class ConversationTurn:
     occurred_at: datetime
     person_id: str | None = None
     provenance: ContentProvenance | None = None
+    # Set by the gateway from the Core outcome, carried unchanged by delivery.
+    # An identity link, never frontend-owned goal state.
+    response_goal_id: str | None = None
 
     def __post_init__(self) -> None:
         _required(self.conversation_id, "conversation_id")
@@ -86,6 +89,10 @@ class ConversationTurn:
         _aware(self.occurred_at, "occurred_at")
         if self.person_id is not None:
             _required(self.person_id, "person_id")
+        if self.response_goal_id is not None:
+            _required(self.response_goal_id, "response_goal_id")
+            if self.origin is not ConversationOrigin.ALX_RESPONSE:
+                raise ValueError("only AL/X responses may reference a response goal")
         if self.provenance is not None:
             from alx.contracts.provenance import ContentProvenance
 

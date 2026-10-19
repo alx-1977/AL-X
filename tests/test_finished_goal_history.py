@@ -26,6 +26,12 @@ from alx.goals import SQLiteGoalStore
 from alx.goals.store import _goal_to_data
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.tools.goal_history import DEFINITION, READ_OWN_GOALS, build_goal_history_executors
+from alx.bootstrap.autonomous import AutonomousCognitionRunner
+from alx.continuity import FutureCognitionSource, SQLiteContinuityStore, SQLiteOpportunityLedger
+from alx.conversation import ConversationGateway, SQLiteConversationStore
+from alx.contracts import (CapabilityAttempt, CapabilityAttemptDisposition, CapabilityDefinition,
+                           CapabilityResult, ResponseDelivery, StructuredSchema, ValueKind)
+from alx.tools.continuity import REQUEST_FUTURE_COGNITION, build_continuity_executors
 
 NOW = datetime(2026, 10, 19, 8, 0, tzinfo=UTC)  # 10:00 SAST
 RETENTION = NOW + timedelta(days=30)
@@ -112,6 +118,150 @@ class FinishedHistoryTests(unittest.TestCase):
         found = self.read(query="878504110311")
         self.assertEqual(found.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(found.values["goals"][0]["goal_id"], "e8b6a256")
+
+    def test_self_requested_completion_delivered_to_person_then_read_after_restart(self):
+        root = Path(self.directory.name)
+        continuity = SQLiteContinuityStore(root / "continuity.sqlite3")
+        ledger = SQLiteOpportunityLedger(root / "occasions.sqlite3")
+        conversations = SQLiteConversationStore(root / "conversations.sqlite3")
+        for store in (continuity, ledger, conversations):
+            self.addCleanup(store.close)
+        requested_at = NOW - timedelta(hours=1)
+        request = build_continuity_executors(
+            continuity, 30, lambda: "schedule", clock=lambda: requested_at,
+            conversation_id_source=lambda: "originating-thread",
+        )[REQUEST_FUTURE_COGNITION]({
+            "request_id": "shipment-follow-up", "not_before": NOW.isoformat(),
+            "note": "Check the parcel again",
+        })
+        self.assertEqual(request.state, CapabilityResultState.SUCCEEDED)
+        identifier = "e8b6a256-0000-4000-8000-000000000001"
+        evidence = Evidence("tracking", "shipment_status", {"status": "delivered"},
+                            ("tracked",), ("attempt:track",))
+        reasoner = RecordingReasoner(
+            AgentDecision(goal_proposal=GoalProposal(
+                GoalMutationKind.CREATE, objective_summary="Track the FedEx shipment",
+                success_criteria=(SuccessCriterion("tracked", "Status checked"),),
+                context={"occasion": "self-requested follow-up"},
+                referents=(Referent("parcel", {"carrier": "FedEx"}),),
+            ), call=CapabilityCall("track", "track_shipment", {"tracking_number": "878504110311"})),
+            AgentDecision(response="The parcel was delivered.", goal_proposal=GoalProposal(
+                GoalMutationKind.REQUEST_COMPLETION, new_evidence=(evidence,),
+            ), response_requires_goal_commit=True),
+        )
+        definition = CapabilityDefinition(
+            "track_shipment", "Read shipment status", StructuredSchema(ValueKind.OBJECT),
+            StructuredSchema(ValueKind.OBJECT), SideEffect.NONE,
+        )
+        def dispatch(call, state):
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(call.call_id, call.capability_id, CapabilityResultState.SUCCEEDED,
+                                 {"tracking_number": "878504110311", "status": "delivered"}))
+        core = CoreAgent(self.store, reasoner, dispatch, (definition,), clock=lambda: self.now,
+                         identifier_factory=lambda: identifier)
+        gateway = ConversationGateway(core, conversations, identifier_factory=lambda: "reply",
+                                      clock=lambda: self.now)
+        class Delivery:
+            def deliver(_, conversation_id, response, opportunity_id):
+                turn_id, _ = gateway.locate_reply(conversation_id, response)
+                self.assertTrue(gateway.relay_response(conversation_id, turn_id, "c1"))
+                return ResponseDelivery.DELIVERED
+        source = FutureCognitionSource(continuity, ledger, enabled=True, clock=lambda: self.now)
+        other = GoalState("other", Objective("event:other", "Other work"),
+                          (SuccessCriterion("done", "Done"),), status=GoalStatus.CANCELLED,
+                          stop_reason=GoalStopReason.CANCELLED)
+        self.store.create(other, "originating-thread", RETENTION)
+        self.store.create(replace(other, goal_id="cancelled"), "c1", RETENTION)
+        runner = AutonomousCognitionRunner(source, ledger, gateway, 5, 30,
+                                           response_transport=Delivery(), clock=lambda: self.now)
+        self.assertTrue(runner.run_one(source.due_opportunities()[0]))
+        saved = self.store.load(identifier)
+        self.assertEqual(saved.state.status, GoalStatus.COMPLETED)
+        self.assertEqual(saved.conversation_id, "originating-thread")
+        self.assertEqual(conversations.load("c1").turns[0].content, "The parcel was delivered.")
+        # The number occurs only in the persisted capability attempt, not the goal's narrative.
+        self.assertNotIn("878504110311", str(saved.state.context))
+        self.assertNotIn("878504110311", str(saved.state.evidence))
+        self.store.close()
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        conversations.close()
+        conversations = SQLiteConversationStore(root / "conversations.sqlite3")
+        self.addCleanup(conversations.close)
+        person = RecordingReasoner()
+        gateway = ConversationGateway(
+            CoreAgent(self.store, person, dispatch, (DEFINITION,), clock=lambda: self.now),
+            conversations, clock=lambda: self.now,
+        )
+        gateway.receive_conversation_turn(ConversationTurn("c1", "person", ConversationOrigin.TYPED,
+                                        "What did you find?", self.now, "friedl"), 3, RETENTION)
+        with self.subTest(surface="recent_finished_goals"):
+            finished = person.contexts[0].recent_finished_goals
+            self.assertEqual([g.state.goal_id for g in finished], [identifier, "cancelled"])
+            self.assertEqual(finished[0].state.context, saved.state.context)
+            self.assertEqual(finished[0].state.evidence, (evidence,))
+        for query in ("FedEx", "shipment", "878504110311", identifier, "e8b6a256"):
+            with self.subTest(query=query):
+                self.assertEqual([g["goal_id"] for g in self.read(query=query).values["goals"]], [identifier])
+        for goal_id in (identifier, "e8b6a256"):
+            with self.subTest(goal_id=goal_id):
+                result = self.read(goal_id=goal_id)
+                self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+                self.assertEqual(result.values["goals"][0]["goal_id"], identifier)
+
+    def test_id_prefixes_are_literal_unambiguous_and_retained(self):
+        for identifier in ("abc-1", "abc-2", "literal%_id"):
+            self.store.create(shipment(identifier, GoalStatus.COMPLETED), "c1", RETENTION)
+        self.assertEqual(self.read(goal_id="abc").failure["code"], "arguments_unusable")
+        self.assertEqual(self.read(goal_id="abc-1").values["goals"][0]["goal_id"], "abc-1")
+        self.assertEqual(self.read(goal_id="literal%_").values["goals"][0]["goal_id"], "literal%_id")
+        # Exact identities win even when they are prefixes of other identities.
+        self.store.create(shipment("abc", GoalStatus.COMPLETED), "c1", RETENTION)
+        self.assertEqual(self.read(goal_id="abc").values["goals"][0]["goal_id"], "abc")
+        self.now = RETENTION + timedelta(seconds=1)
+        self.assertEqual(self.read(goal_id="abc").failure["code"], "goal_not_found")
+
+    def test_reply_links_preserve_bounds_isolation_and_retention(self):
+        for index in range(RECENT_FINISHED_GOALS + 2):
+            self.now = NOW + timedelta(seconds=index)
+            self.store.create(shipment(str(index), GoalStatus.COMPLETED), "source", RETENTION + timedelta(days=1))
+        self.store.create(shipment("unanswered", GoalStatus.COMPLETED), "source", RETENTION)
+        links = tuple(str(index) for index in range(RECENT_FINISHED_GOALS + 2))
+        recent = self.store.list_recent_finished("target", RECENT_FINISHED_GOALS,
+                                                 response_goal_ids=(*links, *links, "missing"))
+        self.assertEqual([g.state.goal_id for g in recent],
+                         [str(i) for i in range(RECENT_FINISHED_GOALS + 1, 1, -1)])
+        self.assertEqual(self.store.list_recent_finished("unrelated", 10), ())
+        provenance = RetentionPolicy().direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
+        reasoner = RecordingReasoner()
+        core = CoreAgent(self.store, reasoner, lambda *_: self.fail("unexpected dispatch"), (),
+                         clock=lambda: self.now)
+        reply = ConversationTurn("target", "reply", ConversationOrigin.ALX_RESPONSE,
+                                 "Checked.", NOW, provenance=provenance, response_goal_id="0")
+        def process_reply():
+            core.process(ConversationSnapshot("target", (reply,), 1, RETENTION + timedelta(days=1)),
+                         RETENTION + timedelta(days=1), 1)
+            return reasoner.contexts[-1].recent_finished_goals
+        self.assertEqual([g.state.goal_id for g in process_reply()], ["0"])
+        self.now = provenance.content_expires_at
+        # The linked goal itself can still exist, but an expired reply grants no visibility.
+        reasoner.decisions.append(AgentDecision(response="Checked."))
+        self.assertEqual(process_reply(), ())
+        self.assertEqual(self.store.load("0").state.status, GoalStatus.COMPLETED)
+
+    def test_v2_reply_without_goal_link_stays_unlinked(self):
+        path = Path(self.directory.name) / "legacy-conversations.sqlite3"
+        conversations = SQLiteConversationStore(path)
+        conversations.create("c1", RETENTION)
+        conversations.append(ConversationTurn("c1", "reply", ConversationOrigin.ALX_RESPONSE,
+                                               "Checked.", NOW), RETENTION, 1)
+        conversations.close()
+        with sqlite3.connect(path) as connection:
+            connection.execute("UPDATE conversation_turns SET turn_json = ?", (
+                json.dumps(["c1", "reply", "alx_response", "Checked.", NOW.isoformat(), None]),))
+            connection.execute("PRAGMA user_version = 2")
+        conversations = SQLiteConversationStore(path)
+        self.addCleanup(conversations.close)
+        self.assertIsNone(conversations.load("c1").turns[0].response_goal_id)
 
     def test_context_is_scoped_bounded_and_ordered_by_completion_not_last_write(self):
         for index in range(RECENT_FINISHED_GOALS + 2):

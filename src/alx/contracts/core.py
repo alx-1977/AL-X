@@ -448,7 +448,7 @@ class DurableGoalStore(Protocol):
     ) -> tuple[GoalSummary, ...]: ...
 
     def list_recent_finished(
-        self, conversation_id: str, limit: int,
+        self, conversation_id: str, limit: int, *, response_goal_ids: tuple[str, ...] = (),
     ) -> tuple[GoalSnapshot, ...]: ...
 
     def read_history(

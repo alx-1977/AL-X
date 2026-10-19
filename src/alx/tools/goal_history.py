@@ -17,7 +17,8 @@ DEFINITION = CapabilityDefinition(
     "Provide query for literal case-insensitive text search over stored content "
     "(tracking numbers, names, invoice numbers, context, progress, evidence). "
     "Results give goal ids, objectives and statuses, newest written first; limit "
-    "defaults to 10, maximum 50. Or provide goal_id alone to read that goal in full, "
+    "defaults to 10, maximum 50. Or provide goal_id (exact or unambiguous prefix) "
+    "alone to read that goal in full; ambiguous prefixes return arguments_unusable, "
     "without truncation. Exactly one of query and goal_id is required.",
     StructuredSchema(ValueKind.OBJECT, {
         "query": StructuredSchema(ValueKind.STRING),
