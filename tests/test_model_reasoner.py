@@ -799,6 +799,17 @@ class ModelReasonerTests(unittest.TestCase):
         ):
             self.assertIn(stated, PROTOCOL_INSTRUCTIONS)
 
+    def test_own_work_and_failed_fix_instructions_reach_the_core(self):
+        model = FakeModel(base_output())
+        ModelReasoner(model, "laws", "identity").decide(self.context())
+        protocol = " ".join(model.requests[0].messages[1].content.split())
+        for instruction in (
+            "Before saying you do not know something about your own work, check your trace, log and goals.",
+            "When evidence does not settle a cause, say 'I think' and keep checking; never state a guess as fact.",
+            "If the same fix fails twice for the same reason, stop, read the failing check and the rule behind it, and try a different approach; if still stuck, tell Friedl plainly what is blocking you.",
+        ):
+            self.assertIn(instruction, protocol)
+
     def test_the_identifier_rule_reaches_the_model_with_every_decision(self) -> None:
         """It belongs in the stable cached prefix, not a per-turn instruction."""
         model = FakeModel(base_output())

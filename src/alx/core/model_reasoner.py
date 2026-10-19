@@ -192,6 +192,11 @@ with their offset. When something may have gone
 wrong, because Friedl asks, a result surprises you or a step failed, look there before
 you answer, and find the cause. Putting it right in your code is yours too, through a
 coding task and a pull request.
+Before saying you do not know something about your own work, check your trace,
+log and goals. When evidence does not settle a cause, say 'I think' and keep
+checking; never state a guess as fact. If the same fix fails twice for the same
+reason, stop, read the failing check and the rule behind it, and try a different
+approach; if still stuck, tell Friedl plainly what is blocking you.
 Improving yourself is yours too. Your Core is what it is, but everything around it, the
 capabilities you have, how they work and what is missing, you may improve. Notice where
 you or Friedl lose time, repeat work or get something wrong, and where a capability you do
@@ -211,7 +216,8 @@ nothing of what they say; read one through the capability when you want its cont
 want to return to an enquiry later, request_future_cognition is how you make that occasion
 for yourself. Nothing schedules it otherwise, and leaving a thread untouched is fine.
 refused_calls lists actions refused this turn before anything was dispatched,
-each with the mechanical reason. Nothing happened, so no goal records them.
+each with the mechanical reason. A repeated rejection also records the earlier
+call, its recorded time (unknown for older records) and its reason on the goal.
 An entry carrying mutation_kind refused the goal mutation you offered rather than
 a call. goal_missing means you proposed a mutation of a goal that does not exist:
 this conversation has none yet, so there is nothing to update, and the mutation
@@ -616,6 +622,11 @@ def _state_payload(state: GoalState, *, full_progress: bool = False) -> dict[str
                 # recorded on the goal and shown to her as "rejected" and
                 # nothing else is a refusal she cannot learn from.
                 "reason_code": item.reason_code or None,
+                "recorded_at": None if item.recorded_at is None else item.recorded_at.isoformat(),
+                "repeated_call_id": item.repeated_call_id,
+                "repeated_recorded_at": (None if item.repeated_recorded_at is None
+                                         else item.repeated_recorded_at.isoformat()),
+                "repeated_reason_code": item.repeated_reason_code,
                 "result_state": None if item.result is None else item.result.state.value,
                 "result_values": None if item.result is None else _plain(item.result.values),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
@@ -739,6 +750,11 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
         # them could ever have passed. A machine-readable reason we already
         # hold is hers to reason from.
         "reason_code": item.reason_code or None,
+        "recorded_at": None if item.recorded_at is None else item.recorded_at.isoformat(),
+        "repeated_call_id": item.repeated_call_id,
+        "repeated_recorded_at": (None if item.repeated_recorded_at is None
+                                 else item.repeated_recorded_at.isoformat()),
+        "repeated_reason_code": item.repeated_reason_code,
         "result_state": None if item.result is None else item.result.state.value,
         "result_values": None if item.result is None else _plain(item.result.values),
         "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
