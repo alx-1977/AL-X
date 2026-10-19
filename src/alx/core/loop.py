@@ -1375,7 +1375,9 @@ class CoreAgent:
                     snapshot,
                     reason="approval_capability_already_dispatched",
                 )
-            refusal = self._binding_rejected_call(snapshot.state, decision.call, now)
+            refusal = self._binding_rejected_call(
+                snapshot.state, decision.call, now, conversation, transient_attempts,
+            )
             if refusal is not None:
                 refused_calls = (*refused_calls, {
                     "call_id": decision.call.call_id,
@@ -3455,7 +3457,9 @@ class CoreAgent:
 
     @classmethod
     def _binding_rejected_call(
-        cls, state: GoalState, call: CapabilityCall, at: datetime
+        cls, state: GoalState, call: CapabilityCall, at: datetime,
+        conversation: ConversationSnapshot | None = None,
+        transient_attempts: tuple[CapabilityAttempt, ...] = (),
     ) -> CapabilityAttempt | None:
         """Stop deterministic safety/input rejections from becoming model loops.
 
@@ -3466,7 +3470,8 @@ class CoreAgent:
         A refusal whose mechanical predicate has since changed is not a loop.
         Approval refusals require a newly valid approval. Coding fuse refusals
         are re-evaluated against the current durable attempts, including the
-        historical timeout classification. All other refusals remain binding.
+        historical timeout classification. Unheard-text refusals require the
+        current text check to clear as well. All other refusals remain binding.
 
         The approval still has to be real: `permits` re-checks lifecycle,
         identifier, expiry and scope against this call.
@@ -3495,7 +3500,14 @@ class CoreAgent:
             return None
         binding = next(
             (item for item in reversed(repeats)
-             if item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS),
+             if item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS
+             and not (
+                 item.reason_code == "approval_covers_unheard_text"
+                 and conversation is not None
+                 and not cls._unheard_authored_text(
+                     conversation, call, state, transient_attempts,
+                 )
+             )),
             None,
         )
         if binding is not None:
