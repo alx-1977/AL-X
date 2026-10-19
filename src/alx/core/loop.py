@@ -964,7 +964,8 @@ class CoreAgent:
                     continue
             if proposal_error is None and decision.approval_proposal is not None:
                 approval_error = self._approval_proposal_error(
-                    conversation, candidate, decision, approved_dispatches
+                    conversation, candidate, decision, approved_dispatches,
+                    transient_attempts,
                 )
                 if approval_error is not None:
                     # A malformed approval authorises nothing, so the action is
@@ -1000,10 +1001,17 @@ class CoreAgent:
                     if self._already_refused(
                         refused_calls, approval_error, decision.call.capability_id
                     ):
-                        # One explanation per reason and capability, as above.
-                        # She has been told this reason and asked for the same
-                        # thing again; a further step would spend the budget on
-                        # the same wall.
+                        # Repeating the blocked send cannot make it safe. Give
+                        # the Core one response-only decision so this turn
+                        # still tells Friedl what prevented the send.
+                        if (approval_error == "approval_covers_unheard_text"
+                                and origin is CognitionOrigin.PERSON_TURN):
+                            return self._respond_to_terminal_blocker(
+                                conversation_id, conversation, snapshot,
+                                reasoning_context, transient_attempts,
+                                approval_error, decision_provenance,
+                                refused_calls, park=False,
+                            )
                         return CoreOutcome(
                             CoreState.CHECKPOINTED, snapshot, reason=approval_error,
                         )
@@ -1476,6 +1484,16 @@ class CoreAgent:
                 response_provenance=None if conflict_silent else conflict_provenance,
                 memory_state="unresolved_identity_conflict",
             )
+        if (origin is CognitionOrigin.PERSON_TURN
+                and any(item.get("reason") == "approval_covers_unheard_text"
+                        for item in refused_calls)):
+            # The last regular step may itself refuse the send. The refusal
+            # still needs one Core-authored answer to the person.
+            return self._respond_to_terminal_blocker(
+                conversation_id, conversation, snapshot, reasoning_context,
+                transient_attempts, "approval_covers_unheard_text",
+                decision_provenance, refused_calls, park=False,
+            )
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
 
     def _respond_to_terminal_blocker(
@@ -1940,20 +1958,65 @@ class CoreAgent:
     # order, and needs no permission to speak. She simply cannot transmit words
     # he never heard, which is what stops her reporting one message and sending
     # another.
-    # Every argument whose value AL/X composes rather than copies from a
-    # message. A recipient or subject he never heard is as much a surprise as
-    # a body he never heard.
+    # A reply subject may be copied from the source message. The check below
+    # removes only that verified copy; a changed subject remains authored.
     _AUTHORED_TEXT_ARGUMENTS = frozenset({"body", "body_text", "subject"})
 
     @staticmethod
     def _unheard_authored_text(
-        conversation: ConversationSnapshot, call: CapabilityCall
+        conversation: ConversationSnapshot, call: CapabilityCall,
+        state: GoalState | None = None,
+        transient_attempts: tuple[CapabilityAttempt, ...] = (),
     ) -> bool:
         """Report whether an outbound call carries text Friedl has not heard."""
+        copied_subject = False
+        if call.capability_id == "send_mail_reply":
+            reference = tuple(call.arguments.get(key) for key in (
+                "mailbox_id", "uid_validity", "uid"
+            ))
+            source_subject = None
+            if all(isinstance(part, str) and part for part in reference):
+                read_attempts = (
+                    *(state.attempts if state is not None else ()),
+                    *transient_attempts,
+                )
+                for attempt in reversed(read_attempts):
+                    if (attempt.call is None or attempt.result is None
+                            or attempt.call.capability_id != "read_mail_message"
+                            or tuple(attempt.call.arguments.get(key) for key in (
+                                "mailbox_id", "uid_validity", "uid"
+                            )) != reference):
+                        continue
+                    subject = attempt.result.values.get("subject")
+                    if (attempt.result.state is CapabilityResultState.SUCCEEDED
+                            and isinstance(subject, str) and subject.strip()):
+                        source_subject = subject
+                        break
+                if source_subject is None:
+                    for event in reversed(conversation.events):
+                        if (not event.kind.startswith("mail.message_")
+                                or tuple(event.data.get(key) for key in (
+                                    "mailbox_id", "uid_validity", "uid"
+                                )) != reference):
+                            continue
+                        subject = event.data.get("subject")
+                        if isinstance(subject, str) and subject.strip():
+                            source_subject = subject
+                            break
+            proposed_subject = call.arguments.get("subject")
+            if source_subject is not None and isinstance(proposed_subject, str):
+                def underlying(value: str) -> str:
+                    normalized = " ".join(value.split()).casefold()
+                    while normalized.startswith("re:"):
+                        normalized = normalized[3:].strip()
+                    return normalized
+
+                copied_subject = underlying(proposed_subject) == underlying(source_subject)
         authored = [
             value
             for name, value in call.arguments.items()
             if name in CoreAgent._AUTHORED_TEXT_ARGUMENTS
+            and not (name == "subject" and copied_subject)
             and isinstance(value, str)
             and value.strip()
         ]
@@ -1977,7 +2040,8 @@ class CoreAgent:
         )
 
     def _approval_proposal_error(
-        self, conversation, state, decision, already_dispatched=frozenset()
+        self, conversation, state, decision, already_dispatched=frozenset(),
+        transient_attempts: tuple[CapabilityAttempt, ...] = (),
     ) -> str | None:
         proposal = decision.approval_proposal
         call = decision.call
@@ -2013,7 +2077,9 @@ class CoreAgent:
         # and sixteen refusals in one turn told her nothing about why.
         definition = self._definition(call.capability_id)
         if definition is not None and definition.transmits_authored_text:
-            if CoreAgent._unheard_authored_text(conversation, call):
+            if CoreAgent._unheard_authored_text(
+                conversation, call, state, transient_attempts
+            ):
                 return "approval_covers_unheard_text"
         return None
 
