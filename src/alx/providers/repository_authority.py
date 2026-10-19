@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -191,15 +192,23 @@ class RepositoryAuthority:
 
     # ---- process ---------------------------------------------------------
 
-    def _run(self, command: tuple[str, ...]) -> subprocess.CompletedProcess:
+    def _run(
+        self, command: tuple[str, ...], *, directory: Path | None = None,
+        local_objects: bool = False,
+    ) -> subprocess.CompletedProcess:
+        environment = _git_environment()
+        if local_objects:
+            environment.update(GIT_NO_LAZY_FETCH="1", GIT_NO_REPLACE_OBJECTS="1")
         try:
             return self._runner(
                 list(command),
-                cwd=str(self._root),
-                env=_git_environment(),
+                cwd=str(self._root if directory is None else directory),
+                env=environment,
                 capture_output=True,
                 text=True,
-                timeout=self._timeout,
+                encoding="utf-8" if local_objects else None,
+                errors="surrogateescape" if local_objects else None,
+                timeout=min(self._timeout, 10) if local_objects else self._timeout,
                 check=False,
                 # Explicit, never inherited: a shell would let a ref name be
                 # read as syntax rather than as an argument.
@@ -208,6 +217,79 @@ class RepositoryAuthority:
         except (OSError, subprocess.SubprocessError) as error:
             LOGGER.warning("Repository command failed: %s", type(error).__name__)
             raise RepositoryAuthorityError("repository_unavailable") from error
+
+    def read_source_object(self, *arguments: str, bound: int) -> bytes:
+        """D-057: bounded local object reads through the existing fixed runner.
+
+        Only full object IDs and enumerated read shapes enter Git. Blob bytes
+        use unpack-file in a private temporary directory, so the text runner
+        cannot translate newlines or lose non-UTF-8 bytes. Nothing is written
+        to the checkout or Git database, and temporary output is removed.
+        """
+        if (not arguments or len(arguments[-1]) not in (40, 64)
+                or any(c not in "0123456789abcdefABCDEF" for c in arguments[-1])
+                or not 0 < bound <= 8_388_608):
+            raise ValueError("unavailable")
+        shape, oid = arguments[:-1], arguments[-1]
+        if shape not in (("cat-file", "-t"), ("cat-file", "-s"),
+                         ("cat-file", "blob"), ("ls-tree", "-r", "-z")):
+            raise ValueError("unavailable")
+
+        def object_text(*args: str, directory: Path | None = None) -> str:
+            completed = self._run(("git", "--no-pager", *args),
+                                  directory=directory, local_objects=True)
+            if completed.returncode:
+                raise ValueError("unavailable")
+            return completed.stdout or ""
+
+        def size(object_id: str, remaining: int) -> None:
+            if int(object_text("cat-file", "-s", object_id)) > remaining:
+                raise ValueError("source_too_large")
+
+        if shape == ("cat-file", "blob"):
+            size(oid, bound)
+            git_dir = object_text("rev-parse", "--absolute-git-dir").strip()
+            with tempfile.TemporaryDirectory(prefix="alx-source-") as temporary:
+                directory = Path(temporary)
+                name = object_text(f"--git-dir={git_dir}", "unpack-file", oid,
+                                   directory=directory).strip()
+                # Git chooses this name; still require a plain temporary file.
+                if (not name.startswith(".merge_file_") or Path(name).name != name
+                        or (directory / name).is_symlink()):
+                    raise ValueError("unavailable")
+                with (directory / name).open("rb") as source:
+                    output = source.read(bound + 1)
+        elif shape == ("ls-tree", "-r", "-z"):
+            # Bound each tree before listing it, and bound the accumulated
+            # recursive listing. A huge descendant cannot defeat the limit.
+            pending = [(oid, b"")]
+            output = bytearray()
+            tree_bytes = 0
+            while pending:
+                tree_id, prefix = pending.pop()
+                if tree_id == oid:
+                    tree_id = object_text("rev-parse", "--verify", f"{oid}^{{tree}}").strip()
+                tree_bytes += int(object_text("cat-file", "-s", tree_id))
+                if tree_bytes > bound:
+                    raise ValueError("source_too_large")
+                listing = object_text("ls-tree", "-z", tree_id).encode("utf-8", "surrogateescape")
+                for entry in listing.split(b"\0"):
+                    if not entry:
+                        continue
+                    metadata, name = entry.split(b"\t", 1)
+                    mode, kind, child = metadata.split()
+                    if kind == b"tree":
+                        pending.append((child.decode("ascii"), prefix + name + b"/"))
+                    else:
+                        output.extend(metadata + b"\t" + prefix + name + b"\0")
+                        if len(output) > bound:
+                            raise ValueError("source_too_large")
+            output = bytes(output)
+        else:
+            output = object_text(*arguments).encode("utf-8", "surrogateescape")
+        if len(output) > bound:
+            raise ValueError("source_too_large")
+        return output
 
     def _text_of(self, command: tuple[str, ...], failure: str = "ref_unknown") -> str:
         completed = self._run(command)
