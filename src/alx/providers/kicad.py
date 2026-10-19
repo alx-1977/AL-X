@@ -4,17 +4,21 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 
 from alx.providers.own_source import denied
 
 
 class KiCadError(Exception):
-    pass
+    def __init__(self, code, recovery=None):
+        super().__init__(code)
+        self.recovery = recovery
 
 
 def bounded(path, roots, *, protected=True):
@@ -369,6 +373,17 @@ class KiCadProvider:
         return {'candidates': candidates}
 
     def write_back(self, arguments):
+        recovery = {'backed_up': [], 'written': [], 'rollback_status': 'not_needed',
+                    'restorations': [], 'remaining_changed': [], 'cleanup_errors': [],
+                    'error': {'code': '', 'type': ''}}
+        try:
+            return self._write_back(arguments, recovery)
+        except Exception as error:
+            code = str(error) if isinstance(error, KiCadError) else 'unavailable'
+            recovery['error'] = {'code': code, 'type': type(error).__name__}
+            raise KiCadError(code, recovery) from error
+
+    def _write_back(self, arguments, recovery):
         root, meta = self._load(arguments['work_copy_id'])
         source = bounded(arguments['project_dir'], self.design_roots)
         if str(source) != meta['source']:
@@ -378,37 +393,108 @@ class KiCadProvider:
         if board_invariant((root / 'project' / meta['board']).read_text()) != meta['board_invariant']:
             raise KiCadError('board_structure_changed')
 
+        temporary = set()
+        expected = dict(meta['hashes'])
+
         def validate():
             bounded(source, self.design_roots)
             if list(source.rglob('~*.lck')):
                 raise KiCadError('board_open')
-            if inventory(source) != meta['hashes']:
+            current = inventory(source)
+            for path in temporary:
+                current.pop(path.name, None)
+            if current != expected:
                 raise KiCadError('original_changed')
         validate()
         copied = inventory(root / 'project')
-        changed = [name for name, value in copied.items() if meta['hashes'].get(name) != value]
+        changed = sorted((name for name, value in copied.items() if meta['hashes'].get(name) != value),
+                         key=lambda name: (name not in meta['hashes'], name))
         allowed = {str(Path(meta['board']).with_suffix(s)) for s in ('.kicad_pcb', '.kicad_pro', '.kicad_dru')}
         if set(changed) - allowed or set(meta['hashes']) - set(copied):
             raise KiCadError('unsupported_project')
         backup = root / 'backups' / uuid.uuid4().hex
         backup.mkdir(parents=True)
-        backed_up = []
-        for name in changed:
-            if name in meta['hashes']:
-                shutil.copy2(source / name, backup / name)
-                if sha(backup / name) != meta['hashes'][name]:
-                    raise KiCadError('verification_failed')
-                backed_up.append(str(backup / name))
-        validate()
-        if self._revision(root) != arguments['work_copy_revision']:
-            raise KiCadError('work_copy_changed')
-        written = []
-        for name in changed:
-            bounded(source / name, self.design_roots)
-            if list(source.rglob('~*.lck')):
-                raise KiCadError('board_open')
-            shutil.copy2(root / 'project' / name, source / name)
-            written.append(str(source / name))
-            if sha(source / name) != copied[name]:
+
+        def verified_copy(origin, target, digest):
+            shutil.copy2(origin, target)
+            if sha(target) != digest or target.read_bytes() != origin.read_bytes():
                 raise KiCadError('verification_failed')
-        return {'backed_up': backed_up, 'written': written}
+
+        def beside(name, kind):
+            fd, value = tempfile.mkstemp(prefix='.' + name + '.' + kind + '-', dir=source)
+            os.close(fd)
+            path = Path(value)
+            temporary.add(path)
+            return path
+
+        staged = {}
+        try:
+            for name in changed:
+                if name in meta['hashes']:
+                    target = backup / name
+                    recovery['backed_up'].append(str(target))
+                    verified_copy(source / name, target, meta['hashes'][name])
+            for name in changed:
+                staged[name] = beside(name, 'stage')
+                verified_copy(root / 'project' / name, staged[name], copied[name])
+            validate()
+            if self._revision(root) != arguments['work_copy_revision']:
+                raise KiCadError('work_copy_changed')
+            for name in changed:
+                target = bounded(source / name, self.design_roots)
+                if sha(staged[name]) != copied[name]:
+                    raise KiCadError('verification_failed')
+                validate()
+                os.replace(staged[name], target)
+                recovery['written'].append(str(target))
+                expected[name] = copied[name]
+                if sha(target) != copied[name]:
+                    raise KiCadError('verification_failed')
+            validate()
+            return recovery
+        except Exception:
+            # Locks prohibit new writes, but cannot prevent restoring our own replacements.
+            for value in reversed(recovery['written']):
+                target = Path(value)
+                name = target.name
+                restored, error_code = False, ''
+                try:
+                    bounded(target, self.design_roots)
+                    if name in meta['hashes']:
+                        restore = beside(name, 'restore')
+                        verified_copy(backup / name, restore, meta['hashes'][name])
+                        os.replace(restore, target)
+                        if sha(target) != meta['hashes'][name]:
+                            raise KiCadError('verification_failed')
+                    else:
+                        target.unlink()
+                    restored = True
+                except Exception as error:
+                    error_code = str(error) if isinstance(error, KiCadError) else 'unavailable'
+                recovery['restorations'].append({'original': value,
+                    'backup': str(backup / name) if name in meta['hashes'] else '',
+                    'restored': restored, 'error': error_code})
+            if recovery['written']:
+                recovery['rollback_status'] = ('succeeded' if all(
+                    item['restored'] for item in recovery['restorations']) else 'failed')
+            # Include concurrent edits to untouched originals too; never restore those.
+            for name in sorted(set(meta['hashes']) | set(changed)):
+                target = source / name
+                try:
+                    bounded(target, self.design_roots)
+                    if target.is_symlink():
+                        different = True
+                    else:
+                        digest = sha(target) if target.exists() else None
+                        different = digest != meta['hashes'].get(name)
+                except (OSError, KiCadError):
+                    different = True  # Unreadable state cannot be claimed restored.
+                if different:
+                    recovery['remaining_changed'].append(str(target))
+            raise
+        finally:
+            for path in temporary:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    recovery['cleanup_errors'].append(str(path))

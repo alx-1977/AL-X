@@ -20,6 +20,10 @@ def array(item):
 
 
 TOTALS = obj({'error': I, 'warning': I, 'ignore': I, 'total': I})
+RECOVERY = obj({'backed_up': array(S), 'written': array(S), 'rollback_status': S,
+                'restorations': array(obj({'original': S, 'backup': S, 'restored': B, 'error': S})),
+                'remaining_changed': array(S), 'cleanup_errors': array(S),
+                'error': obj({'code': S, 'type': S})})
 ITEM = obj({'description': S, 'designator': S, 'pad_number': S, 'uuid': S,
             'position': obj({'x': N, 'y': N}, ())})
 GROUP = obj({'check_type': S, 'count': I, 'noise': B, 'findings': array(
@@ -57,10 +61,11 @@ DEFINITIONS = (
     CapabilityDefinition('write_back_kicad_board',
         'Write changed board/project/custom-rule files from the exact approved work-copy '
         'revision to its recorded original project. Requires approval of this exact call. '
-        'Refuses open boards and changed originals; backs up before writing and verifies '
-        'read-back. Generated reports and renders are excluded.',
+        'Refuses open boards and changed originals; verifies backups and staged files before '
+        'replacement, rolls back on failure, and reports recovery evidence on failure. '
+        'Generated reports and renders are excluded.',
         obj({'work_copy_id': S, 'work_copy_revision': S, 'project_dir': S}),
-        obj({'backed_up': array(S), 'written': array(S)}), SideEffect.EFFECTFUL, FAILURES),
+        RECOVERY, SideEffect.EFFECTFUL, FAILURES),
 )
 
 
@@ -68,6 +73,7 @@ def build_kicad_executors(provider, call_id_source):
     def bind(definition, execute):
         def invoke(arguments):
             code = 'arguments_unusable'
+            failure = {}
             if definition.input_schema.accepts(arguments):
                 try:
                     values = execute(arguments)
@@ -79,8 +85,11 @@ def build_kicad_executors(provider, call_id_source):
                     code = (str(error) if str(error) in FAILURES else
                             'unsupported_project' if isinstance(error, (KeyError, ValueError, TypeError, IndexError))
                             else 'unavailable')
+                    recovery = getattr(error, 'recovery', None)
+                    if recovery is not None:
+                        failure['recovery'] = recovery
             return CapabilityResult(call_id_source(), definition.capability_id,
-                                    CapabilityResultState.FAILED, failure={'code': code})
+                                    CapabilityResultState.FAILED, failure=dict(failure, code=code))
         return invoke
     return {definition.capability_id: bind(definition, method) for definition, method in zip(
         DEFINITIONS, (provider.check, provider.fix, provider.find, provider.write_back))}

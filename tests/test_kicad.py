@@ -281,7 +281,7 @@ class KiCadTests(unittest.TestCase):
                 (self.project / 'test.kicad_pcb').write_text(BOARD + '\n')
             return result
         with patch('alx.providers.kicad.shutil.copy2', side_effect=concurrent):
-            self.failure('original_changed', 'write_back_kicad_board', **args)
+            self.failure('verification_failed', 'write_back_kicad_board', **args)
         (self.project / 'test.kicad_pcb').write_text(BOARD)
         def corrupt(source, target):
             result = copy(source, target)
@@ -293,6 +293,172 @@ class KiCadTests(unittest.TestCase):
         backups = list(self.settings.work_root.rglob('backups/*/test.kicad_pcb'))
         self.assertTrue(backups)
         self.assertTrue(all(p.read_text() == BOARD for p in backups))
+
+    def two_file_write(self):
+        checked = self.check()
+        fixed = self.success('apply_kicad_mechanical_fixes',
+                             work_copy_id=checked['work_copy_id'],
+                             silkscreen_min_text=True, ignore_noise_checks=True)
+        return self.write_args(fixed)
+
+    def test_second_copy_failure_cannot_leave_mixed_originals(self):
+        import shutil
+        args = self.two_file_write()
+        original = inventory(self.project)
+        copy = shutil.copy2
+        count = 0
+        def copying(source, target):
+            nonlocal count
+            if Path(target).parent == self.project:
+                count += 1
+                if count == 2:
+                    raise OSError('second file failed')
+            return copy(source, target)
+        with patch('alx.providers.kicad.shutil.copy2', side_effect=copying):
+            result = self.call('write_back_kicad_board', **args)
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        self.assertEqual(inventory(self.project), original)
+        self.assertIn('recovery', result.failure)
+
+    def test_partial_failure_rolls_back_and_preserves_evidence(self):
+        import os
+        for fault in ('replace', 'lock', 'readback', 'rollback'):
+            with self.subTest(fault=fault):
+                args = self.two_file_write()
+                original = inventory(self.project)
+                replace = os.replace
+                count = 0
+                def replacing(source, target):
+                    nonlocal count
+                    if '.restore-' in Path(source).name and fault == 'rollback':
+                        raise OSError('restore failed')
+                    if '.stage-' in Path(source).name:
+                        count += 1
+                        if count == 2 and fault in ('replace', 'rollback'):
+                            raise OSError('second replace failed')
+                        result = replace(source, target)
+                        if count == 1 and fault == 'lock':
+                            (self.project / '~test.lck').write_text('open')
+                        if count == 1 and fault == 'readback':
+                            Path(target).write_text('corrupt')
+                        return result
+                    return replace(source, target)
+                with patch('alx.providers.kicad.os.replace', side_effect=replacing):
+                    result = self.call('write_back_kicad_board', **args)
+                self.assertEqual(result.state, CapabilityResultState.FAILED)
+                recovery = result.failure['recovery']
+                self.assertEqual(len(recovery['written']), 1)
+                self.assertEqual(len(recovery['backed_up']), 2)
+                self.assertEqual(recovery['rollback_status'],
+                                 'failed' if fault == 'rollback' else 'succeeded')
+                (self.project / '~test.lck').unlink(missing_ok=True)
+                if fault != 'rollback':
+                    self.assertEqual(inventory(self.project), original)
+                    self.assertFalse(recovery['remaining_changed'])
+                else:
+                    self.assertEqual(recovery['remaining_changed'], recovery['written'])
+                    self.assertFalse(recovery['restorations'][0]['restored'])
+                    for backup in recovery['backed_up']:
+                        Path(self.project / Path(backup).name).write_bytes(Path(backup).read_bytes())
+
+    def test_staging_failure_never_changes_originals(self):
+        import shutil
+        for fault in ('copy', 'readback'):
+            args = self.two_file_write()
+            original = inventory(self.project)
+            copy = shutil.copy2
+            def copying(source, target):
+                if '.stage-' in Path(target).name:
+                    if fault == 'copy':
+                        raise OSError('staging failed')
+                    copy(source, target)
+                    Path(target).write_text('corrupt')
+                    return target
+                return copy(source, target)
+            with patch('alx.providers.kicad.shutil.copy2', side_effect=copying):
+                result = self.call('write_back_kicad_board', **args)
+            self.assertEqual(result.state, CapabilityResultState.FAILED)
+            self.assertFalse(result.failure['recovery']['written'])
+            self.assertEqual(inventory(self.project), original)
+
+    def test_original_hash_is_rechecked_between_replacements(self):
+        import os
+        args = self.two_file_write()
+        original = {p.name: p.read_bytes() for p in self.project.iterdir()}
+        replace = os.replace
+        changed = []
+        def replacing(source, target):
+            result = replace(source, target)
+            if '.stage-' in Path(source).name:
+                changed.append(str(target))
+                other = next(p for p in self.project.glob('test.*') if p != Path(target))
+                other.write_text('concurrent edit')
+            return result
+        with patch('alx.providers.kicad.os.replace', side_effect=replacing):
+            result = self.call('write_back_kicad_board', **args)
+        self.assertEqual(result.failure['code'], 'original_changed')
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(Path(changed[0]).read_bytes(), original[Path(changed[0]).name])
+        self.assertIn(b'concurrent edit', [p.read_bytes() for p in self.project.iterdir()])
+        recovery = result.failure['recovery']
+        self.assertEqual(recovery['rollback_status'], 'succeeded')
+        self.assertEqual(len(recovery['remaining_changed']), 1)
+        self.assertNotIn(changed[0], recovery['remaining_changed'])
+
+    def test_rollback_removes_new_custom_rules(self):
+        import os
+        args = self.two_file_write()
+        original = inventory(self.project)
+        provider = KiCadProvider(self.settings, self.run_cli)
+        root = self.settings.work_root / args['work_copy_id']
+        (root / 'project' / 'test.kicad_dru').write_text('(version 1)')
+        args['work_copy_revision'] = provider._revision(root)
+        replace = os.replace
+        def replacing(source, target):
+            result = replace(source, target)
+            if Path(target).suffix == '.kicad_dru':
+                (self.project / '~test.lck').write_text('open')
+            return result
+        with patch('alx.providers.kicad.os.replace', side_effect=replacing):
+            result = self.call('write_back_kicad_board', **args)
+        self.assertEqual(result.failure['code'], 'board_open')
+        recovery = result.failure['recovery']
+        self.assertEqual(len(recovery['written']), 3)
+        self.assertEqual(len(recovery['backed_up']), 2)
+        self.assertEqual(recovery['rollback_status'], 'succeeded')
+        self.assertFalse(recovery['remaining_changed'])
+        (self.project / '~test.lck').unlink()
+        self.assertEqual(inventory(self.project), original)
+
+    def test_provider_reports_all_restorations_after_one_rollback_fails(self):
+        import os
+        args = self.two_file_write()
+        provider = KiCadProvider(self.settings, self.run_cli)
+        root = self.settings.work_root / args['work_copy_id']
+        (root / 'project' / 'test.kicad_dru').write_text('(version 1)')
+        args['work_copy_revision'] = provider._revision(root)
+        replace = os.replace
+        replaced = []
+        failed_restore = []
+        def replacing(source, target):
+            if '.restore-' in Path(source).name and not failed_restore:
+                failed_restore.append(str(target))
+                raise OSError('restore failed')
+            if '.stage-' in Path(source).name:
+                if len(replaced) == 2:
+                    raise OSError('third file failed')
+                replaced.append(str(target))
+            return replace(source, target)
+        with patch('alx.providers.kicad.os.replace', side_effect=replacing):
+            with self.assertRaises(KiCadError) as caught:
+                provider.write_back(args)
+        recovery = caught.exception.recovery
+        self.assertEqual(recovery['written'], replaced)
+        self.assertEqual(len(recovery['restorations']), 2)
+        self.assertEqual([r['restored'] for r in recovery['restorations']], [False, True])
+        self.assertEqual(recovery['remaining_changed'], failed_restore)
+        self.assertEqual(recovery['rollback_status'], 'failed')
+        self.assertEqual(recovery['error']['type'], 'OSError')
 
     def test_settings_defaults_and_storage_bound(self):
         defaults = KiCadSettings.from_environment({}, self.storage)
