@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import (  # noqa: E402
-    AgentDecision, ApprovalProposal, ApprovalScope,
+    AgentDecision, Approval, ApprovalLifecycle, ApprovalProposal, ApprovalScope,
     CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityResult,
     CapabilityResultState, CognitionOrigin, ConversationOrigin, ConversationSnapshot,
@@ -1385,6 +1385,107 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(reasoner.contexts[-1].refused_calls[-1]["subject"], "approval_invalid")
         self.assertEqual(self.store.load("goal-1").state.attempts[0].reason_code,
                          "approval_invalid")
+
+    def _retry_tax_reply(self, *, unheard=False, other_reason=None):
+        """19 Oct: the 07:50 refusal, then fresh authority at 08:25.
+
+        Seed the historical refusal because the copied-subject bug that
+        produced it has already been fixed.
+        """
+        subject = "2026 Tax Calculation for Approval for Submission"
+        body = "Please submit the approved tax calculation."
+        reference = {"mailbox_id": "INBOX", "uid_validity": "1376545928",
+                     "uid": "60756"}
+        arguments = {**reference, "to": ["nobuhlep@bakertillygreenwoods.co.za"],
+                     "subject": f"RE: {subject}", "body": body}
+        old_call = CapabilityCall("send-0750", "send_mail_reply", arguments,
+                                  "approval-0750")
+        retry = CapabilityCall("send-0825", "send_mail_reply", arguments,
+                               "approval-0825")
+        read = CapabilityCall("read-source", "read_mail_message", reference)
+        attempts = (CapabilityAttempt(
+            read, CapabilityAttemptDisposition.EXECUTED, True,
+            CapabilityResult(read.call_id, read.capability_id,
+                             CapabilityResultState.SUCCEEDED, {"subject": subject}),
+        ),)
+        if other_reason is not None:
+            attempts += (CapabilityAttempt(
+                old_call, CapabilityAttemptDisposition.REJECTED, False,
+                reason_code=other_reason,
+            ),)
+        attempts += (CapabilityAttempt(
+            old_call, CapabilityAttemptDisposition.REJECTED, False,
+            reason_code="approval_covers_unheard_text",
+        ),)
+        scope = ApprovalScope(retry.capability_id, retry.arguments)
+        # Existing authority exercises the binding guard even when the current
+        # unheard-text check would reject a new approval proposal earlier.
+        approvals = ((Approval(retry.approval_id, scope, ApprovalLifecycle.GRANTED),)
+                     if unheard else ())
+        state = goal(attempts=attempts, approvals=approvals)
+        self.store.create(state, "conversation-1", RETENTION)
+        current = conversation(
+            ConversationTurn("conversation-1", "draft-0824",
+                             ConversationOrigin.ALX_RESPONSE,
+                             "A different draft." if unheard else body, NOW),
+            ConversationTurn("conversation-1", "approval-turn-0825",
+                             ConversationOrigin.TYPED, "Yes, send it.", NOW, "friedl"),
+        )
+        self.assertEqual(CoreAgent._unheard_authored_text(current, retry, state),
+                         unheard)
+        reasoner = Queued(
+            AgentDecision(call=retry, approval_proposal=(None if unheard else
+                          ApprovalProposal(retry.approval_id, scope,
+                                           "turn:approval-turn-0825"))),
+            AgentDecision(response="I have the send result."),
+            selects="goal-1",
+        )
+        dispatched = []
+
+        def dispatch(call, authority):
+            self.assertTrue(any(item.permits(call, NOW) for item in authority.approvals))
+            dispatched.append(call)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(call.call_id, call.capability_id,
+                                 CapabilityResultState.SUCCEEDED, {"sent": True}),
+            )
+
+        definition = CapabilityDefinition(
+            "send_mail_reply", "Send a reply", SCHEMA, SCHEMA,
+            SideEffect.EFFECTFUL, transmits_authored_text=True,
+        )
+        outcome = CoreAgent(self.store, reasoner, dispatch, (definition,),
+                            clock=lambda: NOW).process(current, RETENTION, 3)
+        return outcome, reasoner, dispatched, retry
+
+    def test_copied_subject_rejection_allows_identical_retry_with_fresh_approval(self) -> None:
+        outcome, reasoner, dispatched, retry = self._retry_tax_reply()
+        self.assertEqual(dispatched, [retry])
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertFalse(reasoner.contexts[-1].refused_calls)
+
+    def test_unheard_text_rejection_stays_binding_and_returns_to_core(self) -> None:
+        outcome, reasoner, dispatched, _ = self._retry_tax_reply(unheard=True)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(outcome.reason, "repeated_rejected_call")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "I have the send result.")
+        self.assertEqual(reasoner.contexts[-1].response_only_reason,
+                         "repeated_rejected_call")
+        self.assertEqual(reasoner.contexts[-1].refused_calls[-1]["subject"],
+                         "approval_covers_unheard_text")
+
+    def test_cleared_unheard_text_does_not_hide_other_binding_rejections(self) -> None:
+        for reason in ("permission_missing", "policy_missing", "policy_denied",
+                       "input_invalid", "active_goal_required",
+                       "approval_capability_already_dispatched"):
+            with self.subTest(reason=reason):
+                outcome, reasoner, dispatched, _ = self._retry_tax_reply(other_reason=reason)
+                self.assertEqual(dispatched, [])
+                self.assertEqual(outcome.reason, "repeated_rejected_call")
+                self.assertEqual(reasoner.contexts[-1].refused_calls[-1]["subject"], reason)
+                self.store.delete("goal-1", self.store.load("goal-1").revision)
 
     def test_interrupted_dispatch_recovers_without_repeating_the_action(self) -> None:
         """An interrupted dispatch must neither wedge the goal nor be retried.
