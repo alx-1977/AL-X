@@ -232,7 +232,8 @@ class RepositoryAuthority:
             raise ValueError("unavailable")
         shape, oid = arguments[:-1], arguments[-1]
         if shape not in (("cat-file", "-t"), ("cat-file", "-s"),
-                         ("cat-file", "blob"), ("ls-tree", "-r", "-z")):
+                         ("cat-file", "blob"), ("ls-tree", "-r", "-z"),
+                         ("ls-tree", "-r", "-l", "-z")):
             raise ValueError("unavailable")
 
         def object_text(*args: str, directory: Path | None = None) -> str:
@@ -259,7 +260,7 @@ class RepositoryAuthority:
                     raise ValueError("unavailable")
                 with (directory / name).open("rb") as source:
                     output = source.read(bound + 1)
-        elif shape == ("ls-tree", "-r", "-z"):
+        elif shape[0] == "ls-tree":
             # Bound each tree before listing it, and bound the accumulated
             # recursive listing. A huge descendant cannot defeat the limit.
             pending = [(oid, b"")]
@@ -272,12 +273,13 @@ class RepositoryAuthority:
                 tree_bytes += int(object_text("cat-file", "-s", tree_id))
                 if tree_bytes > bound:
                     raise ValueError("source_too_large")
-                listing = object_text("ls-tree", "-z", tree_id).encode("utf-8", "surrogateescape")
+                flags = ("-l", "-z") if "-l" in shape else ("-z",)
+                listing = object_text("ls-tree", *flags, tree_id).encode("utf-8", "surrogateescape")
                 for entry in listing.split(b"\0"):
                     if not entry:
                         continue
                     metadata, name = entry.split(b"\t", 1)
-                    mode, kind, child = metadata.split()
+                    mode, kind, child = metadata.split()[:3]
                     if kind == b"tree":
                         pending.append((child.decode("ascii"), prefix + name + b"/"))
                     else:
@@ -290,6 +292,41 @@ class RepositoryAuthority:
         if len(output) > bound:
             raise ValueError("source_too_large")
         return output
+
+    def search_source(
+        self, commit: str, query: str, paths: tuple[str, ...], *,
+        ignore_case: bool, limit: int, bound: int,
+    ) -> tuple[str, bool]:
+        """One local fixed-string grep over the caller's eligible tree entries.
+
+        NUL-delimited filename/line-number fields keep literal names separate
+        from source text. The per-file count bounds Git's emitted matches; the
+        returned prefix is bounded too, ending only at a complete record.
+        """
+        if (len(commit) not in (40, 64)
+                or any(char not in "0123456789abcdefABCDEF" for char in commit)
+                or not query or len(query) > 4096
+                or not paths or not 1 <= limit <= 200 or not 0 < bound <= 65_536
+                or any(not path or path.startswith("/") or "\0" in path for path in paths)):
+            raise ValueError("unavailable")
+        flags = ("-i",) if ignore_case else ()
+        completed = self._run(
+            ("git", "--no-pager", "--literal-pathspecs", "grep", "--no-color",
+             "--no-ext-grep", "--no-textconv", "--no-column", "--no-heading", "--no-break",
+             "--full-name", "-I", "-n", "-F", "-z", f"--max-count={limit + 1}",
+             *flags, "-e", query, commit, "--", *paths), local_objects=True)
+        if completed.returncode == 1:
+            return "", False
+        if completed.returncode != 0:
+            raise ValueError("unavailable")
+        output = completed.stdout or ""
+        truncated = len(output) > bound
+        if truncated:
+            output = output[:bound]
+            output = output[:output.rfind("\n") + 1]
+        if output and not output.endswith("\n"):
+            raise ValueError("unavailable")
+        return output, truncated
 
     def _text_of(self, command: tuple[str, ...], failure: str = "ref_unknown") -> str:
         completed = self._run(command)

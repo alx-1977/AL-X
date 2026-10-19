@@ -125,6 +125,54 @@ class OwnSourceTests(unittest.TestCase):
                         arguments["query"] = "needle"
                     self.failed("arguments_unusable", **arguments)
 
+    def test_standard_ssh_private_keys_are_denied_in_both_operations(self):
+        names = [prefix + name + suffix
+                 for name in ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
+                 for suffix in ("", "_sk")
+                 for prefix in ("", "nested/")]
+        names += ["nested/" + name.upper() for name in names if "/" not in name]
+        names += ["mixed/" + "".join(c.upper() if i % 2 else c for i, c in enumerate(name))
+                  for name in names if "/" not in name]
+        for name in names:
+            self.write(name, "ssh-private-marker\n")
+        self.git("add", "--all")
+        self.git("commit", "-m", "key fixtures")
+        self.source.commit = self.commit = self.git("rev-parse", "HEAD").strip()
+        for name in names:
+            with self.subTest(name=name):
+                self.failed("path_denied", operation="read", path=name)
+        self.assertFalse(self.success(operation="search", query="ssh-private-marker")["matches"])
+
+    def test_search_uses_one_grep_and_no_per_file_blob_reads_even_without_matches(self):
+        authority = self.source.authority
+        for query in ("needle", "no-match-marker"):
+            with patch.object(authority, "_run", wraps=authority._run) as run:
+                found = self.success(operation="search", query=query, path_prefix="src")
+                calls = [call.args[0] for call in run.call_args_list]
+                greps = [args for args in calls if "grep" in args]
+                self.assertEqual(len(greps), 1)
+                args = greps[0]
+                for flag in ("--literal-pathspecs", "-I", "-n", "-F", "-z", self.commit):
+                    self.assertIn(flag, args)
+                self.assertEqual(set(args[args.index("--") + 1:]),
+                                 {"src/main.py", "src/other.py"})
+                self.assertFalse(any("unpack-file" in args or "blob" in args for args in calls))
+                blob_ids = {self.git("rev-parse", f"{self.commit}:{name}").strip()
+                            for name in ("src/main.py", "src/other.py")}
+                self.assertFalse(any("-s" in args and args[-1] in blob_ids for args in calls))
+                if query == "no-match-marker":
+                    self.assertFalse(found["matches"])
+
+    def test_search_literal_filename_and_empty_eligible_set(self):
+        found = self.success(operation="search", query="needle", path_prefix="odd [x]*.py")
+        self.assertEqual([m["path"] for m in found["matches"]], ["odd [x]*.py"])
+        authority = self.source.authority
+        for prefix in ("missing", "oversized.txt", "link.py"):
+            with patch.object(authority, "_run", wraps=authority._run) as run:
+                self.assertFalse(self.success(operation="search", query="needle",
+                                              path_prefix=prefix)["matches"])
+                self.assertFalse(any("grep" in call.args[0] for call in run.call_args_list))
+
     def test_literal_case_prefix_and_unusual_file_names(self):
         found = self.success(operation="search", query="[literal].*", path_prefix="src")
         self.assertEqual(found["matches"][0]["line_number"], 2)
@@ -220,6 +268,65 @@ class OwnSourceAuthorityTests(unittest.TestCase):
         self.assertFalse(self.temporary.exists())
         self.assertEqual(len(self.calls), 3)
 
+    def test_search_is_one_text_runner_call_with_literal_paths_and_bounded_records(self):
+        records = f"{self.oid}:odd [x]*.py\0" + "3\0needle\n"
+        observed = []
+
+        def runner(argv, **kwargs):
+            observed.append(argv)
+            self.assertIs(kwargs["text"], True)
+            self.assertFalse(kwargs["shell"])
+            self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
+            self.assertEqual(kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
+            return SimpleNamespace(returncode=0, stdout=records + "partial" * 20)
+
+        self.authority._runner = runner
+        output, truncated = self.authority.search_source(
+            self.oid, "[literal].*", ("odd [x]*.py", "-leading.py"),
+            ignore_case=True, limit=2, bound=len(records) + 3)
+        self.assertEqual(output, records)
+        self.assertTrue(truncated)
+        self.assertEqual(len(observed), 1)
+        argv = observed[0]
+        for flag in ("--literal-pathspecs", "-I", "-n", "-F", "-z", "-i", "--max-count=3"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("-e") + 1:argv.index("--")], ["[literal].*", self.oid])
+        self.assertEqual(argv[argv.index("--") + 1:], ["odd [x]*.py", "-leading.py"])
+
+    def test_search_no_match_status_is_not_a_command_failure(self):
+        for status in (1, 2):
+            with self.subTest(status=status):
+                self.authority._runner = lambda *args, **kwargs: SimpleNamespace(
+                    returncode=status, stdout="")
+                arguments = (self.oid, "needle", ("src/file.py",))
+                if status == 1:
+                    self.assertEqual(self.authority.search_source(
+                        *arguments, ignore_case=False, limit=50, bound=100), ("", False))
+                else:
+                    with self.assertRaisesRegex(ValueError, "unavailable"):
+                        self.authority.search_source(
+                            *arguments, ignore_case=False, limit=50, bound=100)
+
+    def test_size_tree_listing_keeps_sizes_without_per_blob_commands(self):
+        root_tree, blob = "b" * 40, "c" * 40
+        responses = {
+            ("rev-parse", "--verify", f"{self.oid}^{{tree}}"): root_tree,
+            ("cat-file", "-s", root_tree): "60",
+            ("ls-tree", "-l", "-z", root_tree): f"100644 blob {blob} 42\tfile.py\0",
+        }
+        seen = []
+
+        def runner(argv, **kwargs):
+            key = tuple(argv[2:])
+            seen.append(key)
+            return SimpleNamespace(returncode=0, stdout=responses[key])
+
+        self.authority._runner = runner
+        self.assertEqual(self.authority.read_source_object(
+            "ls-tree", "-r", "-l", "-z", self.oid, bound=100),
+            f"100644 blob {blob} 42\tfile.py\0".encode())
+        self.assertEqual(len(seen), 3)
+
     def test_oversized_blob_is_refused_before_materializing_it(self):
         with self.assertRaisesRegex(ValueError, "source_too_large"):
             self.authority.read_source_object("cat-file", "blob", self.oid, bound=2)
@@ -305,6 +412,10 @@ class OwnSourceObjectTests(unittest.TestCase):
             if args == ("ls-tree", "-r", "-z", self.commit):
                 return b"".join(mode + b" blob " + self.ids[name].encode() + b"\t"
                                 + name.encode() + b"\0" for name, (mode, _) in self.entries.items())
+            if args == ("ls-tree", "-r", "-l", "-z", self.commit):
+                return b"".join(mode + b" blob " + self.ids[name].encode() + b" "
+                                + str(len(blob)).encode() + b"\t" + name.encode() + b"\0"
+                                for name, (mode, blob) in self.entries.items())
             self.assertEqual(args[0], "cat-file")
             name = next(name for name, oid in self.ids.items() if oid == args[2])
             self.requested.append(name)
@@ -318,6 +429,25 @@ class OwnSourceObjectTests(unittest.TestCase):
         self.patch = patch.object(self.source, "_git", side_effect=git)
         self.patch.start()
         self.addCleanup(self.patch.stop)
+        def search(commit, query, paths, *, ignore_case, limit, bound):
+            records = []
+            for name in paths:
+                blob = self.entries[name][1]
+                if b"\0" in blob:
+                    continue
+                content = blob.decode("utf-8", "surrogateescape")
+                for number, line in enumerate(content.split("\n"), 1):
+                    needle = query.casefold() if ignore_case else query
+                    if needle in (line.casefold() if ignore_case else line):
+                        records.append(f"{commit}:{name}\0{number}\0{line}\n")
+            output = "".join(records)
+            truncated = len(output) > bound
+            if truncated:
+                output = output[:bound]
+                output = output[:output.rfind("\n") + 1]
+            return output, truncated
+
+        self.source.authority = SimpleNamespace(search_source=search)
         self.execute = build_own_source_executors(self.source.inspect, lambda: "call")[READ_OWN_SOURCE]
 
     def test_protected_candidates_never_retrieve_size_or_content(self):
@@ -328,6 +458,72 @@ class OwnSourceObjectTests(unittest.TestCase):
             result = self.execute({"operation": "read", "path": name})
             self.assertEqual(result.failure["code"], "path_denied")
             self.assertNotIn(name, self.requested)
+
+    def test_standard_ssh_key_names_never_reach_source_reads_or_search(self):
+        names = [prefix + name + suffix
+                 for name in ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
+                 for suffix in ("", "_sk") for prefix in ("", "nested/")]
+        names += ["nested/" + name.upper() for name in names if "/" not in name]
+        names += ["mixed/" + "".join(c.upper() if i % 2 else c for i, c in enumerate(name))
+                  for name in names if "/" not in name]
+        for number, name in enumerate(names, 100):
+            self.entries[name] = (b"100644", b"private-key-marker")
+            self.ids[name] = f"{number:040x}"
+        for name in names:
+            with self.subTest(name=name):
+                result = self.execute({"operation": "read", "path": name})
+                self.assertIs(result.state, CapabilityResultState.FAILED)
+                self.assertEqual(result.failure["code"], "path_denied")
+        result = self.execute({"operation": "search", "query": "private-key-marker"})
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertFalse(result.values["matches"])
+        self.assertFalse(set(names) & set(self.requested))
+
+    def test_search_never_uses_per_file_object_reader(self):
+        for query in ("needle", "absent"):
+            self.requested.clear()
+            result = self.execute({"operation": "search", "query": query})
+            self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+            self.assertEqual(self.requested, [])
+
+    def test_search_passes_only_eligible_paths_and_skips_grep_without_them(self):
+        authority = self.source.authority
+        with patch.object(authority, "search_source", wraps=authority.search_source) as grep:
+            result = self.execute({"operation": "search", "query": "absent"})
+            self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+            self.assertTrue(result.values["truncated"])
+            self.assertEqual(grep.call_count, 1)
+            self.assertEqual(set(grep.call_args.args[2]),
+                             {"src/file.py", "src/file2.py", "src-more.py", "[literal]*.py",
+                              "binary.bin", "long.py"})
+            for prefix in ("missing", "huge.py", "link.py"):
+                grep.reset_mock()
+                result = self.execute({"operation": "search", "query": "needle", "path_prefix": prefix})
+                self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+                self.assertFalse(result.values["matches"])
+                grep.assert_not_called()
+
+    def test_search_preserves_literal_line_queries_and_filename_boundaries(self):
+        name = 'odd "[x]*\u2028.py'
+        self.entries[name] = (b"100644", b"-needle [literal].*\r\n")
+        self.ids[name] = "e" * 40
+        result = self.execute({"operation": "search", "query": "-needle [literal].*", "path_prefix": name})
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(result.values["matches"][0]["path"], name)
+        self.assertEqual(result.values["matches"][0]["line_text"], "-needle [literal].*")
+        for query in ("First needle\nSecond", "needle\0", "needle\r"):
+            result = self.execute({"operation": "search", "query": query, "path_prefix": "src"})
+            self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+            self.assertFalse(result.values["matches"])
+
+    def test_search_rejects_malformed_or_ineligible_grep_records(self):
+        for output in ("partial", f"{self.commit}:src/file.py\0bad\0needle\n",
+                       f"{self.commit}:secret.txt\0" + "1\0needle\n",
+                       "b" * 40 + ":src/file.py\0" + "1\0needle\n"):
+            with patch.object(self.source.authority, "search_source", return_value=(output, False)):
+                result = self.execute({"operation": "search", "query": "needle"})
+                self.assertIs(result.state, CapabilityResultState.FAILED)
+                self.assertEqual(result.failure["code"], "unavailable")
 
     def test_search_is_literal_and_prefix_is_a_path_boundary(self):
         result = self.execute({"operation": "search", "query": "NEEDLE", "ignore_case": True,

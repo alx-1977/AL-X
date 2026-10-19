@@ -1,7 +1,7 @@
 """Bounded source inspection through Git objects only (D-057).
 
-No user path reaches Git's revision or pathspec parsers. Tree entries supply
-blob identities, after the shared deny policy has been applied.
+Tree entries supply blob identities and literal search paths, after the
+shared deny policy has been applied.
 """
 
 from typing import Any, Mapping
@@ -30,6 +30,8 @@ def denied(path: str) -> bool:
     # Treat credential-shaped directory names as protected too.
     return any(
         part in (".alx", ".env", ".netrc", ".npmrc")
+        or part in ("id_rsa", "id_rsa_sk", "id_dsa", "id_dsa_sk", "id_ecdsa", "id_ecdsa_sk",
+                    "id_ed25519", "id_ed25519_sk")
         or part.startswith((".env.", "id_rsa"))
         or part.endswith((".pem", ".key", ".p12", ".pfx"))
         or any(word in part for word in ("secret", "credential", "token", "password"))
@@ -71,11 +73,10 @@ class OwnSource:
             raise SourceError("unavailable")
         if self._git("cat-file", "-t", self.commit, bound=32).strip() != b"commit":
             raise SourceError("unavailable")
+        if operation == "search":
+            return self._search(query, prefix, arguments.get("ignore_case", False), limit)
         tree = self._git("ls-tree", "-r", "-z", self.commit, bound=MAX_TREE_BYTES)
         values: dict[str, Any] = {"running_commit": self.commit, "truncated": False}
-        matches = []
-        used = 0
-        needle = query.casefold() if arguments.get("ignore_case", False) else query
         for entry in tree.split(b"\0"):
             if not entry:
                 continue
@@ -123,17 +124,61 @@ class OwnSource:
                               content=selected[:MAX_OUTPUT_CHARS],
                               truncated=len(selected) > MAX_OUTPUT_CHARS)
                 return values
-            for number, line in enumerate(lines, 1):
-                line = line.rstrip("\r\n")
-                if needle not in (line.casefold() if arguments.get("ignore_case", False) else line):
-                    continue
-                cost = len(name) + len(line) + 64
-                if len(matches) == limit or used + cost > MAX_OUTPUT_CHARS:
-                    values.update(matches=matches, truncated=True)
-                    return values
-                matches.append({"path": name, "line_number": number, "line_text": line})
-                used += cost
-        if operation == "read":
-            raise SourceError("file_not_found")
-        values["matches"] = matches
+        raise SourceError("file_not_found")
+
+    def _search(self, query: str, prefix: str, ignore_case: bool, limit: int) -> dict[str, Any]:
+        tree = self._git("ls-tree", "-r", "-l", "-z", self.commit, bound=MAX_TREE_BYTES)
+        values: dict[str, Any] = {"running_commit": self.commit, "truncated": False, "matches": []}
+        paths = []
+        for entry in tree.split(b"\0"):
+            if not entry:
+                continue
+            metadata, raw_name = entry.split(b"\t", 1)
+            try:
+                name = raw_name.decode("utf-8")
+                validate_path(name)
+            except (UnicodeError, SourceError):
+                continue
+            if denied(name) or (prefix and not (name == prefix or name.startswith(prefix + "/"))):
+                continue
+            mode, kind, oid, size = metadata.split()
+            if mode not in (b"100644", b"100755") or kind != b"blob":
+                continue
+            if int(size) > MAX_BLOB_BYTES:
+                values["truncated"] = True
+                continue
+            paths.append(name)
+        # A query containing LF cannot occur within a source line. Git would
+        # otherwise treat its parts as separate patterns, even with -F.
+        if not paths or any(ord(char) in (0, 10) for char in query):
+            return values
+        output, truncated = self.authority.search_source(
+            self.commit, query, tuple(paths), ignore_case=ignore_case,
+            limit=limit, bound=MAX_OUTPUT_CHARS + limit * (len(self.commit) + 32))
+        values["truncated"] |= truncated
+        eligible = set(paths)
+        used = 0
+        for record in output.split("\n"):
+            if not record:
+                continue
+            filename, number, line = record.split("\0", 2)
+            if not filename.startswith(self.commit + ":"):
+                raise SourceError("unavailable")
+            name = filename[len(self.commit) + 1:]
+            if name not in eligible or not number.isdecimal() or int(number) < 1:
+                raise SourceError("unavailable")
+            try:
+                line.encode("utf-8")
+            except UnicodeError:
+                continue
+            line = line.rstrip("\r")
+            if (query.casefold() if ignore_case else query) not in (
+                    line.casefold() if ignore_case else line):
+                continue
+            cost = len(name) + len(line) + 64
+            if len(values["matches"]) == limit or used + cost > MAX_OUTPUT_CHARS:
+                values["truncated"] = True
+                break
+            values["matches"].append({"path": name, "line_number": int(number), "line_text": line})
+            used += cost
         return values
