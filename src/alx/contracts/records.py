@@ -616,8 +616,17 @@ class CapabilityAttempt:
     implementation_invoked: bool | None
     result: CapabilityResult | None = None
     reason_code: str | None = None
+    # None means an older record has no known time; never backfill it with now.
+    recorded_at: datetime | None = None
+    repeated_call_id: str | None = None
+    repeated_recorded_at: datetime | None = None
+    repeated_reason_code: str | None = None
 
     def __post_init__(self) -> None:
+        for name in ("recorded_at", "repeated_recorded_at"):
+            value = getattr(self, name)
+            if value is not None:
+                _aware(value, name)
         if not isinstance(self.disposition, CapabilityAttemptDisposition):
             raise TypeError("attempt disposition must be a CapabilityAttemptDisposition")
         if self.reason_code is not None:

@@ -985,6 +985,7 @@ class CoreAgent:
                         CapabilityAttemptDisposition.REJECTED,
                         False,
                         reason_code=approval_error,
+                        recorded_at=now,
                     )
                     if snapshot is not None:
                         snapshot = self._store.replace(
@@ -1310,6 +1311,7 @@ class CoreAgent:
                         CapabilityAttemptDisposition.REJECTED,
                         False,
                         reason_code=coding_exhaustion,
+                        recorded_at=now,
                     )
                     snapshot = self._store.replace(
                         replace(
@@ -1367,6 +1369,7 @@ class CoreAgent:
                     CapabilityAttemptDisposition.REJECTED,
                     False,
                     reason_code="approval_capability_already_dispatched",
+                    recorded_at=now,
                 )
                 snapshot = self._store.replace(
                     replace(
@@ -1386,11 +1389,19 @@ class CoreAgent:
                 snapshot.state, decision.call, now, conversation, transient_attempts,
             )
             if refusal is not None:
+                snapshot = self._record_repeated_rejection(
+                    snapshot, decision.call, refusal, now,
+                    provenance=decision_provenance,
+                )
                 refused_calls = (*refused_calls, {
                     "call_id": decision.call.call_id,
                     "capability_id": decision.call.capability_id,
                     "reason": "repeated_rejected_call",
                     "subject": refusal.reason_code,
+                    "repeated_call_id": refusal.call.call_id,
+                    "repeated_recorded_at": (None if refusal.recorded_at is None
+                                             else refusal.recorded_at.isoformat()),
+                    "repeated_reason_code": refusal.reason_code,
                 })
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
@@ -2307,6 +2318,9 @@ class CoreAgent:
         recorded_at: datetime,
     ) -> GoalSnapshot:
         assert attempt.call is not None
+        if (attempt.recorded_at is None
+                and attempt.disposition is CapabilityAttemptDisposition.REJECTED):
+            attempt = replace(attempt, recorded_at=recorded_at)
         consumed = self._approval_is_spent(attempt)
         approvals = tuple(
             replace(item, lifecycle=(ApprovalLifecycle.CONSUMED
@@ -2660,6 +2674,9 @@ class CoreAgent:
             return None
         refusal = (None if facts or step.call is None
                    else self._plan_dispatch_refusal(snapshot, step, now))
+        if isinstance(refusal, CapabilityAttempt):
+            snapshot = self._record_repeated_rejection(snapshot, step.call, refusal, now)
+            refusal = "plan_repeated_rejection"
         if facts or refusal is not None:
             self._write_plan(snapshot, raise_attention(
                 plan, facts or (refusal,), now))
@@ -2859,8 +2876,8 @@ class CoreAgent:
         return written
 
     def _plan_dispatch_refusal(self, snapshot: GoalSnapshot, step,
-                               now: datetime) -> str | None:
-        """Why the executor may not dispatch this step itself, if it may not."""
+                               now: datetime) -> str | CapabilityAttempt | None:
+        """The dispatch blocker, retaining the binding attempt for repeat records."""
         definition = self._definition(step.call.capability_id)
         if definition is None:
             return "plan_capability_unknown"
@@ -2874,9 +2891,35 @@ class CoreAgent:
                 or self._coding_interruption_exhaustion_reason(
                     snapshot.state, step.call) is not None):
             return "plan_coding_exhausted"
-        if self._binding_rejected_call(snapshot.state, step.call, now) is not None:
-            return "plan_repeated_rejection"
-        return None
+        return self._binding_rejected_call(snapshot.state, step.call, now)
+
+    def _record_repeated_rejection(
+        self, snapshot: GoalSnapshot, call: CapabilityCall,
+        earlier: CapabilityAttempt, now: datetime,
+        *, provenance: ContentProvenance | None = None,
+    ) -> GoalSnapshot:
+        """Retain and log the binding refusal, including unknown legacy time."""
+        assert earlier.call is not None
+        refusal = CapabilityAttempt(
+            call, CapabilityAttemptDisposition.REJECTED, False,
+            reason_code="repeated_rejected_call", recorded_at=now,
+            repeated_call_id=earlier.call.call_id,
+            repeated_recorded_at=earlier.recorded_at,
+            repeated_reason_code=earlier.reason_code,
+        )
+        written = self._store.replace(
+            replace(snapshot.state, attempts=(*snapshot.state.attempts, refusal)),
+            snapshot.retention_until, snapshot.revision,
+            provenance if provenance is not None else snapshot.provenance,
+        )
+        LOGGER.info(
+            "Call %s refused: repeated_rejected_call repeated_call_id=%s "
+            "repeated_recorded_at=%s repeated_reason_code=%s",
+            call.call_id, earlier.call.call_id,
+            "unknown" if earlier.recorded_at is None else earlier.recorded_at.isoformat(),
+            earlier.reason_code,
+        )
+        return written
 
     def _write_plan(self, snapshot: GoalSnapshot, plan: ExecutionPlan) -> GoalSnapshot:
         return self._store.replace(
@@ -3506,6 +3549,9 @@ class CoreAgent:
             for item in state.attempts
             if item.call is not None
             and item.disposition is CapabilityAttemptDisposition.REJECTED
+            # Repeat records describe the original refusal; they do not
+            # create a new binding predicate or conceal a repaired approval.
+            and item.reason_code != "repeated_rejected_call"
             and item.call.capability_id == call.capability_id
             and item.call.arguments == call.arguments
             and not (

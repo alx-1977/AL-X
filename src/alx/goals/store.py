@@ -131,7 +131,9 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
         "attempts": [
             [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.durable_arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
-             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs), None if item.result.outcome is None else item.result.outcome.value], item.reason_code]
+             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs), None if item.result.outcome is None else item.result.outcome.value], item.reason_code,
+             _time_to_data(item.recorded_at), item.repeated_call_id,
+             _time_to_data(item.repeated_recorded_at), item.repeated_reason_code]
             for item in goal.attempts
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
@@ -285,7 +287,13 @@ def _attempts(data: dict[str, Any]) -> tuple[CapabilityAttempt, ...]:
                          else ExecutionOutcome(result_data[6])),
             )
         call = None if item[0] is None else CapabilityCall(item[0], item[1], item[2], item[3])
-        values.append(CapabilityAttempt(call, CapabilityAttemptDisposition(item[4]), item[5], result, item[7]))
+        values.append(CapabilityAttempt(
+            call, CapabilityAttemptDisposition(item[4]), item[5], result, item[7],
+            _time_from_data(item[8]) if len(item) > 8 else None,
+            item[9] if len(item) > 9 else None,
+            _time_from_data(item[10]) if len(item) > 10 else None,
+            item[11] if len(item) > 11 else None,
+        ))
     return tuple(values)
 
 
