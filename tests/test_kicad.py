@@ -102,6 +102,15 @@ class KiCadTests(unittest.TestCase):
         live = (Path(__file__).parents[1] / 'src/alx/bootstrap/live_voice.py').read_text()
         self.assertEqual(live.count('kicad_runtime = build_kicad_runtime('), 1)
 
+    def test_write_back_catalogue_describes_partial_failure_recovery(self):
+        payload = json.loads(_catalogue_payload(self.runtime.definitions))
+        description = next(d['purpose'] for d in payload['capabilities']
+                           if d['id'] == 'write_back_kicad_board')
+        self.assertNotIn('rolls back on failure', description)
+        self.assertIn('already replaced files may remain', description)
+        self.assertIn('returned backups and evidence', description)
+        self.assertIn('no automatic undo', description)
+
     def test_copy_only_grouping_and_restart(self):
         original = inventory(self.project)
         result = self.check()
@@ -555,27 +564,34 @@ class KiCadTests(unittest.TestCase):
 
     def test_recovery_keeps_unverifiable_paths(self):
         import os
+        read_bytes = Path.read_bytes
         for kind in ('missing', 'symlink', 'directory', 'unreadable'):
             with self.subTest(kind=kind):
                 replace = os.replace
+                replaced = False
                 target = self.project / 'test.kicad_pcb'
                 other = self.project / 'external.txt'
                 other.write_text('external contents')
                 def replacing(source, destination):
+                    nonlocal replaced
                     result = replace(source, destination)
                     if Path(destination) == target and '.stage-' in Path(source).name:
-                        if kind == 'unreadable':
-                            target.chmod(0)
-                        else:
+                        replaced = True
+                        if kind != 'unreadable':
                             target.unlink()
                             if kind == 'symlink':
                                 target.symlink_to(other)
                             elif kind == 'directory':
                                 target.mkdir()
                     return result
+                def reading(path):
+                    if kind == 'unreadable' and replaced and path == target:
+                        raise PermissionError('simulated unreadable replaced board')
+                    return read_bytes(path)
                 # Include the user file in the approved snapshot.
                 args = self.two_file_write()
-                with patch('alx.providers.kicad.os.replace', side_effect=replacing):
+                with patch('alx.providers.kicad.os.replace', side_effect=replacing), \
+                        patch.object(Path, 'read_bytes', reading):
                     result = self.call('write_back_kicad_board', **args)
                 recovery = result.failure['recovery']
                 self.assertEqual(recovery['rollback_status'], 'failed')
@@ -585,8 +601,6 @@ class KiCadTests(unittest.TestCase):
                 if kind == 'directory':
                     target.rmdir()
                 else:
-                    if kind == 'unreadable':
-                        target.chmod(0o600)
                     target.unlink(missing_ok=True)
                 target.write_text(BOARD)
                 other.unlink()

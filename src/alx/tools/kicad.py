@@ -62,7 +62,8 @@ DEFINITIONS = (
         'Write changed board/project/custom-rule files from the exact approved work-copy '
         'revision to its recorded original project. Requires approval of this exact call. '
         'Refuses open boards and changed originals; verifies backups and staged files before '
-        'replacement, rolls back on failure, and reports recovery evidence on failure. '
+        'replacement. On failure, already replaced files may remain; recovery depends on '
+        'the returned backups and evidence, with no automatic undo. '
         'Generated reports and renders are excluded.',
         obj({'work_copy_id': S, 'work_copy_revision': S, 'project_dir': S}),
         RECOVERY, SideEffect.EFFECTFUL, FAILURES),
