@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -16,7 +16,7 @@ from alx.contracts import (
     AgentDecision, CapabilityCall, CapabilityResultState, ConversationOrigin, ConversationSnapshot,
     ConversationTurn, Evidence, GoalMutationKind, GoalProposal, GoalState, GoalStatus,
     GoalStopReason, MailReference, Objective,
-    ProgressRecord, Referent, RetentionPolicy, SideEffect, SuccessCriterion,
+    ProgressRecord, Referent, RetentionPolicy, SideEffect, SuccessCriterion, ContentOrigin,
 )
 from alx.core import CoreAgent, CoreState
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
@@ -24,6 +24,7 @@ from alx.core.loop import RECENT_FINISHED_GOALS
 from alx.core.model_reasoner import _context_payload, VERBATIM_HISTORY
 from alx.goals import SQLiteGoalStore
 from alx.goals.store import _goal_to_data
+from alx.contracts.provenance import provenance_to_storage
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.tools.goal_history import DEFINITION, READ_OWN_GOALS, build_goal_history_executors
 from alx.bootstrap.autonomous import AutonomousCognitionRunner
@@ -89,6 +90,264 @@ class FinishedHistoryTests(unittest.TestCase):
         outcome = core.process(conversation, RETENTION, 5)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         return reasoner.contexts
+
+    def assert_shipment_visible(self):
+        for arguments in ({"query": "878504110311"}, {"goal_id": "e8b6"}):
+            with self.subTest(arguments=arguments):
+                result = self.read(**arguments)
+                self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+                self.assertEqual([g["goal_id"] for g in result.values["goals"]], ["e8b6a256"])
+        with self.subTest(surface="recent_finished"):
+            self.assertEqual([g.state.goal_id for g in self.store.list_recent_finished("c1", 5)],
+                             ["e8b6a256"])
+
+    def test_old_email_does_not_expire_a_new_finished_goal(self):
+        policy = RetentionPolicy()
+        email = policy.direct_mail(NOW - timedelta(days=41), (MailReference("INBOX", "42", "1"),))
+        derived = policy.derive(ContentOrigin.ALX, NOW, (email,))
+        self.assertLess(derived.content_expires_at, NOW)
+        saved = self.store.create(shipment(), "c1", RETENTION, derived)
+        self.store.replace(shipment(status=GoalStatus.COMPLETED), RETENTION, saved.revision)
+        self.assert_shipment_visible()
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, RETENTION)
+
+    def test_invalid_stored_expiry_is_repaired_once_without_renewing_valid_rows(self):
+        policy = RetentionPolicy()
+        provenance = policy.direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
+        self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
+        valid = self.store.create(replace(shipment("valid", GoalStatus.COMPLETED), context={}),
+                                  "elsewhere", RETENTION, provenance)
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT created_at FROM goals WHERE goal_id = 'e8b6a256'"
+            ).fetchone()[0], NOW.isoformat())
+            connection.execute("UPDATE goals SET content_expires_at = ? WHERE goal_id = ?",
+                               ((NOW - timedelta(days=11)).isoformat(), "e8b6a256"))
+            # The goal was created on October 19 after its inherited October 8
+            # expiry. A later provenance write must not replace that evidence.
+            connection.execute("UPDATE goals SET content_recorded_at = ? WHERE goal_id = ?",
+                               ((NOW + timedelta(hours=1)).isoformat(), "e8b6a256"))
+            connection.execute("PRAGMA user_version = 9")
+        self.now += timedelta(days=1)
+        for _ in range(2):
+            self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+            self.assert_shipment_visible()
+            repaired = self.store.load("e8b6a256")
+            self.assertEqual(repaired.provenance.content_expires_at, RETENTION)
+            self.assertEqual(self.store.load("valid"), valid)
+            self.store.close()
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.now = RETENTION
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+
+    def test_goal_retention_clock_on_mail_introduction_and_subsequent_updates(self):
+        policy = RetentionPolicy()
+        for origin in (ContentOrigin.PERSON, ContentOrigin.ALX, ContentOrigin.EXTERNAL):
+            with self.subTest(origin=origin):
+                identifier = origin.value
+                self.now = NOW
+                saved = self.store.create(shipment(identifier), "c1", RETENTION,
+                                          policy.non_mail(origin, NOW))
+                self.assertIsNone(saved.provenance.content_expires_at)
+                self.now += timedelta(days=2)
+                email = policy.direct_mail(NOW - timedelta(days=41),
+                                            (MailReference("INBOX", "42", "1"),))
+                supplied = policy.derive(ContentOrigin.ALX, self.now, (saved.provenance, email))
+                updated = self.store.replace(saved.state, RETENTION, saved.revision, supplied)
+                self.assertEqual(updated.provenance.recorded_at, self.now)
+                self.assertEqual(updated.provenance.content_expires_at, RETENTION)
+                self.now += timedelta(days=3)
+                supplied = policy.derive(ContentOrigin.ALX, self.now, (updated.provenance, email))
+                rewritten = self.store.replace(updated.state, RETENTION, updated.revision, supplied)
+                self.assertEqual(rewritten.provenance, updated.provenance)
+                fresh_email = policy.direct_mail(self.now, (MailReference("INBOX", "42", "2"),))
+                supplied = policy.derive(ContentOrigin.ALX, self.now, (rewritten.provenance, fresh_email))
+                rewritten = self.store.replace(rewritten.state, RETENTION, rewritten.revision, supplied)
+                self.assertEqual(rewritten.provenance.content_expires_at, RETENTION)
+                self.assertEqual(set(rewritten.provenance.mail_references),
+                                 set((*email.mail_references, *fresh_email.mail_references)))
+
+    def test_goal_deadline_respects_own_horizon_and_creation_lower_bound(self):
+        email = RetentionPolicy().direct_mail(NOW - timedelta(days=41),
+                                              (MailReference("INBOX", "42", "1"),))
+        for horizon, expected in ((-1, 0), (2, 2), (90, 30)):
+            with self.subTest(horizon=horizon):
+                saved = self.store.create(shipment(str(horizon)), "c1",
+                                          NOW + timedelta(days=horizon), email)
+                self.assertEqual(saved.provenance.recorded_at, NOW)
+                self.assertEqual(saved.provenance.content_expires_at,
+                                 NOW + timedelta(days=expected))
+
+    def test_legacy_update_does_not_renew_elapsed_content_deadline(self):
+        day_0 = NOW - timedelta(days=31)
+        expiry = day_0 + timedelta(days=30)
+        provenance = RetentionPolicy().direct_mail(
+            day_0, (MailReference("INBOX", "42", "1"),))
+        self.now = day_0
+        # Cover both reliable creation evidence and a legacy row where only
+        # the latest write is known. Neither allows renewal of this deadline.
+        for identifier in ("known", "unknown"):
+            saved = self.store.create(shipment(identifier), "c1", RETENTION, provenance)
+            self.now = NOW
+            self.store.replace(shipment(identifier, GoalStatus.COMPLETED),
+                               RETENTION, saved.revision)
+            self.now = day_0
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            # Earlier Core updates advanced provenance's timestamp without
+            # changing the original content deadline.
+            connection.execute("UPDATE goals SET content_recorded_at = ?",
+                               (NOW.isoformat(),))
+            connection.execute("UPDATE goals SET created_at = NULL WHERE goal_id = 'unknown'")
+            connection.execute("PRAGMA user_version = 9")
+        self.now = NOW
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        for identifier in ("known", "unknown"):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(self.store.load(identifier).provenance.content_expires_at, expiry)
+                self.assertEqual(self.read(goal_id=identifier).failure["code"], "goal_not_found")
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+
+    def test_legacy_repair_preserves_deadline_without_creation_evidence(self):
+        policy = RetentionPolicy()
+        provenance = policy.direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
+        self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("ALTER TABLE goals DROP COLUMN created_at")
+            connection.execute("UPDATE goals SET content_recorded_at = ?, content_expires_at = ?",
+                               (NOW.isoformat().replace("+00:00", "Z"),
+                                (NOW - timedelta(days=11)).isoformat()))
+            connection.execute("PRAGMA user_version = 9")
+        expiry = NOW - timedelta(days=11)
+        self.now = NOW + timedelta(days=1)
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, expiry)
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+
+    def schema_9_database(self, identifiers=("e8b6a256",)):
+        """Build the old schema directly, without ever creating created_at."""
+        self.store.close()
+        self.path.unlink()
+        expiry = NOW - timedelta(days=11)
+        provenance = replace(RetentionPolicy().direct_mail(
+            NOW, (MailReference("INBOX", "42", "1"),)),
+            recorded_at=NOW + timedelta(hours=1), content_expires_at=expiry)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "CREATE TABLE goals (goal_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, "
+                "retention_until TEXT NOT NULL, state_json TEXT NOT NULL, conversation_id TEXT, "
+                "content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, "
+                "mail_references TEXT, scope TEXT, updated_at TEXT, unfinished INTEGER, "
+                "project_id TEXT, finished_at TEXT)"
+            )
+            for identifier in identifiers:
+                connection.execute(
+                    "INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (identifier, 3, RETENTION.isoformat(),
+                     json.dumps(_goal_to_data(shipment(identifier, GoalStatus.COMPLETED))),
+                     "c1", *provenance_to_storage(provenance), None,
+                     (NOW + timedelta(hours=1)).isoformat(), 0, None, NOW.isoformat()),
+                )
+            connection.execute("PRAGMA user_version = 9")
+        self.now = NOW + timedelta(days=1)
+
+    def creation_trace(self, records):
+        # Exact persisted format from SQLiteTraceRecord, with explicit event
+        # labels emitted by CoreAgent._persist_goal (references are shortened).
+        with sqlite3.connect(self.path.with_name("trace.sqlite3")) as connection:
+            connection.execute(
+                "CREATE TABLE trace (at TEXT NOT NULL, subsystem TEXT, status TEXT, "
+                "label TEXT, reference TEXT, reason_code TEXT, duration_ms INTEGER, count INTEGER)"
+            )
+            connection.executemany(
+                "INSERT INTO trace VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)", records)
+
+    def test_schema_9_upgrade_repairs_expiry_from_earliest_creation_trace(self):
+        self.schema_9_database()
+        self.creation_trace([
+            ((NOW + timedelta(hours=1)).isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+            (NOW.astimezone(timezone(timedelta(hours=2))).isoformat(),
+             "goals", "completed", "Goal created", "e8b6a256"),
+        ])
+        for _ in range(2):
+            self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+            self.assert_shipment_visible()
+            self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, RETENTION)
+            with sqlite3.connect(self.path) as connection:
+                self.assertEqual(datetime.fromisoformat(connection.execute(
+                    "SELECT created_at FROM goals").fetchone()[0]), NOW)
+            self.store.close()
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+
+    def test_schema_9_update_trace_is_not_creation_evidence(self):
+        self.schema_9_database()
+        self.creation_trace([
+            (NOW.isoformat(), "goals", "completed", "Goal completed", "e8b6a256"),
+        ])
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at,
+                         NOW - timedelta(days=11))
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+        with sqlite3.connect(self.path) as connection:
+            self.assertIsNone(connection.execute("SELECT created_at FROM goals").fetchone()[0])
+
+    def test_schema_9_rejects_invalid_unrelated_and_ambiguous_creation_traces(self):
+        self.schema_9_database(("e8b6a256", "e8b6a256-other", "invalid", "naive", "update", "foreign"))
+        self.creation_trace([
+            (NOW.isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+            ("not-a-time", "goals", "completed", "Goal created", "invalid"),
+            ("2026-10-19T08:00:00", "goals", "completed", "Goal created", "naive"),
+            (NOW.isoformat(), "goals", "completed", "Goal completed", "update"),
+            (NOW.isoformat(), "core", "completed", "Goal created", "foreign"),
+            (NOW.isoformat(), "goals", "failed", "Goal created", "foreign"),
+            (NOW.isoformat(), "goals", "completed", "Goal created", "missing"),
+        ])
+        with sqlite3.connect(self.path) as connection:
+            before = connection.execute("SELECT * FROM goals ORDER BY goal_id").fetchall()
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 10), ())
+        with sqlite3.connect(self.path) as connection:
+            after = connection.execute("SELECT * FROM goals ORDER BY goal_id").fetchall()
+        self.assertEqual(after, [(*row, None) for row in before])
+
+    def test_schema_9_verified_creation_preserves_genuinely_elapsed_deadline(self):
+        self.schema_9_database()
+        created = NOW - timedelta(days=41)
+        self.creation_trace([
+            (created.isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+            (NOW.isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+        ])
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at,
+                         NOW - timedelta(days=11))
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(datetime.fromisoformat(connection.execute(
+                "SELECT created_at FROM goals").fetchone()[0]), created)
+
+    def test_history_deadlines_are_compared_as_instants(self):
+        provenance = RetentionPolicy().direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
+        self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
+        # Equivalent legacy ISO timestamps must not disappear two hours early.
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("UPDATE goals SET retention_until = ?, content_expires_at = ?",
+                               ("2026-11-18T06:00:00-02:00", "2026-11-18T06:00:00-02:00"))
+        self.now = RETENTION - timedelta(minutes=30)
+        self.assert_shipment_visible()
+        self.now = RETENTION
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
 
     def test_reminder_completion_then_follow_up_after_restart(self):
         self.store.create(shipment(), "c1", RETENTION)
