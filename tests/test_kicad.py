@@ -320,21 +320,18 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(inventory(self.project), original)
         self.assertIn('recovery', result.failure)
 
-    def test_partial_failure_rolls_back_and_preserves_evidence(self):
+    def test_partial_failure_preserves_files_and_recovery_evidence(self):
         import os
-        for fault in ('replace', 'lock', 'readback', 'rollback'):
+        for fault in ('replace', 'lock', 'readback'):
             with self.subTest(fault=fault):
                 args = self.two_file_write()
-                original = inventory(self.project)
                 replace = os.replace
                 count = 0
                 def replacing(source, target):
                     nonlocal count
-                    if '.restore-' in Path(source).name and fault == 'rollback':
-                        raise OSError('restore failed')
                     if '.stage-' in Path(source).name:
                         count += 1
-                        if count == 2 and fault in ('replace', 'rollback'):
+                        if count == 2 and fault == 'replace':
                             raise OSError('second replace failed')
                         result = replace(source, target)
                         if count == 1 and fault == 'lock':
@@ -349,17 +346,17 @@ class KiCadTests(unittest.TestCase):
                 recovery = result.failure['recovery']
                 self.assertEqual(len(recovery['written']), 1)
                 self.assertEqual(len(recovery['backed_up']), 2)
-                self.assertEqual(recovery['rollback_status'],
-                                 'failed' if fault == 'rollback' else 'succeeded')
+                self.assertEqual(recovery['rollback_status'], 'failed')
+                self.assertEqual(recovery['remaining_changed'], recovery['written'])
+                self.assertFalse(recovery['restorations'][0]['restored'])
+                reason = ('write_digest_mismatch' if fault == 'readback'
+                          else 'atomic_recovery_unavailable')
+                self.assertEqual(recovery['conflicts'][0]['reason'], reason)
                 (self.project / '~test.lck').unlink(missing_ok=True)
-                if fault != 'rollback':
-                    self.assertEqual(inventory(self.project), original)
-                    self.assertFalse(recovery['remaining_changed'])
-                else:
-                    self.assertEqual(recovery['remaining_changed'], recovery['written'])
-                    self.assertFalse(recovery['restorations'][0]['restored'])
-                    for backup in recovery['backed_up']:
-                        Path(self.project / Path(backup).name).write_bytes(Path(backup).read_bytes())
+                for backup in recovery['backed_up']:
+                    target = self.project / Path(backup).name
+                    self.assertTrue(Path(backup).is_file())
+                    target.write_bytes(Path(backup).read_bytes())
 
     def test_staging_failure_never_changes_originals(self):
         import shutil
@@ -384,7 +381,6 @@ class KiCadTests(unittest.TestCase):
     def test_original_hash_is_rechecked_between_replacements(self):
         import os
         args = self.two_file_write()
-        original = {p.name: p.read_bytes() for p in self.project.iterdir()}
         replace = os.replace
         changed = []
         def replacing(source, target):
@@ -398,17 +394,16 @@ class KiCadTests(unittest.TestCase):
             result = self.call('write_back_kicad_board', **args)
         self.assertEqual(result.failure['code'], 'original_changed')
         self.assertEqual(len(changed), 1)
-        self.assertEqual(Path(changed[0]).read_bytes(), original[Path(changed[0]).name])
+        self.assertIn('(size 1 1)', Path(changed[0]).read_text())
         self.assertIn(b'concurrent edit', [p.read_bytes() for p in self.project.iterdir()])
         recovery = result.failure['recovery']
-        self.assertEqual(recovery['rollback_status'], 'succeeded')
-        self.assertEqual(len(recovery['remaining_changed']), 1)
-        self.assertNotIn(changed[0], recovery['remaining_changed'])
+        self.assertEqual(recovery['rollback_status'], 'failed')
+        self.assertEqual(len(recovery['remaining_changed']), 2)
+        self.assertIn(changed[0], recovery['remaining_changed'])
 
-    def test_rollback_removes_new_custom_rules(self):
+    def test_recovery_preserves_new_custom_rules_without_atomic_delete(self):
         import os
         args = self.two_file_write()
-        original = inventory(self.project)
         provider = KiCadProvider(self.settings, self.run_cli)
         root = self.settings.work_root / args['work_copy_id']
         (root / 'project' / 'test.kicad_dru').write_text('(version 1)')
@@ -425,12 +420,12 @@ class KiCadTests(unittest.TestCase):
         recovery = result.failure['recovery']
         self.assertEqual(len(recovery['written']), 3)
         self.assertEqual(len(recovery['backed_up']), 2)
-        self.assertEqual(recovery['rollback_status'], 'succeeded')
-        self.assertFalse(recovery['remaining_changed'])
+        self.assertEqual(recovery['rollback_status'], 'failed')
+        self.assertCountEqual(recovery['remaining_changed'], recovery['written'])
+        self.assertTrue((self.project / 'test.kicad_dru').is_file())
         (self.project / '~test.lck').unlink()
-        self.assertEqual(inventory(self.project), original)
 
-    def test_provider_reports_all_restorations_after_one_rollback_fails(self):
+    def test_provider_reports_every_deferred_restoration(self):
         import os
         args = self.two_file_write()
         provider = KiCadProvider(self.settings, self.run_cli)
@@ -439,11 +434,7 @@ class KiCadTests(unittest.TestCase):
         args['work_copy_revision'] = provider._revision(root)
         replace = os.replace
         replaced = []
-        failed_restore = []
         def replacing(source, target):
-            if '.restore-' in Path(source).name and not failed_restore:
-                failed_restore.append(str(target))
-                raise OSError('restore failed')
             if '.stage-' in Path(source).name:
                 if len(replaced) == 2:
                     raise OSError('third file failed')
@@ -455,10 +446,150 @@ class KiCadTests(unittest.TestCase):
         recovery = caught.exception.recovery
         self.assertEqual(recovery['written'], replaced)
         self.assertEqual(len(recovery['restorations']), 2)
-        self.assertEqual([r['restored'] for r in recovery['restorations']], [False, True])
-        self.assertEqual(recovery['remaining_changed'], failed_restore)
+        self.assertEqual([r['restored'] for r in recovery['restorations']], [False, False])
+        self.assertCountEqual(recovery['remaining_changed'], replaced)
         self.assertEqual(recovery['rollback_status'], 'failed')
         self.assertEqual(recovery['error']['type'], 'OSError')
+
+    def test_recovery_preserves_external_edits_to_replaced_and_new_files(self):
+        import os
+        for name in ('test.kicad_pcb', 'test.kicad_dru'):
+            with self.subTest(name=name):
+                args = self.two_file_write()
+                provider = KiCadProvider(self.settings, self.run_cli)
+                root = self.settings.work_root / args['work_copy_id']
+                (root / 'project' / 'test.kicad_dru').write_text('(version 1)')
+                args['work_copy_revision'] = provider._revision(root)
+                replace = os.replace
+                def replacing(source, target):
+                    result = replace(source, target)
+                    if '.stage-' in Path(source).name and Path(target).name == name:
+                        Path(target).write_text('external edit')
+                    return result
+                with patch('alx.providers.kicad.os.replace', side_effect=replacing):
+                    with self.assertRaises(KiCadError) as caught:
+                        provider.write_back(args)
+                recovery = caught.exception.recovery
+                self.assertEqual((self.project / name).read_text(), 'external edit')
+                self.assertIn(str(self.project / name), recovery['remaining_changed'])
+                conflict = next(c for c in recovery['conflicts']
+                                if c['original'] == str(self.project / name))
+                self.assertEqual(conflict['reason'], 'write_digest_mismatch')
+                self.assertNotEqual(conflict['expected_digest'], conflict['current_digest'])
+                self.assertEqual(recovery['rollback_status'], 'failed')
+                (self.project / 'test.kicad_dru').unlink(missing_ok=True)
+                (self.project / 'test.kicad_pcb').write_text(BOARD)
+                (self.project / 'test.kicad_pro').write_text(json.dumps(PROJECT))
+
+    def test_transaction_temporaries_do_not_consume_inventory_limits(self):
+        for limit in ('MAX_PROJECT_ENTRIES', 'MAX_PROJECT_BYTES'):
+            with self.subTest(limit=limit):
+                args = self.two_file_write()
+                provider = KiCadProvider(self.settings, self.run_cli)
+                real = inventory(self.project)
+                budget = (len(real) if limit.endswith('ENTRIES') else
+                          sum(p.stat().st_size for p in (self.settings.work_root /
+                              args['work_copy_id'] / 'project').iterdir()) + 100)
+                real_inventory = inventory
+                def limited(root, **kwargs):
+                    if root == self.project:
+                        with patch('alx.providers.kicad.' + limit, budget):
+                            return real_inventory(root, **kwargs)
+                    return real_inventory(root, **kwargs)
+                with patch('alx.providers.kicad.inventory', side_effect=limited):
+                    provider.write_back(args)
+                # Similar names belonging to users must still count.
+                user = self.project / '.test.kicad_pcb.stage-user'
+                user.write_bytes(b'x' * (budget + 1))
+                with patch('alx.providers.kicad.' + limit, budget):
+                    with self.assertRaisesRegex(KiCadError, 'project_too_large'):
+                        inventory(self.project)
+                user.unlink()
+                (self.project / 'test.kicad_pcb').write_text(BOARD)
+                (self.project / 'test.kicad_pro').write_text(json.dumps(PROJECT))
+
+    def test_recovery_does_not_mutate_after_digest_observation(self):
+        import os
+        from alx.providers.kicad import sha
+        args = self.two_file_write()
+        replace = os.replace
+        written = []
+        recovering = False
+        def replacing(source, target):
+            nonlocal recovering
+            if '.stage-' in Path(source).name:
+                if written:
+                    recovering = True
+                    raise OSError('second replacement failed')
+                written.append(Path(target))
+            return replace(source, target)
+        def reading(path):
+            digest = sha(path)
+            if recovering and path in written:
+                path.write_text('edit after digest observation')
+            return digest
+        with patch('alx.providers.kicad.os.replace', side_effect=replacing), \
+                patch('alx.providers.kicad.sha', side_effect=reading):
+            result = self.call('write_back_kicad_board', **args)
+        self.assertEqual(written[0].read_text(), 'edit after digest observation')
+        recovery = result.failure['recovery']
+        self.assertEqual(recovery['rollback_status'], 'failed')
+        self.assertFalse(any(r['restored'] for r in recovery['restorations']))
+
+    def test_exact_temp_exclusions_still_validate_real_files(self):
+        baseline = inventory(self.project)
+        stage = self.project / '.test.kicad_pcb.stage-owned'
+        backup = self.project / '.test.kicad_pcb.backup-owned'
+        for path in (stage, backup):
+            path.write_bytes(b'x' * 1000)
+        excluded = {stage, backup}
+        budget = sum((self.project / name).stat().st_size for name in baseline)
+        with patch('alx.providers.kicad.MAX_PROJECT_BYTES', budget), \
+                patch('alx.providers.kicad.MAX_PROJECT_ENTRIES', len(baseline)):
+            self.assertEqual(inventory(self.project, exclude=excluded), baseline)
+        real = self.project / 'test.kicad_pro'
+        real.unlink()
+        real.symlink_to(stage)
+        with self.assertRaisesRegex(KiCadError, 'path_denied'):
+            inventory(self.project, exclude=excluded)
+
+    def test_recovery_keeps_unverifiable_paths(self):
+        import os
+        for kind in ('missing', 'symlink', 'directory', 'unreadable'):
+            with self.subTest(kind=kind):
+                replace = os.replace
+                target = self.project / 'test.kicad_pcb'
+                other = self.project / 'external.txt'
+                other.write_text('external contents')
+                def replacing(source, destination):
+                    result = replace(source, destination)
+                    if Path(destination) == target and '.stage-' in Path(source).name:
+                        if kind == 'unreadable':
+                            target.chmod(0)
+                        else:
+                            target.unlink()
+                            if kind == 'symlink':
+                                target.symlink_to(other)
+                            elif kind == 'directory':
+                                target.mkdir()
+                    return result
+                # Include the user file in the approved snapshot.
+                args = self.two_file_write()
+                with patch('alx.providers.kicad.os.replace', side_effect=replacing):
+                    result = self.call('write_back_kicad_board', **args)
+                recovery = result.failure['recovery']
+                self.assertEqual(recovery['rollback_status'], 'failed')
+                self.assertEqual(recovery['conflicts'][0]['reason'],
+                                 'current_contents_unverifiable')
+                self.assertEqual(other.read_text(), 'external contents')
+                if kind == 'directory':
+                    target.rmdir()
+                else:
+                    if kind == 'unreadable':
+                        target.chmod(0o600)
+                    target.unlink(missing_ok=True)
+                target.write_text(BOARD)
+                other.unlink()
 
     def test_settings_defaults_and_storage_bound(self):
         defaults = KiCadSettings.from_environment({}, self.storage)

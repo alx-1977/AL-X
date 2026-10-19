@@ -14,6 +14,10 @@ import uuid
 
 from alx.providers.own_source import denied
 
+MAX_PROJECT_ENTRIES = 20000
+MAX_PROJECT_BYTES = 256 * 1024 * 1024
+MAX_FILE_BYTES = 32 * 1024 * 1024
+
 
 class KiCadError(Exception):
     def __init__(self, code, recovery=None):
@@ -30,13 +34,16 @@ def bounded(path, roots, *, protected=True):
     return resolved
 
 
-def inventory(root):
+def inventory(root, *, exclude=()):
     result = {}
     total = 0
     entries = 0
     for path in root.rglob('*'):
+        # Only exact transaction-owned paths, never a filename pattern.
+        if path in exclude:
+            continue
         entries += 1
-        if entries > 20000:
+        if entries > MAX_PROJECT_ENTRIES:
             raise KiCadError('project_too_large')
         bounded(path, (root,), protected=False)
         if denied(path.relative_to(root).as_posix()):
@@ -45,7 +52,7 @@ def inventory(root):
             raise KiCadError('path_denied')
         if path.is_file():
             total += path.stat().st_size
-            if path.stat().st_size > 32 * 1024 * 1024 or total > 256 * 1024 * 1024:
+            if path.stat().st_size > MAX_FILE_BYTES or total > MAX_PROJECT_BYTES:
                 raise KiCadError('project_too_large')
             result[path.relative_to(root).as_posix()] = sha(path)
     return result
@@ -258,7 +265,8 @@ class KiCadProvider:
     def _render(self, root, meta):
         target = root / 'artifacts' / uuid.uuid4().hex
         target.mkdir()
-        self._run('pcb', 'export', 'svg', '--output', str(target) + '/',
+        self._run('pcb', 'export', 'svg', '--layers', 'F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts',
+                  '--mode-multi', '--output', str(target) + '/',
                   root / 'project' / meta['board'])
         paths = [str(p) for p in target.glob('*.svg') if p.is_file()]
         if not paths:
@@ -375,6 +383,7 @@ class KiCadProvider:
     def write_back(self, arguments):
         recovery = {'backed_up': [], 'written': [], 'rollback_status': 'not_needed',
                     'restorations': [], 'remaining_changed': [], 'cleanup_errors': [],
+                    'write_digests': {}, 'conflicts': [],
                     'error': {'code': '', 'type': ''}}
         try:
             return self._write_back(arguments, recovery)
@@ -400,9 +409,7 @@ class KiCadProvider:
             bounded(source, self.design_roots)
             if list(source.rglob('~*.lck')):
                 raise KiCadError('board_open')
-            current = inventory(source)
-            for path in temporary:
-                current.pop(path.name, None)
+            current = inventory(source, exclude=temporary)
             if current != expected:
                 raise KiCadError('original_changed')
         validate()
@@ -447,36 +454,40 @@ class KiCadProvider:
                 validate()
                 os.replace(staged[name], target)
                 recovery['written'].append(str(target))
+                recovery['write_digests'][str(target)] = copied[name]
                 expected[name] = copied[name]
                 if sha(target) != copied[name]:
                     raise KiCadError('verification_failed')
             validate()
-            return recovery
+            # Success schema predates failure-only digest/conflict evidence.
+            return {key: value for key, value in recovery.items()
+                    if key not in ('write_digests', 'conflicts')}
         except Exception:
-            # Locks prohibit new writes, but cannot prevent restoring our own replacements.
+            # POSIX replace/unlink have no compare-digest-and-mutate primitive.
+            # Advisory locks do not exclude KiCad or other writers. Even a matching
+            # digest cannot authorise a later destructive mutation: another writer
+            # could change the path or open inode between those operations. Leave
+            # recovery to AL/X with the retained backups; never destroy evidence.
             for value in reversed(recovery['written']):
                 target = Path(value)
                 name = target.name
-                restored, error_code = False, ''
+                digest = None
                 try:
                     bounded(target, self.design_roots)
-                    if name in meta['hashes']:
-                        restore = beside(name, 'restore')
-                        verified_copy(backup / name, restore, meta['hashes'][name])
-                        os.replace(restore, target)
-                        if sha(target) != meta['hashes'][name]:
-                            raise KiCadError('verification_failed')
-                    else:
-                        target.unlink()
-                    restored = True
-                except Exception as error:
-                    error_code = str(error) if isinstance(error, KiCadError) else 'unavailable'
+                    if target.is_symlink() or not target.is_file():
+                        raise KiCadError('path_denied')
+                    digest = sha(target)
+                    error_code = ('write_digest_mismatch' if digest != recovery['write_digests'][value]
+                                  else 'atomic_recovery_unavailable')
+                except (OSError, KiCadError):
+                    error_code = 'current_contents_unverifiable'
+                recovery['conflicts'].append({'original': value, 'reason': error_code,
+                    'expected_digest': recovery['write_digests'][value], 'current_digest': digest})
                 recovery['restorations'].append({'original': value,
                     'backup': str(backup / name) if name in meta['hashes'] else '',
-                    'restored': restored, 'error': error_code})
+                    'restored': False, 'error': error_code})
             if recovery['written']:
-                recovery['rollback_status'] = ('succeeded' if all(
-                    item['restored'] for item in recovery['restorations']) else 'failed')
+                recovery['rollback_status'] = 'failed'
             # Include concurrent edits to untouched originals too; never restore those.
             for name in sorted(set(meta['hashes']) | set(changed)):
                 target = source / name
