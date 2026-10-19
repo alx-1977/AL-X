@@ -8,11 +8,11 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tempfile
 import uuid
 
 from alx.providers.own_source import denied
+from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS
 
 MAX_PROJECT_ENTRIES = 20000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
@@ -156,14 +156,16 @@ def board_invariant(board_source):
 
 
 class KiCadProvider:
-    def __init__(self, settings, runner=subprocess.run):
-        self.settings, self.runner = settings, runner
+    def __init__(self, settings, execute_cli):
+        self.settings, self.execute_cli = settings, execute_cli
         self.design_roots = tuple(p.expanduser().resolve() for p in settings.design_roots)
         self.work_root = settings.work_root.expanduser().resolve()
 
     def _run(self, *args):
-        result = self.runner([str(self.settings.kicad_cli), *map(str, args)],
-                             capture_output=True, timeout=120, check=False)
+        try:
+            result = self.execute_cli(str(self.settings.kicad_cli), list(map(str, args)))
+        except KICAD_CLI_UNAVAILABLE_ERRORS as error:
+            raise KiCadError('unavailable') from error
         if result.returncode != 0:
             raise KiCadError('cli_failed')
 

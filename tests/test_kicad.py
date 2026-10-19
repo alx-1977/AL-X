@@ -3,10 +3,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
@@ -16,6 +17,7 @@ from alx.config.settings import KiCadSettings, ConfigurationError
 from alx.contracts import (Approval, ApprovalScope, ApprovalLifecycle, CapabilityCall,
                            CapabilityResultState, SideEffect)
 from alx.core.model_reasoner import _catalogue_payload
+from alx.providers.coding_process import run_kicad_cli
 from alx.providers.kicad import KiCadProvider, KiCadError, inventory
 from alx.safety import AuthorityContext, SafetyGate
 from alx.tools.kicad import DEFINITIONS
@@ -53,6 +55,9 @@ class KiCadTests(unittest.TestCase):
         self.calls = []
         self.runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, self.run_cli)
         self.settings = KiCadSettings.from_environment(self.environment, self.storage)
+
+    def execute_cli(self, executable, arguments):
+        return self.run_cli([executable, *arguments])
 
     def run_cli(self, argv, **kwargs):
         self.calls.append(argv)
@@ -123,7 +128,7 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(item['position'], {'x': 1.0, 'y': 2.0})
         self.assertFalse(result['unconnected_items'][0]['noise'])
         self.assertEqual(result['totals']['total'], 2)
-        restarted = KiCadProvider(self.settings, self.run_cli)
+        restarted = KiCadProvider(self.settings, self.execute_cli)
         self.assertEqual(restarted._load(result['work_copy_id'])[1]['source'], str(self.project))
 
     def test_paths_credentials_symlinks_and_ambiguous_boards(self):
@@ -251,12 +256,46 @@ class KiCadTests(unittest.TestCase):
         with self.assertRaisesRegex(KiCadError, 'cli_failed'):
             provider.check({'project_dir': str(self.project)})
 
-        def malformed(argv, **kwargs):
-            Path(argv[argv.index('--output') + 1]).write_text('{malformed')
+        def malformed(executable, arguments):
+            Path(arguments[arguments.index('--output') + 1]).write_text('{malformed')
             return SimpleNamespace(returncode=0)
         provider = KiCadProvider(self.settings, malformed)
         with self.assertRaisesRegex(KiCadError, 'invalid_report'):
             provider.check({'project_dir': str(self.project)})
+
+    def test_provider_forwards_executable_and_string_arguments(self):
+        execute_cli = Mock(return_value=SimpleNamespace(returncode=0))
+        provider = KiCadProvider(self.settings, execute_cli)
+        board = self.project / 'board with spaces.kicad_pcb'
+        provider._run('pcb', 'drc', '--output', board)
+        execute_cli.assert_called_once_with(
+            str(self.settings.kicad_cli), ['pcb', 'drc', '--output', str(board)])
+
+    def test_cli_uses_approved_site_with_fixed_argv_and_options(self):
+        arguments = ['pcb', 'drc', 'board with spaces;$(echo test).kicad_pcb']
+        for runner in (None, Mock()):
+            with self.subTest(default_runner=runner is None), \
+                    patch('alx.providers.coding_process.run_coding_subprocess') as execute:
+                result = run_kicad_cli('/path with spaces/kicad-cli', arguments, runner=runner)
+                execute.assert_called_once_with(
+                    subprocess.run if runner is None else runner,
+                    ['/path with spaces/kicad-cli', *arguments],
+                    shell=False, check=False, timeout=120, capture_output=True, text=True)
+                self.assertIs(result, execute.return_value)
+
+    def test_cli_os_error_and_timeout_return_unavailable(self):
+        for error in (OSError('missing CLI'), subprocess.TimeoutExpired('kicad-cli', 120)):
+            with self.subTest(error=type(error).__name__):
+                runner = Mock(side_effect=error)
+                provider = KiCadProvider(self.settings,
+                    lambda executable, arguments: run_kicad_cli(executable, arguments, runner=runner))
+                with self.assertRaisesRegex(KiCadError, 'unavailable') as caught:
+                    provider._run('pcb', 'drc')
+                self.assertIs(caught.exception.__cause__, error)
+                runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, runner)
+                result = runtime.executors['check_kicad_board']({'project_dir': str(self.project)})
+                self.assertEqual(result.state, CapabilityResultState.FAILED)
+                self.assertEqual(result.failure['code'], 'unavailable')
 
     def test_custom_noise_configuration_is_the_only_flag_source(self):
         environment = dict(self.environment, ALX_KICAD_NOISE_CHECKS='unconnected_items')
@@ -268,7 +307,7 @@ class KiCadTests(unittest.TestCase):
 
     def test_routing_and_footprint_mutations_are_refused_even_with_current_revision(self):
         checked = self.check()
-        provider = KiCadProvider(self.settings, self.run_cli)
+        provider = KiCadProvider(self.settings, self.execute_cli)
         root = self.settings.work_root / checked['work_copy_id']
         board = root / 'project' / 'test.kicad_pcb'
         for board_source in (BOARD.replace('(width 0.25)', '(width 0.3)'),
@@ -413,7 +452,7 @@ class KiCadTests(unittest.TestCase):
     def test_recovery_preserves_new_custom_rules_without_atomic_delete(self):
         import os
         args = self.two_file_write()
-        provider = KiCadProvider(self.settings, self.run_cli)
+        provider = KiCadProvider(self.settings, self.execute_cli)
         root = self.settings.work_root / args['work_copy_id']
         (root / 'project' / 'test.kicad_dru').write_text('(version 1)')
         args['work_copy_revision'] = provider._revision(root)
@@ -437,7 +476,7 @@ class KiCadTests(unittest.TestCase):
     def test_provider_reports_every_deferred_restoration(self):
         import os
         args = self.two_file_write()
-        provider = KiCadProvider(self.settings, self.run_cli)
+        provider = KiCadProvider(self.settings, self.execute_cli)
         root = self.settings.work_root / args['work_copy_id']
         (root / 'project' / 'test.kicad_dru').write_text('(version 1)')
         args['work_copy_revision'] = provider._revision(root)
@@ -465,7 +504,7 @@ class KiCadTests(unittest.TestCase):
         for name in ('test.kicad_pcb', 'test.kicad_dru'):
             with self.subTest(name=name):
                 args = self.two_file_write()
-                provider = KiCadProvider(self.settings, self.run_cli)
+                provider = KiCadProvider(self.settings, self.execute_cli)
                 root = self.settings.work_root / args['work_copy_id']
                 (root / 'project' / 'test.kicad_dru').write_text('(version 1)')
                 args['work_copy_revision'] = provider._revision(root)
@@ -494,7 +533,7 @@ class KiCadTests(unittest.TestCase):
         for limit in ('MAX_PROJECT_ENTRIES', 'MAX_PROJECT_BYTES'):
             with self.subTest(limit=limit):
                 args = self.two_file_write()
-                provider = KiCadProvider(self.settings, self.run_cli)
+                provider = KiCadProvider(self.settings, self.execute_cli)
                 real = inventory(self.project)
                 budget = (len(real) if limit.endswith('ENTRIES') else
                           sum(p.stat().st_size for p in (self.settings.work_root /
