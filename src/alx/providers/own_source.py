@@ -157,28 +157,43 @@ class OwnSource:
             limit=limit, bound=MAX_OUTPUT_CHARS + limit * (len(self.commit) + 32))
         values["truncated"] |= truncated
         eligible = set(paths)
-        used = 0
-        for record in output.split("\n"):
-            if not record:
+        records = []
+        if output and not output.endswith("\n"):
+            raise SourceError("unavailable")
+        for segment in output.split("\n")[:-1]:
+            fields = segment.split("\0", 2)
+            if len(fields) != 3:
+                if not records or "\0" in segment:
+                    raise SourceError("unavailable")
+                # The text runner translates lone CRs into LF. Segments
+                # without a record prefix continue the preceding Git line.
+                records[-1][2] += "\r" + segment
+                records[-1][3] = True
                 continue
-            filename, number, line = record.split("\0", 2)
+            filename, number, line = fields
             if not filename.startswith(self.commit + ":"):
                 raise SourceError("unavailable")
             name = filename[len(self.commit) + 1:]
             if name not in eligible or not number.isdecimal() or int(number) < 1:
                 raise SourceError("unavailable")
+            records.append([name, int(number), line.rstrip("\r"), False])
+        used = 0
+        needle = query.casefold() if ignore_case else query
+        for name, number, line, continued in records:
+            if continued:
+                # Restore the CR at the end of the continued CRLF line too;
+                # the runner collapsed that pair into the record's final LF.
+                line += "\r"
             try:
                 line.encode("utf-8")
             except UnicodeError:
                 continue
-            line = line.rstrip("\r")
-            if (query.casefold() if ignore_case else query) not in (
-                    line.casefold() if ignore_case else line):
+            if needle not in (line.casefold() if ignore_case else line):
                 continue
             cost = len(name) + len(line) + 64
             if len(values["matches"]) == limit or used + cost > MAX_OUTPUT_CHARS:
                 values["truncated"] = True
                 break
-            values["matches"].append({"path": name, "line_number": int(number), "line_text": line})
+            values["matches"].append({"path": name, "line_number": number, "line_text": line})
             used += cost
         return values

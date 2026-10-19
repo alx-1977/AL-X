@@ -183,6 +183,25 @@ class OwnSourceTests(unittest.TestCase):
         self.assertFalse(found["truncated"])
         self.assertEqual(self.success(operation="read", path="odd [x]*.py")["content"], "needle literal path\n")
 
+    def test_search_unicode_casefold_candidates_with_real_git(self):
+        self.write("unicode.py", "unrelated\n" * 10 + "Straße\nSTRASSE\n")
+        self.git("add", "unicode.py")
+        self.git("commit", "-m", "unicode matches")
+        self.source.commit = self.commit = self.git("rev-parse", "HEAD").strip()
+        found = self.success(operation="search", query="STRASSE", ignore_case=True,
+                             path_prefix="unicode.py", limit=1)
+        self.assertEqual(found["matches"][0]["line_text"], "Straße")
+        self.assertEqual(found["matches"][0]["line_number"], 11)
+        self.assertTrue(found["truncated"])
+
+    def test_search_preserves_lone_carriage_returns_with_real_git(self):
+        self.write("carriage.py", b"prefix needle\rremainder\r\n")
+        self.git("add", "carriage.py")
+        self.git("commit", "-m", "carriage match")
+        self.source.commit = self.commit = self.git("rev-parse", "HEAD").strip()
+        found = self.success(operation="search", query="needle", path_prefix="carriage.py")
+        self.assertEqual(found["matches"][0]["line_text"], "prefix needle\rremainder\r")
+
     def test_ranges_and_bounds(self):
         self.assertEqual(self.success(operation="read", path="crlf.py")["content"],
                          "first\r\nsecond\r\n")
@@ -268,7 +287,7 @@ class OwnSourceAuthorityTests(unittest.TestCase):
         self.assertFalse(self.temporary.exists())
         self.assertEqual(len(self.calls), 3)
 
-    def test_search_is_one_text_runner_call_with_literal_paths_and_bounded_records(self):
+    def test_search_is_one_text_runner_call_with_literal_paths_and_casefold_candidates(self):
         records = f"{self.oid}:odd [x]*.py\0" + "3\0needle\n"
         observed = []
 
@@ -278,19 +297,21 @@ class OwnSourceAuthorityTests(unittest.TestCase):
             self.assertFalse(kwargs["shell"])
             self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
             self.assertEqual(kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
-            return SimpleNamespace(returncode=0, stdout=records + "partial" * 20)
+            return SimpleNamespace(returncode=0, stdout=records * 2)
 
         self.authority._runner = runner
         output, truncated = self.authority.search_source(
             self.oid, "[literal].*", ("odd [x]*.py", "-leading.py"),
             ignore_case=True, limit=2, bound=len(records) + 3)
-        self.assertEqual(output, records)
-        self.assertTrue(truncated)
+        self.assertEqual(output, records * 2)
+        self.assertFalse(truncated)
         self.assertEqual(len(observed), 1)
         argv = observed[0]
-        for flag in ("--literal-pathspecs", "-I", "-n", "-F", "-z", "-i", "--max-count=3"):
+        for flag in ("--literal-pathspecs", "-I", "-n", "-F", "-z"):
             self.assertIn(flag, argv)
-        self.assertEqual(argv[argv.index("-e") + 1:argv.index("--")], ["[literal].*", self.oid])
+        self.assertNotIn("-i", argv)
+        self.assertFalse(any(flag == "-m" or flag.startswith("--max-count") for flag in argv))
+        self.assertEqual(argv[argv.index("-e") + 1:argv.index("--")], ["", self.oid])
         self.assertEqual(argv[argv.index("--") + 1:], ["odd [x]*.py", "-leading.py"])
 
     def test_search_no_match_status_is_not_a_command_failure(self):

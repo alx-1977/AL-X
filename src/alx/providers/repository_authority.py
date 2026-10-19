@@ -297,11 +297,12 @@ class RepositoryAuthority:
         self, commit: str, query: str, paths: tuple[str, ...], *,
         ignore_case: bool, limit: int, bound: int,
     ) -> tuple[str, bool]:
-        """One local fixed-string grep over the caller's eligible tree entries.
+        """One local grep over the caller's eligible tree entries.
 
         NUL-delimited filename/line-number fields keep literal names separate
-        from source text. The per-file count bounds Git's emitted matches; the
-        returned prefix is bounded too, ending only at a complete record.
+        from source text. Casefold searches collect every candidate line: the
+        caller filters Unicode matches before applying result and output limits.
+        Fixed-string searches retain their per-file count and output bound.
         """
         if (len(commit) not in (40, 64)
                 or any(char not in "0123456789abcdefABCDEF" for char in commit)
@@ -309,18 +310,18 @@ class RepositoryAuthority:
                 or not paths or not 1 <= limit <= 200 or not 0 < bound <= 65_536
                 or any(not path or path.startswith("/") or "\0" in path for path in paths)):
             raise ValueError("unavailable")
-        flags = ("-i",) if ignore_case else ()
+        flags = () if ignore_case else (f"--max-count={limit + 1}",)
         completed = self._run(
             ("git", "--no-pager", "--literal-pathspecs", "grep", "--no-color",
              "--no-ext-grep", "--no-textconv", "--no-column", "--no-heading", "--no-break",
-             "--full-name", "-I", "-n", "-F", "-z", f"--max-count={limit + 1}",
-             *flags, "-e", query, commit, "--", *paths), local_objects=True)
+             "--full-name", "-I", "-n", "-F", "-z",
+             *flags, "-e", "" if ignore_case else query, commit, "--", *paths), local_objects=True)
         if completed.returncode == 1:
             return "", False
         if completed.returncode != 0:
             raise ValueError("unavailable")
         output = completed.stdout or ""
-        truncated = len(output) > bound
+        truncated = not ignore_case and len(output) > bound
         if truncated:
             output = output[:bound]
             output = output[:output.rfind("\n") + 1]
