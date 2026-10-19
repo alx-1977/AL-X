@@ -450,7 +450,7 @@ class SQLiteGoalStore:
                 self._connection.execute("ALTER TABLE goals ADD COLUMN updated_at TEXT")
             if "created_at" not in columns:
                 # Unknown legacy creation times remain unknown. Provenance's
-                # own write timestamp is sufficient to repair its bad deadline.
+                # timestamp may describe an update, so it cannot establish creation.
                 self._connection.execute("ALTER TABLE goals ADD COLUMN created_at TEXT")
             # Completion is a transition fact, distinct from later writes.
             # Legacy finished goals have unknown completion time (NULL).
@@ -519,8 +519,11 @@ class SQLiteGoalStore:
             ).fetchall():
                 provenance = provenance_from_storage(*row[3:])
                 assert provenance is not None
-                created_at = _time_from_data(row[2]) or provenance.recorded_at
-                if provenance.content_expires_at < created_at:
+                created_at = _time_from_data(row[2])
+                # Legacy Core updates advanced content_recorded_at while
+                # preserving content_expires_at. Only actual creation evidence
+                # distinguishes an inherited source deadline from elapsed content.
+                if created_at is not None and provenance.content_expires_at < created_at:
                     repaired = _goal_provenance(
                         provenance, max(created_at, provenance.recorded_at),
                         _time_from_data(row[1]),

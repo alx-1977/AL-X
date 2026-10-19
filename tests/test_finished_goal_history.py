@@ -118,8 +118,15 @@ class FinishedHistoryTests(unittest.TestCase):
                                   "elsewhere", RETENTION, provenance)
         self.store.close()
         with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT created_at FROM goals WHERE goal_id = 'e8b6a256'"
+            ).fetchone()[0], NOW.isoformat())
             connection.execute("UPDATE goals SET content_expires_at = ? WHERE goal_id = ?",
                                ((NOW - timedelta(days=11)).isoformat(), "e8b6a256"))
+            # The goal was created on October 19 after its inherited October 8
+            # expiry. A later provenance write must not replace that evidence.
+            connection.execute("UPDATE goals SET content_recorded_at = ? WHERE goal_id = ?",
+                               ((NOW + timedelta(hours=1)).isoformat(), "e8b6a256"))
             connection.execute("PRAGMA user_version = 9")
         self.now += timedelta(days=1)
         for _ in range(2):
@@ -173,7 +180,38 @@ class FinishedHistoryTests(unittest.TestCase):
                 self.assertEqual(saved.provenance.content_expires_at,
                                  NOW + timedelta(days=expected))
 
-    def test_legacy_repair_uses_record_time_and_preserves_real_expiration(self):
+    def test_legacy_update_does_not_renew_elapsed_content_deadline(self):
+        day_0 = NOW - timedelta(days=31)
+        expiry = day_0 + timedelta(days=30)
+        provenance = RetentionPolicy().direct_mail(
+            day_0, (MailReference("INBOX", "42", "1"),))
+        self.now = day_0
+        # Cover both reliable creation evidence and a legacy row where only
+        # the latest write is known. Neither allows renewal of this deadline.
+        for identifier in ("known", "unknown"):
+            saved = self.store.create(shipment(identifier), "c1", RETENTION, provenance)
+            self.now = NOW
+            self.store.replace(shipment(identifier, GoalStatus.COMPLETED),
+                               RETENTION, saved.revision)
+            self.now = day_0
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            # Earlier Core updates advanced provenance's timestamp without
+            # changing the original content deadline.
+            connection.execute("UPDATE goals SET content_recorded_at = ?",
+                               (NOW.isoformat(),))
+            connection.execute("UPDATE goals SET created_at = NULL WHERE goal_id = 'unknown'")
+            connection.execute("PRAGMA user_version = 9")
+        self.now = NOW
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        for identifier in ("known", "unknown"):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(self.store.load(identifier).provenance.content_expires_at, expiry)
+                self.assertEqual(self.read(goal_id=identifier).failure["code"], "goal_not_found")
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+
+    def test_legacy_repair_preserves_deadline_without_creation_evidence(self):
         policy = RetentionPolicy()
         provenance = policy.direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
         self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
@@ -184,9 +222,10 @@ class FinishedHistoryTests(unittest.TestCase):
                                (NOW.isoformat().replace("+00:00", "Z"),
                                 (NOW - timedelta(days=11)).isoformat()))
             connection.execute("PRAGMA user_version = 9")
-        self.now = RETENTION + timedelta(days=1)
+        expiry = NOW - timedelta(days=11)
+        self.now = NOW + timedelta(days=1)
         self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
-        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, RETENTION)
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, expiry)
         self.assertEqual(self.read(query="878504110311").values["goals"], ())
         self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
         self.assertEqual(self.store.list_recent_finished("c1", 5), ())
