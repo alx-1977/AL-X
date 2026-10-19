@@ -12,7 +12,7 @@ from alx.contracts.provenance import provenance_from_storage, provenance_to_stor
 from alx.contracts.storage import serialized_store
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -51,6 +51,7 @@ def _turn_to_json(turn: ConversationTurn) -> str:
             turn.content,
             turn.occurred_at.isoformat(),
             turn.person_id,
+            turn.response_goal_id,
         ],
         separators=(",", ":"),
     )
@@ -65,6 +66,7 @@ def _turn_from_json(value: str) -> ConversationTurn:
         data[3],
         datetime.fromisoformat(data[4]),
         data[5],
+        response_goal_id=data[6] if len(data) > 6 else None,
     )
 
 
@@ -78,6 +80,7 @@ def _turn_from_row(row: tuple[str, str | None, str | None, str | None, str | Non
         turn.occurred_at,
         turn.person_id,
         provenance_from_storage(*row[1:]),
+        turn.response_goal_id,
     )
 
 

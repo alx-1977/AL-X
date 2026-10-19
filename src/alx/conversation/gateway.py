@@ -52,7 +52,8 @@ class ConversationGateway:
         if outcome.response_turn_id is None or outcome.snapshot is None:
             self._append_reply(conversation_id, self._identifier_factory(),
                                outcome.response, outcome.response_provenance,
-                               retention_until)
+                               retention_until,
+                               None if outcome.snapshot is None else outcome.snapshot.state.goal_id)
             return
         snapshot = outcome.snapshot
         for announcement in snapshot.state.execution_plan.announcements:
@@ -60,18 +61,20 @@ class ConversationGateway:
                 conversation_id, announcement.turn_id, announcement.text,
                 outcome.response_provenance
                 if announcement.turn_id == outcome.response_turn_id
-                else snapshot.provenance, retention_until)
+                else snapshot.provenance, retention_until, snapshot.state.goal_id)
             self._acknowledge(snapshot.state.goal_id, announcement.turn_id)
 
     def _append_reply(self, conversation_id: str, turn_id: str, text: str,
-                      provenance, retention_until: datetime) -> None:
+                      provenance, retention_until: datetime,
+                      response_goal_id: str | None = None) -> None:
         """Append one reply turn, unless that exact turn is already stored."""
         current = self._conversation_store.load(conversation_id)
         if any(item.turn_id == turn_id for item in current.turns):
             return
         self._conversation_store.append(
             ConversationTurn(conversation_id, turn_id, ConversationOrigin.ALX_RESPONSE,
-                             text, self._clock(), provenance=provenance),
+                             text, self._clock(), provenance=provenance,
+                             response_goal_id=response_goal_id),
             retention_until, current.revision,
         )
 
@@ -125,7 +128,8 @@ class ConversationGateway:
             return True
         self._conversation_store.append(
             ConversationTurn(target_conversation_id, turn_id, ConversationOrigin.ALX_RESPONSE,
-                             original.content, self._clock(), provenance=original.provenance),
+                             original.content, self._clock(), provenance=original.provenance,
+                             response_goal_id=original.response_goal_id),
             max(target.retention_until, source.retention_until), target.revision,
         )
         return True
@@ -150,7 +154,7 @@ class ConversationGateway:
                 try:
                     self._append_reply(snapshot.plan_conversation_id, announcement.turn_id,
                                        announcement.text, snapshot.provenance,
-                                       snapshot.retention_until)
+                                       snapshot.retention_until, snapshot.state.goal_id)
                 except Exception as error:  # noqa: BLE001 - kept for the next tick
                     LOGGER.warning("Plan reply for goal %s not stored: %s",
                                    snapshot.state.goal_id, type(error).__name__)

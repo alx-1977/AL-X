@@ -1802,6 +1802,7 @@ class ReplyDurabilityTests(PlanHarness):
         self.assertTrue(self.plan_of().announcements)
         self.assertEqual(gateway.reconcile_plan_announcements(), 1)
         self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertEqual(self.replies()[0].response_goal_id, self.store.load("goal").state.goal_id)
         self.assertEqual(self.plan_of().announcements, ())
 
     def test_a_crash_between_the_writes_is_recovered_after_restart(self):
@@ -1817,6 +1818,11 @@ class ReplyDurabilityTests(PlanHarness):
         (reply,) = self.replies()
         self.assertEqual((reply.turn_id, reply.content),
                          (outcome.response_turn_id, "It is merged and done."))
+        goal_id = outcome.snapshot.state.goal_id
+        self.assertEqual(reply.response_goal_id, goal_id)
+        self.assertTrue(gateway.relay_response("thread", reply.turn_id, "receiving-thread"))
+        (relayed,) = self.conversations.load("receiving-thread").turns
+        self.assertEqual(relayed.response_goal_id, goal_id)
 
     def test_a_failed_acknowledgement_never_duplicates_the_reply(self):
         self.finish_ready()
@@ -1866,6 +1872,7 @@ class ReplyDurabilityTests(PlanHarness):
         self.assertEqual(self.plan_of().status, PlanStatus.CANCELLED)
         gateway.reconcile_plan_announcements()
         self.assertEqual([item.content for item in self.replies()], ["Stopped it."])
+        self.assertEqual(self.replies()[0].response_goal_id, self.store.load("goal").state.goal_id)
 
     def test_a_replacement_closing_before_reconciliation_loses_no_reply(self):
         self.finish_ready()
