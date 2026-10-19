@@ -964,7 +964,8 @@ class CoreAgent:
                     continue
             if proposal_error is None and decision.approval_proposal is not None:
                 approval_error = self._approval_proposal_error(
-                    conversation, candidate, decision, approved_dispatches
+                    conversation, candidate, decision, approved_dispatches,
+                    transient_attempts,
                 )
                 if approval_error is not None:
                     # A malformed approval authorises nothing, so the action is
@@ -1965,6 +1966,7 @@ class CoreAgent:
     def _unheard_authored_text(
         conversation: ConversationSnapshot, call: CapabilityCall,
         state: GoalState | None = None,
+        transient_attempts: tuple[CapabilityAttempt, ...] = (),
     ) -> bool:
         """Report whether an outbound call carries text Friedl has not heard."""
         copied_subject = False
@@ -1974,19 +1976,22 @@ class CoreAgent:
             ))
             source_subject = None
             if all(isinstance(part, str) and part for part in reference):
-                if state is not None:
-                    for attempt in reversed(state.attempts):
-                        if (attempt.call is None or attempt.result is None
-                                or attempt.call.capability_id != "read_mail_message"
-                                or tuple(attempt.call.arguments.get(key) for key in (
-                                    "mailbox_id", "uid_validity", "uid"
-                                )) != reference):
-                            continue
-                        subject = attempt.result.values.get("subject")
-                        if (attempt.result.state is CapabilityResultState.SUCCEEDED
-                                and isinstance(subject, str) and subject.strip()):
-                            source_subject = subject
-                            break
+                read_attempts = (
+                    *(state.attempts if state is not None else ()),
+                    *transient_attempts,
+                )
+                for attempt in reversed(read_attempts):
+                    if (attempt.call is None or attempt.result is None
+                            or attempt.call.capability_id != "read_mail_message"
+                            or tuple(attempt.call.arguments.get(key) for key in (
+                                "mailbox_id", "uid_validity", "uid"
+                            )) != reference):
+                        continue
+                    subject = attempt.result.values.get("subject")
+                    if (attempt.result.state is CapabilityResultState.SUCCEEDED
+                            and isinstance(subject, str) and subject.strip()):
+                        source_subject = subject
+                        break
                 if source_subject is None:
                     for event in reversed(conversation.events):
                         if (not event.kind.startswith("mail.message_")
@@ -2035,7 +2040,8 @@ class CoreAgent:
         )
 
     def _approval_proposal_error(
-        self, conversation, state, decision, already_dispatched=frozenset()
+        self, conversation, state, decision, already_dispatched=frozenset(),
+        transient_attempts: tuple[CapabilityAttempt, ...] = (),
     ) -> str | None:
         proposal = decision.approval_proposal
         call = decision.call
@@ -2071,7 +2077,9 @@ class CoreAgent:
         # and sixteen refusals in one turn told her nothing about why.
         definition = self._definition(call.capability_id)
         if definition is not None and definition.transmits_authored_text:
-            if CoreAgent._unheard_authored_text(conversation, call, state):
+            if CoreAgent._unheard_authored_text(
+                conversation, call, state, transient_attempts
+            ):
                 return "approval_covers_unheard_text"
         return None
 

@@ -58,7 +58,8 @@ from alx.core import CoreAgent, CoreState
 from alx.core.model_reasoner import _attempt_payload
 from alx.goals import SQLiteGoalStore
 from alx.tools import ASK_WEB_SEARCH, WEB_SEARCH_DEFINITION
-from alx.tools.mail import SEND_MAIL_REPLY, SEND_REPLY_DEFINITION
+from alx.tools.mail import (READ_DEFINITION, READ_MAIL_MESSAGE,
+                            SEND_MAIL_REPLY, SEND_REPLY_DEFINITION)
 
 
 NOW = datetime(2026, 9, 5, 10, 33, tzinfo=UTC)
@@ -113,17 +114,21 @@ class GuardScopeTestCase(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.dispatched: list[str] = []
 
-    def agent(self, reasoner, capabilities, identifiers=("goal-1",)):
+    def agent(self, reasoner, capabilities, identifiers=("goal-1",),
+              read_subject=None):
         values = iter(identifiers)
 
         def dispatch(call, state):
             # A controlled stand-in: nothing reaches Brave, a mail server or
             # any other outside system from these tests.
             self.dispatched.append(call.capability_id)
+            values = ({"subject": read_subject}
+                      if call.capability_id == READ_MAIL_MESSAGE
+                      and read_subject is not None else {"ok": True})
             return CapabilityAttempt(
                 call, CapabilityAttemptDisposition.EXECUTED, True,
                 CapabilityResult(call.call_id, call.capability_id,
-                                 CapabilityResultState.SUCCEEDED, {"ok": True}),
+                                 CapabilityResultState.SUCCEEDED, values),
             )
 
         return CoreAgent(
@@ -239,6 +244,66 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
                              {"mailbox_id": "INBOX", "uid_validity": "1",
                               "uid": "2", "subject": subject}),),
         )
+
+    def run_with_pre_goal_read(self, *, subject: str, read_uid: str = "2",
+                               goal_id: str = "goal-1",
+                               spoken: str = "The parts arrive Tuesday."):
+        read = CapabilityCall(
+            "read-1", READ_MAIL_MESSAGE,
+            {"mailbox_id": "INBOX", "uid_validity": "1", "uid": read_uid},
+        )
+        send = self.send_call("The parts arrive Tuesday.")
+        send = CapabilityCall(send.call_id, send.capability_id,
+                              {**send.arguments, "subject": subject},
+                              send.approval_id)
+        reasoner = Queued(
+            AgentDecision(call=read),
+            AgentDecision(call=send, approval_proposal=self.approved(send),
+                          goal_proposal=self.goal()),
+            AgentDecision(response="I handled the reply."),
+        )
+        outcome = self.agent(
+            reasoner, (READ_DEFINITION, SEND_REPLY_DEFINITION),
+            identifiers=(goal_id,), read_subject="October tax calculation",
+        ).process(conversation(spoken=spoken, asked="send it"),
+                  RETENTION, 4)
+        self.assertIsNone(reasoner.contexts[1].active_goal)
+        self.assertEqual(reasoner.contexts[1].transient_attempts[0].call, read)
+        return reasoner, outcome
+
+    def test_pre_goal_read_allows_only_copied_reply_subjects(self) -> None:
+        for index, subject in enumerate(
+            ("October tax calculation", "RE: October tax calculation"), 1
+        ):
+            with self.subTest(subject=subject):
+                self.dispatched.clear()
+                reasoner, outcome = self.run_with_pre_goal_read(
+                    subject=subject, goal_id=f"goal-{index}")
+                self.assertEqual(outcome.state, CoreState.RESPONDED)
+                self.assertEqual(self.dispatched,
+                                 [READ_MAIL_MESSAGE, SEND_MAIL_REPLY])
+                self.assertFalse(reasoner.contexts[-1].refused_calls)
+
+    def test_pre_goal_read_does_not_exempt_changed_subject(self) -> None:
+        reasoner, _ = self.run_with_pre_goal_read(subject="New parts schedule")
+        self.assertEqual(self.dispatched, [READ_MAIL_MESSAGE])
+        self.assertEqual(reasoner.contexts[-1].refused_calls[0]["reason"],
+                         "approval_covers_unheard_text")
+
+    def test_changed_subject_sends_when_friedl_heard_it(self) -> None:
+        _, outcome = self.run_with_pre_goal_read(
+            subject="New parts schedule",
+            spoken="New parts schedule. The parts arrive Tuesday.",
+        )
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.dispatched, [READ_MAIL_MESSAGE, SEND_MAIL_REPLY])
+
+    def test_unrelated_pre_goal_read_does_not_exempt_copied_subject(self) -> None:
+        reasoner, _ = self.run_with_pre_goal_read(
+            subject="RE: October tax calculation", read_uid="3")
+        self.assertEqual(self.dispatched, [READ_MAIL_MESSAGE])
+        self.assertEqual(reasoner.contexts[-1].refused_calls[0]["reason"],
+                         "approval_covers_unheard_text")
 
     def test_reply_prefixed_source_subject_sends_with_heard_body(self) -> None:
         source = "2026 Tax Calculation for Approval for Submission"
