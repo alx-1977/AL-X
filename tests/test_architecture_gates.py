@@ -43,6 +43,19 @@ class ArchitectureGateTests(unittest.TestCase):
         )
         self.assertEqual([], messages)
 
+    def test_kicad_structural_parsing_passes_architecture_gate(self) -> None:
+        kicad_paths = {
+            f"{self.rules.source_root}/{relative_path}"
+            for relative_path in (
+                "providers/kicad.py", "tools/kicad.py", "bootstrap/kicad.py"
+            )
+        }
+        violations = [
+            violation for violation in check_source(REPOSITORY_ROOT, self.rules)
+            if violation.path in kicad_paths
+        ]
+        self.assertEqual([], violations)
+
     def test_tool_cannot_import_core(self) -> None:
         self.assert_rejected(
             "tools/mail.py",

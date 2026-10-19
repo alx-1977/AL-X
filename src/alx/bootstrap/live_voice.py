@@ -57,6 +57,7 @@ from alx.bootstrap.xero import (
 )
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.bootstrap.ship24 import build_ship24_runtime
+from alx.bootstrap.kicad import build_kicad_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     merge_settings,
@@ -497,6 +498,11 @@ async def run(repository_root: Path) -> None:
     policies.update(ship24_runtime.policies)
     executors.update(ship24_runtime.executors)
     permissions.update(ship24_runtime.permissions)
+    kicad_runtime = build_kicad_runtime(current_call_id.get, environment, storage_root)
+    register(kicad_runtime.definitions, TraceSubsystem.CORE)
+    policies.update(kicad_runtime.policies)
+    executors.update(kicad_runtime.executors)
+    permissions.update(kicad_runtime.permissions)
 
     def notebook_provenance(source_references, _recorded_at):
         """Resolve cited goal artifacts without copying their evidence.
@@ -1161,6 +1167,8 @@ async def run(repository_root: Path) -> None:
                  "src/alx/providers/dhl.py", xero_composed),
                 ("Ship24", "tracking shipments across supported couriers",
                  "src/alx/providers/ship24.py", True),
+                ("KiCad", "board DRC, mechanical cleanup on copies, library footprint "
+                 "inspection and approved write-back", "src/alx/providers/kicad.py", True),
                 ("LlamaParse", "reading invoices and other documents",
                  "src/alx/providers/llamaparse.py", documents_composed),
                 ("Particle", "the BHL readers: Cloud API, event streams and "
