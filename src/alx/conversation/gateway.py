@@ -154,7 +154,7 @@ class ConversationGateway:
                 try:
                     self._append_reply(snapshot.plan_conversation_id, announcement.turn_id,
                                        announcement.text, snapshot.provenance,
-                                       snapshot.retention_until)
+                                       snapshot.retention_until, snapshot.state.goal_id)
                 except Exception as error:  # noqa: BLE001 - kept for the next tick
                     LOGGER.warning("Plan reply for goal %s not stored: %s",
                                    snapshot.state.goal_id, type(error).__name__)
