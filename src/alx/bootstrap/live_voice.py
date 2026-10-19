@@ -126,6 +126,10 @@ from alx.tools.self_diagnosis import (
     DEFINITIONS as SELF_DIAGNOSIS_DEFINITIONS,
     build_self_diagnosis_executors,
 )
+from alx.tools.goal_history import (
+    DEFINITION as GOAL_HISTORY_DEFINITION,
+    build_goal_history_executors,
+)
 
 
 def _bill_budget_for_turn(
@@ -570,6 +574,11 @@ async def run(repository_root: Path) -> None:
         current_call_id.get,
     ))
     permissions.add("self.read")
+
+    # D-057: goal history stays in the same store the Core already owns.
+    register((GOAL_HISTORY_DEFINITION,), TraceSubsystem.CORE)
+    policies[GOAL_HISTORY_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
+    executors.update(build_goal_history_executors(goal_store, current_call_id.get))
 
     # D-024 Phases 2 and 5. The ledgers and the source are constructed here,
     # once, so the paid path is real rather than something that only exists

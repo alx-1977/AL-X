@@ -303,6 +303,11 @@ capabilities you have, and close what is already done. A goal
 untouched for weeks is open work you can offer to resume, not something you were doing.
 project_id says which work a goal belongs to; nothing about being listed means it is
 relevant now, and that judgement is yours.
+recent_finished_goals contains retained finished work from this conversation,
+most recent completion first, bounded by count, with context and evidence.
+read_own_goals searches retained goals across conversations by text, or reads a
+goal in full by id; it includes finished and unfinished work.
+
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have
 selected this turn, or null. You decide which goal the input belongs to: set goal_id
@@ -570,7 +575,7 @@ def _recent(items: Sequence[Any], limit: int) -> list[Any]:
     return list(items[-limit:]) if len(items) > limit else list(items)
 
 
-def _state_payload(state: GoalState) -> dict[str, Any]:
+def _state_payload(state: GoalState, *, full_progress: bool = False) -> dict[str, Any]:
     attempts = tuple(state.attempts)
     recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
     older_attempts = attempts[: len(attempts) - len(recent_attempts)]
@@ -599,9 +604,9 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
         ],
         "progress": [
             {"id": item.record_id, "summary": item.summary, "evidence_refs": list(item.evidence_refs)}
-            for item in _recent(state.progress, VERBATIM_HISTORY)
+            for item in (state.progress if full_progress else _recent(state.progress, VERBATIM_HISTORY))
         ],
-        "older_progress_count": max(0, len(state.progress) - VERBATIM_HISTORY),
+        "older_progress_count": 0 if full_progress else max(0, len(state.progress) - VERBATIM_HISTORY),
         "attempts": [
             {
                 "call_id": None if item.call is None else item.call.call_id,
@@ -629,6 +634,7 @@ def _state_payload(state: GoalState) -> dict[str, Any]:
                 "kind": item.kind,
                 "attributes": _plain(item.attributes),
                 "supports": list(item.supports),
+                "source_references": list(item.source_references),
             }
             for item in state.evidence
         ],
@@ -949,6 +955,10 @@ def _context_payload(context: ReasoningContext) -> str:
                 "selected": goal is not None and item.goal_id == goal.goal_id,
             }
             for item in context.unfinished_goals
+        ],
+        "recent_finished_goals": [
+            _state_payload(item.state, full_progress=True)
+            for item in context.recent_finished_goals
         ],
         "active_goal": None if goal is None else _state_payload(goal),
         "transient_attempts": [

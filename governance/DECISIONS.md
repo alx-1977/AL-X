@@ -2642,3 +2642,17 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Status: APPROVED by Friedl, 2026-10-17.** When the twelve-a-month count refused AL/X a review of PR #152 (the launcher fix her self-restart needs), Friedl: "remove this limit please". Amends D-046.
 - **The allowance.** AL/X may ask for up to three Greptile reviews of one pull request under `review.request`. There is no monthly count. Past three on a pull request, `request_external_review_beyond_allowance` still needs his approval of that exact call.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
+## D-057 — AL/X remembers finished work and can inspect her own work
+
+- **Date:** 2026-10-19
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-19.** Friedl's approval words: "I cannot have her not have details of things she completed, this is absurd. The intention was that she remembers."
+- **Why.** At 10:00 a self-reminder created goal `e8b6a256`, tracked FedEx `878504110311`, found it out for delivery from CAPE TOWN, WC, and completed. At 10:01 Friedl asked which address it was going to. The Core said it had no tracking number and did not know where the reminder came from: completion had removed the goal's context and evidence from the next turn.
+- **Four approved changes, one PR each, in this order:**
+  1. **Remember finished work.** Include recently finished goals of the current conversation in reasoning context, bounded and most recent first, retaining objective, context, referents, progress and evidence alongside unfinished goals. Add one read-only capability to search all her retained past goals, finished or unfinished, by free text over stored content, or read any one in full by id. Extend the existing goal store and context assembly; no second goal-state route.
+  2. **Read her own code.** Add read-only source search and file reading at the running commit, not the checked-out branch. Deny `.env`, `.alx/` and anything credential-shaped. Plain permission, no approval.
+  3. **A repeat refusal names what it repeats.** When `_binding_rejected_call` refuses, record which earlier attempt it repeats, when that attempt happened, and that attempt's reason, in both the task record and log line; `repeated_rejected_call` alone is insufficient.
+  4. **Core instructions.** Before saying she does not know something about her own work, check trace, log and goals. When evidence does not settle a cause, say 'I think' and keep checking; never state a guess as fact.
+- **This PR's scope.** Change 1 and this decision entry only. Changes 2–4 remain for their own subsequent PRs.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty. Existing retention and deletion rules still govern goal history.
