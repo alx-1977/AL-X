@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -398,7 +399,7 @@ class SQLiteGoalStore:
         # Core to supply it would make every caller responsible for a value
         # none of them reasons about.
         self._now = clock or (lambda: datetime.now(UTC))
-        self._migrate()
+        self._migrate(database_path)
 
     def close(self) -> None:
         self._connection.close()
@@ -409,7 +410,49 @@ class SQLiteGoalStore:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
-    def _migrate(self) -> None:
+    def _backfill_creation_times(self, database_path: str | Path) -> None:
+        """Recover only explicit Core creation facts from the retained trace.
+
+        The production trace lives beside goals.sqlite3. Its goal references
+        are shortened to eight characters; a collision cannot establish which
+        goal was created. Missing/unreadable traces and invalid timestamps are
+        absence of evidence, never permission to use a later row write.
+        """
+        if str(database_path) == ":memory:":
+            return
+        trace_path = Path(database_path).absolute().with_name("trace.sqlite3")
+        try:
+            with closing(sqlite3.connect(trace_path.as_uri() + "?mode=ro", uri=True)) as trace:
+                records = trace.execute(
+                    "SELECT reference, at FROM trace WHERE subsystem = 'goals' "
+                    "AND status = 'completed' AND label = 'Goal created'"
+                ).fetchall()
+        except sqlite3.Error:
+            return
+        goals: dict[str, list[tuple[str, str | None]]] = {}
+        for goal_id, created_at in self._connection.execute(
+            "SELECT goal_id, created_at FROM goals"
+        ):
+            goals.setdefault(goal_id[:8], []).append((goal_id, created_at))
+        earliest: dict[str, datetime] = {}
+        for reference, timestamp in records:
+            matches = goals.get(reference, ())
+            if len(matches) != 1 or matches[0][1] is not None:
+                continue
+            try:
+                moment = _time_from_data(timestamp)
+            except (TypeError, ValueError):
+                continue
+            if moment is not None:
+                goal_id = matches[0][0]
+                earliest[goal_id] = min(earliest.get(goal_id, moment), moment)
+        self._connection.executemany(
+            "UPDATE goals SET created_at = ? WHERE goal_id = ? AND created_at IS NULL",
+            ((_time_to_data(moment.astimezone(UTC)), goal_id)
+             for goal_id, moment in earliest.items()),
+        )
+
+    def _migrate(self, database_path: str | Path) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             self._connection.close()
@@ -512,6 +555,7 @@ class SQLiteGoalStore:
                     self._connection.execute(
                         f'ALTER TABLE goals ADD COLUMN "{column}" TEXT'
                     )
+            self._backfill_creation_times(database_path)
             for row in self._connection.execute(
                 "SELECT goal_id, retention_until, created_at, content_origins, "
                 "content_recorded_at, content_expires_at, mail_references FROM goals "

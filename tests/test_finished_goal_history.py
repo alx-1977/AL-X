@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -24,6 +24,7 @@ from alx.core.loop import RECENT_FINISHED_GOALS
 from alx.core.model_reasoner import _context_payload, VERBATIM_HISTORY
 from alx.goals import SQLiteGoalStore
 from alx.goals.store import _goal_to_data
+from alx.contracts.provenance import provenance_to_storage
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.tools.goal_history import DEFINITION, READ_OWN_GOALS, build_goal_history_executors
 from alx.bootstrap.autonomous import AutonomousCognitionRunner
@@ -229,6 +230,110 @@ class FinishedHistoryTests(unittest.TestCase):
         self.assertEqual(self.read(query="878504110311").values["goals"], ())
         self.assertEqual(self.read(goal_id="e8b6").failure["code"], "goal_not_found")
         self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+
+    def schema_9_database(self, identifiers=("e8b6a256",)):
+        """Build the old schema directly, without ever creating created_at."""
+        self.store.close()
+        self.path.unlink()
+        expiry = NOW - timedelta(days=11)
+        provenance = replace(RetentionPolicy().direct_mail(
+            NOW, (MailReference("INBOX", "42", "1"),)),
+            recorded_at=NOW + timedelta(hours=1), content_expires_at=expiry)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "CREATE TABLE goals (goal_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, "
+                "retention_until TEXT NOT NULL, state_json TEXT NOT NULL, conversation_id TEXT, "
+                "content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, "
+                "mail_references TEXT, scope TEXT, updated_at TEXT, unfinished INTEGER, "
+                "project_id TEXT, finished_at TEXT)"
+            )
+            for identifier in identifiers:
+                connection.execute(
+                    "INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (identifier, 3, RETENTION.isoformat(),
+                     json.dumps(_goal_to_data(shipment(identifier, GoalStatus.COMPLETED))),
+                     "c1", *provenance_to_storage(provenance), None,
+                     (NOW + timedelta(hours=1)).isoformat(), 0, None, NOW.isoformat()),
+                )
+            connection.execute("PRAGMA user_version = 9")
+        self.now = NOW + timedelta(days=1)
+
+    def creation_trace(self, records):
+        # Exact persisted format from SQLiteTraceRecord, with explicit event
+        # labels emitted by CoreAgent._persist_goal (references are shortened).
+        with sqlite3.connect(self.path.with_name("trace.sqlite3")) as connection:
+            connection.execute(
+                "CREATE TABLE trace (at TEXT NOT NULL, subsystem TEXT, status TEXT, "
+                "label TEXT, reference TEXT, reason_code TEXT, duration_ms INTEGER, count INTEGER)"
+            )
+            connection.executemany(
+                "INSERT INTO trace VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)", records)
+
+    def test_schema_9_upgrade_repairs_expiry_from_earliest_creation_trace(self):
+        self.schema_9_database()
+        self.creation_trace([
+            ((NOW + timedelta(hours=1)).isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+            (NOW.astimezone(timezone(timedelta(hours=2))).isoformat(),
+             "goals", "completed", "Goal created", "e8b6a256"),
+        ])
+        for _ in range(2):
+            self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+            self.assert_shipment_visible()
+            self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at, RETENTION)
+            with sqlite3.connect(self.path) as connection:
+                self.assertEqual(datetime.fromisoformat(connection.execute(
+                    "SELECT created_at FROM goals").fetchone()[0]), NOW)
+            self.store.close()
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+
+    def test_schema_9_update_trace_is_not_creation_evidence(self):
+        self.schema_9_database()
+        self.creation_trace([
+            (NOW.isoformat(), "goals", "completed", "Goal completed", "e8b6a256"),
+        ])
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at,
+                         NOW - timedelta(days=11))
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+        with sqlite3.connect(self.path) as connection:
+            self.assertIsNone(connection.execute("SELECT created_at FROM goals").fetchone()[0])
+
+    def test_schema_9_rejects_invalid_unrelated_and_ambiguous_creation_traces(self):
+        self.schema_9_database(("e8b6a256", "e8b6a256-other", "invalid", "naive", "update", "foreign"))
+        self.creation_trace([
+            (NOW.isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+            ("not-a-time", "goals", "completed", "Goal created", "invalid"),
+            ("2026-10-19T08:00:00", "goals", "completed", "Goal created", "naive"),
+            (NOW.isoformat(), "goals", "completed", "Goal completed", "update"),
+            (NOW.isoformat(), "core", "completed", "Goal created", "foreign"),
+            (NOW.isoformat(), "goals", "failed", "Goal created", "foreign"),
+            (NOW.isoformat(), "goals", "completed", "Goal created", "missing"),
+        ])
+        with sqlite3.connect(self.path) as connection:
+            before = connection.execute("SELECT * FROM goals ORDER BY goal_id").fetchall()
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 10), ())
+        with sqlite3.connect(self.path) as connection:
+            after = connection.execute("SELECT * FROM goals ORDER BY goal_id").fetchall()
+        self.assertEqual(after, [(*row, None) for row in before])
+
+    def test_schema_9_verified_creation_preserves_genuinely_elapsed_deadline(self):
+        self.schema_9_database()
+        created = NOW - timedelta(days=41)
+        self.creation_trace([
+            (created.isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+            (NOW.isoformat(), "goals", "completed", "Goal created", "e8b6a256"),
+        ])
+        self.store = SQLiteGoalStore(self.path, clock=lambda: self.now)
+        self.assertEqual(self.store.load("e8b6a256").provenance.content_expires_at,
+                         NOW - timedelta(days=11))
+        self.assertEqual(self.read(query="878504110311").values["goals"], ())
+        self.assertEqual(self.store.list_recent_finished("c1", 5), ())
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(datetime.fromisoformat(connection.execute(
+                "SELECT created_at FROM goals").fetchone()[0]), created)
 
     def test_history_deadlines_are_compared_as_instants(self):
         provenance = RetentionPolicy().direct_mail(NOW, (MailReference("INBOX", "42", "1"),))

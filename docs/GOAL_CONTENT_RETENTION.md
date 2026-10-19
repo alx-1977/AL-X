@@ -24,11 +24,18 @@ structured provenance and timestamps only.
 
 Schema version 10 adds nullable `created_at`, populated on new goals. Its migration
 repairs only deadlines earlier than creation, using the same `_goal_provenance`
-calculation. Where legacy creation is unknown, the existing goal provenance's
-`recorded_at` is the available persisted record-write timestamp. The repair uses
-the later of creation and that record timestamp, never migration execution time.
-It changes provenance columns only, retaining revisions, state, update and finish
-times, associations, and scopes. Valid deadlines remain untouched. Restarting
+calculation. For legacy rows, the migration first consults the existing sibling
+`trace.sqlite3` read-only. Only Core's explicit `goals` / `completed` /
+`Goal created` records establish creation. The earliest timezone-aware timestamp
+is used, and the eight-character reference must identify exactly one stored
+goal. Missing or unreadable traces, invalid timestamps, unrelated events and
+colliding references leave creation unknown. Neither `updated_at` nor
+`content_recorded_at` establishes creation; unknown rows stay unchanged.
+For a deadline proven to predate creation, the repair uses the later of creation
+and the existing provenance record timestamp, never migration execution time.
+It fills verified missing creation times and repairs provenance columns,
+retaining revisions, state, update and finish times, associations, and scopes.
+Valid deadlines remain untouched. Restarting
 again leaves the repair stable; elapsed retention remains elapsed. Migration
 runs before any retrieval can filter out an invalid row.
 
@@ -41,7 +48,9 @@ retention purge and the retention inventory consume the persisted goal facts.
 Regression coverage is in `tests/test_finished_goal_history.py`: old mail on a
 new completed goal, invalid stored deadlines, legacy repair after real expiry,
 restart stability, unchanged valid records, non-mail origins, mail introduction
-and subsequent updates, and timezone-equivalent history deadlines. The existing
+and subsequent updates, timezone-equivalent history deadlines, and actual
+schema-9 upgrades using persisted creation traces. Update-only, invalid,
+unrelated and ambiguous traces cannot revive expired goals. The existing
 retention wiring tests use explicit store clocks and assert goal-owned deadlines
 alongside unchanged source provenance for memory and response records.
 
