@@ -1,6 +1,7 @@
 """Screen protocol and real PTYs with fake executables only; no Claude login."""
 
 import os
+import re
 import sys
 import tempfile
 import time
@@ -20,6 +21,23 @@ from alx.providers.claude_usage import ClaudeUsageReader, parse_usage, rendered_
 from alx.tools.claude_usage import DEFINITION, build_claude_usage_executors  # noqa: E402
 
 SCREEN = (ROOT / 'tests/fixtures/claude_usage.txt').read_text()
+
+
+class GovernanceTests(unittest.TestCase):
+    def test_usage_sequence_has_recorded_approval_and_registration_reference(self):
+        decisions = (ROOT / 'governance/DECISIONS.md').read_text()
+        records = re.split(r'^## ', decisions, flags=re.MULTILINE)[1:]
+        approved = [record for record in records
+                    if '`read_claude_usage`' in record
+                    and '**Status: APPROVED by Friedl, 2026-10-20.**' in record]
+        self.assertEqual(len(approved), 1,
+                         'the usage sequence needs its own recorded approval')
+        record = approved[0]
+        self.assertIn('- **Date:** 2026-10-20', record)
+        self.assertIn('- **Decision owner:** Friedl', record)
+        decision_id = record.split(' — ', 1)[0]
+        registration = (ROOT / 'src/alx/bootstrap/live_voice.py').read_text()
+        self.assertIn(f'# {decision_id}:', registration)
 
 
 class ParsingTests(unittest.TestCase):

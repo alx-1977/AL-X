@@ -592,6 +592,7 @@ async def run(repository_root: Path) -> None:
     ))
     permissions.add("self.read")
 
+    # D-059: read her own subscription limits through the existing Claude login.
     if isinstance(providers.reasoning, ClaudeSubscriptionReasoningModel):
         usage_reader = ClaudeUsageReader(
             providers.reasoning.executable, providers.reasoning.child_environment(),
