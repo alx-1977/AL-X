@@ -26,7 +26,7 @@ RECOVERY = obj({'backed_up': array(S), 'written': array(S), 'rollback_status': S
                 'error': obj({'code': S, 'type': S})})
 ITEM = obj({'description': S, 'designator': S, 'pad_number': S, 'uuid': S,
             'position': obj({'x': N, 'y': N}, ())})
-GROUP = obj({'check_type': S, 'count': I, 'noise': B, 'findings': array(
+GROUP = obj({'check_type': S, 'count': I, 'noise': B, 'omitted_findings': I, 'findings': array(
     obj({'severity': S, 'description': S, 'items': array(ITEM)}))})
 FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid_report',
             'cli_failed', 'cli_timeout', 'render_failed', 'footprint_ambiguous', 'board_open',

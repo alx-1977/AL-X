@@ -2651,6 +2651,7 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Why.** Every Core call repeats the recently finished goals. One of them held a full KiCad DRC report, 222,000 characters, as an attempt result. Core calls averaged 123,000 input tokens on 2026-10-20 against 45,000–55,000 a week earlier, and 46 calls spent the session.
 - **Finished goals.** The two most recently finished goals of the conversation are shown with their context, referents, progress, decisions and evidence; their attempts are listed without results. Older finished goals are listed by id, objective and status. `read_own_goals` returns any of them in full.
 - **Stored results.** An attempt result larger than 16,000 characters is shown on later turns as its size, with `read_own_goals` named as the way to read it. A result in the turn that produced it is unchanged.
+- **KiCad check results.** `check_kicad_board` returns, per DRC check type, its count, its first 8 findings (2 for a noise type) with at most 4 items each, and `omitted_findings`. Re-running the check gives the same facts.
 - **Limit wording.** The CLI's "You've hit your session limit · resets …" is classified as `subscription_usage_exhausted`, not `cli_failed`.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 

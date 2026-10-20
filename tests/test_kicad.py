@@ -116,6 +116,20 @@ class KiCadTests(unittest.TestCase):
         self.assertIn('returned backups and evidence', description)
         self.assertIn('no automatic undo', description)
 
+    def test_a_check_result_is_bounded_per_check_type(self):
+        """D-057a: a full DRC report rode on every later Core call."""
+        from alx.providers import kicad as provider
+        result = self.check()
+        groups = [g for key in ('violations', 'unconnected_items', 'schematic_parity')
+                  for g in result[key]]
+        self.assertTrue(groups)
+        for group in groups:
+            limit = provider.NOISE_EXAMPLES if group['noise'] else provider.FINDINGS_PER_CHECK_TYPE
+            self.assertLessEqual(len(group['findings']), limit)
+            self.assertEqual(group['omitted_findings'], group['count'] - len(group['findings']))
+            for finding in group['findings']:
+                self.assertLessEqual(len(finding['items']), provider.ITEMS_PER_FINDING)
+
     def test_copy_only_grouping_and_restart(self):
         original = inventory(self.project)
         result = self.check()
