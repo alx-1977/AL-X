@@ -400,14 +400,15 @@ def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs:
     return (current or CodingCancellation()).run(runner, argv, **kwargs)
 
 
-KICAD_CLI_UNAVAILABLE_ERRORS = (OSError, subprocess.TimeoutExpired)
+KICAD_CLI_UNAVAILABLE_ERRORS = (OSError,)
+KICAD_CLI_TIMEOUT = subprocess.TimeoutExpired
 
 
-def run_kicad_cli(executable, arguments, *, runner=None):
+def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     """Run KiCad's fixed argv through the approved process execution site."""
     return run_coding_subprocess(
         subprocess.run if runner is None else runner, [executable, *arguments],
-        shell=False, check=False, timeout=120, capture_output=True, text=True,
+        shell=False, check=False, timeout=timeout_seconds, capture_output=True, text=True,
     )
 
 

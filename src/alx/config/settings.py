@@ -21,6 +21,7 @@ class KiCadSettings:
     work_root: Path
     library_root: Path
     noise_checks: tuple[str, ...] = ('lib_footprint_mismatch', 'malformed_courtyard')
+    cli_timeout_seconds: int = 600
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str], storage_root: Path) -> 'KiCadSettings':
@@ -42,6 +43,7 @@ class KiCadSettings:
             path('ALX_KICAD_LIBRARY_ROOT', '/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints'),
             tuple(p.strip() for p in environment.get('ALX_KICAD_NOISE_CHECKS',
                   'lib_footprint_mismatch,malformed_courtyard').split(',') if p.strip()),
+            _positive_integer(environment, 'ALX_KICAD_CLI_TIMEOUT_SECONDS', 600),
         )
 
 

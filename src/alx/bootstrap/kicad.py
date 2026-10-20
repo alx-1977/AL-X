@@ -19,7 +19,8 @@ class KiCadRuntime:
 
 def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
     settings = KiCadSettings.from_environment(environment, storage_root)
-    provider = KiCadProvider(settings, partial(run_kicad_cli, runner=runner))
+    provider = KiCadProvider(settings, partial(run_kicad_cli, runner=runner,
+                                             timeout_seconds=settings.cli_timeout_seconds))
     permission = 'design.kicad'
     return KiCadRuntime(DEFINITIONS, {
         d.capability_id: AuthorityPolicy(frozenset({permission}),
