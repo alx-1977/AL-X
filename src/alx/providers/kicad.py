@@ -160,28 +160,88 @@ def references(footprint):
             + [p.children[2] for p in footprint.named('fp_text') if p.children[1] == 'reference'])
 
 
-def board_invariant(board_source):
-    """Everything except permitted text dimensions and zone-fill cache is invariant."""
-    def canonical(node, silk=False, zone=False):
+def silk_text(node):
+    """Shared text identification, including layers with knockout flags."""
+    layers = node.named('layer')
+    return (node.name in ('fp_text', 'gr_text', 'property')
+            and bool(layers and len(layers[0].children) > 1
+                     and layers[0].children[1] in ('F.SilkS', 'B.SilkS')))
+
+
+def board_canonical(board_source):
+    """Everything except permitted dimensions and derived caches is invariant."""
+    def canonical(node, context='', zone=False):
         if not isinstance(node, Node):
             return node
-        if node.name in ('fp_text', 'gr_text', 'property'):
-            layers = node.named('layer')
-            silk = bool(layers and layers[0].children[1] in ('F.SilkS', 'B.SilkS'))
         zone = zone or node.name == 'zone'
         children = []
         for child in node.children:
             if isinstance(child, Node) and (
-                    (silk and node.name == 'font' and child.name in ('size', 'thickness'))
+                    (context == 'font' and child.name in ('size', 'thickness'))
+                    or (silk_text(node) and child.name == 'render_cache')
                     or (zone and child.name in ('filled_polygon', 'fill_segments'))):
                 continue
-            value = canonical(child, silk, zone)
+            child_context = ''
+            if isinstance(child, Node):
+                if silk_text(node) and child.name == 'effects':
+                    child_context = 'effects'
+                elif context == 'effects' and child.name == 'font':
+                    child_context = 'font'
+            value = canonical(child, child_context, zone)
             # Dimension-only wrappers may be inserted when effects/font are absent.
-            if silk and value in (['font'], ['effects']):
+            if child_context and value == [child.name]:
                 continue
             children.append(value)
         return children
-    return hashlib.sha256(json.dumps(canonical(sexpr(board_source))).encode()).hexdigest()
+    return canonical(sexpr(board_source))
+
+
+def invariant_digest(tree):
+    return hashlib.sha256(json.dumps(tree).encode()).hexdigest()
+
+
+def board_invariant(board_source):
+    return invariant_digest(board_canonical(board_source))
+
+
+# Fixed diagnostic vocabulary: arbitrary node names are board content too.
+DIAGNOSTIC_NODE_NAMES = frozenset({
+    'kicad_pcb', 'footprint', 'property', 'fp_text', 'gr_text', 'dimension',
+    'effects', 'font', 'size', 'thickness', 'face', 'justify', 'layer', 'hide',
+    'at', 'uuid', 'tstamp', 'pad', 'segment', 'zone', 'polygon', 'pts', 'xy',
+    'start', 'end', 'width', 'net', 'layers', 'setup', 'general', 'version',
+    'generator', 'render_cache',
+})
+
+
+def first_board_difference(expected, current):
+    """Return canonical child indices and allowlisted names, never atom values."""
+    def name(tree):
+        value = tree[0] if isinstance(tree, list) and tree else None
+        return value if isinstance(value, str) and value in DIAGNOSTIC_NODE_NAMES else 'unknown'
+
+    def compare(left, right, path):
+        if isinstance(left, list) and isinstance(right, list):
+            for index in range(max(len(left), len(right))):
+                if index >= len(left) or index >= len(right):
+                    child = left[index] if index < len(left) else right[index]
+                    return path + [index] + ([name(child)] if isinstance(child, list) else [])
+                if left[index] != right[index]:
+                    child_path = path + [index]
+                    if isinstance(left[index], list) or isinstance(right[index], list):
+                        child_path.append(name(left[index] if isinstance(left[index], list) else right[index]))
+                    return compare(left[index], right[index], child_path)
+        return path
+    return None if expected == current else compare(expected, current, [name(expected)])
+
+
+def verify_board_invariant(board_source, meta, expected=None):
+    current = board_canonical(board_source)
+    if invariant_digest(current) != meta['board_invariant']:
+        expected = meta.get('board_canonical', expected)
+        path = first_board_difference(expected, current) if expected is not None else ['kicad_pcb']
+        logger.warning('KiCad board_structure_changed path=%s', json.dumps(path))
+        raise KiCadError('board_structure_changed', {'first_difference_path': path})
 
 
 SAME_PART_CONDITION = "A.Type == 'Pad' && B.Type == 'Pad' && A.Parent == B.Parent"
@@ -241,6 +301,9 @@ class KiCadProvider:
     def _drc(self, root, meta):
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
         output.parent.mkdir(exist_ok=True)
+        before_source = (root / 'project' / meta['board']).read_text()
+        expected = board_canonical(before_source)
+        verify_board_invariant(before_source, meta)
         self._run('pcb', 'drc', '--format', 'json', '--severity-all', '--refill-zones',
                   '--output', output, root / 'project' / meta['board'])
         try:
@@ -251,8 +314,7 @@ class KiCadProvider:
                    ('violations', 'unconnected_items', 'schematic_parity')):
             raise KiCadError('invalid_report')
         board_text = (root / 'project' / meta['board']).read_text()
-        if board_invariant(board_text) != meta['board_invariant']:
-            raise KiCadError('board_structure_changed')
+        verify_board_invariant(board_text, meta, expected)
         board = sexpr(board_text)
         identities = {}
         for footprint in board.named('footprint'):
@@ -374,8 +436,9 @@ class KiCadProvider:
         shutil.copytree(source, root / 'project')
         if inventory(source) != hashes or inventory(root / 'project') != hashes:
             raise KiCadError('original_changed')
+        canonical = board_canonical((root / 'project' / boards[0]).read_text())
         meta = {'source': str(source), 'hashes': hashes, 'board': boards[0],
-                'board_invariant': board_invariant((root / 'project' / boards[0]).read_text())}
+                'board_invariant': invariant_digest(canonical), 'board_canonical': canonical}
         (root / 'metadata.json').write_text(json.dumps(meta))
         result = self._drc(root, meta)
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
@@ -497,12 +560,10 @@ class KiCadProvider:
                 if not all(math.isfinite(v) and v > 0 for v in (height, thickness)):
                     raise KiCadError('unsupported_project')
                 board_source = board.read_text()
+                board_tree = sexpr(board_source)
                 edits = []
-                for node in descendants(sexpr(board_source)):
-                    if node.name not in ('fp_text', 'gr_text', 'property'):
-                        continue
-                    layers = node.named('layer')
-                    if not layers or layers[0].children[1] not in ('F.SilkS', 'B.SilkS'):
+                for node in descendants(board_tree):
+                    if not silk_text(node):
                         continue
                     effects = node.one('effects') if node.named('effects') else None
                     # Skip the owner name and text fields: the parser represents
@@ -537,6 +598,13 @@ class KiCadProvider:
                     width = font.one('thickness')
                     if float(width.children[1]) < thickness:
                         edits.append((width.start, width.end, f'(thickness {thickness:g})'))
+                # Glyph polygons are derived from the old dimensions. Force KiCad
+                # to regenerate them, just as it refills the zone cache.
+                for node in descendants(board_tree):
+                    if silk_text(node) and any(node.start < start < node.end
+                                               for start, _, _ in edits):
+                        edits.extend((cache.start, cache.end, '')
+                                     for cache in node.named('render_cache'))
                 for start, end, value in sorted(edits, reverse=True):
                     board_source = board_source[:start] + value + board_source[end:]
                 if edits:
@@ -636,6 +704,8 @@ class KiCadProvider:
             return self._write_back(arguments, recovery)
         except Exception as error:
             code = str(error) if isinstance(error, KiCadError) else 'unavailable'
+            if isinstance(error, KiCadError) and error.recovery:
+                recovery.update(error.recovery)
             recovery['error'] = {'code': code, 'type': type(error).__name__}
             raise KiCadError(code, recovery) from error
 
@@ -646,8 +716,7 @@ class KiCadProvider:
             raise KiCadError('path_denied')
         if self._revision(root) != arguments['work_copy_revision']:
             raise KiCadError('work_copy_changed')
-        if board_invariant((root / 'project' / meta['board']).read_text()) != meta['board_invariant']:
-            raise KiCadError('board_structure_changed')
+        verify_board_invariant((root / 'project' / meta['board']).read_text(), meta)
 
         temporary = set()
         expected = dict(meta['hashes'])

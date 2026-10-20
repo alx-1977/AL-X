@@ -238,6 +238,103 @@ class KiCadTests(unittest.TestCase):
         self.assertFalse(again['changes'])
         self.assertEqual(again['work_copy_revision'], result['work_copy_revision'])
 
+    def test_kicad7_and_9_silk_fonts_and_dependent_caches(self):
+        from alx.providers.kicad import board_invariant, descendants, sexpr, silk_text
+        for version in (7, 9):
+            with self.subTest(version=version):
+                source = (Path(__file__).parent / 'fixtures/kicad' /
+                          f'silkscreen_kicad{version}.kicad_pcb').read_text()
+                (self.project / 'test.kicad_pcb').write_text(source)
+                checked = self.check()
+                self.success('apply_kicad_mechanical_fixes',
+                             work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+                board = self.settings.work_root / checked['work_copy_id'] / 'project/test.kicad_pcb'
+                updated = board.read_text()
+                self.assertEqual(board_invariant(source), board_invariant(updated))
+                originals = [n for n in descendants(sexpr(source)) if silk_text(n)]
+                texts = [n for n in descendants(sexpr(updated)) if silk_text(n)]
+                for original, text in zip(originals, texts, strict=True):
+                    old = source[original.start:original.end]
+                    if 'hidden' in old:
+                        self.assertEqual(updated[text.start:text.end], old)
+                        continue
+                    font = text.one('effects').one('font')
+                    self.assertTrue(all(float(v) >= 1 for v in font.one('size').children[1:]))
+                    self.assertGreaterEqual(float(font.one('thickness').children[1]), 0.15)
+                    self.assertFalse(text.named('render_cache'))
+                self.assertIn('(face "Noto Sans")', updated)
+                self.assertIn('bold italic', updated)
+                self.assertIn('(justify right mirror)', updated)
+                self.assertIn('(tstamp "board-text-id")', updated)
+                copper = next(n for n in sexpr(updated).named('gr_text') if not silk_text(n))
+                self.assertTrue(copper.named('render_cache'))
+                self.assertIn(updated[copper.start:copper.end], source)
+
+    def test_invariant_ignores_only_direct_silk_dimensions_and_caches(self):
+        from alx.providers.kicad import board_invariant
+        source = ('(kicad_pcb (gr_text "private" (layer "F.SilkS" knockout) '
+                  '(effects (font (size 0.5 0.5) (thickness 0.08) bold) (justify mirror)) '
+                  '(render_cache "private" 0 (polygon (pts (xy 1 2))))) '
+                  '(gr_text "copper" (layer "F.Cu") (render_cache "copper" 0)))')
+        changed_cache = source.replace('(xy 1 2)', '(xy 3 4)')
+        self.assertEqual(board_invariant(source), board_invariant(changed_cache))
+        for before, after in (('bold', 'italic'), ('mirror', 'left'),
+                              ('"private" (layer', '"changed" (layer'),
+                              ('"copper" 0', '"copper" 1'),
+                              ('F.SilkS', 'B.SilkS')):
+            with self.subTest(before=before):
+                self.assertNotEqual(board_invariant(source), board_invariant(source.replace(before, after)))
+        # Similar descendants outside text.effects.font must remain authoritative.
+        other = source.replace('(render_cache "private"', '(other (font (size 2 2))) (render_cache "private"')
+        self.assertNotEqual(board_invariant(other), board_invariant(other.replace('(size 2 2)', '(size 3 3)')))
+
+    def test_first_difference_is_deterministic_and_sanitised(self):
+        from alx.providers.kicad import first_board_difference
+        cases = [
+            (['kicad_pcb', ['gr_text', 'secret']], ['kicad_pcb', ['gr_text', 'other']],
+             ['kicad_pcb', 1, 'gr_text', 1]),
+            (['kicad_pcb', ['secret', 'value']], ['kicad_pcb', ['secret', 'changed']],
+             ['kicad_pcb', 1, 'unknown', 1]),
+            (['kicad_pcb'], ['kicad_pcb', ['secret', 'value']],
+             ['kicad_pcb', 1, 'unknown']),
+            (['kicad_pcb', 'secret'], ['kicad_pcb', ['gr_text', 'value']],
+             ['kicad_pcb', 1, 'gr_text']),
+            (['kicad_pcb', ['pad']], ['kicad_pcb', ['segment']],
+             ['kicad_pcb', 1, 'pad', 0]),
+        ]
+        for expected, current, path in cases:
+            self.assertEqual(first_board_difference(expected, current), path)
+            self.assertEqual(first_board_difference(current, current), None)
+
+    def test_drc_invariant_failure_reports_one_private_safe_path_and_rolls_back(self):
+        checked = self.check()
+        run_cli = self.run_cli
+        drcs = 0
+        def changing(argv, **kwargs):
+            nonlocal drcs
+            result = run_cli(argv, **kwargs)
+            if argv[2] == 'drc':
+                drcs += 1
+                if drcs == 2:
+                    board = Path(argv[-1])
+                    board.write_text(board.read_text().replace('"copper"', '"private-board-text"'))
+            return result
+        self.runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, changing)
+        with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
+            result = self.call('apply_kicad_mechanical_fixes',
+                               work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+        self.assertEqual(result.failure['code'], 'board_structure_changed')
+        path = ['kicad_pcb', 2, 'gr_text', 1]
+        self.assertEqual(list(result.failure['recovery']['first_difference_path']), path)
+        self.assertEqual(result.failure['recovery']['rollback_status'], 'restored')
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn(json.dumps(path), logs.output[0])
+        self.assertNotIn('private-board-text', str(result.failure) + logs.output[0])
+        self.assertNotIn('copper', str(result.failure) + logs.output[0])
+        self.assertIsNone(logs.records[0].exc_info)
+        board = self.settings.work_root / checked['work_copy_id'] / 'project/test.kicad_pcb'
+        self.assertEqual(board.read_text(), BOARD)
+
     def test_missing_silk_minima_report_unsupported_project_details(self):
         for missing in (['silk_text_height'], ['silk_text_thickness'],
                         ['silk_text_height', 'silk_text_thickness']):
