@@ -310,7 +310,11 @@ untouched for weeks is open work you can offer to resume, not something you were
 project_id says which work a goal belongs to; nothing about being listed means it is
 relevant now, and that judgement is yours.
 recent_finished_goals contains retained finished work begun or answered in this conversation,
-most recent completion first, bounded by count, with context and evidence.
+most recent completion first, bounded by count. The two most recent carry their context,
+progress and evidence, with attempts listed without their results; older ones are listed by
+id and objective. read_own_goals with a goal's id returns any of them in full.
+A stored result from an earlier turn too large to repeat on every turn is replaced by its
+size; read_own_goals with the goal's id returns it in full. Results from this turn are whole.
 read_own_goals searches retained goals across conversations by text, or reads a
 goal in full by exact id or unambiguous id prefix; it includes finished and unfinished work.
 
@@ -552,6 +556,13 @@ def _without_reused_ids(
 # summary. This projects what is sent; the durable record keeps everything.
 VERBATIM_ATTEMPTS = 8
 VERBATIM_HISTORY = 12
+# A stored result is repeated on every turn while its goal is shown. One full
+# DRC report (222,000 characters) in a finished goal doubled every Core call on
+# 2026-10-20 and spent the subscription session within the hour. Larger
+# results are replaced by their size; read_own_goals returns them in full.
+STORED_RESULT_LIMIT = 16_000
+# Finished goals shown in full; older ones are listed by id and objective.
+DETAILED_FINISHED_GOALS = 2
 
 
 def _older_attempt_summary(items: Sequence[Any]) -> dict[str, Any] | None:
@@ -581,7 +592,18 @@ def _recent(items: Sequence[Any], limit: int) -> list[Any]:
     return list(items[-limit:]) if len(items) > limit else list(items)
 
 
-def _state_payload(state: GoalState, *, full_progress: bool = False) -> dict[str, Any]:
+def _stored_result(values: Any) -> Any:
+    plain = _plain(values)
+    size = len(json.dumps(plain, ensure_ascii=False, default=str))
+    if size <= STORED_RESULT_LIMIT:
+        return plain
+    return {"omitted_characters": size,
+            "read_in_full_with": "read_own_goals with this goal's id"}
+
+
+def _state_payload(state: GoalState, *, full_progress: bool = False,
+                   finished: bool = False,
+                   this_turn: frozenset[str] = frozenset()) -> dict[str, Any]:
     attempts = tuple(state.attempts)
     recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
     older_attempts = attempts[: len(attempts) - len(recent_attempts)]
@@ -628,7 +650,15 @@ def _state_payload(state: GoalState, *, full_progress: bool = False) -> dict[str
                                          else item.repeated_recorded_at.isoformat()),
                 "repeated_reason_code": item.repeated_reason_code,
                 "result_state": None if item.result is None else item.result.state.value,
-                "result_values": None if item.result is None else _plain(item.result.values),
+                # A finished goal keeps what it found in its context, progress
+                # and evidence; the raw results stay in the store.
+                "result_values": (
+                    None if item.result is None or finished
+                    # This turn's own observation, shown whole; later turns
+                    # see its size if it is large.
+                    else _plain(item.result.values)
+                    if item.call is not None and item.call.call_id in this_turn
+                    else _stored_result(item.result.values)),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
             }
             for item in recent_attempts
@@ -973,10 +1003,19 @@ def _context_payload(context: ReasoningContext) -> str:
             for item in context.unfinished_goals
         ],
         "recent_finished_goals": [
-            _state_payload(item.state, full_progress=True)
-            for item in context.recent_finished_goals
+            _state_payload(item.state, full_progress=True, finished=True)
+            if index < DETAILED_FINISHED_GOALS else {
+                "goal_id": item.state.goal_id,
+                "objective": {"summary": item.state.objective.summary},
+                "status": item.state.status.value,
+                "stop_reason": (None if item.state.stop_reason is None
+                                else item.state.stop_reason.value),
+                "detail": "read_own_goals with this goal's id",
+            }
+            for index, item in enumerate(context.recent_finished_goals)
         ],
-        "active_goal": None if goal is None else _state_payload(goal),
+        "active_goal": (None if goal is None
+                        else _state_payload(goal, this_turn=frozenset(context.turn_call_ids))),
         "transient_attempts": [
             _attempt_payload(item) for item in context.transient_attempts
         ],

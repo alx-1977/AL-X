@@ -18,6 +18,12 @@ from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI
 logger = logging.getLogger(__name__)
 
 
+
+# What one check result carries per DRC check type (D-057a).
+FINDINGS_PER_CHECK_TYPE = 8
+NOISE_EXAMPLES = 2
+ITEMS_PER_FINDING = 4
+
 def stderr_tail(diagnostic):
     if isinstance(diagnostic, bytes):
         diagnostic = diagnostic.decode('utf-8', errors='replace')
@@ -228,6 +234,19 @@ class KiCadProvider:
                     identities[uid.children[1]] = (ref, node.children[1] if node.name == 'pad' else '')
         totals = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
 
+        # D-057a: a full report (222,000 characters on RoomReader V2) rode on
+        # every later Core call. Each check type keeps its count and its first
+        # findings; a noise type keeps two examples. Re-running the check
+        # gives the same facts.
+        def bounded_groups(groups):
+            for entry in groups:
+                keep = NOISE_EXAMPLES if entry['noise'] else FINDINGS_PER_CHECK_TYPE
+                entry['omitted_findings'] = max(0, len(entry['findings']) - keep)
+                entry['findings'] = entry['findings'][:keep]
+                for finding in entry['findings']:
+                    finding['items'] = finding['items'][:ITEMS_PER_FINDING]
+            return groups
+
         def group(entries):
             groups = {}
             for finding in entries:
@@ -257,7 +276,7 @@ class KiCadProvider:
                     'description': finding.get('description', ''), 'items': items})
             return list(groups.values())
         try:
-            result = {key: group(report[key]) for key in
+            result = {key: bounded_groups(group(report[key])) for key in
                       ('violations', 'unconnected_items', 'schematic_parity')}
         except (KeyError, TypeError, AttributeError) as error:
             raise KiCadError('invalid_report') from error

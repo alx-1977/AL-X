@@ -9,6 +9,7 @@ truncated: restart and audit still see every attempt.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import sys
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ from alx.contracts import (  # noqa: E402
     SuccessCriterion,
 )
 from alx.core.model_reasoner import (  # noqa: E402
+    STORED_RESULT_LIMIT,
     VERBATIM_ATTEMPTS,
     VERBATIM_HISTORY,
     _state_payload,
@@ -66,6 +68,48 @@ def goal(attempts: int = 65, progress: int = 40) -> GoalState:
             for index in range(progress)
         ),
     )
+
+
+def oversized_goal() -> GoalState:
+    call = CapabilityCall("drc-1", "check_kicad_board", {})
+    report = {"violations": [{"description": "x" * 200} for _ in range(STORED_RESULT_LIMIT // 100)]}
+    return GoalState(
+        goal_id="goal-2",
+        objective=Objective("turn:2", "check the board"),
+        success_criteria=(SuccessCriterion("criterion-1", "report read"),),
+        attempts=(CapabilityAttempt(
+            call=call, disposition=CapabilityAttemptDisposition.EXECUTED,
+            implementation_invoked=True,
+            result=CapabilityResult("drc-1", "check_kicad_board",
+                                    CapabilityResultState.SUCCEEDED, report)),),
+    )
+
+
+class PromptSizeTests(unittest.TestCase):
+    """A stored result is repeated on every turn, so its size is bounded.
+
+    On 2026-10-20 one full DRC report in a finished goal doubled every Core
+    call and spent the subscription session within the hour.
+    """
+
+    def test_an_oversized_stored_result_is_replaced_by_its_size(self) -> None:
+        values = _state_payload(oversized_goal())["attempts"][0]["result_values"]
+        self.assertGreater(values["omitted_characters"], STORED_RESULT_LIMIT)
+        self.assertIn("read_own_goals", values["read_in_full_with"])
+
+    def test_this_turns_own_result_is_shown_whole(self) -> None:
+        """Greptile on PR 163: a goal attempt saved this turn must reach the next step."""
+        state = oversized_goal()
+        this_turn = _state_payload(state, this_turn=frozenset({"drc-1"}))
+        later_turn = _state_payload(state, this_turn=frozenset({"other"}))
+        self.assertIn("violations", this_turn["attempts"][0]["result_values"])
+        self.assertIn("omitted_characters", later_turn["attempts"][0]["result_values"])
+
+    def test_a_finished_goal_lists_attempts_without_results(self) -> None:
+        attempts = _state_payload(oversized_goal(), finished=True)["attempts"]
+        self.assertEqual(attempts[0]["capability_id"], "check_kicad_board")
+        self.assertEqual(attempts[0]["result_state"], "succeeded")
+        self.assertIsNone(attempts[0]["result_values"])
 
 
 class ProjectionTests(unittest.TestCase):

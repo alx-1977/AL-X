@@ -21,7 +21,7 @@ from alx.contracts import (
 from alx.core import CoreAgent, CoreState
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.core.loop import RECENT_FINISHED_GOALS
-from alx.core.model_reasoner import _context_payload, VERBATIM_HISTORY
+from alx.core.model_reasoner import _context_payload, DETAILED_FINISHED_GOALS, VERBATIM_HISTORY
 from alx.goals import SQLiteGoalStore
 from alx.goals.store import _goal_to_data
 from alx.contracts.provenance import provenance_to_storage
@@ -535,6 +535,47 @@ class FinishedHistoryTests(unittest.TestCase):
         self.assertEqual([item.state.goal_id for item in context.recent_finished_goals],
                          [str(index) for index in range(RECENT_FINISHED_GOALS + 1, 1, -1)])
         self.assertEqual([item.goal_id for item in context.unfinished_goals], ["open"])
+
+    def test_a_large_result_saved_this_turn_reaches_the_next_step_whole(self):
+        """Greptile on PR 163: goal-bound results were capped before she read them."""
+        from alx.core.model_reasoner import STORED_RESULT_LIMIT
+        big = replace(shipment("big"), context={"notes": "x" * (STORED_RESULT_LIMIT + 1000)})
+        self.store.create(big, "c1", RETENTION)
+        current = [None]
+        broker = CapabilityBroker(
+            CapabilityRegistry((DEFINITION,)),
+            SafetyGate({READ_OWN_GOALS: AuthorityPolicy(frozenset({"self.read"}))}),
+            build_goal_history_executors(self.store, lambda: current[0], lambda: self.now),
+        )
+        def dispatch(call, state):
+            current[0] = call.call_id
+            return broker.dispatch(call, AuthorityContext("friedl", frozenset({"self.read"}), self.now))
+        reasoner = RecordingReasoner(
+            AgentDecision(goal_id="big", call=CapabilityCall("read-big", READ_OWN_GOALS, {"goal_id": "big"})),
+            AgentDecision(goal_id="big", response="Read it."),
+        )
+        contexts = self.follow_up(reasoner, dispatch)
+        self.assertEqual(contexts[1].turn_call_ids, ("read-big",))
+        attempts = json.loads(_context_payload(contexts[1]))["active_goal"]["attempts"]
+        read = [item for item in attempts if item["call_id"] == "read-big"][0]
+        self.assertEqual(read["result_values"]["goals"][0]["goal_id"], "big")
+        later = replace(contexts[1], turn_call_ids=())
+        attempts = json.loads(_context_payload(later))["active_goal"]["attempts"]
+        read = [item for item in attempts if item["call_id"] == "read-big"][0]
+        self.assertIn("omitted_characters", read["result_values"])
+
+    def test_only_the_newest_finished_goals_are_shown_in_detail(self):
+        for index in range(DETAILED_FINISHED_GOALS + 2):
+            self.now = NOW + timedelta(seconds=index)
+            self.store.create(shipment(str(index), GoalStatus.COMPLETED), "c1", RETENTION)
+        payload = json.loads(_context_payload(self.follow_up()[0]))["recent_finished_goals"]
+        detailed = payload[:DETAILED_FINISHED_GOALS]
+        listed = payload[DETAILED_FINISHED_GOALS:]
+        self.assertTrue(all("context" in item for item in detailed))
+        self.assertTrue(listed)
+        for item in listed:
+            self.assertEqual(set(item), {"goal_id", "objective", "status", "stop_reason", "detail"})
+            self.assertIn("read_own_goals", item["detail"])
 
     def test_ties_cancelled_goals_and_recompletion(self):
         self.store.create(shipment("a", GoalStatus.COMPLETED), "c1", RETENTION)
