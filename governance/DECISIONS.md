@@ -2643,6 +2643,16 @@ This grants no authority a single goal update lacks: completion still requires s
 - **The allowance.** AL/X may ask for up to three Greptile reviews of one pull request under `review.request`. There is no monthly count. Past three on a pull request, `request_external_review_beyond_allowance` still needs his approval of that exact call.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
 
+## D-058 — AL/X checks and cleans Friedl's KiCad boards
+
+- **Date:** 2026-10-19
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-19.** Friedl's approval words: "I guess we can try… I hope she will do a good job."
+- **Authority.** AL/X may read Friedl's configured KiCad design folders, the read-only template folder and installed footprint libraries, and work on copies in her own storage. She may write changes back into a design folder only with Friedl's approval of that exact write and never while KiCad has the board open.
+- **Four capabilities.** `check_kicad_board` copies a project, records original hashes, runs all-severity DRC with zone refill on the copy and groups factual findings. `apply_kicad_mechanical_fixes` raises silkscreen text dimensions to project minima, ignores only configured noise checks when requested, or copies named template design rules/constraints and custom rules, then reports before/after DRC counts and renders. `find_kicad_library_footprint` reads candidate footprints and pad counts without replacing anything. `write_back_kicad_board` checks the exact approved copy revision, source identity, original inventory/hashes and board locks, backs up before writing and verifies read-back. These deterministic sequences are authorised as the four single outcomes, not a conversational workflow.
+- **Limits.** Routing changes and footprint replacements are never automatic. Noise is only a configured check-type flag; AL/X interprets the findings. Ambiguous board or footprint selection returns to her. Reports and renders stay in her work storage; retained copies, metadata, backups and artifacts remain there until explicitly removed, including across restarts.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
+
 ## D-057 — AL/X remembers finished work and can inspect her own work
 
 - **Date:** 2026-10-19

@@ -13,6 +13,38 @@ class ConfigurationError(ValueError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class KiCadSettings:
+    kicad_cli: Path
+    design_roots: tuple[Path, ...]
+    template_root: Path
+    work_root: Path
+    library_root: Path
+    noise_checks: tuple[str, ...] = ('lib_footprint_mismatch', 'malformed_courtyard')
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str], storage_root: Path) -> 'KiCadSettings':
+        def path(name, default):
+            return Path(environment.get(name, str(default))).expanduser().resolve()
+
+        storage = storage_root.expanduser().resolve()
+        work = path('ALX_KICAD_WORK_ROOT', storage / 'kicad')
+        if work == storage or not work.is_relative_to(storage):
+            raise ConfigurationError('ALX_KICAD_WORK_ROOT must be under AL/X storage')
+        roots = tuple(Path(p).expanduser().resolve() for p in environment.get(
+            'ALX_KICAD_DESIGN_ROOTS', '~/Desktop' + os.pathsep + '~/Documents/KiCad/projects'
+        ).split(os.pathsep) if p.strip())
+        if not roots:
+            raise ConfigurationError('ALX_KICAD_DESIGN_ROOTS must contain directories')
+        return cls(
+            path('ALX_KICAD_CLI', '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli'),
+            roots, path('ALX_KICAD_TEMPLATE_ROOT', '~/Documents/KiCad/10.0/template'), work,
+            path('ALX_KICAD_LIBRARY_ROOT', '/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints'),
+            tuple(p.strip() for p in environment.get('ALX_KICAD_NOISE_CHECKS',
+                  'lib_footprint_mismatch,malformed_courtyard').split(',') if p.strip()),
+        )
+
+
 def _required(environment: Mapping[str, str], name: str) -> str:
     value = environment.get(name, "").strip()
     if not value:

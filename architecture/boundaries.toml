@@ -342,3 +342,27 @@ description = "Eligible tracked source is searched or read at the process's runn
 # D-057 change 2. No earlier source inspection capability was superseded.
 entry = "tools/own_source.py::build_own_source_executors.<locals>.read_own_source"
 forbidden = []
+
+[[outcomes]]
+id = "kicad.board_is_checked"
+description = "DRC facts are read from an isolated board copy."
+entry = "providers/kicad.py::KiCadProvider.check"
+forbidden = []
+
+[[outcomes]]
+id = "kicad.copy_is_cleaned"
+description = "Requested mechanical rules and silkscreen changes are applied to a work copy."
+entry = "providers/kicad.py::KiCadProvider.fix"
+forbidden = []
+
+[[outcomes]]
+id = "kicad.library_footprint_is_found"
+description = "Installed library footprint candidates and pad counts are read."
+entry = "providers/kicad.py::KiCadProvider.find"
+forbidden = []
+
+[[outcomes]]
+id = "kicad.board_is_written_back"
+description = "An exactly approved copy revision is backed up and written to its original."
+entry = "providers/kicad.py::KiCadProvider.write_back"
+forbidden = []
