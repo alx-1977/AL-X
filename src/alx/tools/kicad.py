@@ -48,7 +48,10 @@ DEFINITIONS = (
             'schematic_parity': array(GROUP)}), SideEffect.NONE, FAILURES),
     CapabilityDefinition('apply_kicad_mechanical_fixes',
         'On a registered work copy only, optionally raise silkscreen text dimensions to '
-        'project minima, ignore configured noise checks, or apply named template rules and '
+        'explicit silk_text_min_height_mm / silk_text_min_thickness_mm minima (millimetres, '
+        'finite and > 0; require silkscreen_min_text), falling back independently to project '
+        'silk_text_height / silk_text_thickness settings. Reports the minima used in '
+        'silkscreen_dimensions changes. Can ignore configured noise checks, or apply named template rules and '
         'custom rules, or set same_footprint_pad_clearance_mm (finite and > 0) for pads '
         'of the same footprint. Reports that change as same_footprint_pad_clearance with '
         'clearance_mm, or reports an equivalent existing rule as already_present by name. '
@@ -57,10 +60,12 @@ DEFINITIONS = (
         'copy durably, changes its revision and makes baseline_eligible false. '
         'Never routes or replaces footprints. Revision changes invalidate write approval.',
         obj({'work_copy_id': S, 'silkscreen_min_text': B, 'ignore_noise_checks': B,
+             'silk_text_min_height_mm': N, 'silk_text_min_thickness_mm': N,
              'apply_template': S, 'same_footprint_pad_clearance_mm': N}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'before': DRC_SUMMARY, 'after': DRC_SUMMARY,
              'work_copy_tainted': B, 'baseline_eligible': B,
              'changes': array(obj({'kind': S, 'value': S, 'clearance_mm': N,
+                                   'silk_text_min_height_mm': N, 'silk_text_min_thickness_mm': N,
                                    'status': S, 'rule_name': S}, ('kind', 'value'))),
              'before_images': array(S), 'after_images': array(S)}), SideEffect.NONE, FAILURES),
     CapabilityDefinition('find_kicad_library_footprint',

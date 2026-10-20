@@ -469,15 +469,22 @@ class KiCadProvider:
         return paths
 
     def fix(self, arguments):
+        silk_minima = {'silk_text_height': 'silk_text_min_height_mm',
+                       'silk_text_thickness': 'silk_text_min_thickness_mm'}
+        if any(key in arguments for key in silk_minima.values()) and not arguments.get('silkscreen_min_text', False):
+            raise KiCadError('arguments_unusable')
         clearance = arguments.get('same_footprint_pad_clearance_mm')
-        if 'same_footprint_pad_clearance_mm' in arguments:
+        for key in ('same_footprint_pad_clearance_mm', *silk_minima.values()):
+            if key not in arguments:
+                continue
+            value = arguments[key]
             try:
-                valid_clearance = (not isinstance(clearance, bool)
-                                   and isinstance(clearance, (int, float))
-                                   and math.isfinite(clearance) and clearance > 0)
+                valid = (not isinstance(value, bool)
+                         and isinstance(value, (int, float))
+                         and math.isfinite(value) and value > 0)
             except OverflowError:
-                valid_clearance = False
-            if not valid_clearance:
+                valid = False
+            if not valid:
                 raise KiCadError('arguments_unusable')
         root, meta = self._load(arguments['work_copy_id'])
         board = root / 'project' / meta['board']
@@ -565,12 +572,12 @@ class KiCadProvider:
             stage = 'silkscreen'
             if arguments.get('silkscreen_min_text', False):
                 rules = settings.get('board', {}).get('design_settings', {}).get('rules', {})
-                missing = [key for key in ('silk_text_height', 'silk_text_thickness')
-                           if key not in rules]
+                missing = [key for key, argument in silk_minima.items()
+                           if argument not in arguments and key not in rules]
                 if missing:
                     raise KiCadError('unsupported_project', {'missing_settings': missing})
-                height = float(rules['silk_text_height'])
-                thickness = float(rules['silk_text_thickness'])
+                height, thickness = (float(arguments[argument] if argument in arguments else rules[key])
+                                     for key, argument in silk_minima.items())
                 if not all(math.isfinite(v) and v > 0 for v in (height, thickness)):
                     raise KiCadError('unsupported_project')
                 board_source = board.read_text()
@@ -623,7 +630,9 @@ class KiCadProvider:
                     board_source = board_source[:start] + value + board_source[end:]
                 if edits:
                     board.write_text(board_source)
-                    changes.append({'kind': 'silkscreen_dimensions', 'value': str(len(edits))})
+                    changes.append({'kind': 'silkscreen_dimensions', 'value': str(len(edits)),
+                                    'silk_text_min_height_mm': height,
+                                    'silk_text_min_thickness_mm': thickness})
             if json.dumps(settings, sort_keys=True) != original_settings:
                 pro.write_text(json.dumps(settings, indent=2) + '\n')
             stage = 'after_drc'
