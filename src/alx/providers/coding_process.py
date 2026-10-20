@@ -92,6 +92,7 @@ class CodingCancellation:
 
     def run(self, runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
         self.check()
+        stop_descendants = kwargs.pop("stop_descendants", False)
         inactivity_timeout = kwargs.pop("inactivity_timeout", None)
         activity_root = kwargs.pop("activity_root", None)
         activity_blocked_paths = tuple(kwargs.pop("activity_blocked_paths", ()))
@@ -241,6 +242,10 @@ class CodingCancellation:
                 self._process = None
             if process.poll() is None:
                 _stop(process)
+            # Reap the writer and stop descendants even if the leader already
+            # exited. KiCad callers may restore files as soon as this returns.
+            if stop_descendants:
+                _stop_remaining(process)
             if relay is not None:
                 # The relays own the pipes: let them drain within a bound,
                 # then close what a lingering holder keeps open.
@@ -395,7 +400,7 @@ def check_cancelled() -> None:
 
 def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
     current = _CURRENT.get()
-    if current is None and "inactivity_timeout" not in kwargs:
+    if current is None and "inactivity_timeout" not in kwargs and "stop_descendants" not in kwargs:
         return runner(argv, **kwargs)
     return (current or CodingCancellation()).run(runner, argv, **kwargs)
 
@@ -409,6 +414,8 @@ def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     return run_coding_subprocess(
         subprocess.run if runner is None else runner, [executable, *arguments],
         shell=False, check=False, timeout=timeout_seconds, capture_output=True, text=True,
+        # Select the existing managed process-group path even outside a Core turn.
+        stop_descendants=True,
     )
 
 

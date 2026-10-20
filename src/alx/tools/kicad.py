@@ -20,6 +20,9 @@ def array(item):
 
 
 TOTALS = obj({'error': I, 'warning': I, 'ignore': I, 'total': I})
+RULE_CITATIONS = array(obj({'name': S, 'count': I}))
+DRC_SUMMARY = obj(dict(TOTALS.properties, custom_rule_citations=RULE_CITATIONS,
+                       work_copy_tainted=B, baseline_eligible=B))
 RECOVERY = obj({'backed_up': array(S), 'written': array(S), 'rollback_status': S,
                 'restorations': array(obj({'original': S, 'backup': S, 'restored': B, 'error': S})),
                 'remaining_changed': array(S), 'cleanup_errors': array(S),
@@ -37,8 +40,10 @@ DEFINITIONS = (
     CapabilityDefinition('check_kicad_board',
         'Run all-severity KiCad DRC with zone refill on a new isolated project copy. '
         'Requires exactly one top-level board. Returns grouped facts, configured noise flags '
-        'and revision for exact write approval; does not interpret findings.',
+        'and revision for exact write approval. custom_rule_citations counts rule names '
+        'cited in violations, not all loaded rules; does not interpret findings.',
         obj({'project_dir': S}), obj({'work_copy_id': S, 'work_copy_revision': S,
+            'custom_rule_citations': RULE_CITATIONS, 'work_copy_tainted': B, 'baseline_eligible': B,
             'totals': TOTALS, 'violations': array(GROUP), 'unconnected_items': array(GROUP),
             'schematic_parity': array(GROUP)}), SideEffect.NONE, FAILURES),
     CapabilityDefinition('apply_kicad_mechanical_fixes',
@@ -46,12 +51,17 @@ DEFINITIONS = (
         'project minima, ignore configured noise checks, or apply named template rules and '
         'custom rules, or set same_footprint_pad_clearance_mm (finite and > 0) for pads '
         'of the same footprint. Reports that change as same_footprint_pad_clearance with '
-        'clearance_mm. Returns actual changes, DRC totals and SVG paths before and after. '
+        'clearance_mm, or reports an equivalent existing rule as already_present by name. '
+        'Returns actual changes, DRC totals, custom-rule violation citation counts and SVG paths '
+        'before and after. Failed apply restores files; unverifiable restoration taints the '
+        'copy durably, changes its revision and makes baseline_eligible false. '
         'Never routes or replaces footprints. Revision changes invalidate write approval.',
         obj({'work_copy_id': S, 'silkscreen_min_text': B, 'ignore_noise_checks': B,
              'apply_template': S, 'same_footprint_pad_clearance_mm': N}, ('work_copy_id',)),
-        obj({'work_copy_id': S, 'work_copy_revision': S, 'before': TOTALS, 'after': TOTALS,
-             'changes': array(obj({'kind': S, 'value': S, 'clearance_mm': N}, ('kind', 'value'))),
+        obj({'work_copy_id': S, 'work_copy_revision': S, 'before': DRC_SUMMARY, 'after': DRC_SUMMARY,
+             'work_copy_tainted': B, 'baseline_eligible': B,
+             'changes': array(obj({'kind': S, 'value': S, 'clearance_mm': N,
+                                   'status': S, 'rule_name': S}, ('kind', 'value'))),
              'before_images': array(S), 'after_images': array(S)}), SideEffect.NONE, FAILURES),
     CapabilityDefinition('find_kicad_library_footprint',
         'Read installed library footprint candidates and pad counts. Supply library_id '

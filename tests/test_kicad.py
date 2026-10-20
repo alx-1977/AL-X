@@ -313,7 +313,8 @@ class KiCadTests(unittest.TestCase):
                 execute.assert_called_once_with(
                     subprocess.run if runner is None else runner,
                     ['/path with spaces/kicad-cli', *arguments],
-                    shell=False, check=False, timeout=600, capture_output=True, text=True)
+                    shell=False, check=False, timeout=600, capture_output=True, text=True,
+                    stop_descendants=True)
                 self.assertIs(result, execute.return_value)
 
     def test_cli_os_error_and_timeout_are_distinct(self):
@@ -401,6 +402,207 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(target.read_text().count('(rule "ALX'), 1)
         self.assertIn('(rule "factory"', target.read_text())
         self.assertFalse((self.project / 'test.kicad_dru').exists())
+
+    def template(self, rules='(version 1)\n'):
+        folder = self.settings.template_root / 'factory'
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'factory.kicad_pro').write_text(json.dumps(PROJECT))
+        (folder / 'factory.kicad_dru').write_text(rules)
+        return folder.name
+
+    def test_apply_failure_restores_every_file_and_original_absence(self):
+        for existing_rules in (False, True):
+            for phase in ('before_drc', 'after_drc', 'after_render'):
+                for timeout in (False, True):
+                    with self.subTest(existing_rules=existing_rules, phase=phase, timeout=timeout):
+                        checked = self.check()
+                        root = self.settings.work_root / checked['work_copy_id']
+                        project = root / 'project'
+                        if existing_rules:
+                            (project / 'test.kicad_dru').write_bytes(b'# original rules\r\n(version 1)\r\n')
+                        before = {p.name: p.read_bytes() for p in project.iterdir()}
+                        provider = KiCadProvider(self.settings, self.execute_cli)
+                        revision = provider._revision(root)
+                        drcs = renders = 0
+                        def runner(executable, argv):
+                            nonlocal drcs, renders
+                            is_drc = argv[1] == 'drc'
+                            drcs += is_drc
+                            renders += not is_drc
+                            fail = ((phase == 'before_drc' and drcs == 1 and is_drc)
+                                    or (phase == 'after_drc' and drcs == 2 and is_drc)
+                                    or (phase == 'after_render' and renders == 2 and not is_drc))
+                            if fail:
+                                # Even preparation/refill can mutate all destinations.
+                                for suffix in ('.kicad_pcb', '.kicad_pro', '.kicad_dru'):
+                                    (project / ('test' + suffix)).write_bytes(b'partial CLI write')
+                                if timeout:
+                                    raise subprocess.TimeoutExpired(argv, 1)
+                                return SimpleNamespace(returncode=1)
+                            return self.execute_cli(executable, argv)
+                        provider.execute_cli = runner
+                        with self.assertRaises(KiCadError) as caught:
+                            provider.fix(dict(work_copy_id=checked['work_copy_id'],
+                                              apply_template=self.template(),
+                                              silkscreen_min_text=True, ignore_noise_checks=True))
+                        self.assertEqual(str(caught.exception), 'cli_timeout' if timeout else 'cli_failed')
+                        self.assertEqual(caught.exception.recovery['rollback_status'], 'restored')
+                        self.assertEqual({p.name: p.read_bytes() for p in project.iterdir()}, before)
+                        self.assertEqual(provider._revision(root), revision)
+                        self.assertNotIn('taint', provider._load(checked['work_copy_id'])[1])
+
+    def test_before_timeout_removes_initially_absent_project_and_rules(self):
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        project = root / 'project'
+        (project / 'test.kicad_pro').unlink()
+        before = inventory(project)
+        def execute(executable, argv):
+            (project / 'test.kicad_pro').write_text('{}')
+            (project / 'test.kicad_dru').write_text('(version 1)')
+            raise subprocess.TimeoutExpired(argv, 1)
+        provider = KiCadProvider(self.settings, execute)
+        with self.assertRaisesRegex(KiCadError, 'cli_timeout'):
+            provider.fix({'work_copy_id': checked['work_copy_id']})
+        self.assertEqual(inventory(project), before)
+
+    def test_rollback_readback_detects_silent_corruption(self):
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        pro = root / 'project/test.kicad_pro'
+        write = Path.write_bytes
+        def corrupt(path, data):
+            return write(path, b'corrupted restoration' if path == pro else data)
+        provider = KiCadProvider(self.settings, self.execute_cli)
+        with patch.object(provider, '_render', side_effect=KiCadError('render_failed')), \
+                patch.object(Path, 'write_bytes', corrupt):
+            with self.assertRaises(KiCadError) as caught:
+                provider.fix({'work_copy_id': checked['work_copy_id']})
+        self.assertEqual(caught.exception.recovery['rollback_status'], 'failed')
+        self.assertTrue(provider._load(checked['work_copy_id'])[1]['taint'])
+
+    def test_real_timed_out_writer_is_stopped_before_rollback(self):
+        from threading import Event
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        project = root / 'project'
+        before = inventory(project)
+        dru = project / 'test.kicad_dru'
+        ready = root / 'artifacts/writer-ready'
+        # A descendant ignores TERM and continually writes until group cleanup kills it.
+        child = ("import signal, time; from pathlib import Path; "
+                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                 f"Path({str(ready)!r}).write_text('ready'); "
+                 f"p=Path({str(dru)!r}); "
+                 "exec(\"while True:\\n p.write_bytes(b'late writer')\\n time.sleep(0.02)\")")
+        leader = ("import subprocess, sys, time; "
+                  f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)")
+        drcs = 0
+        def execute(executable, argv):
+            nonlocal drcs
+            if argv[1] == 'drc':
+                drcs += 1
+                if drcs == 2:
+                    return run_kicad_cli(sys.executable, ['-c', leader], timeout_seconds=1)
+            return self.execute_cli(executable, argv)
+        provider = KiCadProvider(self.settings, execute)
+        with self.assertRaisesRegex(KiCadError, 'cli_timeout'):
+            provider.fix(dict(work_copy_id=checked['work_copy_id'],
+                              apply_template=self.template(), silkscreen_min_text=True))
+        self.assertTrue(ready.exists(), 'descendant must actually start before timeout')
+        self.assertEqual(inventory(project), before)
+        Event().wait(0.2)
+        self.assertEqual(inventory(project), before, 'writer must not overwrite restored files')
+
+    def test_failed_restoration_is_durable_and_never_a_baseline(self):
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        board = root / 'project/test.kicad_pcb'
+        provider = KiCadProvider(self.settings, self.execute_cli)
+        revision = provider._revision(root)
+        original_write = Path.write_bytes
+        def blocked_restore(path, data):
+            if path == board:
+                raise PermissionError('rollback refused')
+            return original_write(path, data)
+        with patch.object(provider, '_render', side_effect=KiCadError('render_failed')), \
+                patch.object(Path, 'write_bytes', blocked_restore):
+            with self.assertRaises(KiCadError) as caught:
+                provider.fix({'work_copy_id': checked['work_copy_id']})
+        self.assertTrue(caught.exception.recovery['work_copy_tainted'])
+        self.assertFalse(caught.exception.recovery['baseline_eligible'])
+        restarted = KiCadProvider(self.settings, self.execute_cli)
+        self.assertNotEqual(restarted._revision(root), revision)
+        result = restarted.fix({'work_copy_id': checked['work_copy_id']})
+        self.assertTrue(result['work_copy_tainted'])
+        for report in (result, result['before'], result['after']):
+            self.assertFalse(report['baseline_eligible'])
+        self.assertTrue(restarted._load(checked['work_copy_id'])[1]['taint'])
+
+    def test_unstoppable_writer_keeps_taint_even_after_byte_restoration(self):
+        from alx.contracts.coding import CodingError
+        checked = self.check()
+        provider = KiCadProvider(self.settings, self.execute_cli)
+        with patch.object(provider, '_render', side_effect=CodingError(
+                'session_interrupted', reason_code='session_unstoppable')):
+            with self.assertRaises(KiCadError) as caught:
+                provider.fix({'work_copy_id': checked['work_copy_id']})
+        self.assertTrue(caught.exception.recovery['work_copy_tainted'])
+        self.assertFalse(caught.exception.recovery['baseline_eligible'])
+
+    def test_existing_equivalent_condition_is_preserved_and_named(self):
+        from alx.providers.kicad import SAME_PART_CONDITION
+        for template in (False, True):
+            checked = self.check()
+            root = self.settings.work_root / checked['work_copy_id']
+            rules = ('# Preserve this rule and its constraint\n(version 1)\n'
+                     '(rule "Same part pads" (condition ' + json.dumps(
+                         SAME_PART_CONDITION.replace(' == ', '==').replace(' && ', '  &&  '))
+                     + ') (constraint clearance (min 0.12mm)))\n')
+            target = root / 'project/test.kicad_dru'
+            options = {}
+            if template:
+                options['apply_template'] = self.template(rules)
+            else:
+                target.write_text(rules)
+            result = self.success('apply_kicad_mechanical_fixes', work_copy_id=checked['work_copy_id'],
+                                  same_footprint_pad_clearance_mm=0.1, **options)
+            self.assertEqual(target.read_text(), rules)
+            self.assertNotIn('ALX same-footprint', target.read_text())
+            self.assertIn({'kind': 'same_footprint_pad_clearance', 'value': 'Same part pads',
+                           'status': 'already_present', 'rule_name': 'Same part pads'}, result['changes'])
+
+    def test_condition_comparison_preserves_literal_spaces_and_operators(self):
+        from alx.providers.kicad import SAME_PART_CONDITION
+        for condition in (SAME_PART_CONDITION.replace("'Pad'", "'P ad'"),
+                          SAME_PART_CONDITION.replace('&&', '||'),
+                          SAME_PART_CONDITION.replace('A.Parent ==', 'A.Parent !=')):
+            checked = self.check()
+            target = self.settings.work_root / checked['work_copy_id'] / 'project/test.kicad_dru'
+            target.write_text('(version 1)\n(rule "Different" (condition ' + json.dumps(condition)
+                              + ') (constraint clearance (min 0.2mm)))\n')
+            self.success('apply_kicad_mechanical_fixes', work_copy_id=checked['work_copy_id'],
+                         same_footprint_pad_clearance_mm=0.1)
+            self.assertIn('ALX same-footprint', target.read_text())
+
+    def test_rule_citations_cover_all_violations_and_apply_reports(self):
+        finding = {'type': 'clearance', 'severity': 'error', 'items': [],
+                   'description': "Clearance violation (rule 'Same part pads'; clearance 0.1 mm)"}
+        self.report = {'violations': [finding] * 12 + [dict(finding,
+            description='Clearance violation (rule "Other rule"; clearance 0.2 mm)')],
+            'unconnected_items': [], 'schematic_parity': []}
+        checked = self.check()
+        expected = [{'name': 'Other rule', 'count': 1}, {'name': 'Same part pads', 'count': 12}]
+        self.assertEqual([dict(c) for c in checked['custom_rule_citations']], expected)
+        fixed = self.success('apply_kicad_mechanical_fixes', work_copy_id=checked['work_copy_id'])
+        for report in (fixed['before'], fixed['after']):
+            self.assertEqual([dict(c) for c in report['custom_rule_citations']], expected)
+        self.report['violations'] = []
+        checked = self.check()
+        self.assertFalse(checked['custom_rule_citations'])
+        fixed = self.success('apply_kicad_mechanical_fixes', work_copy_id=checked['work_copy_id'])
+        self.assertFalse(fixed['before']['custom_rule_citations'])
+        self.assertFalse(fixed['after']['custom_rule_citations'])
 
     def test_custom_noise_configuration_is_the_only_flag_source(self):
         environment = dict(self.environment, ALX_KICAD_NOISE_CHECKS='unconnected_items')
