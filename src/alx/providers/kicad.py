@@ -505,10 +505,13 @@ class KiCadProvider:
                     if not layers or layers[0].children[1] not in ('F.SilkS', 'B.SilkS'):
                         continue
                     effects = node.one('effects') if node.named('effects') else None
-                    # KiCad uses both a bare hide token and (hide yes).
-                    if any('hide' in owner.children or any(
+                    # Skip the owner name and text fields: the parser represents
+                    # quoted "hide" text and bare visibility tokens identically.
+                    visibility_start = 2 if node.name == 'gr_text' else 3
+                    if any('hide' in owner.children[start:] or any(
                             hidden.children[1:] == ['yes'] for hidden in owner.named('hide'))
-                           for owner in (node, effects) if owner is not None):
+                           for owner, start in ((node, visibility_start), (effects, 1))
+                           if owner is not None):
                         continue
                     dimensions = f'(size {height:g} {height:g}) (thickness {thickness:g})'
                     if effects is None:
@@ -553,7 +556,9 @@ class KiCadProvider:
                     'work_copy_tainted': bool(meta.get('taint')), 'baseline_eligible': not bool(meta.get('taint')),
                     'changes': changes,
                     'before_images': before_images, 'after_images': after_images}
+            stage = 'revision'
             result['work_copy_revision'] = self._revision(root, meta)
+            stage = 'metadata'
             self._save_metadata(root, meta)
         except BaseException as error:
             if not isinstance(error, (KiCadError, KeyboardInterrupt, SystemExit)):

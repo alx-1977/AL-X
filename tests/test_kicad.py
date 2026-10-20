@@ -223,9 +223,14 @@ class KiCadTests(unittest.TestCase):
                 self.assertGreaterEqual(float(font.one('thickness').children[1]), 0.15)
                 if original.named('effects') and original.one('effects').named('font'):
                     old_font = original.one('effects').one('font')
-                    for old_size, size in zip(old_font.one('size').children[1:],
-                                              font.one('size').children[1:]):
+                    old_sizes = (old_font.one('size').children[1:]
+                                 if old_font.named('size') else [1, 1])
+                    for old_size, size in zip(old_sizes, font.one('size').children[1:], strict=True):
                         self.assertEqual(float(size), max(1, float(old_size)))
+                    old_thickness = (float(old_font.one('thickness').children[1])
+                                     if old_font.named('thickness') else 0.15)
+                    self.assertEqual(float(font.one('thickness').children[1]),
+                                     max(0.15, old_thickness))
         self.assertIn('bold', updated)
         self.assertIn('(justify left)', updated)
         again = self.success('apply_kicad_mechanical_fixes',
@@ -255,7 +260,7 @@ class KiCadTests(unittest.TestCase):
     def test_unexpected_apply_error_reports_only_sanitised_type_and_stage(self):
         from alx.providers import kicad
         for stage in ('before_drc', 'render', 'template', 'clearance', 'noise',
-                      'silkscreen', 'after_drc'):
+                      'silkscreen', 'after_drc', 'revision', 'metadata'):
             with self.subTest(stage=stage):
                 checked = self.check()
                 provider = KiCadProvider(self.settings, self.execute_cli)
@@ -276,6 +281,19 @@ class KiCadTests(unittest.TestCase):
                     failing = patch.object(provider, '_drc', side_effect=fail_drc)
                 elif stage == 'render':
                     failing = patch.object(provider, '_render', side_effect=error)
+                elif stage == 'revision':
+                    failing = patch.object(provider, '_revision', side_effect=error)
+                elif stage == 'metadata':
+                    save = provider._save_metadata
+                    saves = 0
+                    def fail_final_save(*args):
+                        nonlocal saves
+                        saves += 1
+                        # Allow the pending marker and subsequent rollback save.
+                        if saves == 2:
+                            raise error
+                        return save(*args)
+                    failing = patch.object(provider, '_save_metadata', side_effect=fail_final_save)
                 elif stage == 'template':
                     failing = patch.object(kicad.json, 'loads', side_effect=error)
                     # Avoid failing in _load, before the apply transaction starts.
@@ -292,10 +310,13 @@ class KiCadTests(unittest.TestCase):
                 drc_report = provider._drc(root, meta)
                 with patch.object(provider, '_drc', return_value=drc_report) if stage not in (
                         'before_drc', 'after_drc') else patch.object(provider, '_render', wraps=provider._render):
-                    with failing, self.assertLogs(kicad.logger, level='WARNING') as logs:
+                    with patch.object(provider, '_render', wraps=provider._render) as render, \
+                            failing, self.assertLogs(kicad.logger, level='WARNING') as logs:
                         from alx.tools.kicad import build_kicad_executors
                         result = build_kicad_executors(provider, lambda: 'call')[
                             'apply_kicad_mechanical_fixes'](options)
+                if stage in ('revision', 'metadata'):
+                    self.assertEqual(render.call_count, 2)
                 self.assertEqual(result.failure['code'], 'verification_failed')
                 recovery = result.failure['recovery']
                 self.assertEqual(recovery['error'], dict(code='verification_failed',
