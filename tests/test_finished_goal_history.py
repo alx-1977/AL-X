@@ -536,6 +536,11 @@ class FinishedHistoryTests(unittest.TestCase):
                          [str(index) for index in range(RECENT_FINISHED_GOALS + 1, 1, -1)])
         self.assertEqual([item.goal_id for item in context.unfinished_goals], ["open"])
 
+    def test_every_reasoning_step_knows_when_its_turn_began(self):
+        contexts = self.follow_up()
+        self.assertTrue(contexts)
+        self.assertTrue(all(context.turn_started_at is not None for context in contexts))
+
     def test_only_the_newest_finished_goals_are_shown_in_detail(self):
         for index in range(DETAILED_FINISHED_GOALS + 2):
             self.now = NOW + timedelta(seconds=index)

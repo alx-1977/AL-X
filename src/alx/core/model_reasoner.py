@@ -313,8 +313,8 @@ recent_finished_goals contains retained finished work begun or answered in this 
 most recent completion first, bounded by count. The two most recent carry their context,
 progress and evidence, with attempts listed without their results; older ones are listed by
 id and objective. read_own_goals with a goal's id returns any of them in full.
-A stored result too large to repeat on every turn is replaced by its size; read_own_goals
-with the goal's id returns it in full.
+A stored result from an earlier turn too large to repeat on every turn is replaced by its
+size; read_own_goals with the goal's id returns it in full. Results from this turn are whole.
 read_own_goals searches retained goals across conversations by text, or reads a
 goal in full by exact id or unambiguous id prefix; it includes finished and unfinished work.
 
@@ -602,7 +602,8 @@ def _stored_result(values: Any) -> Any:
 
 
 def _state_payload(state: GoalState, *, full_progress: bool = False,
-                   finished: bool = False) -> dict[str, Any]:
+                   finished: bool = False,
+                   recorded_since: Any = None) -> dict[str, Any]:
     attempts = tuple(state.attempts)
     recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
     older_attempts = attempts[: len(attempts) - len(recent_attempts)]
@@ -651,8 +652,14 @@ def _state_payload(state: GoalState, *, full_progress: bool = False,
                 "result_state": None if item.result is None else item.result.state.value,
                 # A finished goal keeps what it found in its context, progress
                 # and evidence; the raw results stay in the store.
-                "result_values": (None if item.result is None or finished
-                                  else _stored_result(item.result.values)),
+                "result_values": (
+                    None if item.result is None or finished
+                    # This turn's own observation, shown whole; later turns
+                    # see its size if it is large.
+                    else _plain(item.result.values)
+                    if (recorded_since is not None and item.recorded_at is not None
+                        and item.recorded_at >= recorded_since)
+                    else _stored_result(item.result.values)),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
             }
             for item in recent_attempts
@@ -1008,7 +1015,8 @@ def _context_payload(context: ReasoningContext) -> str:
             }
             for index, item in enumerate(context.recent_finished_goals)
         ],
-        "active_goal": None if goal is None else _state_payload(goal),
+        "active_goal": (None if goal is None
+                        else _state_payload(goal, recorded_since=context.turn_started_at)),
         "transient_attempts": [
             _attempt_payload(item) for item in context.transient_attempts
         ],

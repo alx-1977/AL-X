@@ -437,6 +437,7 @@ class CoreAgent:
         loads its full state.
         """
         self._validate_step_budget(step_budget)
+        turn_started_at = self._clock()
         conversation_id = conversation.conversation_id
         # Recovery is deliberately unbounded and unscoped, unlike the candidate
         # projection below. An interrupted dispatch or an unflushed memory
@@ -582,6 +583,7 @@ class CoreAgent:
                     trigger_event_id=trigger_event_id,
                     unfinished_goals=summaries,
                     recent_finished_goals=finished_goals,
+                    turn_started_at=turn_started_at,
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
                     relationship_memories=relationship_memories,

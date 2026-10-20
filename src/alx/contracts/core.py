@@ -227,6 +227,9 @@ class ReasoningContext:
     unfinished_goals: tuple[GoalSummary, ...] = ()
     # Full retained terminal work in this conversation, bounded, newest first.
     recent_finished_goals: tuple[GoalSnapshot, ...] = ()
+    # When this turn began. A goal attempt recorded since then is this turn's
+    # own observation and is shown in full (D-057a).
+    turn_started_at: datetime | None = None
     # Where this turn came from. Provenance only: it says nobody asked, or that
     # Friedl did. Nothing may be derived from it about what to think about.
     origin: CognitionOrigin = CognitionOrigin.PERSON_TURN

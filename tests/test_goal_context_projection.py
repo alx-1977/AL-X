@@ -9,6 +9,7 @@ truncated: restart and audit still see every attempt.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import sys
 import tempfile
 import unittest
@@ -95,6 +96,17 @@ class PromptSizeTests(unittest.TestCase):
         values = _state_payload(oversized_goal())["attempts"][0]["result_values"]
         self.assertGreater(values["omitted_characters"], STORED_RESULT_LIMIT)
         self.assertIn("read_own_goals", values["read_in_full_with"])
+
+    def test_this_turns_own_result_is_shown_whole(self) -> None:
+        """Greptile on PR 163: a goal attempt saved this turn must reach the next step."""
+        state = oversized_goal()
+        recorded = datetime(2026, 10, 20, 8, 0, tzinfo=UTC)
+        attempt_ = replace(state.attempts[0], recorded_at=recorded)
+        state = replace(state, attempts=(attempt_,))
+        this_turn = _state_payload(state, recorded_since=recorded - timedelta(seconds=1))
+        later_turn = _state_payload(state, recorded_since=recorded + timedelta(seconds=1))
+        self.assertIn("violations", this_turn["attempts"][0]["result_values"])
+        self.assertIn("omitted_characters", later_turn["attempts"][0]["result_values"])
 
     def test_a_finished_goal_lists_attempts_without_results(self) -> None:
         attempts = _state_payload(oversized_goal(), finished=True)["attempts"]

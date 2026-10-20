@@ -65,7 +65,9 @@ class KiCadTests(unittest.TestCase):
         self.assertTrue(board.is_relative_to(self.storage))
         self.assertFalse(board.is_relative_to(self.project))
         target = Path(argv[argv.index('--output') + 1])
-        if argv[2] == 'drc':
+        if argv[2] == 'drc' and getattr(self, 'report', None) is not None:
+            target.write_text(json.dumps(self.report))
+        elif argv[2] == 'drc':
             self.assertEqual(argv[3:7], ['--format', 'json', '--severity-all', '--refill-zones'])
             pro = json.loads(board.with_suffix('.kicad_pro').read_text())
             ignored = pro['board']['design_settings']['rule_severities'].get('lib_footprint_mismatch') == 'ignore'
@@ -119,16 +121,33 @@ class KiCadTests(unittest.TestCase):
     def test_a_check_result_is_bounded_per_check_type(self):
         """D-057a: a full DRC report rode on every later Core call."""
         from alx.providers import kicad as provider
+        def finding(kind, severity, index, items):
+            return {'type': kind, 'severity': severity, 'description': f'{kind} {index}',
+                    'items': [{'description': f'item {index}.{n}', 'pos': {'x': 1.0, 'y': 2.0}}
+                              for n in range(items)]}
+        real = provider.FINDINGS_PER_CHECK_TYPE + 3
+        noise = provider.NOISE_EXAMPLES + 4
+        self.report = {
+            'violations': [finding('clearance', 'error', i, provider.ITEMS_PER_FINDING + 2)
+                           for i in range(real)]
+                          + [finding('lib_footprint_mismatch', 'warning', i, 1) for i in range(noise)],
+            'unconnected_items': [], 'schematic_parity': []}
         result = self.check()
-        groups = [g for key in ('violations', 'unconnected_items', 'schematic_parity')
-                  for g in result[key]]
-        self.assertTrue(groups)
-        for group in groups:
-            limit = provider.NOISE_EXAMPLES if group['noise'] else provider.FINDINGS_PER_CHECK_TYPE
-            self.assertLessEqual(len(group['findings']), limit)
-            self.assertEqual(group['omitted_findings'], group['count'] - len(group['findings']))
-            for finding in group['findings']:
-                self.assertLessEqual(len(finding['items']), provider.ITEMS_PER_FINDING)
+        groups = {group['check_type']: group for group in result['violations']}
+        clearance, mismatch = groups['clearance'], groups['lib_footprint_mismatch']
+        self.assertFalse(clearance['noise'])
+        self.assertTrue(mismatch['noise'])
+        self.assertEqual(clearance['count'], real)
+        self.assertEqual([f['description'] for f in clearance['findings']],
+                         [f'clearance {i}' for i in range(provider.FINDINGS_PER_CHECK_TYPE)])
+        self.assertEqual(clearance['omitted_findings'], 3)
+        self.assertEqual([i['description'] for i in clearance['findings'][0]['items']],
+                         [f'item 0.{n}' for n in range(provider.ITEMS_PER_FINDING)])
+        self.assertEqual(mismatch['count'], noise)
+        self.assertEqual(len(mismatch['findings']), provider.NOISE_EXAMPLES)
+        self.assertEqual(mismatch['omitted_findings'], 4)
+        self.assertEqual(result['totals'],
+                         {'error': real, 'warning': noise, 'ignore': 0, 'total': real + noise})
 
     def test_copy_only_grouping_and_restart(self):
         original = inventory(self.project)
