@@ -450,6 +450,18 @@ class FailClosedTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
 
+    def test_the_session_limit_wording_is_usage_exhaustion(self) -> None:
+        runner = _Recorder(json.dumps({
+            "is_error": True, "subtype": "success",
+            "result": "You've hit your session limit · resets 12:40pm (Africa/Johannesburg)",
+        }))
+        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
+
+        with self.assertRaises(ProviderError) as caught:
+            model.complete(_request())
+
+        self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
+
     def test_a_failure_carries_no_prompt(self) -> None:
         """D-012: a failure must not carry the turn that caused it."""
         runner = _Recorder("", "not logged in", 1)

@@ -21,7 +21,7 @@ from alx.contracts import (
 from alx.core import CoreAgent, CoreState
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.core.loop import RECENT_FINISHED_GOALS
-from alx.core.model_reasoner import _context_payload, VERBATIM_HISTORY
+from alx.core.model_reasoner import _context_payload, DETAILED_FINISHED_GOALS, VERBATIM_HISTORY
 from alx.goals import SQLiteGoalStore
 from alx.goals.store import _goal_to_data
 from alx.contracts.provenance import provenance_to_storage
@@ -535,6 +535,19 @@ class FinishedHistoryTests(unittest.TestCase):
         self.assertEqual([item.state.goal_id for item in context.recent_finished_goals],
                          [str(index) for index in range(RECENT_FINISHED_GOALS + 1, 1, -1)])
         self.assertEqual([item.goal_id for item in context.unfinished_goals], ["open"])
+
+    def test_only_the_newest_finished_goals_are_shown_in_detail(self):
+        for index in range(DETAILED_FINISHED_GOALS + 2):
+            self.now = NOW + timedelta(seconds=index)
+            self.store.create(shipment(str(index), GoalStatus.COMPLETED), "c1", RETENTION)
+        payload = json.loads(_context_payload(self.follow_up()[0]))["recent_finished_goals"]
+        detailed = payload[:DETAILED_FINISHED_GOALS]
+        listed = payload[DETAILED_FINISHED_GOALS:]
+        self.assertTrue(all("context" in item for item in detailed))
+        self.assertTrue(listed)
+        for item in listed:
+            self.assertEqual(set(item), {"goal_id", "objective", "status", "stop_reason", "detail"})
+            self.assertIn("read_own_goals", item["detail"])
 
     def test_ties_cancelled_goals_and_recompletion(self):
         self.store.create(shipment("a", GoalStatus.COMPLETED), "c1", RETENTION)

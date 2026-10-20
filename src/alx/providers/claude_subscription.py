@@ -162,6 +162,10 @@ _USAGE_LIMIT_MARKERS = (
     "too many requests",
     "resets at",
     "upgrade to",
+    # The CLI's wording on 2026-10-19/20: "You've hit your session limit ·
+    # resets 12:40pm". Unmatched, it read as cli_failed and was retried.
+    "session limit",
+    "hit your limit",
 )
 _AUTHENTICATION_MARKERS = (
     "not logged in",
