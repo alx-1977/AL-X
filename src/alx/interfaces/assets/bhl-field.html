@@ -5,9 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#010710">
 <title>AL/X · BHL signal field</title>
+<script>
+// Inside AL/X's page the field is a transparent overlay on her backdrop.
+// Opened on its own there is nothing behind it, so it brings its own night.
+if (window.parent === window) document.documentElement.classList.add('standalone');
+</script>
 <style>
 :root{--ice:#e9fbff;--pale:#b1d5e0;--muted:#66889a;--hair:rgba(104,195,226,.24);--blue:#00cfff;--amber:#ffac00;--red:#ff254f;--green:#00ffc6}
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{color:var(--ice);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
+*{box-sizing:border-box}html.standalone{background:radial-gradient(120% 100% at 35% 30%,#071a2a 0%,#03101d 45%,#010710 80%)}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{color:var(--ice);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
 #matrix{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}
 body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,transparent 67%,rgba(1,7,16,.32) 71%,rgba(1,7,16,.58) 75%,rgba(1,7,16,.62)),linear-gradient(180deg,rgba(1,7,16,.5),transparent 25%,transparent 80%,rgba(1,7,16,.17));}
 .shell{position:fixed;inset:0;z-index:3;pointer-events:none}
