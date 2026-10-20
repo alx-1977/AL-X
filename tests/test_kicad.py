@@ -270,6 +270,84 @@ class KiCadTests(unittest.TestCase):
                 self.assertTrue(copper.named('render_cache'))
                 self.assertIn(updated[copper.start:copper.end], source)
 
+    def test_silk_minima_explicit_fallback_and_precedence_on_kicad7_and_9(self):
+        from alx.providers.kicad import board_invariant, descendants, sexpr, silk_text
+        cases = (
+            ({}, {'silk_text_min_height_mm': 1.0, 'silk_text_min_thickness_mm': 0.15}, (1.0, 0.15)),
+            ({'silk_text_height': 2, 'silk_text_thickness': 0.3},
+             {'silk_text_min_height_mm': 1.0, 'silk_text_min_thickness_mm': 0.15}, (1.0, 0.15)),
+            ({'silk_text_thickness': 0.2}, {'silk_text_min_height_mm': 1.2}, (1.2, 0.2)),
+            ({'silk_text_height': 1.3}, {'silk_text_min_thickness_mm': 0.18}, (1.3, 0.18)),
+            ({'silk_text_height': 1, 'silk_text_thickness': 0.15}, {}, (1.0, 0.15)),
+        )
+        for version in (7, 9):
+            for rules, explicit, (height, thickness) in cases:
+                with self.subTest(version=version, rules=rules, explicit=explicit):
+                    source = (Path(__file__).parent / 'fixtures/kicad' /
+                              f'silkscreen_kicad{version}.kicad_pcb').read_text()
+                    (self.project / 'test.kicad_pcb').write_text(source)
+                    project = json.loads(json.dumps(PROJECT))
+                    project['board']['design_settings']['rules'] = rules
+                    project_source = json.dumps(project)
+                    (self.project / 'test.kicad_pro').write_text(project_source)
+                    checked = self.check()
+                    result = self.success('apply_kicad_mechanical_fixes',
+                                          work_copy_id=checked['work_copy_id'],
+                                          silkscreen_min_text=True, **explicit)
+                    root = self.settings.work_root / checked['work_copy_id'] / 'project'
+                    updated = (root / 'test.kicad_pcb').read_text()
+                    self.assertEqual(board_invariant(source), board_invariant(updated))
+                    self.assertEqual((root / 'test.kicad_pro').read_text(), project_source)
+                    self.assertFalse(result['work_copy_tainted'])
+                    self.assertTrue(result['baseline_eligible'])
+                    change, = result['changes']
+                    self.assertEqual(change['kind'], 'silkscreen_dimensions')
+                    self.assertEqual(change['silk_text_min_height_mm'], height)
+                    self.assertEqual(change['silk_text_min_thickness_mm'], thickness)
+                    originals = [n for n in descendants(sexpr(source)) if silk_text(n)]
+                    texts = [n for n in descendants(sexpr(updated)) if silk_text(n)]
+                    for original, text in zip(originals, texts, strict=True):
+                        old = source[original.start:original.end]
+                        if 'hidden' in old:
+                            self.assertEqual(updated[text.start:text.end], old)
+                            continue
+                        old_font = (original.one('effects').one('font')
+                                    if original.named('effects') and original.one('effects').named('font')
+                                    else None)
+                        font = text.one('effects').one('font')
+                        old_sizes = (old_font.one('size').children[1:]
+                                     if old_font is not None and old_font.named('size') else [height, height])
+                        old_thickness = (float(old_font.one('thickness').children[1])
+                                         if old_font is not None and old_font.named('thickness') else thickness)
+                        self.assertEqual([float(v) for v in font.one('size').children[1:]],
+                                         [max(height, float(v)) for v in old_sizes])
+                        self.assertEqual(float(font.one('thickness').children[1]),
+                                         max(thickness, old_thickness))
+                    again = self.success('apply_kicad_mechanical_fixes',
+                                         work_copy_id=checked['work_copy_id'],
+                                         silkscreen_min_text=True, **explicit)
+                    self.assertFalse(again['changes'])
+                    self.assertEqual(again['work_copy_revision'], result['work_copy_revision'])
+
+    def test_silk_minima_validation_before_cli_or_edits(self):
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        before = inventory(root)
+        count = len(self.calls)
+        for key in ('silk_text_min_height_mm', 'silk_text_min_thickness_mm'):
+            for invalid in (True, False, None, '1.0', [], {}, 0, -1,
+                            float('nan'), float('inf'), -float('inf'), 10 ** 1000):
+                with self.subTest(key=key, invalid=invalid):
+                    self.failure('arguments_unusable', 'apply_kicad_mechanical_fixes',
+                                 work_copy_id=checked['work_copy_id'],
+                                 silkscreen_min_text=True, **{key: invalid})
+            for flag in ({}, {'silkscreen_min_text': False}):
+                with self.subTest(key=key, flag=flag):
+                    self.failure('arguments_unusable', 'apply_kicad_mechanical_fixes',
+                                 work_copy_id=checked['work_copy_id'], **flag, **{key: 1.0})
+        self.assertEqual(len(self.calls), count)
+        self.assertEqual(inventory(root), before)
+
     def legacy_copy(self, *, canonical_saved=True):
         # Frozen old-format tree: dimensions excluded, render_cache retained.
         source = ('(kicad_pcb (gr_text "legacy private text" (layer "F.SilkS") '
@@ -448,9 +526,13 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(board.read_text(), BOARD)
 
     def test_missing_silk_minima_report_unsupported_project_details(self):
-        for missing in (['silk_text_height'], ['silk_text_thickness'],
-                        ['silk_text_height', 'silk_text_thickness']):
-            with self.subTest(missing=missing):
+        cases = [([key], {}, [key]) for key in ('silk_text_height', 'silk_text_thickness')]
+        both = ['silk_text_height', 'silk_text_thickness']
+        cases.extend(((both, {}, both),
+                      (both, {'silk_text_min_height_mm': 1.0}, ['silk_text_thickness']),
+                      (both, {'silk_text_min_thickness_mm': 0.15}, ['silk_text_height'])))
+        for missing, explicit, unresolved in cases:
+            with self.subTest(missing=missing, explicit=explicit):
                 project = json.loads(json.dumps(PROJECT))
                 for key in missing:
                     del project['board']['design_settings']['rules'][key]
@@ -459,10 +541,10 @@ class KiCadTests(unittest.TestCase):
                 root = self.settings.work_root / checked['work_copy_id']
                 before = inventory(root / 'project')
                 result = self.call('apply_kicad_mechanical_fixes',
-                                   work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+                                   work_copy_id=checked['work_copy_id'], silkscreen_min_text=True, **explicit)
                 self.assertEqual(result.failure['code'], 'unsupported_project')
                 recovery = result.failure['recovery']
-                self.assertEqual(list(recovery['missing_settings']), missing)
+                self.assertEqual(list(recovery['missing_settings']), unresolved)
                 self.assertEqual(recovery['rollback_status'], 'restored')
                 self.assertEqual(inventory(root / 'project'), before)
 
