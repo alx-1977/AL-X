@@ -437,7 +437,6 @@ class CoreAgent:
         loads its full state.
         """
         self._validate_step_budget(step_budget)
-        turn_started_at = self._clock()
         conversation_id = conversation.conversation_id
         # Recovery is deliberately unbounded and unscoped, unlike the candidate
         # projection below. An interrupted dispatch or an unflushed memory
@@ -524,6 +523,9 @@ class CoreAgent:
         # Capabilities this turn dispatched, in order. Counted where the loop
         # dispatches, so a goal it merely loaded never reads as a new result.
         dispatched: list[str] = []
+        # The same dispatches by call id: their results are shown whole on the
+        # goal for the rest of this turn (D-057a).
+        turn_call_ids: list[str] = []
         for step_index in range(step_budget):
             try:
                 now = self._clock()
@@ -583,7 +585,7 @@ class CoreAgent:
                     trigger_event_id=trigger_event_id,
                     unfinished_goals=summaries,
                     recent_finished_goals=finished_goals,
-                    turn_started_at=turn_started_at,
+                    turn_call_ids=tuple(turn_call_ids),
                     origin=origin,
                     carried_thoughts=self._open_thoughts(),
                     relationship_memories=relationship_memories,
@@ -1284,6 +1286,7 @@ class CoreAgent:
                 if not committed:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 dispatched.append(decision.call.capability_id)
+                turn_call_ids.append(decision.call.call_id)
                 try:
                     attempt = self._dispatch(decision.call, None)
                 except Exception:
@@ -1446,6 +1449,7 @@ class CoreAgent:
                 # gate must evaluate the immutable pre-claim authority snapshot,
                 # where the exact approval is still GRANTED.
                 dispatched.append(decision.call.capability_id)
+                turn_call_ids.append(decision.call.call_id)
                 attempt = self._dispatch(decision.call, authority_state)
             except Exception:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="dispatch_error")

@@ -536,10 +536,33 @@ class FinishedHistoryTests(unittest.TestCase):
                          [str(index) for index in range(RECENT_FINISHED_GOALS + 1, 1, -1)])
         self.assertEqual([item.goal_id for item in context.unfinished_goals], ["open"])
 
-    def test_every_reasoning_step_knows_when_its_turn_began(self):
-        contexts = self.follow_up()
-        self.assertTrue(contexts)
-        self.assertTrue(all(context.turn_started_at is not None for context in contexts))
+    def test_a_large_result_saved_this_turn_reaches_the_next_step_whole(self):
+        """Greptile on PR 163: goal-bound results were capped before she read them."""
+        from alx.core.model_reasoner import STORED_RESULT_LIMIT
+        big = replace(shipment("big"), context={"notes": "x" * (STORED_RESULT_LIMIT + 1000)})
+        self.store.create(big, "c1", RETENTION)
+        current = [None]
+        broker = CapabilityBroker(
+            CapabilityRegistry((DEFINITION,)),
+            SafetyGate({READ_OWN_GOALS: AuthorityPolicy(frozenset({"self.read"}))}),
+            build_goal_history_executors(self.store, lambda: current[0], lambda: self.now),
+        )
+        def dispatch(call, state):
+            current[0] = call.call_id
+            return broker.dispatch(call, AuthorityContext("friedl", frozenset({"self.read"}), self.now))
+        reasoner = RecordingReasoner(
+            AgentDecision(goal_id="big", call=CapabilityCall("read-big", READ_OWN_GOALS, {"goal_id": "big"})),
+            AgentDecision(goal_id="big", response="Read it."),
+        )
+        contexts = self.follow_up(reasoner, dispatch)
+        self.assertEqual(contexts[1].turn_call_ids, ("read-big",))
+        attempts = json.loads(_context_payload(contexts[1]))["active_goal"]["attempts"]
+        read = [item for item in attempts if item["call_id"] == "read-big"][0]
+        self.assertEqual(read["result_values"]["goals"][0]["goal_id"], "big")
+        later = replace(contexts[1], turn_call_ids=())
+        attempts = json.loads(_context_payload(later))["active_goal"]["attempts"]
+        read = [item for item in attempts if item["call_id"] == "read-big"][0]
+        self.assertIn("omitted_characters", read["result_values"])
 
     def test_only_the_newest_finished_goals_are_shown_in_detail(self):
         for index in range(DETAILED_FINISHED_GOALS + 2):

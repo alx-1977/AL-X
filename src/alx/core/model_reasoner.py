@@ -603,7 +603,7 @@ def _stored_result(values: Any) -> Any:
 
 def _state_payload(state: GoalState, *, full_progress: bool = False,
                    finished: bool = False,
-                   recorded_since: Any = None) -> dict[str, Any]:
+                   this_turn: frozenset[str] = frozenset()) -> dict[str, Any]:
     attempts = tuple(state.attempts)
     recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
     older_attempts = attempts[: len(attempts) - len(recent_attempts)]
@@ -657,8 +657,7 @@ def _state_payload(state: GoalState, *, full_progress: bool = False,
                     # This turn's own observation, shown whole; later turns
                     # see its size if it is large.
                     else _plain(item.result.values)
-                    if (recorded_since is not None and item.recorded_at is not None
-                        and item.recorded_at >= recorded_since)
+                    if item.call is not None and item.call.call_id in this_turn
                     else _stored_result(item.result.values)),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
             }
@@ -1016,7 +1015,7 @@ def _context_payload(context: ReasoningContext) -> str:
             for index, item in enumerate(context.recent_finished_goals)
         ],
         "active_goal": (None if goal is None
-                        else _state_payload(goal, recorded_since=context.turn_started_at)),
+                        else _state_payload(goal, this_turn=frozenset(context.turn_call_ids))),
         "transient_attempts": [
             _attempt_payload(item) for item in context.transient_attempts
         ],

@@ -100,11 +100,8 @@ class PromptSizeTests(unittest.TestCase):
     def test_this_turns_own_result_is_shown_whole(self) -> None:
         """Greptile on PR 163: a goal attempt saved this turn must reach the next step."""
         state = oversized_goal()
-        recorded = datetime(2026, 10, 20, 8, 0, tzinfo=UTC)
-        attempt_ = replace(state.attempts[0], recorded_at=recorded)
-        state = replace(state, attempts=(attempt_,))
-        this_turn = _state_payload(state, recorded_since=recorded - timedelta(seconds=1))
-        later_turn = _state_payload(state, recorded_since=recorded + timedelta(seconds=1))
+        this_turn = _state_payload(state, this_turn=frozenset({"drc-1"}))
+        later_turn = _state_payload(state, this_turn=frozenset({"other"}))
         self.assertIn("violations", this_turn["attempts"][0]["result_values"])
         self.assertIn("omitted_characters", later_turn["attempts"][0]["result_values"])
 
