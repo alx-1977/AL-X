@@ -38,7 +38,7 @@ PROJECT = {'board': {'design_settings': {'rules': {'silk_text_height': 1,
 
 class KiCadTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(dir=tempfile.gettempdir())
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.design = self.root / 'designs'
@@ -197,6 +197,117 @@ class KiCadTests(unittest.TestCase):
         self.assertNotEqual(checked['work_copy_revision'], result['work_copy_revision'])
         for path in result['before_images'] + result['after_images']:
             self.assertTrue(Path(path).is_file())
+
+    def test_kicad8_silkscreen_optional_nodes_and_visibility(self):
+        from alx.providers.kicad import board_invariant, descendants, sexpr
+        source = (Path(__file__).parent / 'fixtures/kicad/silkscreen_kicad8.kicad_pcb').read_text()
+        (self.project / 'test.kicad_pcb').write_text(source)
+        checked = self.check()
+        result = self.success('apply_kicad_mechanical_fixes',
+                              work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+        board = self.settings.work_root / checked['work_copy_id'] / 'project/test.kicad_pcb'
+        updated = board.read_text()
+        self.assertEqual(board_invariant(source), board_invariant(updated))
+        originals = [n for n in descendants(sexpr(source))
+                     if n.name in ('property', 'fp_text', 'gr_text')]
+        texts = [n for n in descendants(sexpr(updated))
+                 if n.name in ('property', 'fp_text', 'gr_text')]
+        for original, text in zip(originals, texts, strict=True):
+            with self.subTest(text=text.children[:3]):
+                old = source[original.start:original.end]
+                if 'hidden' in old or text.one('layer').children[1] == 'F.Cu':
+                    self.assertEqual(updated[text.start:text.end], old)
+                    continue
+                font = text.one('effects').one('font')
+                self.assertTrue(all(float(v) >= 1 for v in font.one('size').children[1:]))
+                self.assertGreaterEqual(float(font.one('thickness').children[1]), 0.15)
+                if original.named('effects') and original.one('effects').named('font'):
+                    old_font = original.one('effects').one('font')
+                    for old_size, size in zip(old_font.one('size').children[1:],
+                                              font.one('size').children[1:]):
+                        self.assertEqual(float(size), max(1, float(old_size)))
+        self.assertIn('bold', updated)
+        self.assertIn('(justify left)', updated)
+        again = self.success('apply_kicad_mechanical_fixes',
+                             work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+        self.assertFalse(again['changes'])
+        self.assertEqual(again['work_copy_revision'], result['work_copy_revision'])
+
+    def test_missing_silk_minima_report_unsupported_project_details(self):
+        for missing in (['silk_text_height'], ['silk_text_thickness'],
+                        ['silk_text_height', 'silk_text_thickness']):
+            with self.subTest(missing=missing):
+                project = json.loads(json.dumps(PROJECT))
+                for key in missing:
+                    del project['board']['design_settings']['rules'][key]
+                (self.project / 'test.kicad_pro').write_text(json.dumps(project))
+                checked = self.check()
+                root = self.settings.work_root / checked['work_copy_id']
+                before = inventory(root / 'project')
+                result = self.call('apply_kicad_mechanical_fixes',
+                                   work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+                self.assertEqual(result.failure['code'], 'unsupported_project')
+                recovery = result.failure['recovery']
+                self.assertEqual(list(recovery['missing_settings']), missing)
+                self.assertEqual(recovery['rollback_status'], 'restored')
+                self.assertEqual(inventory(root / 'project'), before)
+
+    def test_unexpected_apply_error_reports_only_sanitised_type_and_stage(self):
+        from alx.providers import kicad
+        for stage in ('before_drc', 'render', 'template', 'clearance', 'noise',
+                      'silkscreen', 'after_drc'):
+            with self.subTest(stage=stage):
+                checked = self.check()
+                provider = KiCadProvider(self.settings, self.execute_cli)
+                root, meta = provider._load(checked['work_copy_id'])
+                before = inventory(root / 'project')
+                error = RuntimeError('unexpected fixture failure')
+                options = dict(work_copy_id=checked['work_copy_id'], silkscreen_min_text=True,
+                               ignore_noise_checks=True, same_footprint_pad_clearance_mm=0.1)
+                if stage in ('before_drc', 'after_drc'):
+                    drc = provider._drc
+                    calls = 0
+                    def fail_drc(*args):
+                        nonlocal calls
+                        calls += 1
+                        if calls == (1 if stage == 'before_drc' else 2):
+                            raise error
+                        return drc(*args)
+                    failing = patch.object(provider, '_drc', side_effect=fail_drc)
+                elif stage == 'render':
+                    failing = patch.object(provider, '_render', side_effect=error)
+                elif stage == 'template':
+                    failing = patch.object(kicad.json, 'loads', side_effect=error)
+                    # Avoid failing in _load, before the apply transaction starts.
+                    provider._load = lambda _: (root, meta)
+                elif stage == 'clearance':
+                    failing = patch.object(kicad, 'sexpr', side_effect=error)
+                elif stage == 'noise':
+                    failing = patch.object(provider, 'settings',
+                        noise_checks=Mock(__iter__=Mock(side_effect=error)))
+                else:
+                    options.pop('same_footprint_pad_clearance_mm')
+                    failing = patch.object(kicad, 'sexpr', side_effect=error)
+                # Parser/json patches must not affect the before DRC's inspection.
+                drc_report = provider._drc(root, meta)
+                with patch.object(provider, '_drc', return_value=drc_report) if stage not in (
+                        'before_drc', 'after_drc') else patch.object(provider, '_render', wraps=provider._render):
+                    with failing, self.assertLogs(kicad.logger, level='WARNING') as logs:
+                        from alx.tools.kicad import build_kicad_executors
+                        result = build_kicad_executors(provider, lambda: 'call')[
+                            'apply_kicad_mechanical_fixes'](options)
+                self.assertEqual(result.failure['code'], 'verification_failed')
+                recovery = result.failure['recovery']
+                self.assertEqual(recovery['error'], dict(code='verification_failed',
+                    type='RuntimeError', stage=stage))
+                self.assertIn(stage, logs.output[0])
+                self.assertIn('RuntimeError', logs.output[0])
+                self.assertNotIn(str(error), '\n'.join(logs.output))
+                self.assertTrue(all(record.exc_info is None for record in logs.records))
+                self.assertEqual(recovery['rollback_status'], 'restored')
+                self.assertFalse(recovery['work_copy_tainted'])
+                self.assertEqual(inventory(root / 'project'), before)
+                self.assertEqual(provider._load(checked['work_copy_id'])[1], meta)
 
     def test_template_rules_only_and_library_read_only(self):
         folder = self.settings.template_root / 'JLCPCB_4L_1.6mm'

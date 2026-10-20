@@ -30,7 +30,7 @@ class CapturedKiCadTests(unittest.TestCase):
             shutil.copy2(FIXTURE / 'drc-10.0.7.json',
                          argv[argv.index('--output') + 1])
             return SimpleNamespace(returncode=0)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
             root = Path(directory)
             project = root / 'designs' / 'minimal'
             project.mkdir(parents=True)
@@ -54,7 +54,7 @@ class CapturedKiCadTests(unittest.TestCase):
 @unittest.skipUnless(CLI, 'kicad-cli 9 or later is required')
 class RealKiCadTests(unittest.TestCase):
     def test_same_footprint_clearance_is_honoured(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
             root = Path(directory).resolve()
             project = root / 'designs/pads'
             project.mkdir(parents=True)
@@ -112,7 +112,7 @@ class RealKiCadTests(unittest.TestCase):
     def test_saved_project_drc_and_svg(self):
         cli = CLI
         fixture = FIXTURE
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
             root = Path(directory).resolve()
             project = root / 'designs' / 'minimal'
             project.mkdir(parents=True)
