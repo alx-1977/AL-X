@@ -451,6 +451,61 @@ class KiCadTests(unittest.TestCase):
                         self.assertEqual(provider._revision(root), revision)
                         self.assertNotIn('taint', provider._load(checked['work_copy_id'])[1])
 
+    def test_apply_shutdown_restores_snapshot_and_propagates_through_capability(self):
+        from alx.tools.kicad import build_kicad_executors
+        for exception_type in (KeyboardInterrupt, SystemExit):
+            for state in ('clean', 'previously_tainted', 'failed_restore'):
+                with self.subTest(exception_type=exception_type, state=state):
+                    checked = self.check()
+                    root = self.settings.work_root / checked['work_copy_id']
+                    project = root / 'project'
+                    provider = KiCadProvider(self.settings, self.execute_cli)
+                    meta = provider._load(checked['work_copy_id'])[1]
+                    if state == 'previously_tainted':
+                        meta['taint'] = 'prior-taint'
+                        provider._save_metadata(root, meta)
+                    before = inventory(project)
+                    revision = provider._revision(root)
+                    shutdown = exception_type('stop apply')
+                    drcs = 0
+                    def execute(executable, argv):
+                        nonlocal drcs
+                        if argv[1] == 'drc':
+                            drcs += 1
+                            if drcs == 2:
+                                for suffix in ('.kicad_pcb', '.kicad_pro', '.kicad_dru'):
+                                    (project / ('test' + suffix)).write_bytes(b'partial write')
+                                raise shutdown
+                        return self.execute_cli(executable, argv)
+                    provider.execute_cli = execute
+                    write = Path.write_bytes
+                    def restore(path, data):
+                        if (state == 'failed_restore' and path == project / 'test.kicad_pro'
+                                and data != b'partial write'):
+                            raise PermissionError('rollback refused')
+                        return write(path, data)
+                    executor = build_kicad_executors(provider, lambda: 'call')['apply_kicad_mechanical_fixes']
+                    with patch.object(Path, 'write_bytes', restore):
+                        with self.assertRaises(BaseException) as caught:
+                            executor(dict(work_copy_id=checked['work_copy_id'],
+                                          silkscreen_min_text=True,
+                                          same_footprint_pad_clearance_mm=0.1))
+                    self.assertIs(caught.exception, shutdown)
+                    restarted = KiCadProvider(self.settings, self.execute_cli)
+                    persisted = restarted._load(checked['work_copy_id'])[1]
+                    if state == 'failed_restore':
+                        self.assertTrue(persisted['taint'])
+                        self.assertNotEqual(restarted._revision(root), revision)
+                        # Repair only the malformed project so DRC can inspect taint.
+                        (project / 'test.kicad_pro').write_text(json.dumps(PROJECT))
+                        report = restarted._drc(root, persisted)
+                        self.assertTrue(report['work_copy_tainted'])
+                        self.assertFalse(report['baseline_eligible'])
+                    else:
+                        self.assertEqual(inventory(project), before)
+                        self.assertEqual(persisted, meta)
+                        self.assertEqual(restarted._revision(root), revision)
+
     def test_before_timeout_removes_initially_absent_project_and_rules(self):
         checked = self.check()
         root = self.settings.work_root / checked['work_copy_id']
@@ -603,6 +658,29 @@ class KiCadTests(unittest.TestCase):
         fixed = self.success('apply_kicad_mechanical_fixes', work_copy_id=checked['work_copy_id'])
         self.assertFalse(fixed['before']['custom_rule_citations'])
         self.assertFalse(fixed['after']['custom_rule_citations'])
+
+    def test_rule_citations_preserve_embedded_quotes_and_distinct_prefixes(self):
+        names = ['U1', "U1's pads", "U1's pads extended", 'U1 "signal" pads',
+                 '''U1's "signal" pads''']
+        descriptions = []
+        expected = []
+        for index, name in enumerate(names, 1):
+            expected.append({'name': name, 'count': index * 8})
+            for quote in ("'", '"'):
+                for suffix in ('; clearance 0.1 mm)', ')', '',
+                               ' clearance 0.1000 mm; actual 0.0500 mm)'):
+                    citation = f'rule {quote}{name}{quote}'
+                    # Repeated citations in one finding still count only once.
+                    descriptions.extend([f'{citation}{suffix}; also {citation}{suffix}'] * index)
+        finding = {'type': 'clearance', 'severity': 'error', 'items': []}
+        self.report = {'violations': [dict(finding, description=text) for text in descriptions],
+                       'unconnected_items': [], 'schematic_parity': []}
+        checked = self.check()
+        expected.sort(key=lambda citation: citation['name'])
+        self.assertEqual([dict(c) for c in checked['custom_rule_citations']], expected)
+        fixed = self.success('apply_kicad_mechanical_fixes', work_copy_id=checked['work_copy_id'])
+        for report in (fixed['before'], fixed['after']):
+            self.assertEqual([dict(c) for c in report['custom_rule_citations']], expected)
 
     def test_custom_noise_configuration_is_the_only_flag_source(self):
         environment = dict(self.environment, ALX_KICAD_NOISE_CHECKS='unconnected_items')

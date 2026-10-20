@@ -278,8 +278,11 @@ class KiCadProvider:
                 totals[severity] += 1
                 totals['total'] += 1
                 # Count all citations before finding limits, once per finding/rule.
+                # The closing quote precedes a separator/end or unquoted constraint
+                # details up to that separator. Quotes within the name are literal.
                 names = {match[1] for match in re.findall(
-                    r'''\brule\s+(['"])(.*?)\1''', finding.get('description', ''), re.IGNORECASE)}
+                    r'''\brule\s+(['"])(.*?)\1(?=\s*(?:[;)]|$)|\s+[^'";()]*[;)])''',
+                    finding.get('description', ''), re.IGNORECASE)}
                 for name in names:
                     citations[name] = citations.get(name, 0) + 1
                 items = []
@@ -507,6 +510,8 @@ class KiCadProvider:
                         'rollback_status': 'restored' if restored else 'failed',
                         'work_copy_tainted': bool(meta.get('taint')) or not restored,
                         'baseline_eligible': not bool(meta.get('taint')) and restored}
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
             if isinstance(error, KiCadError):
                 error.recovery = recovery
                 raise
