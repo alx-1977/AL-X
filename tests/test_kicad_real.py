@@ -60,11 +60,12 @@ class RealKiCadTests(unittest.TestCase):
             project.mkdir(parents=True)
             board = (FIXTURE / 'minimal.kicad_pcb').read_text()
             footprints = []
-            # U1: 0.15 mm gap; U2: overlapping pads; U3/U4: different parents.
+            # U1: 0.15 mm gap; U2: overlap; U3/U4: different parents; U5: 0.05 mm gap.
             for reference, x, y, positions in (('U1', 102, 102, (0, 1.15)),
                                                ('U2', 106, 102, (0, 0.9)),
                                                ('U3', 102, 106, (0,)),
-                                               ('U4', 103.15, 106, (0,))):
+                                               ('U4', 103.15, 106, (0,)),
+                                               ('U5', 106, 106, (0, 1.05))):
                 pads = ''.join(f'(pad "{i}" smd rect (at {offset} 0) (size 1 1) '
                                f'(layers "F.Cu") (net {i} "N{i}"))'
                                for i, offset in enumerate(positions, 1))
@@ -89,16 +90,18 @@ class RealKiCadTests(unittest.TestCase):
                 checked = runtime.executors['check_kicad_board']({'project_dir': str(project)})
                 self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
                 before = next(g for g in checked.values['violations'] if g['check_type'] == 'clearance')
-                self.assertEqual(before['count'], 2, checked.values['violations'])
+                self.assertEqual(before['count'], 3, checked.values['violations'])
                 fixed = runtime.executors['apply_kicad_mechanical_fixes']({
                     'work_copy_id': checked.values['work_copy_id'], 'same_footprint_pad_clearance_mm': 0.1})
                 self.assertEqual(fixed.state, CapabilityResultState.SUCCEEDED, fixed.failure)
-                # Inspect the actual post-fix report: only overlap and different parents remain.
+                # U1 is resolved; overlap, different parents and the real U5 fault remain.
                 reports = list((root / 'storage/kicad' / checked.values['work_copy_id'] / 'artifacts').glob('*.json'))
                 latest = max(reports, key=lambda p: p.stat().st_mtime_ns)
                 violations = json.loads(latest.read_text())['violations']
                 clearance = [v for v in violations if v['type'] == 'clearance']
-                self.assertEqual(len(clearance), 1, violations)
+                self.assertEqual(len(clearance), 2, violations)
+                self.assertEqual([dict(c) for c in fixed.values['after']['custom_rule_citations']],
+                                 [{'name': 'ALX same-footprint pad clearance', 'count': 1}])
                 self.assertTrue(any(v['type'] == 'shorting_items' and 'U2' in str(v) for v in violations))
                 self.assertFalse(any('U1' in str(v) for v in clearance))
                 self.assertFalse(any(v['type'] == 'dsl_parse_error' for v in violations), violations)

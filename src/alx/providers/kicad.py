@@ -176,6 +176,14 @@ def board_invariant(board_source):
     return hashlib.sha256(json.dumps(canonical(sexpr(board_source))).encode()).hexdigest()
 
 
+SAME_PART_CONDITION = "A.Type == 'Pad' && B.Type == 'Pad' && A.Parent == B.Parent"
+
+
+def condition_tokens(expression):
+    """Ignore expression whitespace, preserving literal contents and token boundaries."""
+    return tuple(re.findall(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|[A-Za-z_][A-Za-z_0-9]*|[0-9.]+|==|!=|&&|\|\||\S", expression))
+
+
 class KiCadProvider:
     def __init__(self, settings, execute_cli):
         self.settings, self.execute_cli = settings, execute_cli
@@ -206,8 +214,21 @@ class KiCadProvider:
         meta = json.loads((root / 'metadata.json').read_text())
         return root, meta
 
-    def _revision(self, root):
-        return hashlib.sha256(json.dumps(inventory(root / 'project'), sort_keys=True).encode()).hexdigest()
+    def _revision(self, root, meta=None):
+        contents = inventory(root / 'project')
+        if meta is None:
+            meta = json.loads((root / 'metadata.json').read_text())
+        taint = meta.get('taint')
+        return hashlib.sha256(json.dumps([contents, taint], sort_keys=True).encode()).hexdigest()
+
+    def _save_metadata(self, root, meta):
+        # An interrupted metadata update must leave the prior taint readable.
+        target = root / ('metadata-' + uuid.uuid4().hex + '.json')
+        try:
+            target.write_text(json.dumps(meta))
+            os.replace(target, root / 'metadata.json')
+        finally:
+            target.unlink(missing_ok=True)
 
     def _drc(self, root, meta):
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
@@ -233,6 +254,45 @@ class KiCadProvider:
                 for uid in node.named('uuid') + node.named('tstamp'):
                     identities[uid.children[1]] = (ref, node.children[1] if node.name == 'pad' else '')
         totals = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
+        citations = {}
+        rules_path = (root / 'project' / meta['board']).with_suffix('.kicad_dru')
+        rule_names = []
+        if rules_path.exists():
+            rules = sexpr('(' + rules_path.read_text() + '\n)')
+            rule_names = sorted({node.children[1] for node in rules.named('rule')},
+                                key=len, reverse=True)
+
+        citation_start = re.compile(r'''\brule\s+(['"])''', re.IGNORECASE)
+        # KiCad may append unquoted constraint details before the separator.
+        citation_boundary = r'''\s*(?:[;)]|$)|\s+[^'";()]*[;)]'''
+        closing_boundary = re.compile(citation_boundary)
+
+        def cited_names(description):
+            names = set()
+            position = 0
+            while start := citation_start.search(description, position):
+                quote = start[1]
+                position = start.end()
+                # A quote (or even a separator) can belong to a loaded name.
+                # Prefer the longest complete name with a valid closing boundary.
+                for name in rule_names:
+                    end = position + len(name) + 1
+                    if (description.startswith(name + quote, position)
+                            and closing_boundary.match(description, end)):
+                        names.add(name)
+                        position = end
+                        break
+                else:
+                    # Without a loaded match, use the final valid closing quote
+                    # within this citation, never a quote in the next citation.
+                    next_start = citation_start.search(description, position)
+                    end = next_start.start() if next_start else len(description)
+                    match = re.match(r'(.*)' + re.escape(quote) +
+                                     r'(?=' + citation_boundary + ')', description[position:end])
+                    if match:
+                        names.add(match[1])
+                        position += match.end()
+            return names
 
         # D-057a: a full report (222,000 characters on RoomReader V2) rode on
         # every later Core call. Each check type keeps its count and its first
@@ -255,6 +315,9 @@ class KiCadProvider:
                     raise KiCadError('invalid_report')
                 totals[severity] += 1
                 totals['total'] += 1
+                # Count all citations before finding limits, once per finding/rule.
+                for name in cited_names(finding.get('description', '')):
+                    citations[name] = citations.get(name, 0) + 1
                 items = []
                 for item in finding['items']:
                     description = item['description']
@@ -281,6 +344,10 @@ class KiCadProvider:
         except (KeyError, TypeError, AttributeError) as error:
             raise KiCadError('invalid_report') from error
         result['totals'] = totals
+        result['custom_rule_citations'] = [{'name': name, 'count': count}
+                                           for name, count in sorted(citations.items())]
+        result['work_copy_tainted'] = bool(meta.get('taint'))
+        result['baseline_eligible'] = not bool(meta.get('taint'))
         return result
 
     def check(self, arguments):
@@ -328,101 +395,161 @@ class KiCadProvider:
             if not valid_clearance:
                 raise KiCadError('arguments_unusable')
         root, meta = self._load(arguments['work_copy_id'])
-        before = self._drc(root, meta)['totals']
-        before_images = self._render(root, meta)
         board = root / 'project' / meta['board']
-        pro = board.with_suffix('.kicad_pro')
-        if not pro.is_file():
-            raise KiCadError('unsupported_project')
-        settings = json.loads(pro.read_text())
-        original_settings = json.dumps(settings, sort_keys=True)
-        changes = []
-        template = arguments.get('apply_template')
-        if template:
-            template_root = self.settings.template_root.expanduser().resolve()
-            if Path(template).name != template or template in ('.', '..'):
-                raise KiCadError('path_denied')
-            folder = bounded(template_root / template, (template_root,))
-            files = inventory(folder)
-            projects = [name for name in files if name.endswith('.kicad_pro')]
-            if len(projects) != 1:
+        paths = (board, board.with_suffix('.kicad_pro'), board.with_suffix('.kicad_dru'))
+        snapshot = {path: path.read_bytes() if path.exists() else None for path in paths}
+        # Persist uncertainty BEFORE even the before DRC, which refills zones.
+        pending = dict(meta, taint=uuid.uuid4().hex)
+        self._save_metadata(root, pending)
+        try:
+            before = self._drc(root, meta)
+            before_images = self._render(root, meta)
+            board = root / 'project' / meta['board']
+            pro = board.with_suffix('.kicad_pro')
+            if not pro.is_file():
                 raise KiCadError('unsupported_project')
-            template_project = folder / projects[0]
-            template_settings = json.loads(template_project.read_text())['board']['design_settings']
-            if 'rules' not in template_settings:
-                raise KiCadError('unsupported_project')
-            current = settings['board']['design_settings']
-            for key in ('rules', 'rule_severities'):
-                if key in template_settings:
-                    if current.get(key) != template_settings[key]:
-                        current[key] = template_settings[key]
-                        changes.append({'kind': 'template_' + key, 'value': template})
-            dru = template_project.with_suffix('.kicad_dru')
-            if dru.is_file():
-                target = board.with_suffix('.kicad_dru')
-                if not target.exists() or target.read_bytes() != dru.read_bytes():
-                    target.write_bytes(dru.read_bytes())
-                    changes.append({'kind': 'template_custom_rules', 'value': template})
-        if clearance is not None:
-            target = board.with_suffix('.kicad_dru')
-            original_rules = target.read_text() if target.exists() else '(version 1)\n'
-            # Synthetic root permits span edits across top-level rules and comments.
-            parsed = sexpr('(' + original_rules + '\n)')
-            managed_name = 'ALX same-footprint pad clearance'
-            managed = [node for node in parsed.named('rule') if node.children[1] == managed_name]
-            rule = (f'(rule "{managed_name}"\n'
-                    '  (condition "A.Type == \'Pad\' && B.Type == \'Pad\' && A.Parent == B.Parent")\n'
-                    f'  (constraint clearance (min {clearance!r}mm)))\n')
-            updated_rules = original_rules
-            for node in reversed(managed):
-                updated_rules = updated_rules[:node.start - 1] + updated_rules[node.end - 1:]
-            updated_rules = updated_rules.rstrip() + '\n' + rule
-            if updated_rules != original_rules:
-                target.write_text(updated_rules)
-                changes.append({'kind': 'same_footprint_pad_clearance',
-                                'value': str(clearance), 'clearance_mm': clearance})
-        if arguments.get('ignore_noise_checks', False):
-            severities = settings['board']['design_settings'].setdefault('rule_severities', {})
-            for kind in self.settings.noise_checks:
-                if severities.get(kind) != 'ignore':
-                    severities[kind] = 'ignore'
-                    changes.append({'kind': 'rule_severity', 'value': kind})
-        if arguments.get('silkscreen_min_text', False):
-            rules = settings['board']['design_settings']['rules']
-            height = float(rules['silk_text_height'])
-            thickness = float(rules['silk_text_thickness'])
-            if not all(math.isfinite(v) and v > 0 for v in (height, thickness)):
-                raise KiCadError('unsupported_project')
-            board_source = board.read_text()
-            edits = []
-            for node in descendants(sexpr(board_source)):
-                if node.name not in ('fp_text', 'gr_text', 'property'):
-                    continue
-                layers = node.named('layer')
-                if not layers or layers[0].children[1] not in ('F.SilkS', 'B.SilkS'):
-                    continue
-                font = node.one('effects').one('font')
-                size = font.one('size')
-                x, y = map(float, size.children[1:])
-                if not all(math.isfinite(v) and v > 0 for v in (x, y)):
+            settings = json.loads(pro.read_text())
+            original_settings = json.dumps(settings, sort_keys=True)
+            changes = []
+            template = arguments.get('apply_template')
+            if template:
+                template_root = self.settings.template_root.expanduser().resolve()
+                if Path(template).name != template or template in ('.', '..'):
+                    raise KiCadError('path_denied')
+                folder = bounded(template_root / template, (template_root,))
+                files = inventory(folder)
+                projects = [name for name in files if name.endswith('.kicad_pro')]
+                if len(projects) != 1:
                     raise KiCadError('unsupported_project')
-                if x < height or y < height:
-                    edits.append((size.start, size.end, f'(size {max(x, height):g} {max(y, height):g})'))
-                width = font.one('thickness')
-                if float(width.children[1]) < thickness:
-                    edits.append((width.start, width.end, f'(thickness {thickness:g})'))
-            for start, end, value in sorted(edits, reverse=True):
-                board_source = board_source[:start] + value + board_source[end:]
-            if edits:
-                board.write_text(board_source)
-                changes.append({'kind': 'silkscreen_dimensions', 'value': str(len(edits))})
-        if json.dumps(settings, sort_keys=True) != original_settings:
-            pro.write_text(json.dumps(settings, indent=2) + '\n')
-        after = self._drc(root, meta)['totals']
-        after_images = self._render(root, meta)
-        return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': self._revision(root),
-                'before': before, 'after': after, 'changes': changes,
-                'before_images': before_images, 'after_images': after_images}
+                template_project = folder / projects[0]
+                template_settings = json.loads(template_project.read_text())['board']['design_settings']
+                if 'rules' not in template_settings:
+                    raise KiCadError('unsupported_project')
+                current = settings['board']['design_settings']
+                for key in ('rules', 'rule_severities'):
+                    if key in template_settings:
+                        if current.get(key) != template_settings[key]:
+                            current[key] = template_settings[key]
+                            changes.append({'kind': 'template_' + key, 'value': template})
+                dru = template_project.with_suffix('.kicad_dru')
+                if dru.is_file():
+                    target = board.with_suffix('.kicad_dru')
+                    if not target.exists() or target.read_bytes() != dru.read_bytes():
+                        target.write_bytes(dru.read_bytes())
+                        changes.append({'kind': 'template_custom_rules', 'value': template})
+            if clearance is not None:
+                target = board.with_suffix('.kicad_dru')
+                original_rules = target.read_text() if target.exists() else '(version 1)\n'
+                # Synthetic root permits span edits across top-level rules and comments.
+                parsed = sexpr('(' + original_rules + '\n)')
+                managed_name = 'ALX same-footprint pad clearance'
+                managed = [node for node in parsed.named('rule') if node.children[1] == managed_name]
+                existing = [node for node in parsed.named('rule')
+                            if node.children[1] != managed_name
+                            and any(len(condition.children) == 2 and
+                                    condition_tokens(condition.children[1]) == condition_tokens(SAME_PART_CONDITION)
+                                    for condition in node.named('condition'))]
+                if existing:
+                    for node in existing:
+                        changes.append({'kind': 'same_footprint_pad_clearance',
+                                        'value': node.children[1], 'status': 'already_present',
+                                        'rule_name': node.children[1]})
+                else:
+                    rule = (f'(rule "{managed_name}"\n'
+                            f'  (condition {json.dumps(SAME_PART_CONDITION)})\n'
+                            f'  (constraint clearance (min {clearance!r}mm)))\n')
+                    updated_rules = original_rules
+                    for node in reversed(managed):
+                        updated_rules = updated_rules[:node.start - 1] + updated_rules[node.end - 1:]
+                    updated_rules = updated_rules.rstrip() + '\n' + rule
+                    if updated_rules != original_rules:
+                        target.write_text(updated_rules)
+                        changes.append({'kind': 'same_footprint_pad_clearance',
+                                        'value': str(clearance), 'clearance_mm': clearance})
+            if arguments.get('ignore_noise_checks', False):
+                severities = settings['board']['design_settings'].setdefault('rule_severities', {})
+                for kind in self.settings.noise_checks:
+                    if severities.get(kind) != 'ignore':
+                        severities[kind] = 'ignore'
+                        changes.append({'kind': 'rule_severity', 'value': kind})
+            if arguments.get('silkscreen_min_text', False):
+                rules = settings['board']['design_settings']['rules']
+                height = float(rules['silk_text_height'])
+                thickness = float(rules['silk_text_thickness'])
+                if not all(math.isfinite(v) and v > 0 for v in (height, thickness)):
+                    raise KiCadError('unsupported_project')
+                board_source = board.read_text()
+                edits = []
+                for node in descendants(sexpr(board_source)):
+                    if node.name not in ('fp_text', 'gr_text', 'property'):
+                        continue
+                    layers = node.named('layer')
+                    if not layers or layers[0].children[1] not in ('F.SilkS', 'B.SilkS'):
+                        continue
+                    font = node.one('effects').one('font')
+                    size = font.one('size')
+                    x, y = map(float, size.children[1:])
+                    if not all(math.isfinite(v) and v > 0 for v in (x, y)):
+                        raise KiCadError('unsupported_project')
+                    if x < height or y < height:
+                        edits.append((size.start, size.end, f'(size {max(x, height):g} {max(y, height):g})'))
+                    width = font.one('thickness')
+                    if float(width.children[1]) < thickness:
+                        edits.append((width.start, width.end, f'(thickness {thickness:g})'))
+                for start, end, value in sorted(edits, reverse=True):
+                    board_source = board_source[:start] + value + board_source[end:]
+                if edits:
+                    board.write_text(board_source)
+                    changes.append({'kind': 'silkscreen_dimensions', 'value': str(len(edits))})
+            if json.dumps(settings, sort_keys=True) != original_settings:
+                pro.write_text(json.dumps(settings, indent=2) + '\n')
+            after = self._drc(root, meta)
+            after_images = self._render(root, meta)
+            result = {'work_copy_id': arguments['work_copy_id'],
+                    'before': dict(before['totals'], custom_rule_citations=before['custom_rule_citations'],
+                                   work_copy_tainted=before['work_copy_tainted'], baseline_eligible=before['baseline_eligible']),
+                    'after': dict(after['totals'], custom_rule_citations=after['custom_rule_citations'],
+                                  work_copy_tainted=after['work_copy_tainted'], baseline_eligible=after['baseline_eligible']),
+                    'work_copy_tainted': bool(meta.get('taint')), 'baseline_eligible': not bool(meta.get('taint')),
+                    'changes': changes,
+                    'before_images': before_images, 'after_images': after_images}
+            result['work_copy_revision'] = self._revision(root, meta)
+            self._save_metadata(root, meta)
+        except BaseException as error:
+            restored = True
+            for path, original in snapshot.items():
+                try:
+                    if original is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(original)
+                except OSError:
+                    restored = False
+            # Verify the entire snapshot after all restorations, including absence.
+            for path, original in snapshot.items():
+                try:
+                    if (path.exists() if original is None else path.read_bytes() != original):
+                        restored = False
+                except OSError:
+                    restored = False
+            if getattr(error, 'details', {}).get('reason_code') == 'session_unstoppable':
+                restored = False
+            if restored:
+                try:
+                    self._save_metadata(root, meta)
+                except OSError:
+                    restored = False
+            recovery = {'work_copy_id': arguments['work_copy_id'],
+                        'rollback_status': 'restored' if restored else 'failed',
+                        'work_copy_tainted': bool(meta.get('taint')) or not restored,
+                        'baseline_eligible': not bool(meta.get('taint')) and restored}
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            if isinstance(error, KiCadError):
+                error.recovery = recovery
+                raise
+            raise KiCadError('verification_failed', recovery) from error
+        return result
 
     def find(self, arguments):
         library_id = arguments.get('library_id')
