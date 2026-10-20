@@ -53,6 +53,43 @@ class CapturedKiCadTests(unittest.TestCase):
 
 @unittest.skipUnless(CLI, 'kicad-cli 9 or later is required')
 class RealKiCadTests(unittest.TestCase):
+    def test_cached_silkscreen_edit_and_real_svg_export(self):
+        from alx.providers.kicad import descendants, sexpr, silk_text
+        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
+            root = Path(directory).resolve()
+            project = root / 'designs/cached'
+            project.mkdir(parents=True)
+            source = (FIXTURE / 'cached_silkscreen.kicad_pcb').read_text()
+            self.assertIn('(render_cache ', source)
+            (project / 'cached.kicad_pcb').write_text(source)
+            settings = json.loads((FIXTURE / 'minimal.kicad_pro').read_text())
+            settings['board']['design_settings']['rules'].update(
+                silk_text_height=1, silk_text_thickness=0.15)
+            (project / 'cached.kicad_pro').write_text(json.dumps(settings))
+            runtime = build_kicad_runtime(lambda: 'cached-silk', {
+                'ALX_KICAD_CLI': CLI, 'ALX_KICAD_DESIGN_ROOTS': str(root / 'designs'),
+            }, root / 'storage')
+            checked = runtime.executors['check_kicad_board']({'project_dir': str(project)})
+            self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
+            work_id = checked.values['work_copy_id']
+            work_board = root / 'storage/kicad' / work_id / 'project/cached.kicad_pcb'
+            self.assertIn('(render_cache ', work_board.read_text())
+            fixed = runtime.executors['apply_kicad_mechanical_fixes']({
+                'work_copy_id': work_id, 'silkscreen_min_text': True})
+            self.assertEqual(fixed.state, CapabilityResultState.SUCCEEDED, fixed.failure)
+            texts = [n for n in descendants(sexpr(work_board.read_text())) if silk_text(n)]
+            self.assertEqual(len(texts), 1)
+            font = texts[0].one('effects').one('font')
+            self.assertEqual(font.one('size').children[1:], ['1', '1'])
+            self.assertEqual(font.one('thickness').children[1:], ['0.15'])
+            self.assertFalse(texts[0].named('render_cache'))
+            self.assertTrue(fixed.values['after_images'])
+            for value in (*fixed.values['before_images'], *fixed.values['after_images']):
+                exported = Path(value)
+                self.assertGreater(exported.stat().st_size, 0)
+                self.assertIn('<svg', exported.read_text())
+            self.assertEqual((project / 'cached.kicad_pcb').read_text(), source)
+
     def test_same_footprint_clearance_is_honoured(self):
         with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
             root = Path(directory).resolve()

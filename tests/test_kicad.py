@@ -238,6 +238,215 @@ class KiCadTests(unittest.TestCase):
         self.assertFalse(again['changes'])
         self.assertEqual(again['work_copy_revision'], result['work_copy_revision'])
 
+    def test_kicad7_and_9_silk_fonts_and_dependent_caches(self):
+        from alx.providers.kicad import board_invariant, descendants, sexpr, silk_text
+        for version in (7, 9):
+            with self.subTest(version=version):
+                source = (Path(__file__).parent / 'fixtures/kicad' /
+                          f'silkscreen_kicad{version}.kicad_pcb').read_text()
+                (self.project / 'test.kicad_pcb').write_text(source)
+                checked = self.check()
+                self.success('apply_kicad_mechanical_fixes',
+                             work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+                board = self.settings.work_root / checked['work_copy_id'] / 'project/test.kicad_pcb'
+                updated = board.read_text()
+                self.assertEqual(board_invariant(source), board_invariant(updated))
+                originals = [n for n in descendants(sexpr(source)) if silk_text(n)]
+                texts = [n for n in descendants(sexpr(updated)) if silk_text(n)]
+                for original, text in zip(originals, texts, strict=True):
+                    old = source[original.start:original.end]
+                    if 'hidden' in old:
+                        self.assertEqual(updated[text.start:text.end], old)
+                        continue
+                    font = text.one('effects').one('font')
+                    self.assertTrue(all(float(v) >= 1 for v in font.one('size').children[1:]))
+                    self.assertGreaterEqual(float(font.one('thickness').children[1]), 0.15)
+                    self.assertFalse(text.named('render_cache'))
+                self.assertIn('(face "Noto Sans")', updated)
+                self.assertIn('bold italic', updated)
+                self.assertIn('(justify right mirror)', updated)
+                self.assertIn('(tstamp "board-text-id")', updated)
+                copper = next(n for n in sexpr(updated).named('gr_text') if not silk_text(n))
+                self.assertTrue(copper.named('render_cache'))
+                self.assertIn(updated[copper.start:copper.end], source)
+
+    def legacy_copy(self, *, canonical_saved=True):
+        # Frozen old-format tree: dimensions excluded, render_cache retained.
+        source = ('(kicad_pcb (gr_text "legacy private text" (layer "F.SilkS") '
+                  '(effects (font (size 0.5 0.5) (thickness 0.08))) '
+                  '(render_cache "legacy private text" 0 '
+                  '(polygon (pts (xy 1 2))))))')
+        canonical = ['kicad_pcb', ['gr_text', 'legacy private text',
+                     ['layer', 'F.SilkS'], ['render_cache', 'legacy private text', '0',
+                     ['polygon', ['pts', ['xy', '1', '2']]]]]]
+        (self.project / 'test.kicad_pcb').write_text(source)
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        meta_path = root / 'metadata.json'
+        meta = json.loads(meta_path.read_text())
+        import hashlib
+        meta['board_invariant'] = hashlib.sha256(json.dumps(canonical).encode()).hexdigest()
+        meta.pop('board_invariant_version', None)
+        meta.pop('board_canonical', None)
+        if canonical_saved:
+            meta['board_canonical'] = canonical
+        meta_path.write_text(json.dumps(meta))
+        return checked, root, meta
+
+    def test_legacy_invariant_migrates_before_fix_and_survives_restart_and_writeback(self):
+        from alx.providers.kicad import board_canonical, board_invariant
+        for canonical_saved in (True, False):
+            with self.subTest(canonical_saved=canonical_saved):
+                checked, root, old = self.legacy_copy(canonical_saved=canonical_saved)
+                provider = KiCadProvider(self.settings, self.execute_cli)
+                run = provider.execute_cli
+                def verify_migrated(executable, arguments):
+                    saved = json.loads((root / 'metadata.json').read_text())
+                    self.assertEqual(saved['board_invariant_version'], 2)
+                    self.assertNotEqual(saved['board_invariant'], old['board_invariant'])
+                    return run(executable, arguments)
+                provider.execute_cli = verify_migrated
+                fixed = provider.fix(dict(work_copy_id=checked['work_copy_id'], silkscreen_min_text=True))
+                saved = json.loads((root / 'metadata.json').read_text())
+                updated = (root / 'project/test.kicad_pcb').read_text()
+                self.assertNotIn('render_cache', updated)
+                self.assertIn('(size 1 1)', updated)
+                self.assertEqual(saved['board_invariant'], board_invariant(updated))
+                self.assertEqual(saved['board_canonical'], board_canonical(updated))
+                provider = KiCadProvider(self.settings, self.execute_cli)
+                again = provider.fix(dict(work_copy_id=checked['work_copy_id'], silkscreen_min_text=True))
+                self.assertFalse(again['changes'])
+                provider.write_back(self.write_args(fixed))
+                self.assertEqual((self.project / 'test.kicad_pcb').read_text(), updated)
+
+    def test_legacy_writeback_migrates_without_applying_fixes(self):
+        checked, root, old = self.legacy_copy()
+        self.success('write_back_kicad_board', **self.write_args(checked))
+        saved = json.loads((root / 'metadata.json').read_text())
+        self.assertEqual(saved['board_invariant_version'], 2)
+        self.assertNotEqual(saved['board_invariant'], old['board_invariant'])
+
+    def test_legacy_changes_rejected_before_migration_or_cli(self):
+        for operation in ('apply_kicad_mechanical_fixes', 'write_back_kicad_board'):
+            for before, after in (('(xy 1 2)', '(xy 3 4)'),
+                                  ('legacy private text', 'changed private text')):
+                with self.subTest(operation=operation, before=before):
+                    checked, root, old = self.legacy_copy()
+                    board = root / 'project/test.kicad_pcb'
+                    board.write_text(board.read_text().replace(before, after))
+                    args = dict(work_copy_id=checked['work_copy_id'])
+                    if operation == 'write_back_kicad_board':
+                        args.update(project_dir=str(self.project), work_copy_revision=
+                                    KiCadProvider(self.settings, self.execute_cli)._revision(root))
+                    count = len(self.calls)
+                    with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
+                        self.failure('board_structure_changed', operation, **args)
+                    self.assertEqual(len(self.calls), count)
+                    self.assertEqual(json.loads((root / 'metadata.json').read_text()), old)
+                    self.assertNotIn('private text', str(logs.output))
+                    self.assertTrue(all(r.exc_info is None for r in logs.records))
+
+    def test_unsupported_invariant_version_is_never_regenerated(self):
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        path = root / 'metadata.json'
+        meta = json.loads(path.read_text())
+        meta['board_invariant_version'] = 999
+        path.write_text(json.dumps(meta))
+        for operation in ('apply_kicad_mechanical_fixes', 'write_back_kicad_board'):
+            args = (self.write_args(checked) if operation == 'write_back_kicad_board'
+                    else dict(work_copy_id=checked['work_copy_id']))
+            self.failure('unsupported_project', operation, **args)
+            self.assertEqual(json.loads(path.read_text()), meta)
+
+    def test_canonicalisation_detects_silk_once_per_node_and_skips_ineligible_scans(self):
+        from alx.providers import kicad
+        source = '(kicad_pcb ' + '(segment (start 0 0) (end 1 1)) ' * 1000 + ')'
+        tree = kicad.sexpr(source)
+        with patch.object(kicad, 'silk_text', wraps=kicad.silk_text) as detect:
+            kicad.board_canonical(source)
+        self.assertEqual(detect.call_count, sum(1 for _ in kicad.descendants(tree)))
+        with patch.object(tree, 'named', side_effect=AssertionError('ineligible scan')):
+            self.assertFalse(kicad.silk_text(tree))
+
+    def test_cli_failure_diagnostics_never_include_board_content(self):
+        private = '(gr_text "private board text")'
+        for outcome in (SimpleNamespace(returncode=2, stderr=private),
+                        subprocess.TimeoutExpired('kicad-cli', 600, stderr=private)):
+            execute = Mock(**({'side_effect': outcome} if isinstance(outcome, Exception)
+                              else {'return_value': outcome}))
+            provider = KiCadProvider(self.settings, execute)
+            with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
+                with self.assertRaises(KiCadError):
+                    provider._run('pcb', 'export', 'svg')
+            self.assertNotIn(private, str(logs.output))
+            self.assertTrue(all(record.exc_info is None for record in logs.records))
+
+    def test_invariant_ignores_only_direct_silk_dimensions_and_caches(self):
+        from alx.providers.kicad import board_invariant
+        source = ('(kicad_pcb (gr_text "private" (layer "F.SilkS" knockout) '
+                  '(effects (font (size 0.5 0.5) (thickness 0.08) bold) (justify mirror)) '
+                  '(render_cache "private" 0 (polygon (pts (xy 1 2))))) '
+                  '(gr_text "copper" (layer "F.Cu") (render_cache "copper" 0)))')
+        changed_cache = source.replace('(xy 1 2)', '(xy 3 4)')
+        self.assertEqual(board_invariant(source), board_invariant(changed_cache))
+        for before, after in (('bold', 'italic'), ('mirror', 'left'),
+                              ('"private" (layer', '"changed" (layer'),
+                              ('"copper" 0', '"copper" 1'),
+                              ('F.SilkS', 'B.SilkS')):
+            with self.subTest(before=before):
+                self.assertNotEqual(board_invariant(source), board_invariant(source.replace(before, after)))
+        # Similar descendants outside text.effects.font must remain authoritative.
+        other = source.replace('(render_cache "private"', '(other (font (size 2 2))) (render_cache "private"')
+        self.assertNotEqual(board_invariant(other), board_invariant(other.replace('(size 2 2)', '(size 3 3)')))
+
+    def test_first_difference_is_deterministic_and_sanitised(self):
+        from alx.providers.kicad import first_board_difference
+        cases = [
+            (['kicad_pcb', ['gr_text', 'secret']], ['kicad_pcb', ['gr_text', 'other']],
+             ['kicad_pcb', 1, 'gr_text', 1]),
+            (['kicad_pcb', ['secret', 'value']], ['kicad_pcb', ['secret', 'changed']],
+             ['kicad_pcb', 1, 'unknown', 1]),
+            (['kicad_pcb'], ['kicad_pcb', ['secret', 'value']],
+             ['kicad_pcb', 1, 'unknown']),
+            (['kicad_pcb', 'secret'], ['kicad_pcb', ['gr_text', 'value']],
+             ['kicad_pcb', 1, 'gr_text']),
+            (['kicad_pcb', ['pad']], ['kicad_pcb', ['segment']],
+             ['kicad_pcb', 1, 'pad', 0]),
+        ]
+        for expected, current, path in cases:
+            self.assertEqual(first_board_difference(expected, current), path)
+            self.assertEqual(first_board_difference(current, current), None)
+
+    def test_drc_invariant_failure_reports_one_private_safe_path_and_rolls_back(self):
+        checked = self.check()
+        run_cli = self.run_cli
+        drcs = 0
+        def changing(argv, **kwargs):
+            nonlocal drcs
+            result = run_cli(argv, **kwargs)
+            if argv[2] == 'drc':
+                drcs += 1
+                if drcs == 2:
+                    board = Path(argv[-1])
+                    board.write_text(board.read_text().replace('"copper"', '"private-board-text"'))
+            return result
+        self.runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, changing)
+        with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
+            result = self.call('apply_kicad_mechanical_fixes',
+                               work_copy_id=checked['work_copy_id'], silkscreen_min_text=True)
+        self.assertEqual(result.failure['code'], 'board_structure_changed')
+        path = ['kicad_pcb', 2, 'gr_text', 1]
+        self.assertEqual(list(result.failure['recovery']['first_difference_path']), path)
+        self.assertEqual(result.failure['recovery']['rollback_status'], 'restored')
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn(json.dumps(path), logs.output[0])
+        self.assertNotIn('private-board-text', str(result.failure) + logs.output[0])
+        self.assertNotIn('copper', str(result.failure) + logs.output[0])
+        self.assertIsNone(logs.records[0].exc_info)
+        board = self.settings.work_root / checked['work_copy_id'] / 'project/test.kicad_pcb'
+        self.assertEqual(board.read_text(), BOARD)
+
     def test_missing_silk_minima_report_unsupported_project_details(self):
         for missing in (['silk_text_height'], ['silk_text_thickness'],
                         ['silk_text_height', 'silk_text_thickness']):
@@ -462,7 +671,7 @@ class KiCadTests(unittest.TestCase):
                 self.assertIn('pcb export svg', logs.output[0])
                 if code == 'cli_timeout':
                     self.assertIn('timed out', logs.output[0])
-                    self.assertIn('export stalled', logs.output[0])
+                    self.assertNotIn('export stalled', logs.output[0])
                 self.assertIs(caught.exception.__cause__, error)
                 runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, runner)
                 result = runtime.executors['check_kicad_board']({'project_dir': str(self.project)})
@@ -505,7 +714,7 @@ class KiCadTests(unittest.TestCase):
             result = runtime.executors['apply_kicad_mechanical_fixes']({'work_copy_id': checked['work_copy_id']})
         self.assertEqual(result.failure['code'], 'cli_timeout')
         self.assertIn('pcb export svg timed out', logs.output[0])
-        self.assertIn('SVG stalled', logs.output[0])
+        self.assertNotIn('SVG stalled', logs.output[0])
 
     def test_same_footprint_rule_creation_update_and_template_coexistence(self):
         checked = self.check()
