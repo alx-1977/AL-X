@@ -682,6 +682,62 @@ class KiCadTests(unittest.TestCase):
         for report in (fixed['before'], fixed['after']):
             self.assertEqual([dict(c) for c in report['custom_rule_citations']], expected)
 
+    def test_rule_citations_match_loaded_names_and_full_fallback_boundaries(self):
+        names = ['U1', "U1's pads", "U1' pads", "U1' tracks",
+                 "U1' pads' extended", 'U1" pads', 'U1" tracks',
+                 'U1" pads" extended', "U1'; pads", "U1'; tracks",
+                 'U1"); pads', 'U1"); tracks']
+        finding = {'type': 'clearance', 'severity': 'error', 'items': []}
+        descriptions = []
+        for index, name in enumerate(names, 1):
+            for quote in ("'", '"'):
+                for suffix in ('; clearance 0.1 mm)', ')', '',
+                               ' clearance 0.1000 mm; actual 0.0500 mm)'):
+                    citation = f'rule {quote}{name}{quote}{suffix}'
+                    descriptions.extend([f'{citation}; also {citation}'] * index)
+        self.report = {'violations': [dict(finding, description=text) for text in descriptions],
+                       'unconnected_items': [], 'schematic_parity': []}
+        expected = sorted([{'name': name, 'count': index * 8}
+                           for index, name in enumerate(names, 1)], key=lambda c: c['name'])
+        # Both absent rules and unrelated loaded rules must use the full fallback.
+        for loaded_names in ([], ['Unrelated'], names):
+            with self.subTest(loaded_names=loaded_names):
+                (self.project / 'test.kicad_dru').write_text('(version 1)\n' + '\n'.join(
+                    f'(rule {json.dumps(name)} (constraint clearance (min 0.1mm)))'
+                    for name in loaded_names))
+                checked = self.check()
+                self.assertEqual([dict(c) for c in checked['custom_rule_citations']], expected)
+                fixed = self.success('apply_kicad_mechanical_fixes',
+                                     work_copy_id=checked['work_copy_id'])
+                for report in (fixed['before'], fixed['after']):
+                    self.assertEqual([dict(c) for c in report['custom_rule_citations']], expected)
+
+    def test_rule_citations_require_loaded_name_closing_boundary(self):
+        (self.project / 'test.kicad_dru').write_text(
+            '(version 1)\n(rule "U1" (constraint clearance (min 0.1mm)))')
+        self.report = {'violations': [{'type': 'clearance', 'severity': 'error', 'items': [],
+            'description': "rule 'U1's pads'; rule 'U1 extended'; rule 'U1'"}],
+            'unconnected_items': [], 'schematic_parity': []}
+        self.assertEqual([dict(c) for c in self.check()['custom_rule_citations']], [
+            {'name': 'U1', 'count': 1}, {'name': 'U1 extended', 'count': 1},
+            {'name': "U1's pads", 'count': 1}])
+
+    def test_rule_citations_prefer_loaded_names_and_keep_multiple_citations_separate(self):
+        names = ['U1', "U1'; pads", "U1'; tracks", "Nested rule 'pads'"]
+        (self.project / 'test.kicad_dru').write_text('(version 1)\n' + '\n'.join(
+            f'(rule {json.dumps(name)} (constraint clearance (min 0.1mm)))'
+            for name in names))
+        finding = {'type': 'clearance', 'severity': 'error', 'items': []}
+        # Loaded names take precedence over unrelated quoted diagnostic text.
+        self.report = {'violations': [dict(finding,
+            description="rule 'U1'; diagnostic 'unrelated'")],
+            'unconnected_items': [dict(finding, description='; '.join(
+                f"rule '{name}'" for name in names))],
+            'schematic_parity': [dict(finding, description="rule 'U1'; pads'")]}
+        self.assertEqual([dict(c) for c in self.check()['custom_rule_citations']], [
+            {'name': "Nested rule 'pads'", 'count': 1}, {'name': 'U1', 'count': 2},
+            {'name': "U1'; pads", 'count': 2}, {'name': "U1'; tracks", 'count': 1}])
+
     def test_custom_noise_configuration_is_the_only_flag_source(self):
         environment = dict(self.environment, ALX_KICAD_NOISE_CHECKS='unconnected_items')
         runtime = build_kicad_runtime(lambda: 'call', environment, self.storage, self.run_cli)

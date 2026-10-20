@@ -255,6 +255,44 @@ class KiCadProvider:
                     identities[uid.children[1]] = (ref, node.children[1] if node.name == 'pad' else '')
         totals = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
         citations = {}
+        rules_path = (root / 'project' / meta['board']).with_suffix('.kicad_dru')
+        rule_names = []
+        if rules_path.exists():
+            rules = sexpr('(' + rules_path.read_text() + '\n)')
+            rule_names = sorted({node.children[1] for node in rules.named('rule')},
+                                key=len, reverse=True)
+
+        citation_start = re.compile(r'''\brule\s+(['"])''', re.IGNORECASE)
+        # KiCad may append unquoted constraint details before the separator.
+        citation_boundary = r'''\s*(?:[;)]|$)|\s+[^'";()]*[;)]'''
+        closing_boundary = re.compile(citation_boundary)
+
+        def cited_names(description):
+            names = set()
+            position = 0
+            while start := citation_start.search(description, position):
+                quote = start[1]
+                position = start.end()
+                # A quote (or even a separator) can belong to a loaded name.
+                # Prefer the longest complete name with a valid closing boundary.
+                for name in rule_names:
+                    end = position + len(name) + 1
+                    if (description.startswith(name + quote, position)
+                            and closing_boundary.match(description, end)):
+                        names.add(name)
+                        position = end
+                        break
+                else:
+                    # Without a loaded match, use the final valid closing quote
+                    # within this citation, never a quote in the next citation.
+                    next_start = citation_start.search(description, position)
+                    end = next_start.start() if next_start else len(description)
+                    match = re.match(r'(.*)' + re.escape(quote) +
+                                     r'(?=' + citation_boundary + ')', description[position:end])
+                    if match:
+                        names.add(match[1])
+                        position += match.end()
+            return names
 
         # D-057a: a full report (222,000 characters on RoomReader V2) rode on
         # every later Core call. Each check type keeps its count and its first
@@ -278,12 +316,7 @@ class KiCadProvider:
                 totals[severity] += 1
                 totals['total'] += 1
                 # Count all citations before finding limits, once per finding/rule.
-                # The closing quote precedes a separator/end or unquoted constraint
-                # details up to that separator. Quotes within the name are literal.
-                names = {match[1] for match in re.findall(
-                    r'''\brule\s+(['"])(.*?)\1(?=\s*(?:[;)]|$)|\s+[^'";()]*[;)])''',
-                    finding.get('description', ''), re.IGNORECASE)}
-                for name in names:
+                for name in cited_names(finding.get('description', '')):
                     citations[name] = citations.get(name, 0) + 1
                 items = []
                 for item in finding['items']:
