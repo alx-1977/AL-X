@@ -24,14 +24,6 @@ FINDINGS_PER_CHECK_TYPE = 8
 NOISE_EXAMPLES = 2
 ITEMS_PER_FINDING = 4
 
-def stderr_tail(diagnostic):
-    if isinstance(diagnostic, bytes):
-        diagnostic = diagnostic.decode('utf-8', errors='replace')
-    diagnostic = re.sub(
-        r'(?i)(bearer\s+|(?:token|password|secret|api[_-]?key)\s*[=:]\s*)[^\s]+',
-        r'\1[redacted]', str(diagnostic or ''))
-    return ''.join(c if c.isprintable() or c == '\n' else '?' for c in diagnostic)[-2000:]
-
 MAX_PROJECT_ENTRIES = 20000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
@@ -162,28 +154,35 @@ def references(footprint):
 
 def silk_text(node):
     """Shared text identification, including layers with knockout flags."""
+    if node.name not in ('fp_text', 'gr_text', 'property'):
+        return False
     layers = node.named('layer')
-    return (node.name in ('fp_text', 'gr_text', 'property')
-            and bool(layers and len(layers[0].children) > 1
-                     and layers[0].children[1] in ('F.SilkS', 'B.SilkS')))
+    return bool(layers and len(layers[0].children) > 1
+                and layers[0].children[1] in ('F.SilkS', 'B.SilkS'))
 
 
-def board_canonical(board_source):
+BOARD_INVARIANT_VERSION = 2
+
+
+def board_canonical(board_source, *, version=BOARD_INVARIANT_VERSION):
     """Everything except permitted dimensions and derived caches is invariant."""
+    if type(version) is not int or version not in (1, BOARD_INVARIANT_VERSION):
+        raise KiCadError('unsupported_project')
     def canonical(node, context='', zone=False):
         if not isinstance(node, Node):
             return node
         zone = zone or node.name == 'zone'
+        silk = silk_text(node)
         children = []
         for child in node.children:
             if isinstance(child, Node) and (
                     (context == 'font' and child.name in ('size', 'thickness'))
-                    or (silk_text(node) and child.name == 'render_cache')
+                    or (version != 1 and silk and child.name == 'render_cache')
                     or (zone and child.name in ('filled_polygon', 'fill_segments'))):
                 continue
             child_context = ''
             if isinstance(child, Node):
-                if silk_text(node) and child.name == 'effects':
+                if silk and child.name == 'effects':
                     child_context = 'effects'
                 elif context == 'effects' and child.name == 'font':
                     child_context = 'font'
@@ -236,12 +235,20 @@ def first_board_difference(expected, current):
 
 
 def verify_board_invariant(board_source, meta, expected=None):
-    current = board_canonical(board_source)
+    # Absence means the historical format, never permission to rebaseline.
+    version = meta.get('board_invariant_version', 1)
+    current = board_canonical(board_source, version=version)
     if invariant_digest(current) != meta['board_invariant']:
         expected = meta.get('board_canonical', expected)
         path = first_board_difference(expected, current) if expected is not None else ['kicad_pcb']
         logger.warning('KiCad board_structure_changed path=%s', json.dumps(path))
         raise KiCadError('board_structure_changed', {'first_difference_path': path})
+    if version == 1:
+        current = board_canonical(board_source)
+        meta.update(board_invariant_version=BOARD_INVARIANT_VERSION,
+                    board_invariant=invariant_digest(current), board_canonical=current)
+        return True
+    return False
 
 
 SAME_PART_CONDITION = "A.Type == 'Pad' && B.Type == 'Pad' && A.Parent == B.Parent"
@@ -263,14 +270,13 @@ class KiCadProvider:
         try:
             result = self.execute_cli(str(self.settings.kicad_cli), list(map(str, args)))
         except KICAD_CLI_TIMEOUT as error:
-            logger.warning('kicad-cli %s timed out; stderr: %s', subcommand, stderr_tail(error.stderr))
+            logger.warning('kicad-cli %s timed out', subcommand)
             raise KiCadError('cli_timeout') from error
         except KICAD_CLI_UNAVAILABLE_ERRORS as error:
             logger.warning('kicad-cli %s unavailable; error: %s', subcommand, type(error).__name__)
             raise KiCadError('unavailable') from error
         if result.returncode != 0:
-            logger.warning('kicad-cli %s failed (%s); stderr: %s', subcommand,
-                           result.returncode, stderr_tail(getattr(result, 'stderr', '')))
+            logger.warning('kicad-cli %s failed (%s)', subcommand, result.returncode)
             raise KiCadError('cli_failed')
 
     def _load(self, work_copy_id):
@@ -280,6 +286,8 @@ class KiCadProvider:
         root = bounded(self.work_root / work_copy_id, (self.work_root,), protected=False)
         inventory(root)
         meta = json.loads((root / 'metadata.json').read_text())
+        if meta.get('board_invariant_version') != BOARD_INVARIANT_VERSION:
+            self._verify_board(root, meta, (root / 'project' / meta['board']).read_text())
         return root, meta
 
     def _revision(self, root, meta=None):
@@ -303,7 +311,7 @@ class KiCadProvider:
         output.parent.mkdir(exist_ok=True)
         before_source = (root / 'project' / meta['board']).read_text()
         expected = board_canonical(before_source)
-        verify_board_invariant(before_source, meta)
+        self._verify_board(root, meta, before_source)
         self._run('pcb', 'drc', '--format', 'json', '--severity-all', '--refill-zones',
                   '--output', output, root / 'project' / meta['board'])
         try:
@@ -420,6 +428,11 @@ class KiCadProvider:
         result['baseline_eligible'] = not bool(meta.get('taint'))
         return result
 
+    def _verify_board(self, root, meta, board_source):
+        if verify_board_invariant(board_source, meta):
+            # Persist the verified upgrade before CLI refill or authorised edits.
+            self._save_metadata(root, meta)
+
     def check(self, arguments):
         source = bounded(arguments['project_dir'], self.design_roots)
         if source.is_relative_to(self.work_root) or self.work_root.is_relative_to(source):
@@ -438,6 +451,7 @@ class KiCadProvider:
             raise KiCadError('original_changed')
         canonical = board_canonical((root / 'project' / boards[0]).read_text())
         meta = {'source': str(source), 'hashes': hashes, 'board': boards[0],
+                'board_invariant_version': BOARD_INVARIANT_VERSION,
                 'board_invariant': invariant_digest(canonical), 'board_canonical': canonical}
         (root / 'metadata.json').write_text(json.dumps(meta))
         result = self._drc(root, meta)
@@ -716,7 +730,7 @@ class KiCadProvider:
             raise KiCadError('path_denied')
         if self._revision(root) != arguments['work_copy_revision']:
             raise KiCadError('work_copy_changed')
-        verify_board_invariant((root / 'project' / meta['board']).read_text(), meta)
+        self._verify_board(root, meta, (root / 'project' / meta['board']).read_text())
 
         temporary = set()
         expected = dict(meta['hashes'])
