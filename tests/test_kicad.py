@@ -280,22 +280,94 @@ class KiCadTests(unittest.TestCase):
                 execute.assert_called_once_with(
                     subprocess.run if runner is None else runner,
                     ['/path with spaces/kicad-cli', *arguments],
-                    shell=False, check=False, timeout=120, capture_output=True, text=True)
+                    shell=False, check=False, timeout=600, capture_output=True, text=True)
                 self.assertIs(result, execute.return_value)
 
-    def test_cli_os_error_and_timeout_return_unavailable(self):
-        for error in (OSError('missing CLI'), subprocess.TimeoutExpired('kicad-cli', 120)):
+    def test_cli_os_error_and_timeout_are_distinct(self):
+        for error, code in ((OSError('missing CLI'), 'unavailable'),
+                            (subprocess.TimeoutExpired('kicad-cli', 600, stderr=b'export stalled'), 'cli_timeout')):
             with self.subTest(error=type(error).__name__):
                 runner = Mock(side_effect=error)
                 provider = KiCadProvider(self.settings,
                     lambda executable, arguments: run_kicad_cli(executable, arguments, runner=runner))
-                with self.assertRaisesRegex(KiCadError, 'unavailable') as caught:
-                    provider._run('pcb', 'drc')
+                with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
+                    with self.assertRaisesRegex(KiCadError, code) as caught:
+                        provider._run('pcb', 'export', 'svg')
+                self.assertIn('pcb export svg', logs.output[0])
+                if code == 'cli_timeout':
+                    self.assertIn('timed out', logs.output[0])
+                    self.assertIn('export stalled', logs.output[0])
                 self.assertIs(caught.exception.__cause__, error)
                 runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, runner)
                 result = runtime.executors['check_kicad_board']({'project_dir': str(self.project)})
                 self.assertEqual(result.state, CapabilityResultState.FAILED)
-                self.assertEqual(result.failure['code'], 'unavailable')
+                self.assertEqual(result.failure['code'], code)
+
+    def test_timeout_configuration_and_failed_cli_diagnostics(self):
+        self.assertEqual(self.settings.cli_timeout_seconds, 600)
+        environment = dict(self.environment, ALX_KICAD_CLI_TIMEOUT_SECONDS='875')
+        runner = Mock(return_value=SimpleNamespace(returncode=2, stderr='x' * 3000 + '\npassword=private-value\x1b'))
+        runtime = build_kicad_runtime(lambda: 'call', environment, self.storage, runner)
+        with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
+            result = runtime.executors['check_kicad_board']({'project_dir': str(self.project)})
+        self.assertEqual(result.failure['code'], 'cli_failed')
+        self.assertEqual(runner.call_args.kwargs['timeout'], 875)
+        self.assertIn('pcb drc failed (2)', logs.output[0])
+        self.assertNotIn('private-value', logs.output[0])
+        self.assertNotIn('\x1b', logs.output[0])
+        self.assertLess(len(logs.output[0]), 2200)
+        for invalid in ('0', '-1', 'nan', '1.2'):
+            with self.assertRaises(ConfigurationError):
+                KiCadSettings.from_environment(dict(environment, ALX_KICAD_CLI_TIMEOUT_SECONDS=invalid), self.storage)
+
+    def test_same_footprint_clearance_validation_before_cli_or_edits(self):
+        checked = self.check()
+        count = len(self.calls)
+        for invalid in (True, False, None, '0.1', 0, -1, float('nan'), float('inf'), -float('inf'), 10 ** 1000):
+            self.failure('arguments_unusable', 'apply_kicad_mechanical_fixes',
+                         work_copy_id=checked['work_copy_id'], same_footprint_pad_clearance_mm=invalid)
+        self.assertEqual(len(self.calls), count)
+
+    def test_svg_timeout_returns_distinct_capability_failure(self):
+        checked = self.check()
+        def runner(argv, **kwargs):
+            if argv[1:4] == ['pcb', 'export', 'svg']:
+                raise subprocess.TimeoutExpired(argv, kwargs['timeout'], stderr=b'SVG stalled')
+            return self.run_cli(argv, **kwargs)
+        runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, runner)
+        with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
+            result = runtime.executors['apply_kicad_mechanical_fixes']({'work_copy_id': checked['work_copy_id']})
+        self.assertEqual(result.failure['code'], 'cli_timeout')
+        self.assertIn('pcb export svg timed out', logs.output[0])
+        self.assertIn('SVG stalled', logs.output[0])
+
+    def test_same_footprint_rule_creation_update_and_template_coexistence(self):
+        checked = self.check()
+        options = dict(work_copy_id=checked['work_copy_id'], same_footprint_pad_clearance_mm=0.1)
+        target = self.settings.work_root / checked['work_copy_id'] / 'project/test.kicad_dru'
+        first = self.success('apply_kicad_mechanical_fixes', **options)
+        self.assertIn({'kind': 'same_footprint_pad_clearance', 'value': '0.1', 'clearance_mm': 0.1}, first['changes'])
+        saved = target.read_bytes()
+        second = self.success('apply_kicad_mechanical_fixes', **options)
+        self.assertEqual(target.read_bytes(), saved)
+        self.assertFalse(second['changes'])
+        folder = self.root / 'templates/factory'
+        folder.mkdir(parents=True)
+        (folder / 'factory.kicad_pro').write_text(json.dumps(PROJECT))
+        template_rules = '# Keep this comment\n(version 1)\n(rule "factory" (constraint clearance (min 0.2mm)))\n'
+        (folder / 'factory.kicad_dru').write_text(template_rules)
+        self.success('apply_kicad_mechanical_fixes', **dict(options, apply_template='factory'))
+        self.assertTrue(target.read_text().startswith(template_rules))
+        self.success('apply_kicad_mechanical_fixes', **dict(options, same_footprint_pad_clearance_mm=0.15))
+        self.assertEqual(target.read_text().count('(rule "ALX same-footprint pad clearance"'), 1)
+        self.assertIn('(min 0.15mm)', target.read_text())
+        # Repair duplicate managed rules while retaining unrelated existing rules.
+        managed_rule = target.read_text()[target.read_text().index('(rule "ALX'):]
+        target.write_text(target.read_text() + managed_rule)
+        self.success('apply_kicad_mechanical_fixes', **options)
+        self.assertEqual(target.read_text().count('(rule "ALX'), 1)
+        self.assertIn('(rule "factory"', target.read_text())
+        self.assertFalse((self.project / 'test.kicad_dru').exists())
 
     def test_custom_noise_configuration_is_the_only_flag_source(self):
         environment = dict(self.environment, ALX_KICAD_NOISE_CHECKS='unconnected_items')

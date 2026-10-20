@@ -29,7 +29,7 @@ ITEM = obj({'description': S, 'designator': S, 'pad_number': S, 'uuid': S,
 GROUP = obj({'check_type': S, 'count': I, 'noise': B, 'findings': array(
     obj({'severity': S, 'description': S, 'items': array(ITEM)}))})
 FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid_report',
-            'cli_failed', 'render_failed', 'footprint_ambiguous', 'board_open',
+            'cli_failed', 'cli_timeout', 'render_failed', 'footprint_ambiguous', 'board_open',
             'original_changed', 'work_copy_changed', 'board_structure_changed',
             'project_too_large', 'verification_failed', 'unavailable')
 
@@ -44,12 +44,14 @@ DEFINITIONS = (
     CapabilityDefinition('apply_kicad_mechanical_fixes',
         'On a registered work copy only, optionally raise silkscreen text dimensions to '
         'project minima, ignore configured noise checks, or apply named template rules and '
-        'custom rules. Returns actual changes, DRC totals and SVG paths before and after. '
+        'custom rules, or set same_footprint_pad_clearance_mm (finite and > 0) for pads '
+        'of the same footprint. Reports that change as same_footprint_pad_clearance with '
+        'clearance_mm. Returns actual changes, DRC totals and SVG paths before and after. '
         'Never routes or replaces footprints. Revision changes invalidate write approval.',
         obj({'work_copy_id': S, 'silkscreen_min_text': B, 'ignore_noise_checks': B,
-             'apply_template': S}, ('work_copy_id',)),
+             'apply_template': S, 'same_footprint_pad_clearance_mm': N}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'before': TOTALS, 'after': TOTALS,
-             'changes': array(obj({'kind': S, 'value': S})),
+             'changes': array(obj({'kind': S, 'value': S, 'clearance_mm': N}, ('kind', 'value'))),
              'before_images': array(S), 'after_images': array(S)}), SideEffect.NONE, FAILURES),
     CapabilityDefinition('find_kicad_library_footprint',
         'Read installed library footprint candidates and pad counts. Supply library_id '

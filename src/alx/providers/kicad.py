@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -12,7 +13,18 @@ import tempfile
 import uuid
 
 from alx.providers.own_source import denied
-from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS
+from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
+
+logger = logging.getLogger(__name__)
+
+
+def stderr_tail(diagnostic):
+    if isinstance(diagnostic, bytes):
+        diagnostic = diagnostic.decode('utf-8', errors='replace')
+    diagnostic = re.sub(
+        r'(?i)(bearer\s+|(?:token|password|secret|api[_-]?key)\s*[=:]\s*)[^\s]+',
+        r'\1[redacted]', str(diagnostic or ''))
+    return ''.join(c if c.isprintable() or c == '\n' else '?' for c in diagnostic)[-2000:]
 
 MAX_PROJECT_ENTRIES = 20000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
@@ -94,6 +106,9 @@ def sexpr(board_source):
         c = board_source[i]
         if c.isspace():
             i += 1
+        elif c == '#':
+            newline = board_source.find('\n', i)
+            i = len(board_source) if newline < 0 else newline + 1
         elif c == '(':
             node = Node(i, 0, [])
             (stack[-1].children if stack else roots).append(node)
@@ -162,11 +177,18 @@ class KiCadProvider:
         self.work_root = settings.work_root.expanduser().resolve()
 
     def _run(self, *args):
+        subcommand = 'pcb export svg' if args[:3] == ('pcb', 'export', 'svg') else 'pcb drc'
         try:
             result = self.execute_cli(str(self.settings.kicad_cli), list(map(str, args)))
+        except KICAD_CLI_TIMEOUT as error:
+            logger.warning('kicad-cli %s timed out; stderr: %s', subcommand, stderr_tail(error.stderr))
+            raise KiCadError('cli_timeout') from error
         except KICAD_CLI_UNAVAILABLE_ERRORS as error:
+            logger.warning('kicad-cli %s unavailable; error: %s', subcommand, type(error).__name__)
             raise KiCadError('unavailable') from error
         if result.returncode != 0:
+            logger.warning('kicad-cli %s failed (%s); stderr: %s', subcommand,
+                           result.returncode, stderr_tail(getattr(result, 'stderr', '')))
             raise KiCadError('cli_failed')
 
     def _load(self, work_copy_id):
@@ -276,6 +298,16 @@ class KiCadProvider:
         return paths
 
     def fix(self, arguments):
+        clearance = arguments.get('same_footprint_pad_clearance_mm')
+        if 'same_footprint_pad_clearance_mm' in arguments:
+            try:
+                valid_clearance = (not isinstance(clearance, bool)
+                                   and isinstance(clearance, (int, float))
+                                   and math.isfinite(clearance) and clearance > 0)
+            except OverflowError:
+                valid_clearance = False
+            if not valid_clearance:
+                raise KiCadError('arguments_unusable')
         root, meta = self._load(arguments['work_copy_id'])
         before = self._drc(root, meta)['totals']
         before_images = self._render(root, meta)
@@ -312,6 +344,24 @@ class KiCadProvider:
                 if not target.exists() or target.read_bytes() != dru.read_bytes():
                     target.write_bytes(dru.read_bytes())
                     changes.append({'kind': 'template_custom_rules', 'value': template})
+        if clearance is not None:
+            target = board.with_suffix('.kicad_dru')
+            original_rules = target.read_text() if target.exists() else '(version 1)\n'
+            # Synthetic root permits span edits across top-level rules and comments.
+            parsed = sexpr('(' + original_rules + '\n)')
+            managed_name = 'ALX same-footprint pad clearance'
+            managed = [node for node in parsed.named('rule') if node.children[1] == managed_name]
+            rule = (f'(rule "{managed_name}"\n'
+                    '  (condition "A.Type == \'Pad\' && B.Type == \'Pad\' && A.Parent == B.Parent")\n'
+                    f'  (constraint clearance (min {clearance!r}mm)))\n')
+            updated_rules = original_rules
+            for node in reversed(managed):
+                updated_rules = updated_rules[:node.start - 1] + updated_rules[node.end - 1:]
+            updated_rules = updated_rules.rstrip() + '\n' + rule
+            if updated_rules != original_rules:
+                target.write_text(updated_rules)
+                changes.append({'kind': 'same_footprint_pad_clearance',
+                                'value': str(clearance), 'clearance_mm': clearance})
         if arguments.get('ignore_noise_checks', False):
             severities = settings['board']['design_settings'].setdefault('rule_severities', {})
             for kind in self.settings.noise_checks:
