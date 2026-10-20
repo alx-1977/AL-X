@@ -169,10 +169,18 @@ def board_invariant(board_source):
             layers = node.named('layer')
             silk = bool(layers and layers[0].children[1] in ('F.SilkS', 'B.SilkS'))
         zone = zone or node.name == 'zone'
-        return [canonical(child, silk, zone) for child in node.children
-                if not (isinstance(child, Node) and (
+        children = []
+        for child in node.children:
+            if isinstance(child, Node) and (
                     (silk and node.name == 'font' and child.name in ('size', 'thickness'))
-                    or (zone and child.name in ('filled_polygon', 'fill_segments'))))]
+                    or (zone and child.name in ('filled_polygon', 'fill_segments'))):
+                continue
+            value = canonical(child, silk, zone)
+            # Dimension-only wrappers may be inserted when effects/font are absent.
+            if silk and value in (['font'], ['effects']):
+                continue
+            children.append(value)
+        return children
     return hashlib.sha256(json.dumps(canonical(sexpr(board_source))).encode()).hexdigest()
 
 
@@ -401,9 +409,12 @@ class KiCadProvider:
         # Persist uncertainty BEFORE even the before DRC, which refills zones.
         pending = dict(meta, taint=uuid.uuid4().hex)
         self._save_metadata(root, pending)
+        stage = 'before_drc'
         try:
             before = self._drc(root, meta)
+            stage = 'render'
             before_images = self._render(root, meta)
+            stage = 'template'
             board = root / 'project' / meta['board']
             pro = board.with_suffix('.kicad_pro')
             if not pro.is_file():
@@ -437,6 +448,7 @@ class KiCadProvider:
                     if not target.exists() or target.read_bytes() != dru.read_bytes():
                         target.write_bytes(dru.read_bytes())
                         changes.append({'kind': 'template_custom_rules', 'value': template})
+            stage = 'clearance'
             if clearance is not None:
                 target = board.with_suffix('.kicad_dru')
                 original_rules = target.read_text() if target.exists() else '(version 1)\n'
@@ -466,14 +478,20 @@ class KiCadProvider:
                         target.write_text(updated_rules)
                         changes.append({'kind': 'same_footprint_pad_clearance',
                                         'value': str(clearance), 'clearance_mm': clearance})
+            stage = 'noise'
             if arguments.get('ignore_noise_checks', False):
                 severities = settings['board']['design_settings'].setdefault('rule_severities', {})
                 for kind in self.settings.noise_checks:
                     if severities.get(kind) != 'ignore':
                         severities[kind] = 'ignore'
                         changes.append({'kind': 'rule_severity', 'value': kind})
+            stage = 'silkscreen'
             if arguments.get('silkscreen_min_text', False):
-                rules = settings['board']['design_settings']['rules']
+                rules = settings.get('board', {}).get('design_settings', {}).get('rules', {})
+                missing = [key for key in ('silk_text_height', 'silk_text_thickness')
+                           if key not in rules]
+                if missing:
+                    raise KiCadError('unsupported_project', {'missing_settings': missing})
                 height = float(rules['silk_text_height'])
                 thickness = float(rules['silk_text_thickness'])
                 if not all(math.isfinite(v) and v > 0 for v in (height, thickness)):
@@ -486,13 +504,36 @@ class KiCadProvider:
                     layers = node.named('layer')
                     if not layers or layers[0].children[1] not in ('F.SilkS', 'B.SilkS'):
                         continue
-                    font = node.one('effects').one('font')
-                    size = font.one('size')
-                    x, y = map(float, size.children[1:])
-                    if not all(math.isfinite(v) and v > 0 for v in (x, y)):
-                        raise KiCadError('unsupported_project')
-                    if x < height or y < height:
-                        edits.append((size.start, size.end, f'(size {max(x, height):g} {max(y, height):g})'))
+                    effects = node.one('effects') if node.named('effects') else None
+                    # Skip the owner name and text fields: the parser represents
+                    # quoted "hide" text and bare visibility tokens identically.
+                    visibility_start = 2 if node.name == 'gr_text' else 3
+                    if any('hide' in owner.children[start:] or any(
+                            hidden.children[1:] == ['yes'] for hidden in owner.named('hide'))
+                           for owner, start in ((node, visibility_start), (effects, 1))
+                           if owner is not None):
+                        continue
+                    dimensions = f'(size {height:g} {height:g}) (thickness {thickness:g})'
+                    if effects is None:
+                        edits.append((node.end - 1, node.end - 1,
+                                      f' (effects (font {dimensions}))'))
+                        continue
+                    if not effects.named('font'):
+                        edits.append((effects.end - 1, effects.end - 1, f' (font {dimensions})'))
+                        continue
+                    font = effects.one('font')
+                    if not font.named('size'):
+                        edits.append((font.end - 1, font.end - 1, f' (size {height:g} {height:g})'))
+                    else:
+                        size = font.one('size')
+                        x, y = map(float, size.children[1:])
+                        if not all(math.isfinite(v) and v > 0 for v in (x, y)):
+                            raise KiCadError('unsupported_project')
+                        if x < height or y < height:
+                            edits.append((size.start, size.end, f'(size {max(x, height):g} {max(y, height):g})'))
+                    if not font.named('thickness'):
+                        edits.append((font.end - 1, font.end - 1, f' (thickness {thickness:g})'))
+                        continue
                     width = font.one('thickness')
                     if float(width.children[1]) < thickness:
                         edits.append((width.start, width.end, f'(thickness {thickness:g})'))
@@ -503,7 +544,9 @@ class KiCadProvider:
                     changes.append({'kind': 'silkscreen_dimensions', 'value': str(len(edits))})
             if json.dumps(settings, sort_keys=True) != original_settings:
                 pro.write_text(json.dumps(settings, indent=2) + '\n')
+            stage = 'after_drc'
             after = self._drc(root, meta)
+            stage = 'render'
             after_images = self._render(root, meta)
             result = {'work_copy_id': arguments['work_copy_id'],
                     'before': dict(before['totals'], custom_rule_citations=before['custom_rule_citations'],
@@ -513,9 +556,13 @@ class KiCadProvider:
                     'work_copy_tainted': bool(meta.get('taint')), 'baseline_eligible': not bool(meta.get('taint')),
                     'changes': changes,
                     'before_images': before_images, 'after_images': after_images}
+            stage = 'revision'
             result['work_copy_revision'] = self._revision(root, meta)
+            stage = 'metadata'
             self._save_metadata(root, meta)
         except BaseException as error:
+            if not isinstance(error, (KiCadError, KeyboardInterrupt, SystemExit)):
+                logger.warning('KiCad apply failed during %s: %s', stage, type(error).__name__)
             restored = True
             for path, original in snapshot.items():
                 try:
@@ -546,8 +593,10 @@ class KiCadProvider:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
             if isinstance(error, KiCadError):
-                error.recovery = recovery
+                error.recovery = dict(error.recovery or {}, **recovery)
                 raise
+            recovery['error'] = {'code': 'verification_failed', 'type': type(error).__name__,
+                                 'stage': stage}
             raise KiCadError('verification_failed', recovery) from error
         return result
 
