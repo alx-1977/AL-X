@@ -91,6 +91,7 @@ class IntegrationsTests(unittest.TestCase):
         research = SimpleNamespace(enabled_tiers=frozenset({"survey"}), survey=tier)
         listed = _integrations(_settings(), research, ())
         self.assertEqual(listed[0]["name"], "Claude")
+        self.assertIn("src/alx/providers/claude_usage.py", listed[0]["code"])
         self.assertIn("survey research (claude-haiku-5-5)", listed[0]["for"])
 
     def test_only_composed_services_are_listed(self) -> None:

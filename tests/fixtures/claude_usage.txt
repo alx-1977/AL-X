@@ -1,0 +1,15 @@
+Settings:  Status   Config   Usage
+
+Current session
+██████                                    12% used
+Resets 3pm (Africa/Johannesburg)
+
+Current week (all models)
+████████████                              25% used
+Resets Oct 23 at 9am (Africa/Johannesburg)
+
+Current week (Sonnet only)
+██                                        4.5% used
+Resets Oct 24 at 2:30pm (Africa/Johannesburg)
+
+Esc to cancel

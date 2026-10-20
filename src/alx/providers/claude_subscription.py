@@ -351,6 +351,10 @@ class ClaudeSubscriptionReasoningModel:
         return environment
 
     @property
+    def executable(self) -> str:
+        return self._executable
+
+    @property
     def config_dir(self) -> str | None:
         return self._config_dir
 
