@@ -17,18 +17,32 @@ from alx.providers.coding_process import interactive_terminal
 
 _ROWS, _COLUMNS = 80, 240
 _MAX_CAPTURE = 256_000
-_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b(?![\[\]])[@-_]")
+# CSI, OSC, string controls (DCS/SOS/PM/APC), then every other complete
+# two-or-more byte escape (ESC 7/8, charset designations such as ESC ( B).
+# Claude Code's startup sends ESC 7, ESC 8, CSI r and CSI ? u; when this only
+# knew CSI and ESC @-_, each one made the whole session unreadable (2026-10-21).
+_ESCAPE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[PX^_][^\x1b]*\x1b\\|\x1b(?![\[\]PX^_])[ -/]*[0-~]"
+)
+# Alternate-screen switches start from a blank screen in either direction.
+_ALTERNATE_SCREEN = frozenset({'?47', '?1047', '?1049'})
+_MAX_RAW_EVIDENCE = 4000
+_SETTLE_SECONDS = 0.3
+_MAX_KEY_ATTEMPTS = 3
 _LABEL = re.compile(r"(?:Current session|Current week(?:\s*\([^\n]+\))?|Weekly(?:\s+[^\n]+)?)", re.I)
 _PERCENT = re.compile(r"(?<![\d.+-])(\d+(?:\.\d+)?)%\s*used\b", re.I)
 _RESET = re.compile(r"^Resets\s+(.+)$", re.I | re.M)
 _FOOTER = re.compile(r"Esc to (?:cancel|close|exit)", re.I)
-_PROMPT = re.compile(r'(?:^|\n)[ \t]*[❯>][ \t]*(?:Try ["“][^\n]*)?(?:\n|$)')
+# Claude Code 2.1 puts a no-break space after the prompt marker.
+_PROMPT = re.compile(r'(?:^|\n)[^\S\n]*[❯>][^\S\n]*(?:Try ["“][^\n]*)?(?:\n|$)')
 
 
 def rendered_screen(capture: str) -> str:
     """Apply cursor/erase controls so redraws cannot become duplicate limits."""
     lines: list[list[str]] = [[] for _ in range(_ROWS)]
     row = column = offset = 0
+    saved = (0, 0)
     clipped = False
     unsupported = False
     # The sentinel ensures trailing plain text passes through the same loop.
@@ -44,6 +58,8 @@ def rendered_screen(capture: str) -> str:
                 column = 0
             elif char == '\b':
                 column = max(0, column - 1)
+            elif char == '\t':
+                column = min(_COLUMNS - 1, (column // 8 + 1) * 8)
             elif char >= ' ' and char != '\x7f' and column < _COLUMNS:
                 line = lines[row]
                 line.extend(' ' for _ in range(column + 1 - len(line)))
@@ -52,12 +68,64 @@ def rendered_screen(capture: str) -> str:
             elif char >= ' ' and char != '\x7f':
                 clipped = True
         token = match.group()
-        if token.startswith('\x1b['):
+        if not token.startswith(('\x1b[', '\x1b]', '\x1bP', '\x1bX', '\x1b^', '\x1b_')):
+            # Two-byte escapes: only cursor save/restore, index and reset move
+            # anything; keypad modes and charset designations draw nothing.
+            if token == '\x1b7':
+                saved = (row, column)
+            elif token == '\x1b8':
+                row, column = saved
+            elif token == '\x1bD':
+                row = min(row + 1, _ROWS - 1)
+            elif token == '\x1bE':
+                row, column = min(row + 1, _ROWS - 1), 0
+            elif token == '\x1bM':
+                row = max(0, row - 1)
+            elif token == '\x1bc':
+                lines = [[] for _ in range(_ROWS)]
+                row = column = 0
+        elif token.startswith('\x1b['):
             body, op = token[2:-1], token[-1]
             if all(part.isdigit() or not part for part in body.split(';')):
                 args = [int(part or 0) for part in body.split(';')]
                 n = args[0] or 1
-                if op in ('H', 'f'):
+                if op == 'r':
+                    # Only the full-screen region is modelled; a narrower one
+                    # would make the scroll and line edits below move rows
+                    # outside it.
+                    top = args[0] or 1
+                    bottom = (args[1] or _ROWS) if len(args) > 1 else _ROWS
+                    if (top, bottom) != (1, _ROWS):
+                        unsupported = True
+                    # Setting the scrolling region homes the cursor.
+                    row = column = 0
+                elif op == 's':
+                    saved = (row, column)
+                elif op == 'u':
+                    row, column = saved
+                elif op == '@':
+                    line = lines[row]
+                    if column < len(line):
+                        line[column:column] = [' '] * n
+                        del line[_COLUMNS:]
+                elif op == 'P':
+                    del lines[row][column:column + n]
+                elif op == 'X':
+                    line = lines[row]
+                    line[column:column + n] = [' '] * len(line[column:column + n])
+                elif op == 'L':
+                    lines[row:row] = [[] for _ in range(min(n, _ROWS - row))]
+                    del lines[_ROWS:]
+                elif op == 'M':
+                    del lines[row:row + n]
+                    lines.extend([] for _ in range(_ROWS - len(lines)))
+                elif op == 'S':
+                    del lines[:n]
+                    lines.extend([] for _ in range(_ROWS - len(lines)))
+                elif op == 'T':
+                    lines[0:0] = [[] for _ in range(min(n, _ROWS))]
+                    del lines[_ROWS:]
+                elif op in ('H', 'f'):
                     row = min(n - 1, _ROWS - 1)
                     column = min((args[1] or 1) - 1, _COLUMNS - 1) if len(args) > 1 else 0
                 elif op == 'A':
@@ -89,9 +157,15 @@ def rendered_screen(capture: str) -> str:
                         lines[row] = []
                     elif args[0] == 1:
                         lines[row][:column + 1] = [' '] * min(column + 1, len(lines[row]))
-                elif op not in ('m', 'h', 'l', 'n', 'c', 't'):
+                elif op not in ('m', 'h', 'l', 'n', 'c', 't', 'g'):
                     unsupported = True
-            elif op not in ('m', 'h', 'l', 'q'):
+            elif op in ('h', 'l') and body in _ALTERNATE_SCREEN:
+                lines = [[] for _ in range(_ROWS)]
+                row = column = 0
+            elif op in ('J', 'K', 'b'):
+                # Selective erase and repeat change what is drawn in ways this
+                # renderer does not model. Other private or parameterised
+                # sequences are modes and queries that draw nothing.
                 unsupported = True
         offset = match.end()
     cleaned_screen = '\n'.join(''.join(line).rstrip() for line in lines).strip()
@@ -144,10 +218,14 @@ class ClaudeUsageReader:
     def read(self) -> dict[str, Any]:
         deadline = monotonic() + self.timeout_seconds
         capture = ''
+        # Everything received, kept apart from the evidence frames below so a
+        # failure can show what the terminal actually sent.
+        received = ''
         decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         child = None
         code = 'usage_timeout'
-        sent = trusted = trust_pending = trust_moved = False
+        sent = trusted = trust_pending = dirty = False
+        downs = 0
         screen = ''
         selected: list[str] = []
         try:
@@ -160,26 +238,40 @@ class ClaudeUsageReader:
                     rows=_ROWS, columns=_COLUMNS, deadline=deadline,
                 ) as (master, child):
                     while monotonic() < deadline:
+                        # Act only on a screen that has stopped changing. Claude
+                        # Code redraws its trust dialog during startup, which
+                        # reset a selection made in its first 200 ms and turned
+                        # Enter into "No, exit" (measured live, 2026-10-21).
+                        wait = max(0, deadline - monotonic())
                         ready, _, _ = select.select(
-                            [master], [], [], max(0, deadline - monotonic()),
+                            [master], [], [], min(wait, _SETTLE_SECONDS) if dirty else wait,
                         )
+                        if ready:
+                            try:
+                                chunk = os.read(master, 16384)
+                            except OSError as error:
+                                if error.errno != errno.EIO:
+                                    raise
+                                chunk = b''
+                            if not chunk:
+                                code = 'usage_unreadable'
+                                break
+                            text = decoder.decode(chunk)
+                            received = (received + text)[-_MAX_RAW_EVIDENCE:]
+                            capture += text
+                            if len(capture) > _MAX_CAPTURE:
+                                capture = capture[:_MAX_CAPTURE]
+                                code = 'usage_unreadable'
+                                break
+                            dirty = True
+                            # Keys wait for a quiet screen; a usage panel that
+                            # keeps refreshing is read as soon as it is complete.
+                            if not sent:
+                                continue
                         # No output means no new evidence about the last key.
-                        if not ready:
+                        if not dirty:
                             continue
-                        try:
-                            chunk = os.read(master, 16384)
-                        except OSError as error:
-                            if error.errno != errno.EIO:
-                                raise
-                            chunk = b''
-                        if not chunk:
-                            code = 'usage_unreadable'
-                            break
-                        capture += decoder.decode(chunk)
-                        if len(capture) > _MAX_CAPTURE:
-                            capture = capture[:_MAX_CAPTURE]
-                            code = 'usage_unreadable'
-                            break
+                        dirty = False
                         screen = rendered_screen(capture)
                         # Never interpret an incomplete escape or an unsupported
                         # cursor operation as a selection or command prompt.
@@ -217,11 +309,12 @@ class ClaudeUsageReader:
                                 # but start a fresh evidence frame after Enter.
                                 capture = ''
                                 screen = ''
-                            elif no and not trust_moved:
+                            elif no and downs < _MAX_KEY_ATTEMPTS:
+                                # A Down lost to a redraw is pressed again, a
+                                # bounded number of times. An unchanged No never
+                                # permits Enter.
                                 os.write(master, b'\x1b[B')
-                                trust_moved = True
-                            # An echo, unchanged No, or partial redraw is not
-                            # failure while time remains, and never permits Enter.
+                                downs += 1
                         elif not sent and len(selected) == 1 and _PROMPT.fullmatch(
                             selected[0] + '\n'
                         ):
@@ -244,6 +337,7 @@ class ClaudeUsageReader:
                         # Preserve the last screen as evidence. Unsupported
                         # selections and incomplete usage panels are unreadable;
                         # a silent CLI/loading screen remains a timeout.
+                        screen = rendered_screen(capture)
                         if trust_pending or (not sent and selected) or (
                             sent and _FOOTER.search(screen)
                         ):
@@ -254,5 +348,7 @@ class ClaudeUsageReader:
             code = 'cli_unavailable' if child is None else 'usage_unreadable'
         values = parse_usage(capture)
         if code:
-            values.update(limits=[], failure_code=code)
+            # Escaped so control sequences stay visible as text.
+            values.update(limits=[], failure_code=code,
+                          raw_output_tail=received.encode('unicode_escape').decode('ascii'))
         return values

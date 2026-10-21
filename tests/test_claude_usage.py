@@ -1,5 +1,6 @@
 """Screen protocol and real PTYs with fake executables only; no Claude login."""
 
+import json
 import os
 import re
 import sys
@@ -21,6 +22,9 @@ from alx.providers.claude_usage import ClaudeUsageReader, parse_usage, rendered_
 from alx.tools.claude_usage import DEFINITION, build_claude_usage_executors  # noqa: E402
 
 SCREEN = (ROOT / 'tests/fixtures/claude_usage.txt').read_text()
+# Real Claude Code output from AL/X's own login, recorded on 2026-10-21. The
+# hand-written screens above passed while the live reader failed three times.
+LIVE = json.loads((ROOT / 'tests/fixtures/claude_usage_live.json').read_text())
 TRUST_SCREEN = """ Accessing workspace:
 
  /private/var/folders/.../alx-claude-usage-XXXX
@@ -79,11 +83,27 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(rendered_screen('99% used\r\x1b[2K12% used'), '12% used')
         self.assertEqual(rendered_screen('old\nwrong\x1b[1A\r\x1b[2Knew'), 'new\nwrong')
 
+    def test_cursor_save_restore_scroll_and_line_edits_render(self):
+        self.assertEqual(rendered_screen('ab\x1b7cd\x1b8XY'), 'abXY')
+        self.assertEqual(rendered_screen('ab\x1b[scd\x1b[uXY'), 'abXY')
+        self.assertEqual(rendered_screen('x\x1b[ry'), 'y')
+        self.assertEqual(rendered_screen('one\ntwo\x1b[1S'), 'two')
+        self.assertEqual(rendered_screen('abcd\x1b[1G\x1b[2P'), 'cd')
+        self.assertEqual(rendered_screen('abcd\x1b[1G\x1b[2X'), 'cd')
+        self.assertEqual(rendered_screen('a\x1b(B\x1b=b\x1b[?u\x1b[>0q\x1b[?2004h'), 'ab')
+        self.assertEqual(rendered_screen('old\x1b[?1049hnew'), 'new')
+        self.assertIn('[terminal_output_unreadable]', rendered_screen('a\x1b[?2J'))
+        # A narrower scrolling region is not modelled, so it is not trusted.
+        self.assertIn('[terminal_output_unreadable]',
+                      rendered_screen('panel\x1b[70;80r\x1b[S'))
+        self.assertEqual(rendered_screen('x\x1b[1;80ry'), 'y')
+
     def test_unreadable_incomplete_ambiguous_and_unknown_limits_fail(self):
         for screen in ('Please sign in', SCREEN.replace('12% used', '101% used'),
                        SCREEN.replace('12% used', '-1% used'),
                        SCREEN.replace('12% used', '12% spent'),
-                       '\x1b[1S' + SCREEN,
+                       # Repeat (CSI b) still changes the screen unmodelled.
+                       '\x1b[1b' + SCREEN,
                        SCREEN.replace('Resets 3pm', 'Resets ' + 'x' * 250),
                        SCREEN.replace('Resets 3pm (Africa/Johannesburg)', ''),
                        SCREEN.replace('12% used', '12% used 14% used'),
@@ -289,7 +309,11 @@ class DriverTests(unittest.TestCase):
                     self.assertEqual(values['failure_code'], 'usage_unreadable')
                     self.assertEqual(values['limits'], [])
                     self.assertIn('❯ No, exit', values['screen_capture'])
-                    self.assertFalse(self.events.exists(), 'no input after unconfirmed selection')
+                    # Down may be retried; nothing else, and never Enter.
+                    if self.events.exists():
+                        self.assertEqual(
+                            self.events.read_bytes().replace(b'\x1b[B', b''), b'',
+                            'only Down after an unconfirmed selection')
                 self.assert_dead()
 
     def test_timeout_after_usage_and_unreadable_screen(self):
@@ -369,6 +393,7 @@ class OutputDrivenTests(unittest.TestCase):
             result = ClaudeUsageReader('unused', {}, timeout_seconds=timeout).read()
         self.assertEqual(closed, [True])
         self.assertLessEqual(now[0], timeout)
+        self.finished_at = now[0]
         return result, keys
 
     def test_delayed_down_redraw_review_regression(self):
@@ -407,7 +432,56 @@ class OutputDrivenTests(unittest.TestCase):
         initial = TRUST_SCREEN.replace('/private/var/folders/.../alx-claude-usage-XXXX', '{cwd}')
         result, keys = self.drive([(0, initial)], {b'\x1b[B': [(0.4, '\x1b[0m')]})
         self.assertEqual(result['failure_code'], 'usage_unreadable')
-        self.assertEqual([key for _, key in keys], [b'\x1b[B'])
+        # A lost Down is pressed again, a bounded number of times; never Enter.
+        self.assertEqual([key for _, key in keys], [b'\x1b[B'] * 3)
+        self.assertIn('raw_output_tail', result)
+
+    def test_recorded_live_session_reads_usage(self):
+        result, keys = self.drive([(0, LIVE['startup'])], {
+            b'\x1b[B': [(0.05, LIVE['after_down'])],
+            b'\r': [(0.3, LIVE['after_enter'])],
+            b'/usage\r': [(0.5, LIVE['after_usage'])],
+        }, timeout=10)
+        self.assertNotIn('failure_code', result)
+        self.assertEqual([key for _, key in keys], [b'\x1b[B', b'\r', b'/usage\r'])
+        self.assertEqual(
+            [(item['label'], item['percent_used']) for item in result['limits']],
+            [('Current session', 49.0), ('Current week (all models)', 39.0)],
+        )
+
+    def test_recorded_startup_codes_render_readable(self):
+        # ESC 7, ESC 8, CSI r and CSI ? u each marked the session unreadable.
+        screen = rendered_screen(LIVE['startup'].replace('{cwd}', '/tmp/x'))
+        self.assertNotIn('[terminal_output_unreadable]', screen)
+        self.assertIn('❯ No, exit', screen)
+
+    def test_refreshing_usage_panel_is_read_without_a_quiet_screen(self):
+        # /usage keeps animating a status line; the complete limits must be
+        # read while it does, not only once output stops.
+        refresh = [(0.5 + 0.1 * tick, f'\x1b[1;1HRefreshing {tick}') for tick in range(120)]
+        result, keys = self.drive([(0, LIVE['startup'])], {
+            b'\x1b[B': [(0.05, LIVE['after_down'])],
+            b'\r': [(0.3, LIVE['after_enter'])],
+            b'/usage\r': [(0.4, LIVE['after_usage']), *refresh],
+        }, timeout=10)
+        self.assertNotIn('failure_code', result)
+        self.assertEqual(len(result['limits']), 2)
+        # Read as the panel completed, long before the refreshing stops.
+        self.assertLess(self.finished_at, 3)
+
+    def test_keys_wait_for_startup_output_to_settle(self):
+        # Live: keys pressed within Claude's first 200 ms were undone by its
+        # startup redraw and Enter chose "No, exit". The menu arrives first
+        # and the rest of the startup output 150 ms later.
+        split = LIVE['startup'].index('\x1b[2G\x1b[38;5;246mEnter')
+        result, keys = self.drive(
+            [(0, LIVE['startup'][:split]), (0.15, LIVE['startup'][split:])], {
+                b'\x1b[B': [(0.05, LIVE['after_down'])],
+                b'\r': [(0.3, LIVE['after_enter'])],
+                b'/usage\r': [(0.5, LIVE['after_usage'])],
+            }, timeout=10)
+        self.assertNotIn('failure_code', result)
+        self.assertGreaterEqual(keys[0][0], 0.15 + 0.3)
 
     def test_fragmented_ansi_redraw_cannot_authorize_enter_early(self):
         initial = TRUST_SCREEN.replace('/private/var/folders/.../alx-claude-usage-XXXX', '{cwd}')
