@@ -169,7 +169,7 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(ChildProcessError):
             os.waitpid(pid, os.WNOHANG)
 
-    def test_interactive_usage_same_identity_and_clean_exit(self):
+    def test_interactive_usage_same_identity_and_reaped_exit(self):
         self.fake(
             f'assert os.environ["CLAUDE_CONFIG_DIR"] == {str(self.root / "dedicated")!r}\n'
             'assert "ANTHROPIC_API_KEY" not in os.environ\n'
@@ -180,15 +180,14 @@ class DriverTests(unittest.TestCase):
             'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
             'assert command == b"/usage\\r"\n'
             f'os.write(1, {("\x1b[2J\x1b[H" + SCREEN).encode()!r})\n'
-            'command = b""\n'
-            'while not command.endswith(b"/exit\\r"): command += os.read(0, 1)\n'
-            'assert command.startswith(b"\\x1b")\n'
-            'events.write_text("clean_exit")\n'
+            'while True:\n'
+            '    data = os.read(0, 1024)\n'
+            '    with events.open("ab") as log: log.write(data)\n'
         )
         values = self.reader().read()
         self.assertNotIn('failure_code', values)
         self.assertEqual(values['limits'], parse_usage(SCREEN)['limits'])
-        self.assertEqual(self.events.read_text(), 'clean_exit')
+        self.assertFalse(self.events.exists(), 'cleanup must not send confirmation keys')
         self.assert_dead()
 
     def test_timeout_kills_and_reaps_uncooperative_child(self):
@@ -305,6 +304,16 @@ class DriverTests(unittest.TestCase):
             self.assertIn(output, values['screen_capture'])
             self.assert_dead()
 
+    def test_reader_protocol_exception_still_reaps_child(self):
+        self.fake('os.write(1, b"> ")\n'
+                  'while os.read(0, 1) != b"\\r": pass\n'
+                  f'os.write(1, {SCREEN.encode()!r})\n'
+                  'while True: time.sleep(1)\n')
+        with patch('alx.providers.claude_usage.parse_usage', side_effect=RuntimeError('parser failed')):
+            with self.assertRaisesRegex(RuntimeError, 'parser failed'):
+                self.reader().read()
+        self.assert_dead()
+
     def test_missing_executable_and_spawn_error_close_both_descriptors(self):
         import alx.providers.coding_process as runner
         for spawn in (None, OSError('spawn failed')):
@@ -317,6 +326,133 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(values['failure_code'], 'cli_unavailable')
                 self.assertGreaterEqual(close.call_count, 2)
                 self.assertEqual(values['screen_capture'], '')
+
+
+class OutputDrivenTests(unittest.TestCase):
+    """Virtual PTY time makes delayed redraws independent of host load."""
+
+    def drive(self, initial, transitions, timeout=4):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        import alx.providers.claude_usage as usage
+
+        now, pending, keys, closed = [0.0], [], [], []
+
+        @contextmanager
+        def terminal(*args, **kwargs):
+            pending.extend((delay, text.replace('{cwd}', kwargs['cwd']).encode())
+                           for delay, text in initial)
+            try:
+                yield 999, SimpleNamespace(poll=lambda: None)
+            finally:
+                closed.append(True)
+
+        def select_output(read, write, error, timeout):
+            pending.sort(key=lambda item: item[0])
+            if pending and pending[0][0] <= now[0] + timeout:
+                now[0] = max(now[0], pending[0][0])
+                return read, [], []
+            now[0] += timeout
+            return [], [], []
+
+        def send(fd, data):
+            keys.append((now[0], data))
+            pending.extend((now[0] + delay, text.encode())
+                           for delay, text in transitions.get(data, []))
+            return len(data)
+
+        with patch.object(usage, 'interactive_terminal', terminal), \
+             patch.object(usage, 'monotonic', lambda: now[0]), \
+             patch.object(usage.select, 'select', select_output), \
+             patch.object(usage.os, 'read', lambda *args: pending.pop(0)[1]), \
+             patch.object(usage.os, 'write', send):
+            result = ClaudeUsageReader('unused', {}, timeout_seconds=timeout).read()
+        self.assertEqual(closed, [True])
+        self.assertLessEqual(now[0], timeout)
+        return result, keys
+
+    def test_delayed_down_redraw_review_regression(self):
+        initial = TRUST_SCREEN.replace('/private/var/folders/.../alx-claude-usage-XXXX', '{cwd}')
+        yes = '\x1b[11;1H\x1b[2K   No, exit\x1b[12;1H\x1b[2K ❯ Yes, I trust this folder'
+        result, keys = self.drive([(0, initial)], {
+            b'\x1b[B': [(0.4, yes)],
+            b'\r': [(0.6, '\x1b[2J\x1b[H> ')],
+            b'/usage\r': [(0.8, '\x1b[2J\x1b[H' + SCREEN)],
+        })
+        self.assertNotIn('failure_code', result)
+        self.assertEqual([key for _, key in keys], [b'\x1b[B', b'\r', b'/usage\r'])
+        self.assertGreaterEqual(keys[1][0] - keys[0][0], 0.4)
+        self.assertGreaterEqual(keys[2][0] - keys[1][0], 0.6)
+
+    def test_usage_echo_and_partial_limits_do_not_complete_read(self):
+        result, keys = self.drive([(0, '> ')], {
+            b'/usage\r': [(0.01, '/usage\r\n> '),
+                           (0.8, '\x1b[2J\x1b[H' + SCREEN.replace('25% used', 'loading')),
+                           (1.6, '\x1b[2J\x1b[H' + SCREEN)],
+        })
+        self.assertNotIn('failure_code', result)
+        self.assertEqual(result['limits'], parse_usage(SCREEN)['limits'])
+        self.assertEqual([key for _, key in keys], [b'/usage\r'])
+
+    def test_unknown_interstitial_is_evidence_without_confirmation(self):
+        for screen in ('Choose a theme\n❯ Dark', 'Sign in\n❯ Continue',
+                       'Update available\n❯ Install', 'Important notice\n> Continue'):
+            with self.subTest(screen=screen):
+                result, keys = self.drive([(0, screen)], {})
+                self.assertEqual(result['failure_code'], 'usage_unreadable')
+                self.assertIn(screen, result['screen_capture'])
+                self.assertEqual(keys, [])
+
+    def test_down_without_selected_yes_never_confirms(self):
+        initial = TRUST_SCREEN.replace('/private/var/folders/.../alx-claude-usage-XXXX', '{cwd}')
+        result, keys = self.drive([(0, initial)], {b'\x1b[B': [(0.4, '\x1b[0m')]})
+        self.assertEqual(result['failure_code'], 'usage_unreadable')
+        self.assertEqual([key for _, key in keys], [b'\x1b[B'])
+
+    def test_fragmented_ansi_redraw_cannot_authorize_enter_early(self):
+        initial = TRUST_SCREEN.replace('/private/var/folders/.../alx-claude-usage-XXXX', '{cwd}')
+        result, keys = self.drive([(0, initial)], {
+            b'\x1b[B': [(0.2, '\x1b[11;1H\x1b[2K   No, exit\x1b[12;1H\x1b[2K ❯ Yes, I trust this folder\x1b['),
+                         (0.7, '0m')],
+            b'\r': [(0.5, '\x1b[2J\x1b[H> ')],
+            b'/usage\r': [(0.1, '\x1b[2J\x1b[H' + SCREEN)],
+        })
+        self.assertNotIn('failure_code', result)
+        self.assertGreaterEqual(keys[1][0], 0.7)
+
+    def test_confirmed_trust_waits_for_prompt_not_another_interstitial(self):
+        initial = TRUST_YES_SCREEN.replace('/private/var/folders/.../alx-claude-usage-XXXX', '{cwd}')
+        result, keys = self.drive([(0, initial)], {
+            b'\r': [(0.5, '\x1b[2J\x1b[HLogin required\n❯ Sign in')],
+        })
+        self.assertEqual(result['failure_code'], 'usage_unreadable')
+        self.assertIn('Login required', result['screen_capture'])
+        self.assertEqual([key for _, key in keys], [b'\r'])
+
+    def test_footer_before_incomplete_limits_and_silent_transitions(self):
+        for emissions, expected in (
+            ([], 'usage_timeout'),
+            ([(0.1, 'Esc to cancel\nCurrent session\n12% used\nResets soon\n'
+                     'Current week (all models)\nloading')], 'usage_unreadable'),
+        ):
+            with self.subTest(emissions=emissions):
+                result, keys = self.drive([(0, '> ')], {b'/usage\r': emissions})
+                self.assertEqual(result['failure_code'], expected)
+                self.assertEqual([key for _, key in keys], [b'/usage\r'])
+
+    def test_silent_startup_is_bounded(self):
+        result, keys = self.drive([], {})
+        self.assertEqual(result['failure_code'], 'usage_timeout')
+        self.assertEqual(keys, [])
+
+    def test_footer_painted_first_does_not_finish_partial_panel(self):
+        result, keys = self.drive([(0, '> ')], {
+            b'/usage\r': [(0.1, 'Esc to cancel\nCurrent session\n12% used\nResets soon\n'
+                           'Current week (all models)\n25% used\nResets tomorrow'),
+                          (1.2, '\x1b[2J\x1b[H' + SCREEN)],
+        })
+        self.assertNotIn('failure_code', result)
+        self.assertEqual(result['limits'], parse_usage(SCREEN)['limits'])
 
 
 class InteractiveTerminalTests(unittest.TestCase):
