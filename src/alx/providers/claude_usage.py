@@ -17,7 +17,7 @@ from alx.providers.coding_process import interactive_terminal
 
 _ROWS, _COLUMNS = 80, 240
 _MAX_CAPTURE = 256_000
-_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
+_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b(?![\[\]])[@-_]")
 _LABEL = re.compile(r"(?:Current session|Current week(?:\s*\([^\n]+\))?|Weekly(?:\s+[^\n]+)?)", re.I)
 _PERCENT = re.compile(r"(?<![\d.+-])(\d+(?:\.\d+)?)%\s*used\b", re.I)
 _RESET = re.compile(r"^Resets\s+(.+)$", re.I | re.M)
@@ -34,7 +34,9 @@ def rendered_screen(capture: str) -> str:
     # The sentinel ensures trailing plain text passes through the same loop.
     for match in _ESCAPE.finditer(capture + '\x1b[m'):
         for char in capture[offset:match.start()]:
-            if char == '\n':
+            if char == '\x1b':
+                unsupported = True
+            elif char == '\n':
                 clipped |= row == _ROWS - 1
                 row = min(row + 1, _ROWS - 1)
                 column = 0
@@ -106,11 +108,13 @@ def parse_usage(screen_capture: str) -> dict[str, Any]:
     }
     screen_lines = [line.strip().strip('│').strip() for line in screen.splitlines()]
     headings = [(i, line) for i, line in enumerate(screen_lines) if _LABEL.fullmatch(line)]
+    footers = [i for i, line in enumerate(screen_lines) if _FOOTER.search(line)]
     try:
-        if not headings or not _FOOTER.search(screen) or '[terminal_output_unreadable]' in screen or '\x1b' in screen:
+        if (not headings or len(footers) != 1 or footers[0] <= headings[-1][0]
+                or '[terminal_output_unreadable]' in screen or '\x1b' in screen):
             raise ValueError
         for index, (start, label) in enumerate(headings):
-            end = headings[index + 1][0] if index + 1 < len(headings) else len(screen_lines)
+            end = headings[index + 1][0] if index + 1 < len(headings) else footers[0]
             block = '\n'.join(screen_lines[start + 1:end])
             percents, resets = _PERCENT.findall(block), _RESET.findall(block)
             if len(percents) != 1 or len(resets) != 1 or not 0 <= float(percents[0]) <= 100:
@@ -120,7 +124,8 @@ def parse_usage(screen_capture: str) -> dict[str, Any]:
             values['limits'].append({
                 'label': label, 'percent_used': float(percents[0]), 'resets_at': resets[0],
             })
-        if screen.count('%') != len(headings):
+        if (screen.count('%') != len(headings)
+                or len(_RESET.findall('\n'.join(screen_lines))) != len(headings)):
             raise ValueError
     except ValueError:
         values['limits'] = []
@@ -142,9 +147,9 @@ class ClaudeUsageReader:
         decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         child = None
         code = 'usage_timeout'
-        sent = False
-        trusted = False
-        last_output = monotonic()
+        sent = trusted = trust_pending = trust_moved = False
+        screen = ''
+        selected: list[str] = []
         try:
             with TemporaryDirectory(prefix='alx-claude-usage-') as directory:
                 with interactive_terminal(
@@ -155,51 +160,96 @@ class ClaudeUsageReader:
                     rows=_ROWS, columns=_COLUMNS, deadline=deadline,
                 ) as (master, child):
                     while monotonic() < deadline:
-                        ready, _, _ = select.select([master], [], [], min(0.1, max(0, deadline - monotonic())))
-                        if ready:
-                            try:
-                                chunk = os.read(master, 16384)
-                            except OSError as error:
-                                if error.errno != errno.EIO:
-                                    raise
-                                chunk = b''
-                            if not chunk:
-                                code = '' if sent and _FOOTER.search(rendered_screen(capture)) else 'usage_unreadable'
-                                break
-                            capture += decoder.decode(chunk)
-                            last_output = monotonic()
-                            if len(capture) > _MAX_CAPTURE:
-                                capture = capture[:_MAX_CAPTURE]
-                                code = 'usage_unreadable'
-                                break
+                        ready, _, _ = select.select(
+                            [master], [], [], max(0, deadline - monotonic()),
+                        )
+                        # No output means no new evidence about the last key.
+                        if not ready:
+                            continue
+                        try:
+                            chunk = os.read(master, 16384)
+                        except OSError as error:
+                            if error.errno != errno.EIO:
+                                raise
+                            chunk = b''
+                        if not chunk:
+                            code = 'usage_unreadable'
+                            break
+                        capture += decoder.decode(chunk)
+                        if len(capture) > _MAX_CAPTURE:
+                            capture = capture[:_MAX_CAPTURE]
+                            code = 'usage_unreadable'
+                            break
                         screen = rendered_screen(capture)
-                        # The CLI may ask to trust its workspace before showing a
-                        # prompt. Only confirm our own empty disposable directory;
-                        # never answer login, permission or onboarding questions.
-                        if not trusted and not sent and (
-                            ('1. Yes, I trust this folder' in screen or (
-                                '1. Yes, proceed' in screen
-                                and ('Do you trust this folder?' in screen
-                                     or 'Do you trust the files in this folder?' in screen)
-                            ))
-                            and (directory in screen or os.path.realpath(directory) in screen)
+                        # Never interpret an incomplete escape or an unsupported
+                        # cursor operation as a selection or command prompt.
+                        if '\x1b' in screen or '[terminal_output_unreadable]' in screen:
+                            continue
+                        selected = [line.strip() for line in screen.splitlines()
+                                    if line.lstrip().startswith(('❯', '>'))]
+                        is_trust = (
+                            '1. Yes, I trust this folder' in screen
+                            or ('1. Yes, proceed' in screen and (
+                                'Do you trust this folder?' in screen
+                                or 'Do you trust the files in this folder?' in screen))
+                            or ('Quick safety check:' in screen
+                                and 'Yes, I trust this folder' in screen
+                                and 'No, exit' in screen)
+                        )
+                        if not trusted and not sent and (trust_pending or is_trust):
+                            trust_pending = True
+                            # Only this disposable directory may be trusted.
+                            # A partial redraw may temporarily omit its path.
+                            paths = (directory, os.path.realpath(directory))
+                            if not any(line.strip() in paths for line in screen.splitlines()):
+                                continue
+                            yes = len(selected) == 1 and re.fullmatch(
+                                r'[❯>]\s*(?:1\.\s*)?Yes, (?:I trust this folder|proceed)',
+                                selected[0],
+                            )
+                            no = len(selected) == 1 and re.fullmatch(
+                                r'[❯>]\s*(?:2\.\s*)?No, exit', selected[0],
+                            )
+                            if yes:
+                                os.write(master, b'\r')
+                                trusted, trust_pending = True, False
+                                # Retain the renderer's cursor state after Down,
+                                # but start a fresh evidence frame after Enter.
+                                capture = ''
+                                screen = ''
+                            elif no and not trust_moved:
+                                os.write(master, b'\x1b[B')
+                                trust_moved = True
+                            # An echo, unchanged No, or partial redraw is not
+                            # failure while time remains, and never permits Enter.
+                        elif not sent and len(selected) == 1 and _PROMPT.fullmatch(
+                            selected[0] + '\n'
                         ):
-                            os.write(master, b'1\r')
-                            trusted = True
-                            capture = ''
-                        elif not sent and _PROMPT.search(screen):
                             os.write(master, b'/usage\r')
                             capture = ''
+                            screen = ''
                             sent = True
-                            last_output = monotonic()
-                        elif sent and monotonic() - last_output >= 0.5 and (
-                            _FOOTER.search(screen) or _PROMPT.search(screen)
+                        elif sent:
+                            values = parse_usage(capture)
+                            labels = [item['label'].lower() for item in values['limits']]
+                            # Both session and weekly limits must be present;
+                            # a footer alone or a command echo is not completion.
+                            if ('failure_code' not in values
+                                    and 'current session' in labels
+                                    and any(label.startswith(('current week', 'weekly'))
+                                            for label in labels)):
+                                code = ''
+                                break
+                    else:
+                        # Preserve the last screen as evidence. Unsupported
+                        # selections and incomplete usage panels are unreadable;
+                        # a silent CLI/loading screen remains a timeout.
+                        if trust_pending or (not sent and selected) or (
+                            sent and _FOOTER.search(screen)
                         ):
-                            code = ''
-                            break
-                    if child.poll() is None:
-                        os.write(master, b'\x1b')
-                        os.write(master, b'\x15/exit\r')
+                            code = 'usage_unreadable'
+                    # interactive_terminal owns termination and reaping on all
+                    # paths. No cleanup keys may confirm an interstitial screen.
         except OSError:
             code = 'cli_unavailable' if child is None else 'usage_unreadable'
         values = parse_usage(capture)
