@@ -14,7 +14,9 @@ DEFINITION = CapabilityDefinition(
     READ_CLAUDE_USAGE,
     "Read your own Claude subscription limits through the existing Claude login. "
     "Returns printed labels, percent used and reset text, raw screen text and read time. "
-    "Unreadable or timed-out screens return failure evidence, never estimates.",
+    "Unreadable or timed-out screens return failure evidence, never estimates, "
+    "including raw_output_tail: the last terminal output received, with control "
+    "sequences escaped so you can see exactly what the terminal sent.",
     StructuredSchema(ValueKind.OBJECT, extra_properties=False),
     StructuredSchema(ValueKind.OBJECT, {
         'limits': StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(
@@ -22,7 +24,7 @@ DEFINITION = CapabilityDefinition(
                 'label': _STRING, 'percent_used': StructuredSchema(ValueKind.NUMBER),
                 'resets_at': _STRING,
             }, ('label', 'percent_used', 'resets_at'), extra_properties=False)),
-        'screen_capture': _STRING, 'read_at': _STRING,
+        'screen_capture': _STRING, 'read_at': _STRING, 'raw_output_tail': _STRING,
     }, ('limits', 'screen_capture', 'read_at'), extra_properties=False),
     SideEffect.NONE,
     ('cli_unavailable', 'usage_timeout', 'usage_unreadable'),
