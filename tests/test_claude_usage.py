@@ -123,9 +123,9 @@ class DriverTests(unittest.TestCase):
         self.pid_file = self.root / 'pid'
         self.events = self.root / 'events'
 
-    def fake(self, behavior):
+    def fake(self, behavior, *, prelude=''):
         source = (
-            '#!' + sys.executable + '\n'
+            '#!' + sys.executable + '\n' + prelude +
             'import os, sys, time, tty, signal\n'
             'from pathlib import Path\n'
             f'Path({str(self.pid_file)!r}).write_text(str(os.getpid()))\n'
@@ -175,11 +175,13 @@ class DriverTests(unittest.TestCase):
         self.assert_dead()
 
     def test_timeout_kills_and_reaps_uncooperative_child(self):
+        # Emit evidence before fixture setup, with startup headroom under load.
         self.fake('signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
-                  'os.write(1, b"still starting")\nwhile True: time.sleep(1)\n')
+                  'while True: time.sleep(1)\n',
+                  prelude='import os\nos.write(1, b"still starting")\n')
         started = time.monotonic()
-        values = self.reader(1).read()
-        self.assertLess(time.monotonic() - started, 2.5)
+        values = self.reader(3).read()
+        self.assertLess(time.monotonic() - started, 4.5)
         self.assertEqual(values['failure_code'], 'usage_timeout')
         self.assertIn('still starting', values['screen_capture'])
         self.assert_dead()
@@ -244,17 +246,56 @@ class DriverTests(unittest.TestCase):
             self.assert_dead()
 
     def test_missing_executable_and_spawn_error_close_both_descriptors(self):
-        import alx.providers.claude_usage as usage
+        import alx.providers.coding_process as runner
         for spawn in (None, OSError('spawn failed')):
-            with patch.object(usage.os, 'close', wraps=os.close) as close:
+            with patch.object(runner.os, 'close', wraps=os.close) as close:
                 if spawn:
-                    with patch.object(usage.subprocess, 'Popen', side_effect=spawn):
+                    with patch.object(runner.subprocess, 'Popen', side_effect=spawn):
                         values = self.reader().read()
                 else:
                     values = self.reader().read()
                 self.assertEqual(values['failure_code'], 'cli_unavailable')
                 self.assertGreaterEqual(close.call_count, 2)
                 self.assertEqual(values['screen_capture'], '')
+
+
+class InteractiveTerminalTests(unittest.TestCase):
+    def test_protocol_error_reaps_child_and_closes_terminal(self):
+        from alx.providers.coding_process import interactive_terminal
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, 'protocol failed'):
+                with interactive_terminal(
+                    [sys.executable, '-c', 'import time; time.sleep(30)'],
+                    cwd=directory, env=dict(os.environ), rows=80, columns=240,
+                    deadline=time.monotonic() + 2,
+                ) as (master, child):
+                    self.assertEqual(os.get_terminal_size(master), (240, 80))
+                    raise RuntimeError('protocol failed')
+            with self.assertRaises(OSError):
+                os.fstat(master)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child.pid, 0)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(child.pid, os.WNOHANG)
+
+    def test_terminal_setup_error_closes_both_descriptors_without_spawning(self):
+        import alx.providers.coding_process as runner
+
+        descriptors = runner.pty.openpty()
+        with patch.object(runner.pty, 'openpty', return_value=descriptors):
+            with patch.object(runner.fcntl, 'ioctl', side_effect=OSError('setup failed')):
+                with patch.object(runner.subprocess, 'Popen') as spawn:
+                    with self.assertRaisesRegex(OSError, 'setup failed'):
+                        with runner.interactive_terminal(
+                            ['unused'], cwd='.', env={}, rows=80, columns=240,
+                            deadline=time.monotonic() + 2,
+                        ):
+                            self.fail('terminal setup should fail')
+                    spawn.assert_not_called()
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
 
 
 if __name__ == '__main__':

@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import codecs
 import errno
-import fcntl
 import os
-import pty
 import re
 import select
-import signal
-import struct
-import subprocess
-import termios
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from tempfile import TemporaryDirectory
 from time import monotonic
 from typing import Any
+
+from alx.providers.coding_process import interactive_terminal
 
 _ROWS, _COLUMNS = 80, 240
 _MAX_CAPTURE = 256_000
@@ -144,7 +140,6 @@ class ClaudeUsageReader:
         deadline = monotonic() + self.timeout_seconds
         capture = ''
         decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-        master = slave = None
         child = None
         code = 'usage_timeout'
         sent = False
@@ -152,79 +147,61 @@ class ClaudeUsageReader:
         last_output = monotonic()
         try:
             with TemporaryDirectory(prefix='alx-claude-usage-') as directory:
-                master, slave = pty.openpty()
-                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', _ROWS, _COLUMNS, 0, 0))
-                child = subprocess.Popen(
+                with interactive_terminal(
                     [self.executable, '--tools', '', '--mcp-config', '{"mcpServers":{}}',
                      '--strict-mcp-config', '--setting-sources', ''],
-                    stdin=slave, stdout=slave, stderr=slave, cwd=directory,
-                    env={**self.environment, 'TERM': 'xterm-256color'}, start_new_session=True,
-                )
-                os.close(slave)
-                slave = None
-                while monotonic() < deadline:
-                    ready, _, _ = select.select([master], [], [], min(0.1, max(0, deadline - monotonic())))
-                    if ready:
-                        try:
-                            chunk = os.read(master, 16384)
-                        except OSError as error:
-                            if error.errno != errno.EIO:
-                                raise
-                            chunk = b''
-                        if not chunk:
-                            code = '' if sent and _FOOTER.search(rendered_screen(capture)) else 'usage_unreadable'
+                    cwd=directory,
+                    env={**self.environment, 'TERM': 'xterm-256color'},
+                    rows=_ROWS, columns=_COLUMNS, deadline=deadline,
+                ) as (master, child):
+                    while monotonic() < deadline:
+                        ready, _, _ = select.select([master], [], [], min(0.1, max(0, deadline - monotonic())))
+                        if ready:
+                            try:
+                                chunk = os.read(master, 16384)
+                            except OSError as error:
+                                if error.errno != errno.EIO:
+                                    raise
+                                chunk = b''
+                            if not chunk:
+                                code = '' if sent and _FOOTER.search(rendered_screen(capture)) else 'usage_unreadable'
+                                break
+                            capture += decoder.decode(chunk)
+                            last_output = monotonic()
+                            if len(capture) > _MAX_CAPTURE:
+                                capture = capture[:_MAX_CAPTURE]
+                                code = 'usage_unreadable'
+                                break
+                        screen = rendered_screen(capture)
+                        # The CLI may ask to trust its workspace before showing a
+                        # prompt. Only confirm our own empty disposable directory;
+                        # never answer login, permission or onboarding questions.
+                        if not trusted and not sent and (
+                            ('1. Yes, I trust this folder' in screen or (
+                                '1. Yes, proceed' in screen
+                                and ('Do you trust this folder?' in screen
+                                     or 'Do you trust the files in this folder?' in screen)
+                            ))
+                            and (directory in screen or os.path.realpath(directory) in screen)
+                        ):
+                            os.write(master, b'1\r')
+                            trusted = True
+                            capture = ''
+                        elif not sent and _PROMPT.search(screen):
+                            os.write(master, b'/usage\r')
+                            capture = ''
+                            sent = True
+                            last_output = monotonic()
+                        elif sent and monotonic() - last_output >= 0.5 and (
+                            _FOOTER.search(screen) or _PROMPT.search(screen)
+                        ):
+                            code = ''
                             break
-                        capture += decoder.decode(chunk)
-                        last_output = monotonic()
-                        if len(capture) > _MAX_CAPTURE:
-                            capture = capture[:_MAX_CAPTURE]
-                            code = 'usage_unreadable'
-                            break
-                    screen = rendered_screen(capture)
-                    # The CLI may ask to trust its workspace before showing a
-                    # prompt. Only confirm our own empty disposable directory;
-                    # never answer login, permission or onboarding questions.
-                    if not trusted and not sent and (
-                        ('1. Yes, I trust this folder' in screen or (
-                            '1. Yes, proceed' in screen
-                            and ('Do you trust this folder?' in screen
-                                 or 'Do you trust the files in this folder?' in screen)
-                        ))
-                        and (directory in screen or os.path.realpath(directory) in screen)
-                    ):
-                        os.write(master, b'1\r')
-                        trusted = True
-                        capture = ''
-                    elif not sent and _PROMPT.search(screen):
-                        os.write(master, b'/usage\r')
-                        capture = ''
-                        sent = True
-                        last_output = monotonic()
-                    elif sent and monotonic() - last_output >= 0.5 and (
-                        _FOOTER.search(screen) or _PROMPT.search(screen)
-                    ):
-                        code = ''
-                        break
-                if child.poll() is None:
-                    os.write(master, b'\x1b')
-                    os.write(master, b'\x15/exit\r')
-                    try:
-                        child.wait(timeout=max(0, min(0.3, deadline - monotonic())))
-                    except subprocess.TimeoutExpired:
-                        pass
+                    if child.poll() is None:
+                        os.write(master, b'\x1b')
+                        os.write(master, b'\x15/exit\r')
         except OSError:
             code = 'cli_unavailable' if child is None else 'usage_unreadable'
-        finally:
-            if child is not None:
-                # An exited parent can still leave descendants behind.
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                child.wait()
-            for descriptor in (master, slave):
-                if descriptor is not None:
-                    os.close(descriptor)
         values = parse_usage(capture)
         if code:
             values.update(limits=[], failure_code=code)
