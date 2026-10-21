@@ -209,6 +209,28 @@ class DriverTests(unittest.TestCase):
             self.assertNotIn(b'1\r', self.events.read_bytes())
         self.assert_dead()
 
+    def test_folder_trust_prompt_precedes_usage(self):
+        for question in ('Do you trust this folder?',
+                         'Do you trust the files in this folder?'):
+            with self.subTest(question=question):
+                self.fake(
+                    f'os.write(1, ({question!r} + "\\n" + os.getcwd() + '
+                    '"\\n  1. Yes, proceed\\n❯ 2. No, exit\\n").encode())\n'
+                    'command = b""\n'
+                    'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
+                    'assert command == b"1\\r"\n'
+                    'os.write(1, b"> ")\n'
+                    'command = b""\n'
+                    'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
+                    'assert command == b"/usage\\r"\n'
+                    f'os.write(1, {SCREEN.encode()!r})\n'
+                    'while True: time.sleep(1)\n'
+                )
+                values = self.reader().read()
+                self.assertNotIn('failure_code', values)
+                self.assertEqual(values['limits'], parse_usage(SCREEN)['limits'])
+                self.assert_dead()
+
     def test_timeout_after_usage_and_unreadable_screen(self):
         for output, expected in (('loading', 'usage_timeout'),
                                  ('unreadable\nEsc to cancel', 'usage_unreadable')):

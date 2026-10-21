@@ -185,7 +185,11 @@ class ClaudeUsageReader:
                     # prompt. Only confirm our own empty disposable directory;
                     # never answer login, permission or onboarding questions.
                     if not trusted and not sent and (
-                        '1. Yes, I trust this folder' in screen
+                        ('1. Yes, I trust this folder' in screen or (
+                            '1. Yes, proceed' in screen
+                            and ('Do you trust this folder?' in screen
+                                 or 'Do you trust the files in this folder?' in screen)
+                        ))
                         and (directory in screen or os.path.realpath(directory) in screen)
                     ):
                         os.write(master, b'1\r')
