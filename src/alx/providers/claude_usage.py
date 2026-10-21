@@ -144,6 +144,8 @@ class ClaudeUsageReader:
         code = 'usage_timeout'
         sent = False
         trusted = False
+        trust_pending = False
+        trust_moved = False
         last_output = monotonic()
         try:
             with TemporaryDirectory(prefix='alx-claude-usage-') as directory:
@@ -176,17 +178,40 @@ class ClaudeUsageReader:
                         # The CLI may ask to trust its workspace before showing a
                         # prompt. Only confirm our own empty disposable directory;
                         # never answer login, permission or onboarding questions.
-                        if not trusted and not sent and (
+                        if not trusted and not sent and (trust_pending or (
                             ('1. Yes, I trust this folder' in screen or (
                                 '1. Yes, proceed' in screen
                                 and ('Do you trust this folder?' in screen
                                      or 'Do you trust the files in this folder?' in screen)
-                            ))
-                            and (directory in screen or os.path.realpath(directory) in screen)
-                        ):
-                            os.write(master, b'1\r')
-                            trusted = True
-                            capture = ''
+                            ) or ('Quick safety check:' in screen
+                                  and 'Yes, I trust this folder' in screen
+                                  and 'No, exit' in screen))
+                        )):
+                            trust_pending = True
+                            # Wait for the redraw to settle, then require one
+                            # unambiguous selection marker on the affirmative.
+                            if monotonic() - last_output < 0.1:
+                                continue
+                            if directory not in screen and os.path.realpath(directory) not in screen:
+                                code = 'usage_unreadable'
+                                break
+                            selected = [line.strip() for line in screen.splitlines()
+                                        if line.lstrip().startswith(('❯', '>'))]
+                            if (len(selected) == 1 and re.fullmatch(
+                                r'[❯>]\s*(?:1\.\s*)?Yes, (?:I trust this folder|proceed)',
+                                selected[0],
+                            ) and '[terminal_output_unreadable]' not in screen):
+                                os.write(master, b'\r')
+                                trusted = True
+                                trust_pending = False
+                                capture = ''
+                            elif not trust_moved:
+                                os.write(master, b'\x1b[B')
+                                trust_moved = True
+                                last_output = monotonic()
+                            else:
+                                code = 'usage_unreadable'
+                                break
                         elif not sent and _PROMPT.search(screen):
                             os.write(master, b'/usage\r')
                             capture = ''
@@ -197,7 +222,9 @@ class ClaudeUsageReader:
                         ):
                             code = ''
                             break
-                    if child.poll() is None:
+                    if trust_pending:
+                        code = 'usage_unreadable'
+                    if child.poll() is None and not trust_pending:
                         os.write(master, b'\x1b')
                         os.write(master, b'\x15/exit\r')
         except OSError:

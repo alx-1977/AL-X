@@ -21,6 +21,23 @@ from alx.providers.claude_usage import ClaudeUsageReader, parse_usage, rendered_
 from alx.tools.claude_usage import DEFINITION, build_claude_usage_executors  # noqa: E402
 
 SCREEN = (ROOT / 'tests/fixtures/claude_usage.txt').read_text()
+TRUST_SCREEN = """ Accessing workspace:
+
+ /private/var/folders/.../alx-claude-usage-XXXX
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+"""
+TRUST_YES_SCREEN = TRUST_SCREEN.replace('❯ No, exit', '  No, exit').replace(
+    '  Yes, I trust this folder', '❯ Yes, I trust this folder')
 
 
 class GovernanceTests(unittest.TestCase):
@@ -188,10 +205,10 @@ class DriverTests(unittest.TestCase):
 
     def test_only_own_disposable_workspace_trust_is_confirmed(self):
         self.fake(
-            'os.write(1, (os.getcwd() + "\\n1. Yes, I trust this folder\\n").encode())\n'
+            'os.write(1, (os.getcwd() + "\\n❯ 1. Yes, I trust this folder\\n").encode())\n'
             'command = b""\n'
             'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
-            'assert command == b"1\\r"\n'
+            'assert command == b"\\r"\n'
             'os.write(1, b"> ")\n'
             'command = b""\n'
             'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
@@ -205,10 +222,10 @@ class DriverTests(unittest.TestCase):
         self.fake('os.write(1, b"/some/other/folder\\n1. Yes, I trust this folder\\n")\n'
                   'data = os.read(0, 1024)\nevents.write_bytes(data)\n'
                   'while True: time.sleep(1)\n')
-        self.assertEqual(self.reader(1).read()['failure_code'], 'usage_timeout')
-        # Cleanup may send Escape and /exit, but never trust the other folder.
+        self.assertEqual(self.reader(1).read()['failure_code'], 'usage_unreadable')
+        # An unconfirmed trust screen must never receive Enter, even for cleanup.
         if self.events.exists():
-            self.assertNotIn(b'1\r', self.events.read_bytes())
+            self.assertNotIn(b'\r', self.events.read_bytes())
         self.assert_dead()
 
     def test_folder_trust_prompt_precedes_usage(self):
@@ -218,9 +235,12 @@ class DriverTests(unittest.TestCase):
                 self.fake(
                     f'os.write(1, ({question!r} + "\\n" + os.getcwd() + '
                     '"\\n  1. Yes, proceed\\n❯ 2. No, exit\\n").encode())\n'
+                    'assert os.read(0, 3) == b"\\x1b[B"\n'
+                    'os.write(1, ("\\x1b[2J\\x1b[H" + os.getcwd() + '
+                    '"\\n❯ 1. Yes, proceed\\n  2. No, exit\\n").encode())\n'
                     'command = b""\n'
                     'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
-                    'assert command == b"1\\r"\n'
+                    'assert command == b"\\r"\n'
                     'os.write(1, b"> ")\n'
                     'command = b""\n'
                     'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
@@ -231,6 +251,46 @@ class DriverTests(unittest.TestCase):
                 values = self.reader().read()
                 self.assertNotIn('failure_code', values)
                 self.assertEqual(values['limits'], parse_usage(SCREEN)['limits'])
+                self.assert_dead()
+
+    def test_quick_safety_check_requires_confirmed_yes_selection(self):
+        for initially_yes, moves in ((False, True), (True, True), (False, False)):
+            with self.subTest(initially_yes=initially_yes, moves=moves):
+                initial = TRUST_YES_SCREEN if initially_yes else TRUST_SCREEN
+                self.fake(
+                    f'screen = {initial!r}.replace("/private/var/folders/.../alx-claude-usage-XXXX", os.getcwd())\n'
+                    'os.write(1, screen.encode())\n'
+                    + ('' if initially_yes else
+                       'assert os.read(0, 3) == b"\\x1b[B"\n'
+                       + (f'screen = {TRUST_YES_SCREEN!r}.replace("/private/var/folders/.../alx-claude-usage-XXXX", os.getcwd())\n'
+                          if moves else '')
+                       + 'os.write(1, ("\\x1b[2J\\x1b[H" + screen).encode())\n')
+                    + ('command = b""\n'
+                       'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
+                       'assert command == b"\\r"\n'
+                       'events.write_text("confirmed_yes")\n'
+                       'os.write(1, b"\\x1b[2J\\x1b[H> ")\n'
+                       'command = b""\n'
+                       'while not command.endswith(b"\\r"): command += os.read(0, 1)\n'
+                       'assert command == b"/usage\\r"\n'
+                       f'os.write(1, {("\x1b[2J\x1b[H" + SCREEN).encode()!r})\n'
+                       'while True: time.sleep(1)\n'
+                       if moves else
+                       'while True:\n'
+                       '    data = os.read(0, 1024)\n'
+                       '    with events.open("ab") as log: log.write(data)\n')
+                )
+                self.events.unlink(missing_ok=True)
+                values = self.reader().read()
+                if moves:
+                    self.assertNotIn('failure_code', values)
+                    self.assertEqual(values['limits'], parse_usage(SCREEN)['limits'])
+                    self.assertEqual(self.events.read_text(), 'confirmed_yes')
+                else:
+                    self.assertEqual(values['failure_code'], 'usage_unreadable')
+                    self.assertEqual(values['limits'], [])
+                    self.assertIn('❯ No, exit', values['screen_capture'])
+                    self.assertFalse(self.events.exists(), 'no input after unconfirmed selection')
                 self.assert_dead()
 
     def test_timeout_after_usage_and_unreadable_screen(self):
