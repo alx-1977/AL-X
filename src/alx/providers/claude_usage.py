@@ -90,6 +90,13 @@ def rendered_screen(capture: str) -> str:
                 args = [int(part or 0) for part in body.split(';')]
                 n = args[0] or 1
                 if op == 'r':
+                    # Only the full-screen region is modelled; a narrower one
+                    # would make the scroll and line edits below move rows
+                    # outside it.
+                    top = args[0] or 1
+                    bottom = (args[1] or _ROWS) if len(args) > 1 else _ROWS
+                    if (top, bottom) != (1, _ROWS):
+                        unsupported = True
                     # Setting the scrolling region homes the cursor.
                     row = column = 0
                 elif op == 's':
@@ -257,7 +264,10 @@ class ClaudeUsageReader:
                                 code = 'usage_unreadable'
                                 break
                             dirty = True
-                            continue
+                            # Keys wait for a quiet screen; a usage panel that
+                            # keeps refreshing is read as soon as it is complete.
+                            if not sent:
+                                continue
                         # No output means no new evidence about the last key.
                         if not dirty:
                             continue

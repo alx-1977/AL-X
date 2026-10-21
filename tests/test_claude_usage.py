@@ -93,6 +93,10 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(rendered_screen('a\x1b(B\x1b=b\x1b[?u\x1b[>0q\x1b[?2004h'), 'ab')
         self.assertEqual(rendered_screen('old\x1b[?1049hnew'), 'new')
         self.assertIn('[terminal_output_unreadable]', rendered_screen('a\x1b[?2J'))
+        # A narrower scrolling region is not modelled, so it is not trusted.
+        self.assertIn('[terminal_output_unreadable]',
+                      rendered_screen('panel\x1b[70;80r\x1b[S'))
+        self.assertEqual(rendered_screen('x\x1b[1;80ry'), 'y')
 
     def test_unreadable_incomplete_ambiguous_and_unknown_limits_fail(self):
         for screen in ('Please sign in', SCREEN.replace('12% used', '101% used'),
@@ -389,6 +393,7 @@ class OutputDrivenTests(unittest.TestCase):
             result = ClaudeUsageReader('unused', {}, timeout_seconds=timeout).read()
         self.assertEqual(closed, [True])
         self.assertLessEqual(now[0], timeout)
+        self.finished_at = now[0]
         return result, keys
 
     def test_delayed_down_redraw_review_regression(self):
@@ -449,6 +454,20 @@ class OutputDrivenTests(unittest.TestCase):
         screen = rendered_screen(LIVE['startup'].replace('{cwd}', '/tmp/x'))
         self.assertNotIn('[terminal_output_unreadable]', screen)
         self.assertIn('❯ No, exit', screen)
+
+    def test_refreshing_usage_panel_is_read_without_a_quiet_screen(self):
+        # /usage keeps animating a status line; the complete limits must be
+        # read while it does, not only once output stops.
+        refresh = [(0.5 + 0.1 * tick, f'\x1b[1;1HRefreshing {tick}') for tick in range(120)]
+        result, keys = self.drive([(0, LIVE['startup'])], {
+            b'\x1b[B': [(0.05, LIVE['after_down'])],
+            b'\r': [(0.3, LIVE['after_enter'])],
+            b'/usage\r': [(0.4, LIVE['after_usage']), *refresh],
+        }, timeout=10)
+        self.assertNotIn('failure_code', result)
+        self.assertEqual(len(result['limits']), 2)
+        # Read as the panel completed, long before the refreshing stops.
+        self.assertLess(self.finished_at, 3)
 
     def test_keys_wait_for_startup_output_to_settle(self):
         # Live: keys pressed within Claude's first 200 ms were undone by its
