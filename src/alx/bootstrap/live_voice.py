@@ -132,6 +132,11 @@ from alx.tools.goal_history import (
     build_goal_history_executors,
 )
 from alx.providers.own_source import OwnSource
+from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
+from alx.providers.claude_usage import ClaudeUsageReader
+from alx.tools.claude_usage import (
+    DEFINITION as CLAUDE_USAGE_DEFINITION, build_claude_usage_executors,
+)
 from alx.tools.own_source import (
     DEFINITION as OWN_SOURCE_DEFINITION,
     build_own_source_executors,
@@ -237,7 +242,8 @@ def migrate_legacy_conversations(
 # The model and speech services her providers may be, by configured name:
 # what to call each and the code that talks to it.
 _SERVICES: dict[str, tuple[str, str]] = {
-    "claude_subscription": ("Claude", "src/alx/providers/claude_subscription.py"),
+    "claude_subscription": ("Claude", "src/alx/providers/claude_subscription.py, "
+                            "src/alx/providers/claude_usage.py"),
     "openai": ("OpenAI", "src/alx/providers/openai.py"),
     "xai": ("xAI", "src/alx/providers/xai.py"),
     "kimi": ("Kimi", "src/alx/providers/xai.py"),
@@ -585,6 +591,15 @@ async def run(repository_root: Path) -> None:
         current_call_id.get,
     ))
     permissions.add("self.read")
+
+    # D-059: read her own subscription limits through the existing Claude login.
+    if isinstance(providers.reasoning, ClaudeSubscriptionReasoningModel):
+        usage_reader = ClaudeUsageReader(
+            providers.reasoning.executable, providers.reasoning.child_environment(),
+        )
+        register((CLAUDE_USAGE_DEFINITION,), TraceSubsystem.CORE)
+        policies[CLAUDE_USAGE_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
+        executors.update(build_claude_usage_executors(usage_reader.read, current_call_id.get))
 
     # D-057: goal history stays in the same store the Core already owns.
     register((GOAL_HISTORY_DEFINITION,), TraceSubsystem.CORE)

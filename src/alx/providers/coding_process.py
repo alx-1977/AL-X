@@ -9,21 +9,26 @@ review invocation are refused here even if a coding model asks for them.
 from __future__ import annotations
 
 import os
+import fcntl
 import hashlib
 import logging
 import io
 import json
 import platform
+import pty
 import select
 import signal
+import struct
 import tarfile
 import tempfile
+import termios
+from contextlib import contextmanager
 from importlib import metadata
 from contextvars import ContextVar
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
 from typing import Any, Callable
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -403,6 +408,47 @@ def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs:
     if current is None and "inactivity_timeout" not in kwargs and "stop_descendants" not in kwargs:
         return runner(argv, **kwargs)
     return (current or CodingCancellation()).run(runner, argv, **kwargs)
+
+
+@contextmanager
+def interactive_terminal(
+    argv: list[str], *, cwd: str, env: Mapping[str, str],
+    rows: int, columns: int, deadline: float,
+) -> Iterator[tuple[int, subprocess.Popen[bytes]]]:
+    """Own a PTY session; the caller drives its terminal protocol.
+
+    Allow a requested clean exit up to the deadline, then kill the whole
+    process group and reap its leader, even when the caller raises.
+    """
+    master = slave = None
+    child = None
+    try:
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, columns, 0, 0))
+        child = subprocess.Popen(
+            argv, stdin=slave, stdout=slave, stderr=slave, cwd=cwd,
+            env=env, start_new_session=True, shell=False,
+        )
+        os.close(slave)
+        slave = None
+        yield master, child
+        try:
+            child.wait(timeout=max(0, min(0.3, deadline - monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        try:
+            if child is not None:
+                # An exited parent can still leave descendants behind.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait()
+        finally:
+            for descriptor in (master, slave):
+                if descriptor is not None:
+                    os.close(descriptor)
 
 
 KICAD_CLI_UNAVAILABLE_ERRORS = (OSError,)

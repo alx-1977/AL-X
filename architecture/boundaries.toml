@@ -76,6 +76,12 @@ config = []
 # ---------------------------------------------------------------------------
 # Law 0 production-outcome manifest
 # ---------------------------------------------------------------------------
+
+[[outcomes]]
+id = "claude.subscription_usage_is_read"
+description = "AL/X's own Claude subscription limits are read from the interactive CLI."
+entry = "providers/claude_usage.py::ClaudeUsageReader.read"
+forbidden = []
 #
 # Law 0 states that every production outcome has exactly one authoritative
 # implementation path. This manifest is the declared list of outcomes whose

@@ -2679,3 +2679,13 @@ This grants no authority a single goal update lacks: completion still requires s
      **Addition approved by Friedl, 2026-10-19:** "if the same fix fails twice for the same reason, stop, read the failing check and the rule behind it, and try a different approach; if still stuck, tell me plainly what's blocking you."
 - **This PR's scope.** Change 1 and this decision entry only. Changes 2–4 remain for their own subsequent PRs.
 - **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty. Existing retention and deletion rules still govern goal history.
+
+## D-059 — AL/X reads her own Claude subscription usage
+
+- **Date:** 2026-10-20
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-10-20.** Asked whether he was happy for AL/X to have the usage reader, Friedl answered yes.
+- **Capability.** `read_claude_usage` is read-only and argument-free. It returns session and weekly limits and reset times as structured values, or a structured failure.
+- **Deterministic sequence under Law 2.** The reader drives an interactive Claude Code session in a pseudo-terminal under AL/X's own existing login, confirms only its own disposable workspace's trust prompt if needed, reads the `/usage` screen, and exits and cleans up the session. This decision names and authorises that sequence as one reusable outcome.
+- **Limits.** It adds no credentials or dependencies and changes no reasoning calls. Interpretation of the usage evidence and what to do next remain with AL/X.
+- **Boundary.** No Law exception is created; `governance/EXCEPTIONS.md` remains empty.
