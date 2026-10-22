@@ -499,12 +499,25 @@ class SingleExecutionSiteTest(unittest.TestCase):
         "create_subprocess_shell",
     }
 
+    # Extra modules to scan as if they were production code. The mutation
+    # tests plant their probe here, outside the repository: planted into
+    # src/alx it was seen by tests running in parallel and failed them
+    # (2026-10-22, PR #173).
+    extra_modules: tuple[Path, ...] = ()
+
     def _production_modules(self) -> list[Path]:
         return [
             path
             for path in sorted(PRODUCTION_ROOT.rglob("*.py"))
             if "__pycache__" not in path.parts
-        ]
+        ] + list(self.extra_modules)
+
+    @staticmethod
+    def _shown(path: Path) -> str:
+        try:
+            return path.relative_to(REPOSITORY_ROOT).as_posix()
+        except ValueError:
+            return str(path)
 
     @staticmethod
     def _is_approved_transport_import(path: Path, node: ast.AST) -> bool:
@@ -742,7 +755,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     or name.endswith("create_subprocess_shell")
                     for name in names
                 ):
-                    offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}")
+                    offenders.append(f"{self._shown(path)}:{node.lineno}")
         self.assertEqual(offenders, [], f"a second execution path appeared: {offenders}")
 
     def test_no_production_module_calls_a_process_execution_function(self) -> None:
@@ -778,7 +791,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     )
                     if creates_process:
                         offenders.append(
-                            f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}"
+                            f"{self._shown(path)}:{node.lineno}"
                         )
                 elif isinstance(target, ast.Name) and target.id in {
                     "Popen",
@@ -787,7 +800,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     "posix_spawn",
                     "posix_spawnp",
                 }:
-                    offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}")
+                    offenders.append(f"{self._shown(path)}:{node.lineno}")
         self.assertEqual(offenders, [], f"a second execution path appeared: {offenders}")
 
     def test_the_self_restart_site_starts_only_the_launcher(self) -> None:
@@ -829,7 +842,7 @@ class SingleExecutionSiteTest(unittest.TestCase):
                     for name in names
                 ):
                     offenders.append(
-                        f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}"
+                        f"{self._shown(path)}:{node.lineno}"
                     )
         self.assertEqual(
             offenders, [], f"the launcher became importable: {offenders}"
@@ -880,15 +893,19 @@ class SingleExecutionSiteTest(unittest.TestCase):
 
     def test_a_second_execution_site_would_be_detected(self) -> None:
         """The mutation the enforcement specification requires."""
-        planted = PRODUCTION_ROOT / "tools" / "mutation_probe.py"
-        planted.write_text("import subprocess\n\n\ndef run():\n    subprocess.Popen(['echo'])\n")
-        try:
-            with self.assertRaises(AssertionError):
-                self.test_only_the_runner_imports_a_process_execution_module()
-            with self.assertRaises(AssertionError):
-                self.test_no_production_module_calls_a_process_execution_function()
-        finally:
-            planted.unlink()
+        with tempfile.TemporaryDirectory() as directory:
+            planted = Path(directory) / "mutation_probe.py"
+            planted.write_text(
+                "import subprocess\n\n\ndef run():\n    subprocess.Popen(['echo'])\n"
+            )
+            self.extra_modules = (planted,)
+            try:
+                with self.assertRaises(AssertionError):
+                    self.test_only_the_runner_imports_a_process_execution_module()
+                with self.assertRaises(AssertionError):
+                    self.test_no_production_module_calls_a_process_execution_function()
+            finally:
+                self.extra_modules = ()
 
     def test_repository_runtime_forbidden_process_paths_are_detected(self) -> None:
         source = REPOSITORY_RUNTIME_SITE.read_text()

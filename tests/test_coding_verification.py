@@ -683,7 +683,9 @@ class TheAllowlistStaysNarrow(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertTrue(command_permitted(base + ["-n", value], REPOSITORY_ROOT))
         for args in (["-n", "17"], ["-n", "0"], ["-n", "lots"], ["-n"],
-                     ["-n", "-p", "no:cacheprovider"]):
+                     ["-n", "-p", "no:cacheprovider"],
+                     # Digits isdigit() accepts and int() rejects (PR #173).
+                     ["-n", "²"], ["-n", "٣"], ["-n", "08"], ["-n", " 4"]):
             with self.subTest(args=args):
                 self.assertFalse(command_permitted(base + args, REPOSITORY_ROOT))
 

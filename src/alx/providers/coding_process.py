@@ -619,6 +619,11 @@ _PYTEST_PLUGIN = "no:cacheprovider"
 # tests in parallel processes (requirements.txt); it selects nothing.
 _PYTEST_WORKERS_FLAG = "-n"
 _PYTEST_MAX_WORKERS = 16
+# Matched as exact strings: str.isdigit() accepts characters such as "²" that
+# int() rejects, which raised instead of refusing (Greptile, PR #173).
+_PYTEST_WORKER_VALUES = frozenset(
+    {"auto", *(str(count) for count in range(1, _PYTEST_MAX_WORKERS + 1))}
+)
 
 
 def command_permitted(
@@ -681,9 +686,7 @@ def _pytest_args_permitted(
     expecting_workers = False
     for item in args:
         if expecting_workers:
-            if item != "auto" and not (
-                item.isdigit() and 1 <= int(item) <= _PYTEST_MAX_WORKERS
-            ):
+            if item not in _PYTEST_WORKER_VALUES:
                 return False
             expecting_workers = False
             continue
