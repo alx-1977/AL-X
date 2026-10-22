@@ -64,9 +64,7 @@ def _decoded(value: str | None) -> str:
 # Shipping mail often puts "." or a one-line placeholder in text/plain.
 _PLAIN_STUB_CHARACTERS = 20
 
-_STYLE_CLOSE = re.compile(r"</style(?![0-9A-Za-z])[^>]*>", re.IGNORECASE)
-_SCRIPT_CLOSE = re.compile(r"</script(?![0-9A-Za-z])[^>]*>", re.IGNORECASE)
-_NOISE_CLOSE = {"style": _STYLE_CLOSE, "script": _SCRIPT_CLOSE}
+_NOISE_NAMES = ("style", "script")
 
 
 def _plain_body(item) -> str:
@@ -119,21 +117,32 @@ def _plain_text_unusable(plain: str, html_text: str) -> bool:
 def _html_to_text(content: str) -> str:
     """Drop style, script and comments, then tags, the way a body was read."""
     without_noise = _without_unreadable_html(content)
-    without_tags = re.sub(r"<[^>]+>", " ", without_noise)
-    return html.unescape(without_tags)
+    return html.unescape(_strip_tags(without_noise))
 
 
 def _without_unreadable_html(content: str) -> str:
     """Replace comments and style/script elements, tags and contents, with a space.
 
-    Tag names match case-insensitively and may carry attributes. An unclosed
-    element runs to the end of the part. A self-closing tag drops only itself,
-    so the text after it stays. Quotes hide a `>` that belongs to an attribute.
+    Names match case-insensitively. Style or script is that element only when
+    the name ends at whitespace, `/`, or `>`, so style-wrapper and scripts stay
+    ordinary tags on the way in and on the way out. An ordinary tag is taken
+    whole, quotes included, before the next noise marker is sought, so
+    `<style>`, `<script>`, and `<!--` inside an attribute are not elements.
+    An unclosed element or comment runs to the end of the part. A self-closing
+    tag drops only itself, so the text after it stays. Quotes hide a `>`.
     """
     parts: list[str] = []
     index = 0
     length = len(content)
     while index < length:
+        if content[index] != "<":
+            next_mark = content.find("<", index)
+            if next_mark == -1:
+                parts.append(content[index:])
+                break
+            parts.append(content[index:next_mark])
+            index = next_mark
+            continue
         if content.startswith("<!--", index):
             parts.append(" ")
             end = content.find("-->", index + 4)
@@ -150,11 +159,23 @@ def _without_unreadable_html(content: str) -> str:
             if self_closing:
                 index = open_end
                 continue
-            close_end = _NOISE_CLOSE[tag].search(content, open_end)
+            close_end = _noise_close_end(content, tag, open_end)
             if close_end is None:
                 break
-            index = close_end.end()
+            index = close_end
             continue
+        end = _ordinary_markup_end(content, index)
+        parts.append(content[index:end])
+        index = end
+    return "".join(parts)
+
+
+def _strip_tags(content: str) -> str:
+    """Replace tags with a space. A quoted `>` does not end the tag."""
+    parts: list[str] = []
+    index = 0
+    length = len(content)
+    while index < length:
         if content[index] != "<":
             next_mark = content.find("<", index)
             if next_mark == -1:
@@ -163,26 +184,90 @@ def _without_unreadable_html(content: str) -> str:
             parts.append(content[index:next_mark])
             index = next_mark
             continue
-        parts.append("<")
-        index += 1
+        open_end, _self_closing = _open_tag_end(content, index)
+        if open_end is None:
+            parts.append(content[index:])
+            break
+        parts.append(" ")
+        index = open_end
     return "".join(parts)
+
+
+def _is_name_boundary(character: str) -> bool:
+    """A tag name ends at whitespace, `/`, or `>`."""
+    return character.isspace() or character in "/>"
 
 
 def _noise_tag_at(content: str, index: int) -> str | None:
     if index >= len(content) or content[index] != "<":
         return None
-    for name in ("style", "script"):
+    for name in _NOISE_NAMES:
         after = index + 1 + len(name)
         if content[index + 1:after].casefold() != name:
             continue
-        if after < len(content) and content[after].isalnum():
+        if after < len(content) and not _is_name_boundary(content[after]):
             continue
         return name
     return None
 
 
+def _noise_close_end(content: str, name: str, start: int) -> int | None:
+    """Index just after `</name ...>`, or None when that end never comes."""
+    needle = "</" + name
+    needle_length = len(needle)
+    limit = len(content)
+    position = start
+    while position < limit:
+        found = content.find("<", position)
+        if found == -1 or found + needle_length > limit:
+            return None
+        if content[found:found + needle_length].casefold() == needle:
+            after = found + needle_length
+            if after >= limit or _is_name_boundary(content[after]):
+                open_end, _self_closing = _open_tag_end(content, found)
+                if open_end is None:
+                    return None
+                return open_end
+        position = found + 1
+    return None
+
+
+def _ordinary_markup_end(content: str, start: int) -> int:
+    """Copy an ordinary `<` only until its `>`, or until real noise markup.
+
+    Quoted `<style>`, `<script>`, and `<!--` stay inside the tag. An unquoted
+    one is a marker of its own, so the text before it is kept and that marker
+    is read next. With no `>` and no such marker, the rest of the part is text.
+    """
+    quote = ""
+    position = start + 1
+    limit = len(content)
+    while position < limit:
+        character = content[position]
+        if quote:
+            if character == quote:
+                quote = ""
+            position += 1
+            continue
+        if character in ("'", '"'):
+            quote = character
+            position += 1
+            continue
+        if character == "<" and (
+            content.startswith("<!--", position) or _noise_tag_at(content, position)
+        ):
+            return position
+        if character == ">":
+            return position + 1
+        position += 1
+    return limit
+
+
 def _open_tag_end(content: str, start: int) -> tuple[int | None, bool]:
-    """Index just after the opening tag's `>`, and whether the tag is `/>`."""
+    """Index just after the tag's `>`, and whether the tag is `/>`.
+
+    Either quote hides `>` and any marker that belongs to an attribute.
+    """
     quote = ""
     position = start + 1
     limit = len(content)

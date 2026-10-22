@@ -254,6 +254,122 @@ class MailBodyExtractionTests(unittest.TestCase):
         text = body(single("<p>Keep</p><stylesheet>still here</stylesheet>", "html"))
         self.assertEqual(text, "Keep  still here")
 
+    def test_quoted_attribute_markers_keep_surrounding_text(self) -> None:
+        """Markers inside a quoted attribute are not style, script, or comments."""
+        for title in ("Use <style> here", "Use <script> here", "Use <!-- here"):
+            for html in (
+                f'Lead<div title="{title}">Tracking ABC123</div>Tail',
+                f"Lead<div title='{title}'>Tracking ABC123</div>Tail",
+            ):
+                with self.subTest(html=html):
+                    self.assertEqual(
+                        body(single(html, "html")),
+                        "Lead Tracking ABC123 Tail",
+                    )
+
+        mixed_quotes = (
+            '<div title="It\'s <style> here">Tracking ABC123</div>',
+            """<div title='Say "<script>"'>Tracking ABC123</div>""",
+            '<div title="Use <style> here">Tracking ABC123</div></style>',
+            "<div title='Use <script> here'>Tracking ABC123</div></script>",
+            '<div title="Use <!-- here">Tracking ABC123</div><!-- end -->',
+        )
+        for html in mixed_quotes:
+            with self.subTest(html=html):
+                self.assertEqual(body(single(html, "html")), "Tracking ABC123")
+
+        surrounded = body(single(
+            "<p>Before</p>"
+            '<div title="Use <style> here">Tracking ABC123</div>'
+            "<p>After</p>",
+            "html",
+        ))
+        self.assertEqual(
+            surrounded,
+            "Before" + " " * 2 + "Tracking ABC123" + " " * 2 + "After",
+        )
+        later = body(single(
+            "<p>Before</p>"
+            "<div title='Use <script> here'>Tracking ABC123</div></script>"
+            "<p>After</p>",
+            "html",
+        ))
+        self.assertEqual(
+            later,
+            "Before" + " " * 2 + "Tracking ABC123" + " " * 3 + "After",
+        )
+
+    def test_hyphenated_and_longer_names_are_ordinary_tags(self) -> None:
+        kept = "Keep" + " " * 2 + "still here"
+        for html in (
+            "<p>Keep</p><style-wrapper>still here</style-wrapper>",
+            "<p>Keep</p><STYLE-WRAPPER>still here</STYLE-WRAPPER>",
+            "<p>Keep</p><script-block>still here</script-block>",
+            "<p>Keep</p><scripts>still here</scripts>",
+            '<p>Keep</p><style-wrapper class="a>b">still here</style-wrapper>',
+            """<p>Keep</p><scripts data-note='a>b'>still here</scripts>""",
+        ):
+            with self.subTest(html=html):
+                self.assertEqual(body(single(html, "html")), kept)
+
+        beside_real_style = body(single(
+            '<style type="text/css">SECRET</style>'
+            "<style-wrapper>Tracking ABC123</style-wrapper>",
+            "html",
+        ))
+        self.assertEqual(beside_real_style, "Tracking ABC123")
+        self.assertNotIn("SECRET", beside_real_style)
+
+        beside_real_script = body(single(
+            '<script type="text/javascript">SECRETJS</script>'
+            "<scripts>Tracking ABC123</scripts>",
+            "html",
+        ))
+        self.assertEqual(beside_real_script, "Tracking ABC123")
+        self.assertNotIn("SECRETJS", beside_real_script)
+
+        for html in (
+            "<style>SECRET</style-wrapper>HIDDEN</style><p>Shown</p>",
+            "<style>SECRET</STYLE-WRAPPER>HIDDEN</style><p>Shown</p>",
+            "<script>SECRETJS</script-block>HIDDENJS</script><p>Shown</p>",
+            "<script>SECRETJS</scripts>HIDDENJS</script><p>Shown</p>",
+        ):
+            with self.subTest(html=html):
+                text = body(single(html, "html"))
+                self.assertEqual(text, "Shown")
+                self.assertNotIn("SECRET", text)
+                self.assertNotIn("HIDDEN", text)
+
+    def test_noise_markup_is_not_split_into_visible_text(self) -> None:
+        split = body(single(
+            "<div <style>SECRET</style><p>Shown</p>",
+            "html",
+        ))
+        self.assertEqual(split, "Shown")
+        self.assertNotIn("SECRET", split)
+
+        comparison = body(single(
+            "a < b <style>SECRET</style> tail",
+            "html",
+        ))
+        self.assertEqual(comparison, "a < b" + " " * 3 + "tail")
+        self.assertNotIn("SECRET", comparison)
+
+        for html in (
+            '<p>Before</p><style>SECRET</style title="a>b"><p>Shown</p>',
+            "<p>Before</p><script>SECRETJS</script title='a>b'><p>Shown</p>",
+            '<style data-x="</style>">SECRET</style><p>Shown</p>',
+            "<script data-x='</script>'>SECRETJS</script><p>Shown</p>",
+        ):
+            with self.subTest(html=html):
+                text = body(single(html, "html"))
+                self.assertNotIn("SECRET", text)
+                self.assertNotIn("a>b", text)
+                if html.startswith("<p>Before</p>"):
+                    self.assertEqual(text, "Before" + " " * 3 + "Shown")
+                else:
+                    self.assertEqual(text, "Shown")
+
     def test_whitespace_collapses_as_before(self) -> None:
         self.assertEqual(
             body(single("<p>Hello</p><p>World</p>", "html")),
