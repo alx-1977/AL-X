@@ -78,7 +78,7 @@ from alx.config import (
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
 from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
-from alx.continuity.mail_source import MailCognitionSource
+from alx.continuity.mail_source import MailCognitionSource, mail_conversation_id
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.bootstrap.documents import build_document_runtime
 from alx.bootstrap.readers import (
@@ -1312,6 +1312,8 @@ async def run(repository_root: Path) -> None:
         core,
         conversation_store,
         contextual_events=mail_runtime.source.contextual_events,
+        mail_response_raised_at=lambda event: conversation_store.response_relayed_at(
+            mail_conversation_id(event), since=event.occurred_at),
     )
     # One Core-turn lock for the whole runtime. Person turns and autonomous
     # turns serialize through this same object: AL/X has one Core, so she has

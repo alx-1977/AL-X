@@ -38,12 +38,14 @@ class ConversationGateway:
     def __init__(self, core: CoreAgent, conversation_store: DurableConversationStore,
                  identifier_factory: Callable[[], str] | None = None,
                  clock: Callable[[], datetime] | None = None,
-                 contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None) -> None:
+                 contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None,
+                 mail_response_raised_at: Callable[[BackgroundEvent], datetime | None] | None = None) -> None:
         self._core = core
         self._conversation_store = conversation_store
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
+        self._mail_response_raised_at = mail_response_raised_at or (lambda event: None)
 
     def _store_response(self, conversation_id: str, outcome: CoreOutcome,
                         retention_until: datetime) -> None:
@@ -166,6 +168,11 @@ class ConversationGateway:
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
+        """Attach local facts, including delivered mail-thread relay evidence.
+
+        A raised marker neither filters observations nor acknowledges mail;
+        the Core decides what to say about every item still in context.
+        """
         started_at = monotonic()
         contextual = self._contextual_events()
         elapsed = monotonic() - started_at
@@ -179,6 +186,15 @@ class ConversationGateway:
             item.event_id: item
             for item in (*contextual, *additional)
         }
+        for event_id, event in events.items():
+            if event.kind not in ("mail.message_arrived", "mail.message_waiting"):
+                continue
+            raised_at = self._mail_response_raised_at(event)
+            events[event_id] = replace(event, data={
+                **event.data,
+                "already_raised_with_friedl": raised_at is not None,
+                "raised_with_friedl_at": None if raised_at is None else raised_at.isoformat(),
+            })
         return ConversationSnapshot(
             conversation.conversation_id,
             conversation.turns,

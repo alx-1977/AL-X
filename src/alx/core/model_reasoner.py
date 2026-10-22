@@ -450,7 +450,9 @@ releases it. Whether it warrants saying anything is your judgement on what you h
 told him and what he is doing now.
 Alongside the item you are holding you are shown mail.message_waiting entries for
 what is queued behind it, oldest first, in the order they would be delivered.
-Those have not been raised with Friedl. Seeing them together is what lets you
+The already_raised_with_friedl field and raised_with_friedl_at timestamp record a
+delivered reply relayed from that mail thread; an already-raised item need not be
+announced again unless something about it changed. Seeing them together lets you
 answer several at once rather than one interruption each: say whatever is worth
 saying, or nothing. You may release a waiting item by acknowledging it without
 ever mentioning it. Judge each from the observation in front of you, never from a

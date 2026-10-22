@@ -12,7 +12,7 @@ from alx.contracts.provenance import provenance_from_storage, provenance_to_stor
 from alx.contracts.storage import serialized_store
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -122,6 +122,20 @@ class SQLiteConversationStore:
                     self._connection.execute(
                         f'ALTER TABLE conversation_turns ADD COLUMN "{column}" TEXT'
                     )
+            # A relay is recorded only after transport acceptance. Keep its
+            # identity and time independently of the reply payload, for the
+            # lifetime of the source conversation (not the target's content).
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS response_relays ("
+                "source_conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) "
+                "ON DELETE CASCADE, source_turn_id TEXT NOT NULL, raised_at TEXT NOT NULL, "
+                "PRIMARY KEY(source_conversation_id, source_turn_id))"
+            )
+            if version < 4:
+                for (value,) in self._connection.execute(
+                    "SELECT turn_json FROM conversation_turns"
+                ).fetchall():
+                    self._record_relay(_turn_from_json(value))
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -202,7 +216,45 @@ class SQLiteConversationStore:
                     *provenance,
                 ),
             )
+            self._record_relay(turn)
         return self.load(turn.conversation_id)
+
+    def _record_relay(self, turn: ConversationTurn) -> None:
+        """Retain the receipt encoded by the gateway's structured relay id.
+
+        Called inside the same transaction as append (and on schema upgrade).
+        No wording or provenance-content matching qualifies a delivery.
+        """
+        if (turn.origin is not ConversationOrigin.ALX_RESPONSE
+                or not turn.turn_id.startswith("relayed:")):
+            return
+        source, separator, source_turn = turn.turn_id[len("relayed:"):].rpartition("#")
+        if not separator or not source or not source_turn:
+            return
+        self._connection.execute(
+            "INSERT OR IGNORE INTO response_relays "
+            "(source_conversation_id, source_turn_id, raised_at) "
+            "SELECT conversation_id, ?, ? FROM conversations WHERE conversation_id = ?",
+            (source_turn, turn.occurred_at.isoformat(), source),
+        )
+
+    def response_relayed_at(self, conversation_id: str,
+                           since: datetime | None = None) -> datetime | None:
+        """First delivered relay time, even after the reply's content expires.
+
+        When supplied, `since` excludes announcements preceding this observation,
+        so a new message in an existing thread does not inherit an older reply.
+        Source conversation deletion removes these content-free receipts too.
+        A generated response without a delivered relay supplies no receipt.
+        """
+        if since is not None:
+            _aware(since, "since")
+        rows = self._connection.execute(
+            "SELECT raised_at FROM response_relays WHERE source_conversation_id = ?",
+            (conversation_id,),
+        ).fetchall()
+        times = (datetime.fromisoformat(row[0]) for row in rows)
+        return min((at for at in times if since is None or at >= since), default=None)
 
     def list_conversations(self) -> tuple[ConversationSnapshot, ...]:
         identifiers = self._connection.execute(

@@ -500,6 +500,76 @@ class SetupFailureTests(unittest.TestCase):
 
 
 class RelayTests(unittest.TestCase):
+    def test_held_mail_is_marked_after_delivery_and_store_reload(self) -> None:
+        from alx.contracts import BackgroundEvent
+        from alx.continuity.mail_source import mail_conversation_id
+
+        a = BackgroundEvent("mail:777:1", "mail.message_arrived", NOW,
+                            {"message_id": "<jlcpcb-123@mail>"})
+        b = BackgroundEvent("mail:777:2:waiting", "mail.message_waiting", NOW,
+                            {"message_id": "<fms@mail>"})
+        events = [a, b]
+        seen = []
+
+        class Core:
+            def process(self, conversation, *args, **kwargs):
+                seen.append(conversation)
+                return CoreOutcome(CoreState.FINISHED_SILENTLY)
+
+        def context():
+            gateway = ConversationGateway(
+                Core(), self.store, contextual_events=lambda: tuple(events),
+                mail_response_raised_at=lambda event: self.store.response_relayed_at(
+                    mail_conversation_id(event), since=event.occurred_at))
+            gateway.receive_session_open("mail-thread:<fms@mail>", 1,
+                                         NOW + timedelta(days=30))
+            return {event.event_id: event.data for event in seen[-1].events
+                    if event.kind.startswith("mail.")}
+
+        self.assertFalse(context()[a.event_id]["already_raised_with_friedl"])
+        self.assertIsNone(context()[a.event_id]["raised_with_friedl_at"])
+        self.gateway.relay_response(MAIL, "t1", FRIEDL)
+        path = self.store._connection.execute("PRAGMA database_list").fetchone()[2]
+        self.store.close()
+        self.store = SQLiteConversationStore(path)
+        self.addCleanup(self.store.close)
+        data = context()
+        self.assertTrue(data[a.event_id]["already_raised_with_friedl"])
+        self.assertEqual(data[a.event_id]["raised_with_friedl_at"], NOW.isoformat())
+        self.assertFalse(data[b.event_id]["already_raised_with_friedl"])
+        self.assertIsNone(data[b.event_id]["raised_with_friedl_at"])
+        later = BackgroundEvent("mail:777:3:waiting", "mail.message_waiting",
+                                NOW + timedelta(minutes=8), a.data)
+        events.append(later)
+        self.assertFalse(context()[later.event_id]["already_raised_with_friedl"])
+        # A waiting item can have been raised without becoming current.
+        events[:] = [BackgroundEvent(a.event_id, "mail.message_waiting", NOW, a.data), b]
+        self.assertTrue(context()[a.event_id]["already_raised_with_friedl"])
+        # Expiring/removing the payload and the target conversation must not
+        # erase evidence while the held source conversation still exists.
+        with self.store._connection:
+            self.store._connection.execute("DELETE FROM conversation_turns")
+        target = self.store.load(FRIEDL)
+        self.store.delete(FRIEDL, target.revision)
+        self.assertEqual(context()[a.event_id]["raised_with_friedl_at"], NOW.isoformat())
+        events.remove(events[0])
+        self.assertNotIn(a.event_id, context())
+        source = self.store.load(MAIL)
+        self.store.delete(MAIL, source.revision)
+        self.assertIsNone(self.store.response_relayed_at(MAIL))
+
+    def test_existing_relays_are_migrated_without_reply_text_matching(self) -> None:
+        self.gateway.relay_response(MAIL, "t1", FRIEDL)
+        path = self.store._connection.execute("PRAGMA database_list").fetchone()[2]
+        with self.store._connection:
+            self.store._connection.execute("DROP TABLE response_relays")
+            self.store._connection.execute("PRAGMA user_version = 3")
+        self.store.close()
+        self.store = SQLiteConversationStore(path)
+        self.addCleanup(self.store.close)
+        self.assertEqual(self.store.response_relayed_at(MAIL), NOW)
+        self.assertIsNone(self.store.response_relayed_at("mail-thread:<unrelated>"))
+
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
