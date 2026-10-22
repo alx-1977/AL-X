@@ -15,7 +15,7 @@ installed versions (see §15).
 
 ## 0. Governing principle (Friedl, 2026-10-22)
 
-AL/X may do anything, except four things:
+AL/X may do anything, except five things:
 
 1. **Spend money** (paid reviews or paid services) beyond what Friedl has approved,
    without asking him.
@@ -24,6 +24,8 @@ AL/X may do anything, except four things:
 3. **Change her own laws, identity or governance records** without his approval.
 4. **Read or reveal passwords and keys.** She uses them only through the tools that
    hold them.
+5. **Change or delete Friedl's own files and designs** without asking him. Whatever
+   file she changes, anywhere, its previous version is kept so it can be restored.
 
 Everything else she does, sees and decides herself: coding, tests, reviews within
 the allowance, merges by her own rule, GitHub, diagnosis and choice of approach.
@@ -33,7 +35,7 @@ Friedl decides *what* the code should do; AL/X decides *how*.
 tool for it existed. Every "she can't see that" and "she isn't allowed to do that"
 this week was a missing tool, and patching them one at a time never ends (§2a).
 This is the same principle Claude Code works by, with one difference: AL/X works
-unattended, so the four exceptions are **enforced locks** (her safety gate and the
+unattended, so the five exceptions are **enforced locks** (her safety gate and the
 broker), not a person watching.
 
 Her Laws already forbid the other thing Friedl does not want: fixed workflows,
@@ -495,7 +497,9 @@ These do not depend on the broker and are built first (§14, phase 0).
 
 ## 13b. Proposed decision D-060 (text for Friedl's approval)
 
-> **D-060 — AL/X may do anything except four things.**
+> **D-060 — AL/X may do anything except five things** (as approved; the fifth and
+> three settled conflicts were added on review of the earlier decisions; the
+> recorded text is in `governance/DECISIONS.md`).
 > AL/X may do anything except: (1) spend money beyond what Friedl has approved
 > without asking him; (2) send, delete, post or pay on his behalf beyond what he has
 > already approved without asking him; (3) change her laws, identity or governance
