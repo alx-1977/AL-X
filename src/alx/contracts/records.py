@@ -15,6 +15,7 @@ from typing import Mapping, TypeAlias, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from alx.contracts.provenance import ContentProvenance
+    from alx.contracts.mail import MailReference
 
 
 StructuredValue: TypeAlias = None | bool | int | float | str | tuple["StructuredValue", ...] | Mapping[str, "StructuredValue"]
@@ -81,8 +82,17 @@ class ConversationTurn:
     # Set by the gateway from the Core outcome, carried unchanged by delivery.
     # An identity link, never frontend-owned goal state.
     response_goal_id: str | None = None
+    raised_mail_observations: tuple[MailReference, ...] = ()
 
     def __post_init__(self) -> None:
+        from alx.contracts.mail import MailReference
+
+        refs = tuple(self.raised_mail_observations)
+        if any(not isinstance(ref, MailReference) for ref in refs):
+            raise TypeError("raised mail observations must be MailReference values")
+        if refs and self.origin is not ConversationOrigin.ALX_RESPONSE:
+            raise ValueError("only AL/X responses may raise mail observations")
+        object.__setattr__(self, "raised_mail_observations", tuple(dict.fromkeys(refs)))
         _required(self.conversation_id, "conversation_id")
         _required(self.turn_id, "turn_id")
         _required(self.content, "content")

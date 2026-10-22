@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from alx.contracts.mail import MailReference
+
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -451,8 +453,13 @@ told him and what he is doing now.
 Alongside the item you are holding you are shown mail.message_waiting entries for
 what is queued behind it, oldest first, in the order they would be delivered.
 The already_raised_with_friedl field and raised_with_friedl_at timestamp record a
-delivered reply relayed from that mail thread; an already-raised item need not be
-announced again unless something about it changed. Seeing them together lets you
+delivered response explicitly raising that exact mail observation; an already-raised
+item need not be announced again unless something about it changed. In a respond
+action, name every observation your response raises in raised_mail_observations,
+using its exact mailbox_id, uid_validity and uid from this turn's mail context.
+Use an empty list if none are raised. Only named observations from this context
+receive receipts, and only after delivery; thread identity and timing imply nothing.
+Seeing them together lets you
 answer several at once rather than one interruption each: say whatever is worth
 saying, or nothing. You may release a waiting item by acknowledging it without
 ever mentioning it. Judge each from the observation in front of you, never from a
@@ -1405,6 +1412,12 @@ def decision_schema() -> dict[str, Any]:
             "type": {"type": "string", "const": "respond"},
             "response": string,
             "response_requires_goal_commit": {"type": "boolean"},
+            "raised_mail_observations": {
+                "type": "array",
+                "items": _strict_object({
+                    "mailbox_id": string, "uid_validity": string, "uid": string,
+                }),
+            },
         }
     )
     silent_action = _strict_object(
@@ -1846,6 +1859,9 @@ class ModelReasoner:
                 raise ValueError("respond.response must be a nonblank string")
             return AgentDecision(
                 response=response,
+                raised_mail_observations=tuple(
+                    MailReference(**item) for item in action.get("raised_mail_observations", ())
+                ),
                 goal_proposal=proposal,
                 response_requires_goal_commit=action["response_requires_goal_commit"],
                 memory_proposals=memory_proposals,

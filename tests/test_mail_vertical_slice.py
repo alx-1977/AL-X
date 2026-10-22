@@ -1055,7 +1055,9 @@ class ForegroundContextIsLocalTests(unittest.TestCase):
         source = store.create(mail_conversation_id(a), keep)
         store.append(ConversationTurn(source.conversation_id, "announcement",
                                      ConversationOrigin.ALX_RESPONSE, "A reply",
-                                     a.occurred_at), keep, source.revision)
+                                     a.occurred_at, raised_mail_observations=(
+                                         MailReference(a.data["mailbox_id"], a.data["uid_validity"], a.data["uid"]),
+                                     )), keep, source.revision)
         seen: list[ConversationSnapshot] = []
 
         class Core:
@@ -1065,9 +1067,7 @@ class ForegroundContextIsLocalTests(unittest.TestCase):
 
         gateway = ConversationGateway(
             Core(), store, clock=lambda: a.occurred_at,
-            contextual_events=self.adapter.contextual_events,
-            mail_response_raised_at=lambda event: store.response_relayed_at(
-                mail_conversation_id(event), since=event.occurred_at))
+            contextual_events=self.adapter.contextual_events)
         gateway.relay_response(source.conversation_id, "announcement", "friedl")
         # A stays held while two unrelated messages arrive.
         self.imap.items[3] = message("FMS statement", "Statement")

@@ -272,6 +272,15 @@ class _ExchangeFeed:
             await asyncio.gather(self._waiter, return_exceptions=True)
 
 
+class StoredResponse(str):
+    """Core words carrying their durable turn identity through a text queue."""
+
+    def __new__(cls, text: str, turn_id: str | None):
+        value = super().__new__(cls, text)
+        value.turn_id = turn_id
+        return value
+
+
 class QueuedDelivery:
     """Ephemeral words and the durable occasion they came from."""
 
@@ -415,7 +424,13 @@ class VoiceSession:
                     await asyncio.gather(update_task, return_exceptions=True)
                 if cancelled_during_cleanup:
                     raise asyncio.CancelledError
-        return outcome.response if outcome.state.value == "responded" else None
+        return (StoredResponse(outcome.response, outcome.response_turn_id)
+                if outcome.state.value == "responded" else None)
+
+    def response_delivered(self, conversation_id: str, turn_id: str | None) -> None:
+        """Confirm a particular response after the transport accepted its words."""
+        if turn_id is not None:
+            self._gateway.response_delivered(conversation_id, turn_id)
 
     async def remote_turn(self, conversation_id: str, content: str,
                           turn_id: str | None = None) -> Any:
@@ -769,7 +784,8 @@ class VoiceSession:
         # second response implementation: the wording is the Core's own, and it
         # is emitted whether or not anything is audible.
         yield VoiceEvent(VoiceEventKind.TEXT, text=outcome.response)
-        async for speech_event in self._speak(conversation_id, outcome.response, feed):
+        async for speech_event in self._speak(
+                conversation_id, StoredResponse(outcome.response, outcome.response_turn_id), feed):
             yield speech_event
 
     async def _speak(
@@ -781,6 +797,11 @@ class VoiceSession:
         unprompted speech would be a second voice, and the wording reaching it
         is the Core's own either way.
         """
+        # The consumer has resumed after accepting the TEXT event. Keep the
+        # original response identity across that asynchronous boundary; never
+        # rediscover it by words or by the latest reply in the conversation.
+        await asyncio.to_thread(
+            self.response_delivered, conversation_id, getattr(response, "turn_id", None))
         if self._synthesizer is None:
             # No speech transport. Her wording already reached the console, and
             # the turn is complete; a missing speaker changes nothing about

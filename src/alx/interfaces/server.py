@@ -167,12 +167,11 @@ class LiveVoiceServer:
             # it. If it cannot be sent it takes the ordinary path below.
             identity = self._identify(conversation_id, response)
             if phone.send(response):
-                if conversation_id != PHONE_CONVERSATION_ID:
-                    self._relay_into(source_conversation_id, identity,
-                                     PHONE_CONVERSATION_ID)
+                self._relay_into(source_conversation_id, identity,
+                                 PHONE_CONVERSATION_ID)
                 return ResponseDelivery.DELIVERED
         registered = self._delivery_queues.get(conversation_id) or []
-        identity = None if registered else self._identify(conversation_id, response)
+        identity = self._identify(conversation_id, response)
         if not registered:
             # A mail thread has no listener of its own. An absent session
             # makes this occasion undelivered evidence for a later Core turn.
@@ -234,7 +233,7 @@ class LiveVoiceServer:
             accepted = acknowledged.get(timeout=self.DELIVERY_ACK_SECONDS)
         except queue.Empty:
             return ResponseDelivery.UNDELIVERABLE
-        if accepted and conversation_id != source_conversation_id:
+        if accepted:
             # Heard in his thread, so it is recorded in his thread: his answer
             # to it is then an answer to something his conversation holds.
             self._relay_into(source_conversation_id, identity, conversation_id)

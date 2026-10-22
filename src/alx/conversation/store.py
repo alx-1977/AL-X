@@ -8,11 +8,12 @@ from datetime import datetime
 from pathlib import Path
 
 from alx.contracts import ConversationOrigin, ConversationSnapshot, ConversationTurn
+from alx.contracts.mail import MailReference
 from alx.contracts.provenance import provenance_from_storage, provenance_to_storage
 from alx.contracts.storage import serialized_store
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -52,6 +53,7 @@ def _turn_to_json(turn: ConversationTurn) -> str:
             turn.occurred_at.isoformat(),
             turn.person_id,
             turn.response_goal_id,
+            [[ref.mailbox_id, ref.uid_validity, ref.uid] for ref in turn.raised_mail_observations],
         ],
         separators=(",", ":"),
     )
@@ -67,6 +69,7 @@ def _turn_from_json(value: str) -> ConversationTurn:
         datetime.fromisoformat(data[4]),
         data[5],
         response_goal_id=data[6] if len(data) > 6 else None,
+        raised_mail_observations=tuple(MailReference(*ref) for ref in data[7]) if len(data) > 7 else (),
     )
 
 
@@ -81,6 +84,7 @@ def _turn_from_row(row: tuple[str, str | None, str | None, str | None, str | Non
         turn.person_id,
         provenance_from_storage(*row[1:]),
         turn.response_goal_id,
+        turn.raised_mail_observations,
     )
 
 
@@ -122,20 +126,15 @@ class SQLiteConversationStore:
                     self._connection.execute(
                         f'ALTER TABLE conversation_turns ADD COLUMN "{column}" TEXT'
                     )
-            # A relay is recorded only after transport acceptance. Keep its
-            # identity and time independently of the reply payload, for the
-            # lifetime of the source conversation (not the target's content).
+            # Legacy thread/time relays cannot prove observation coverage.
+            self._connection.execute("DROP TABLE IF EXISTS response_relays")
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS response_relays ("
-                "source_conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) "
-                "ON DELETE CASCADE, source_turn_id TEXT NOT NULL, raised_at TEXT NOT NULL, "
-                "PRIMARY KEY(source_conversation_id, source_turn_id))"
+                "CREATE TABLE IF NOT EXISTS mail_observation_receipts ("
+                "response_conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) "
+                "ON DELETE CASCADE, response_turn_id TEXT NOT NULL, mailbox_id TEXT NOT NULL, "
+                "uid_validity TEXT NOT NULL, uid TEXT NOT NULL, raised_at TEXT NOT NULL, "
+                "PRIMARY KEY(response_conversation_id, response_turn_id, mailbox_id, uid_validity, uid))"
             )
-            if version < 4:
-                for (value,) in self._connection.execute(
-                    "SELECT turn_json FROM conversation_turns"
-                ).fetchall():
-                    self._record_relay(_turn_from_json(value))
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -216,45 +215,40 @@ class SQLiteConversationStore:
                     *provenance,
                 ),
             )
-            self._record_relay(turn)
         return self.load(turn.conversation_id)
 
-    def _record_relay(self, turn: ConversationTurn) -> None:
-        """Retain the receipt encoded by the gateway's structured relay id.
+    def record_response_delivery(self, conversation_id: str, turn_id: str,
+                                 delivered_at: datetime) -> bool:
+        """Persist only the validated identities carried by this stored response.
 
-        Called inside the same transaction as append (and on schema upgrade).
-        No wording or provenance-content matching qualifies a delivery.
+        Payload expiry never widens coverage. Repeated confirmations retain the
+        first delivery time. Source conversation deletion removes its receipts.
         """
-        if (turn.origin is not ConversationOrigin.ALX_RESPONSE
-                or not turn.turn_id.startswith("relayed:")):
-            return
-        source, separator, source_turn = turn.turn_id[len("relayed:"):].rpartition("#")
-        if not separator or not source or not source_turn:
-            return
-        self._connection.execute(
-            "INSERT OR IGNORE INTO response_relays "
-            "(source_conversation_id, source_turn_id, raised_at) "
-            "SELECT conversation_id, ?, ? FROM conversations WHERE conversation_id = ?",
-            (source_turn, turn.occurred_at.isoformat(), source),
-        )
+        _aware(delivered_at, "delivered_at")
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT turn_json FROM conversation_turns WHERE conversation_id = ? AND turn_id = ?",
+                (conversation_id, turn_id),
+            ).fetchone()
+            if row is None:
+                return False
+            turn = _turn_from_json(row[0])
+            if turn.origin is not ConversationOrigin.ALX_RESPONSE:
+                return False
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO mail_observation_receipts VALUES (?, ?, ?, ?, ?, ?)",
+                ((conversation_id, turn_id, ref.mailbox_id, ref.uid_validity, ref.uid,
+                  delivered_at.isoformat()) for ref in turn.raised_mail_observations),
+            )
+        return True
 
-    def response_relayed_at(self, conversation_id: str,
-                           since: datetime | None = None) -> datetime | None:
-        """First delivered relay time, even after the reply's content expires.
-
-        When supplied, `since` excludes announcements preceding this observation,
-        so a new message in an existing thread does not inherit an older reply.
-        Source conversation deletion removes these content-free receipts too.
-        A generated response without a delivered relay supplies no receipt.
-        """
-        if since is not None:
-            _aware(since, "since")
+    def mail_observation_raised_at(self, reference: MailReference) -> datetime | None:
         rows = self._connection.execute(
-            "SELECT raised_at FROM response_relays WHERE source_conversation_id = ?",
-            (conversation_id,),
+            "SELECT raised_at FROM mail_observation_receipts "
+            "WHERE mailbox_id = ? AND uid_validity = ? AND uid = ?",
+            (reference.mailbox_id, reference.uid_validity, reference.uid),
         ).fetchall()
-        times = (datetime.fromisoformat(row[0]) for row in rows)
-        return min((at for at in times if since is None or at >= since), default=None)
+        return min((datetime.fromisoformat(row[0]) for row in rows), default=None)
 
     def list_conversations(self) -> tuple[ConversationSnapshot, ...]:
         identifiers = self._connection.execute(
