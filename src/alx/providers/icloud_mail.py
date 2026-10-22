@@ -60,7 +60,22 @@ def _decoded(value: str | None) -> str:
         return value
 
 
+# A plain part shorter than this is only a stub when the HTML text is longer.
+# Shipping mail often puts "." or a one-line placeholder in text/plain.
+_PLAIN_STUB_CHARACTERS = 20
+
+_STYLE_CLOSE = re.compile(r"</style(?![0-9A-Za-z])[^>]*>", re.IGNORECASE)
+_SCRIPT_CLOSE = re.compile(r"</script(?![0-9A-Za-z])[^>]*>", re.IGNORECASE)
+_NOISE_CLOSE = {"style": _STYLE_CLOSE, "script": _SCRIPT_CLOSE}
+
+
 def _plain_body(item) -> str:
+    """Text of one message. One path: a real plain part, otherwise HTML text.
+
+    With an HTML part present, the plain part is set aside when, trimmed, it
+    has no letters or digits, or it is under 20 characters and the HTML text
+    is longer. Style, script and comments are not part of that HTML text.
+    """
     candidates = item.walk() if item.is_multipart() else (item,)
     plain: list[str] = []
     rich: list[str] = []
@@ -80,10 +95,115 @@ def _plain_body(item) -> str:
         if media_type == "text/plain":
             plain.append(content)
         else:
-            without_tags = re.sub(r"<[^>]+>", " ", content)
-            rich.append(html.unescape(without_tags))
-    selected = "\n".join(plain or rich)
-    return "\n".join(line.strip() for line in selected.splitlines() if line.strip())
+            rich.append(_html_to_text(content))
+    plain_raw = "\n".join(plain)
+    html_text = _collapsed("\n".join(rich))
+    # No HTML part: the plain part is the only body, however short it is.
+    if plain and not (rich and _plain_text_unusable(plain_raw, html_text)):
+        return _collapsed(plain_raw)
+    return html_text
+
+
+def _collapsed(text: str) -> str:
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _plain_text_unusable(plain: str, html_text: str) -> bool:
+    """True when the trimmed plain part is empty of text, or a short stub."""
+    trimmed = plain.strip()
+    if not any(character.isalnum() for character in trimmed):
+        return True
+    return len(trimmed) < _PLAIN_STUB_CHARACTERS and len(html_text) > len(trimmed)
+
+
+def _html_to_text(content: str) -> str:
+    """Drop style, script and comments, then tags, the way a body was read."""
+    without_noise = _without_unreadable_html(content)
+    without_tags = re.sub(r"<[^>]+>", " ", without_noise)
+    return html.unescape(without_tags)
+
+
+def _without_unreadable_html(content: str) -> str:
+    """Replace comments and style/script elements, tags and contents, with a space.
+
+    Tag names match case-insensitively and may carry attributes. An unclosed
+    element runs to the end of the part. A self-closing tag drops only itself,
+    so the text after it stays. Quotes hide a `>` that belongs to an attribute.
+    """
+    parts: list[str] = []
+    index = 0
+    length = len(content)
+    while index < length:
+        if content.startswith("<!--", index):
+            parts.append(" ")
+            end = content.find("-->", index + 4)
+            if end == -1:
+                break
+            index = end + 3
+            continue
+        tag = _noise_tag_at(content, index)
+        if tag is not None:
+            parts.append(" ")
+            open_end, self_closing = _open_tag_end(content, index)
+            if open_end is None:
+                break
+            if self_closing:
+                index = open_end
+                continue
+            close_end = _NOISE_CLOSE[tag].search(content, open_end)
+            if close_end is None:
+                break
+            index = close_end.end()
+            continue
+        if content[index] != "<":
+            next_mark = content.find("<", index)
+            if next_mark == -1:
+                parts.append(content[index:])
+                break
+            parts.append(content[index:next_mark])
+            index = next_mark
+            continue
+        parts.append("<")
+        index += 1
+    return "".join(parts)
+
+
+def _noise_tag_at(content: str, index: int) -> str | None:
+    if index >= len(content) or content[index] != "<":
+        return None
+    for name in ("style", "script"):
+        after = index + 1 + len(name)
+        if content[index + 1:after].casefold() != name:
+            continue
+        if after < len(content) and content[after].isalnum():
+            continue
+        return name
+    return None
+
+
+def _open_tag_end(content: str, start: int) -> tuple[int | None, bool]:
+    """Index just after the opening tag's `>`, and whether the tag is `/>`."""
+    quote = ""
+    position = start + 1
+    limit = len(content)
+    while position < limit:
+        character = content[position]
+        if quote:
+            if character == quote:
+                quote = ""
+            position += 1
+            continue
+        if character in ("'", '"'):
+            quote = character
+            position += 1
+            continue
+        if character == ">":
+            look = position - 1
+            while look > start and content[look].isspace():
+                look -= 1
+            return position + 1, content[look] == "/"
+        position += 1
+    return None, False
 
 
 def _has_attachments(item) -> bool:
