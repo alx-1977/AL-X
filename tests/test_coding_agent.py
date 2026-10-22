@@ -867,7 +867,13 @@ class NativeExecutionTests(unittest.TestCase):
         worktree = _worktree(self.root)
         session = TerminalSession(edits={"app.py": _FIXED})
         self._run(PlanningModel(), session, task="fix add", worktree=str(worktree))
-        self.assertIn("Do not\n  run the whole suite", session.calls[0][1])
+        briefing = session.calls[0][1]
+        self.assertIn("Do not run the whole suite\n  unless it is printed", briefing)
+        # Its sandbox cannot run git or read protected files; those failures
+        # are not the change's.
+        self.assertIn("Operation not permitted", briefing)
+        # 2026-10-22: it runs the checks AL/X will run, so it can fix them.
+        self.assertIn("python scripts/required_checks.py", briefing)
 
     def test_the_briefing_states_the_withheld_authority(self) -> None:
         """14. Commit, push, merge and review are refused in the instruction."""

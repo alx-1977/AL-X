@@ -272,6 +272,18 @@ class _ExchangeFeed:
             await asyncio.gather(self._waiter, return_exceptions=True)
 
 
+class StoredResponse(str):
+    """Core words carrying their durable turn identity through a text queue."""
+
+    def __new__(cls, text: str, turn_id: str | None,
+                conversation_id: str | None = None, expires_at: datetime | None = None):
+        value = super().__new__(cls, text)
+        value.turn_id = turn_id
+        value.conversation_id = conversation_id
+        value.expires_at = expires_at
+        return value
+
+
 class QueuedDelivery:
     """Ephemeral words and the durable occasion they came from."""
 
@@ -415,7 +427,13 @@ class VoiceSession:
                     await asyncio.gather(update_task, return_exceptions=True)
                 if cancelled_during_cleanup:
                     raise asyncio.CancelledError
-        return outcome.response if outcome.state.value == "responded" else None
+        return (StoredResponse(outcome.response, outcome.response_turn_id)
+                if outcome.state.value == "responded" else None)
+
+    def response_delivered(self, conversation_id: str, turn_id: str | None) -> None:
+        """Confirm a particular response after the transport accepted its words."""
+        if turn_id is not None:
+            self._gateway.response_delivered(conversation_id, turn_id)
 
     async def remote_turn(self, conversation_id: str, content: str,
                           turn_id: str | None = None) -> Any:
@@ -563,19 +581,11 @@ class VoiceSession:
                 for delivery in spoken:
                     response = (delivery.response if isinstance(delivery, QueuedDelivery)
                                 else delivery)
-                    # The console mirrors this exactly as it mirrors an
-                    # answer to Friedl. Going straight to synthesis left her
-                    # unprompted speech audible with no transcript line: the
-                    # words were spoken, and the terminal showed nothing.
-                    yield VoiceEvent(VoiceEventKind.TEXT, text=response)
-                    # Then the existing synthesis, unaltered. The Core already
-                    # decided both that this was worth saying and how to say
-                    # it; nothing here rewords it.
-                    async for speech_event in self._speak(conversation_id, response, feed):
+                    async for speech_event in self._deliver_response(conversation_id, response, feed):
                         yield speech_event
                         if (isinstance(delivery, QueuedDelivery)
                                 and speech_event.kind is VoiceEventKind.SPEAKING):
-                            # The exchange resumes only after its consumer
+                            # The exchange resumes when its consumer
                             # successfully sends the speech-start phase. A
                             # close during that send leaves the occasion
                             # available for fresh reasoning.
@@ -765,12 +775,24 @@ class VoiceSession:
             )
             yield VoiceEvent(VoiceEventKind.LISTENING)
             return
-        # The console mirrors what the one response path produced. It is not a
-        # second response implementation: the wording is the Core's own, and it
-        # is emitted whether or not anything is audible.
-        yield VoiceEvent(VoiceEventKind.TEXT, text=outcome.response)
-        async for speech_event in self._speak(conversation_id, outcome.response, feed):
+        async for speech_event in self._deliver_response(
+                conversation_id, StoredResponse(outcome.response, outcome.response_turn_id), feed):
             yield speech_event
+
+    async def _deliver_response(
+        self, conversation_id: str, response: str, feed: _ExchangeFeed | None = None,
+    ):
+        """Send Core words to the console, confirm that send, then synthesize."""
+        yield VoiceEvent(VoiceEventKind.TEXT, text=response)
+        # Resumption means the consumer successfully sent TEXT. Closing or
+        # failing that send leaves this response unconfirmed. Keep its source
+        # identity across the queue and this asynchronous boundary.
+        await run_core_worker(
+            self.response_delivered,
+            getattr(response, "conversation_id", None) or conversation_id,
+            getattr(response, "turn_id", None))
+        async for event in self._speak(conversation_id, response, feed):
+            yield event
 
     async def _speak(
         self, conversation_id: str, response: str, feed: _ExchangeFeed | None = None,

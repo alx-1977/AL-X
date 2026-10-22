@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from alx.contracts.phone import IncomingMessage, MessagesUnavailable
+from alx.interfaces.live_voice import StoredResponse
 
 LOGGER = logging.getLogger(__name__)
 
@@ -129,9 +130,16 @@ class PhoneLink:
         if not response:
             return
         if await asyncio.to_thread(self.send, response):
+            confirm = getattr(self._session, "response_delivered", None)
+            if confirm is not None:
+                await asyncio.to_thread(
+                    confirm, PHONE_CONVERSATION_ID, getattr(outcome, "response_turn_id", None))
             return
         if self.fallback is not None:
-            await asyncio.to_thread(self.fallback, response)
+            provenance = getattr(outcome, "response_provenance", None)
+            await asyncio.to_thread(self.fallback, StoredResponse(
+                response, getattr(outcome, "response_turn_id", None), PHONE_CONVERSATION_ID,
+                getattr(provenance, "content_expires_at", None)))
 
     async def run(self) -> None:
         while True:

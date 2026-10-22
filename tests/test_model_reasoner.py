@@ -49,6 +49,7 @@ def base_output(**changes):
         action = {
             "type": "respond",
             "response": changes.pop("response", "A normal response."),
+            "raised_mail_observations": changes.pop("raised_mail_observations", []),
             "response_requires_goal_commit": changes.pop(
                 "response_requires_goal_commit", False
             ),
@@ -303,7 +304,7 @@ class ModelReasonerTests(unittest.TestCase):
                 {"path": path, "equals_json": equals, "negate": False}])
             return dict(self.plan_output(step), action={
                 "type": "respond", "response": "Started; I will report back.",
-                "response_requires_goal_commit": False})
+                "response_requires_goal_commit": False, "raised_mail_observations": []})
 
         class Sequence:
             def __init__(self, *outputs):
@@ -374,7 +375,7 @@ class ModelReasonerTests(unittest.TestCase):
             "goal_update": None,
             "memory_proposals": [],
             "action": {"type": "respond", "response": "Watching the checks.",
-                       "response_requires_goal_commit": False},
+                       "response_requires_goal_commit": False, "raised_mail_observations": []},
             "plan_update": {
                 "operation": "install",
                 "plan": {
@@ -461,6 +462,20 @@ class ModelReasonerTests(unittest.TestCase):
                         DecisionValidationError, "respond.response must be a nonblank string"
                     ):
                         ModelReasoner(model, "laws", "identity").decide(self.context())
+
+    def test_response_parses_exact_observations_and_accepts_legacy_omission(self):
+        from alx.contracts.mail import MailReference
+
+        refs = [{"mailbox_id": "INBOX", "uid_validity": "777", "uid": "1"},
+                {"mailbox_id": "Other", "uid_validity": "888", "uid": "1"}]
+        output = base_output(raised_mail_observations=refs)
+        self.assertTrue(_schema_accepts(decision_schema(), output))
+        decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
+        self.assertEqual(decision.raised_mail_observations,
+                         tuple(MailReference(**ref) for ref in refs))
+        del output["action"]["raised_mail_observations"]
+        legacy = ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
+        self.assertEqual(legacy.raised_mail_observations, ())
 
     def test_ordinary_response_has_no_required_goal_metadata(self) -> None:
         model = FakeModel(base_output())

@@ -84,7 +84,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(heard, ["JLCPCB needs a choice"])
         self.assertEqual(relayed, [(MAIL, "turn-JLCPCB needs a choice", FRIEDL)])
 
-    def test_a_reply_in_his_own_thread_is_not_copied(self) -> None:
+    def test_a_reply_in_his_own_thread_confirms_its_original_identity(self) -> None:
         relayed = []
 
         async def scenario():
@@ -94,7 +94,8 @@ class RoutingTests(unittest.TestCase):
             return result, _drain(mine)
 
         result, heard = asyncio.run(scenario())
-        self.assertEqual((result, heard, relayed), (ResponseDelivery.DELIVERED, ["hello"], []))
+        self.assertEqual((result, heard), (ResponseDelivery.DELIVERED, ["hello"]))
+        self.assertEqual(relayed, [(FRIEDL, "turn-hello", FRIEDL)])
 
     def test_the_newest_open_session_hears_it(self) -> None:
         async def scenario():
@@ -500,6 +501,19 @@ class SetupFailureTests(unittest.TestCase):
 
 
 class RelayTests(unittest.TestCase):
+    def test_legacy_relays_are_not_backfilled_as_observation_receipts(self) -> None:
+        from alx.contracts.mail import MailReference
+
+        self.gateway.relay_response(MAIL, "t1", FRIEDL)
+        path = self.store._connection.execute("PRAGMA database_list").fetchone()[2]
+        with self.store._connection:
+            self.store._connection.execute("PRAGMA user_version = 3")
+        self.store.close()
+        self.store = SQLiteConversationStore(path)
+        self.addCleanup(self.store.close)
+        self.assertIsNone(self.store.mail_observation_raised_at(
+            MailReference("INBOX", "777", "1")))
+
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

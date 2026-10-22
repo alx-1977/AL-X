@@ -1041,6 +1041,53 @@ class ForegroundContextIsLocalTests(unittest.TestCase):
             )
         self.adapter.scan()
 
+    def test_held_raised_mail_and_waiting_items_use_the_same_gateway_context(self) -> None:
+        from alx.continuity.mail_source import mail_conversation_id
+        from alx.core import CoreOutcome
+
+        self.observe(1)
+        a = self.state.unclaimed_arrivals()[0]
+        self.adapter.mark_claimed(a.event_id)
+        self.adapter.record_delivery(a.event_id)
+        store = SQLiteConversationStore(Path(self.directory.name) / "conversation.sqlite3")
+        self.addCleanup(store.close)
+        keep = a.occurred_at + timedelta(days=30)
+        source = store.create(mail_conversation_id(a), keep)
+        store.append(ConversationTurn(source.conversation_id, "announcement",
+                                     ConversationOrigin.ALX_RESPONSE, "A reply",
+                                     a.occurred_at, raised_mail_observations=(
+                                         MailReference(a.data["mailbox_id"], a.data["uid_validity"], a.data["uid"]),
+                                     )), keep, source.revision)
+        seen: list[ConversationSnapshot] = []
+
+        class Core:
+            def process(self, conversation, *args, **kwargs):
+                seen.append(conversation)
+                return CoreOutcome(CoreState.FINISHED_SILENTLY)
+
+        gateway = ConversationGateway(
+            Core(), store, clock=lambda: a.occurred_at,
+            contextual_events=self.adapter.contextual_events)
+        gateway.relay_response(source.conversation_id, "announcement", "friedl")
+        gateway.response_delivered(source.conversation_id, "announcement")
+        # A stays held while two unrelated messages arrive.
+        self.imap.items[3] = message("FMS statement", "Statement")
+        self.imap.items[4] = message("Other mail", "Other")
+        self.adapter.scan()
+        b = next(event for event in self.adapter.contextual_events()
+                 if event.data["uid"] == "3")
+        gateway.receive_session_open(mail_conversation_id(b), 1, keep)
+        items = {event.data["uid"]: event.data for event in seen[-1].events
+                 if event.kind in ("mail.message_arrived", "mail.message_waiting")}
+        self.assertTrue(items["2"]["already_raised_with_friedl"])
+        self.assertEqual(items["2"]["raised_with_friedl_at"], a.occurred_at.isoformat())
+        for uid in ("3", "4"):
+            self.assertFalse(items[uid]["already_raised_with_friedl"])
+            self.assertIsNone(items[uid]["raised_with_friedl_at"])
+        self.adapter.acknowledge(MailReference("INBOX", "777", "2"))
+        gateway.receive_session_open(mail_conversation_id(b), 1, keep)
+        self.assertFalse(any(event.data.get("uid") == "2" for event in seen[-1].events))
+
     def test_context_assembly_opens_no_connection_and_sends_no_command(
         self,
     ) -> None:

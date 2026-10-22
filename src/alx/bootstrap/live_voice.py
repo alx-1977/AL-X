@@ -78,7 +78,7 @@ from alx.config import (
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
 from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
-from alx.continuity.mail_source import MailCognitionSource
+from alx.continuity.mail_source import MailCognitionSource, mail_conversation_id
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.bootstrap.documents import build_document_runtime
 from alx.bootstrap.readers import (
@@ -1488,6 +1488,9 @@ async def run(repository_root: Path) -> None:
         reopen=None if autonomous_holds is None else autonomous_holds.reopen,
         advance_plans=plan_workers.advance,
     )
+    # A plan a turn has just made runnable starts on the next tick; wake it,
+    # so the first step follows the turn instead of up to a tick later.
+    core.plan_runnable_listener = due_cognition.wake
     # Watching the mailbox is not a property of whether Friedl has a browser
     # open, so the scan lives here beside the transport rather than inside a
     # voice exchange. It is purely mechanical: it discovers, advances the

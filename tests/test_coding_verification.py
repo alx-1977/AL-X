@@ -200,7 +200,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
         self.assertEqual(_names(changed), ("diff_check", "content_check", "pytest_targeted"))
         self.assertEqual(
             _commands(changed),
-            (DIFF_CHECK, ("python", "-m", "pytest", "-q", "tests/test_coding_agent.py")),
+            (DIFF_CHECK, ("python", "-m", "pytest", "-q", "--rootdir=tests", "tests/test_coding_agent.py")),
         )
 
     def test_a_python_change_with_no_mapped_test_is_reported(self) -> None:
@@ -253,7 +253,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
                 ("src/alx/core/mapped.py",), root
             )
             self.assertIn(
-                ("python", "-m", "pytest", "-q", "tests/test_core_mapped.py"),
+                ("python", "-m", "pytest", "-q", "--rootdir=tests", "tests/test_core_mapped.py"),
                 mapped_only.commands,
             )
             self.assertNotIn(FULL_SUITE, mapped_only.commands)
@@ -263,7 +263,7 @@ class PolicyIsDerivedFromTheChangedFiles(unittest.TestCase):
             )
             self.assertNotIn(FULL_SUITE, mixed.commands)
             self.assertIn(
-                ("python", "-m", "pytest", "-q", "tests/test_core_mapped.py"),
+                ("python", "-m", "pytest", "-q", "--rootdir=tests", "tests/test_core_mapped.py"),
                 mixed.commands,
             )
             names = tuple(check.name for check in mixed.checks)
@@ -578,6 +578,94 @@ class TheFullSuiteCanActuallyFinish(unittest.TestCase):
         self.assertEqual(DEFAULT_VERIFICATION_COMMAND_SECONDS, 180)
 
 
+class TestsFollowTheModulesTheyImport(unittest.TestCase):
+    """2026-10-22: a change to the Core's instructions mapped to 1 test file
+    while 13 check their wording, and two coding jobs were lost to failures
+    only the full suite found."""
+
+    def _root(self, files: dict[str, str]) -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        for name, text in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text)
+        return root
+
+    def _targeted(self, changed, root) -> tuple[str, ...]:
+        for check in required_verification(changed, root).checks:
+            if check.name == "pytest_targeted":
+                return check.argv
+        return ()
+
+    def test_every_test_importing_the_changed_module_runs(self) -> None:
+        root = self._root({
+            "src/alx/core/brain.py": "PROTOCOL = 'x'\n",
+            "tests/test_wording.py": "from alx.core.brain import PROTOCOL\n",
+            "tests/test_other.py": "import alx.core.brain\n",
+            "tests/test_package.py": "from alx.core import brain\n",
+            "tests/test_unrelated.py": "from alx.core.other import X\n",
+        })
+        argv = self._targeted(("src/alx/core/brain.py",), root)
+        for name in ("tests/test_wording.py", "tests/test_other.py", "tests/test_package.py"):
+            self.assertIn(name, argv)
+        self.assertNotIn("tests/test_unrelated.py", argv)
+
+    def test_a_changed_test_file_is_seen_despite_the_cache(self) -> None:
+        root = self._root({
+            "src/alx/core/brain.py": "",
+            "tests/test_first.py": "import alx.core.brain\n",
+        })
+        self.assertIn("tests/test_first.py",
+                      self._targeted(("src/alx/core/brain.py",), root))
+        # A test added and one rewritten after the first index: both seen.
+        (root / "tests/test_added.py").write_text("import alx.core.brain\n")
+        (root / "tests/test_first.py").write_text("import alx.core.other\n")
+        argv = self._targeted(("src/alx/core/brain.py",), root)
+        self.assertIn("tests/test_added.py", argv)
+        self.assertNotIn("tests/test_first.py", argv)
+
+    def test_the_real_instructions_reach_the_wording_tests(self) -> None:
+        argv = self._targeted(("src/alx/core/model_reasoner.py",), REPOSITORY_ROOT)
+        for name in ("tests/test_routine_invoice_processing.py", "tests/test_mail_reply.py"):
+            self.assertIn(name, argv)
+
+    def test_large_targeted_runs_are_parallel_and_small_ones_are_not(self) -> None:
+        many = self._root({
+            "src/alx/core/brain.py": "",
+            **{f"tests/test_t{i}.py": "import alx.core.brain\n" for i in range(4)},
+        })
+        argv = self._targeted(("src/alx/core/brain.py",), many)
+        self.assertEqual(argv[argv.index("-n"):argv.index("-n") + 2], ("-n", "auto"))
+        few = self._root({"src/alx/core/brain.py": "",
+                          "tests/test_brain.py": "import alx.core.brain\n"})
+        self.assertNotIn("-n", self._targeted(("src/alx/core/brain.py",), few))
+
+    def test_test_runs_start_their_scan_in_tests(self) -> None:
+        """The sandbox denies .env at the root; pytest 8+ stats it otherwise."""
+        self.assertIn("--rootdir=tests", FULL_SUITE)
+        argv = self._targeted(("src/alx/core/model_reasoner.py",), REPOSITORY_ROOT)
+        self.assertIn("--rootdir=tests", argv)
+        self.assertFalse(command_permitted(
+            ["python", "-m", "pytest", "--rootdir=/"], REPOSITORY_ROOT))
+
+    def test_the_full_suite_runs_in_parallel(self) -> None:
+        self.assertEqual(FULL_SUITE[-2:], ("-n", "auto"))
+        self.assertTrue(command_permitted(list(FULL_SUITE), REPOSITORY_ROOT))
+
+    def test_the_session_script_prints_the_derived_commands(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "scripts/required_checks.py", "src/alx/core/model_reasoner.py"],
+            cwd=REPOSITORY_ROOT, capture_output=True, text=True, check=True,
+        )
+        lines = result.stdout.splitlines()
+        self.assertIn("python scripts/check_architecture.py", lines)
+        self.assertTrue(any("tests/test_routine_invoice_processing.py" in line
+                            for line in lines))
+        # The session cannot read git metadata; AL/X runs the diff check.
+        self.assertNotIn("git diff --check", lines)
+
+
 class TheAllowlistStaysNarrow(unittest.TestCase):
     """11. The Coding Agent cannot execute commands outside the allowlist."""
 
@@ -602,6 +690,18 @@ class TheAllowlistStaysNarrow(unittest.TestCase):
                     command_permitted(argv, REPOSITORY_ROOT),
                     f"the allowlist admitted {argv}",
                 )
+
+    def test_parallel_workers_are_auto_or_a_small_number(self) -> None:
+        base = ["python", "-m", "pytest", "-q"]
+        for value in ("auto", "1", "8", "16"):
+            with self.subTest(value=value):
+                self.assertTrue(command_permitted(base + ["-n", value], REPOSITORY_ROOT))
+        for args in (["-n", "17"], ["-n", "0"], ["-n", "lots"], ["-n"],
+                     ["-n", "-p", "no:cacheprovider"],
+                     # Digits isdigit() accepts and int() rejects (PR #173).
+                     ["-n", "²"], ["-n", "٣"], ["-n", "08"], ["-n", " 4"]):
+            with self.subTest(args=args):
+                self.assertFalse(command_permitted(base + args, REPOSITORY_ROOT))
 
     def test_a_blocked_gate_path_is_refused(self) -> None:
         """The gate must be the worktree's own and not a blocked path."""

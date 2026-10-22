@@ -81,9 +81,9 @@ class StreamedActivityTests(unittest.TestCase):
         self.home = Path(self.directory.name) / "grok-home"
         self.home.mkdir()
 
-    def _session(self, cli: Path) -> GrokCodingSession:
+    def _session(self, cli: Path, stall_seconds: float = 1) -> GrokCodingSession:
         return GrokCodingSession(
-            "grok-test", executable=str(cli), stall_seconds=1,
+            "grok-test", executable=str(cli), stall_seconds=stall_seconds,
             environment={"PATH": os.environ.get("PATH", ""), "GROK_HOME": str(self.home)},
         )
 
@@ -165,7 +165,9 @@ for _ in range(50):
 print(json.dumps({"type": "text", "data": "done"}), flush=True)
 print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 3}), flush=True)
 """
-        session = self._session(_fake_cli(Path(self.directory.name), reader))
+        # Not a stall test: under a loaded parallel run the fake CLI took over
+        # 1 s to start and was taken for a stalled session (PR #173).
+        session = self._session(_fake_cli(Path(self.directory.name), reader), stall_seconds=5)
         retained: list[str] = []
         original = session.retained_output
         session.retained_output = lambda lines: retained.append(original(lines)) or retained[-1]
