@@ -78,7 +78,7 @@ from alx.config import (
 )
 from alx.continuity.completed_work_source import CompletedWorkSource
 from alx.continuity.plan_source import PlanAttentionSource, PlanWorkers
-from alx.continuity.mail_source import MailCognitionSource
+from alx.continuity.mail_source import MailCognitionSource, mail_conversation_id
 from alx.continuity.occasions import CombinedOccasionSource
 from alx.bootstrap.documents import build_document_runtime
 from alx.bootstrap.readers import (

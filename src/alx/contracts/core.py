@@ -26,6 +26,7 @@ from alx.contracts.records import (
     GoalStopReason,
 )
 from alx.contracts.memory import MemoryProposal, MemoryQuery, MemorySnapshot
+from alx.contracts.mail import MailReference
 from alx.contracts.scope import ScopeReference
 from alx.contracts.provenance import ContentProvenance
 from alx.contracts.trace import ReasoningPurpose
@@ -380,8 +381,15 @@ class AgentDecision:
     # A plan change travels with the words or silence that end the decision,
     # the way a goal update does. It is never the decision's one action.
     plan_update: PlanUpdate | None = None
+    raised_mail_observations: tuple[MailReference, ...] = ()
 
     def __post_init__(self) -> None:
+        refs = tuple(self.raised_mail_observations)
+        if any(not isinstance(ref, MailReference) for ref in refs):
+            raise TypeError("raised mail observations must be MailReference values")
+        if refs and self.response is None:
+            raise ValueError("only a response may raise mail observations")
+        object.__setattr__(self, "raised_mail_observations", tuple(dict.fromkeys(refs)))
         if not isinstance(self.finish_silently, bool):
             raise TypeError("finish_silently must be a bool")
         chosen = sum(item is not None for item in (self.call, self.response, self.memory_query))
@@ -514,6 +522,11 @@ class DurableConversationStore(Protocol):
         retention_until: datetime,
         expected_revision: int,
     ) -> ConversationSnapshot: ...
+
+    def record_response_delivery(self, conversation_id: str, turn_id: str,
+                                 delivered_at: datetime) -> bool: ...
+
+    def mail_observation_raised_at(self, reference: MailReference) -> datetime | None: ...
 
 class DurableMemoryStore(Protocol):
     def remember(

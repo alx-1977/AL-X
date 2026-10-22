@@ -13,7 +13,7 @@ import logging
 from uuid import uuid4
 
 from alx.contracts import (
-    AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled,
+    AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled, BackgroundEvent,
     DecisionValidationError,
     AutonomousRequestUnbounded,
     CapabilityAttempt, CapabilityAttemptDisposition,
@@ -30,6 +30,7 @@ from alx.contracts import (
     ReasoningPurpose, TraceSink, TraceStatus, TraceSubsystem,
     emit_trace, history_evidence_ids,
 )
+from alx.contracts.mail import MailReference
 
 from alx.core.plan_results import (
     PlanResultClassification, PlanResultKind,
@@ -100,6 +101,27 @@ class CoreState(str, Enum):
     ERROR = "error"
 
 
+def _in_context_raised_mail(
+    decision: AgentDecision, events: Sequence[BackgroundEvent],
+) -> tuple[MailReference, ...]:
+    """Retain only named observations from the decision's mail context."""
+    available = {
+        (event.data.get("mailbox_id"), event.data.get("uid_validity"), event.data.get("uid"))
+        for event in events
+        if event.kind in ("mail.message_arrived", "mail.message_waiting")
+    }
+    return tuple(ref for ref in decision.raised_mail_observations
+                 if (ref.mailbox_id, ref.uid_validity, ref.uid) in available)
+
+
+def _validate_raised_mail(
+    decision: AgentDecision, events: Sequence[BackgroundEvent],
+) -> None:
+    """Refuse decisions naming observations absent from their mail context."""
+    if len(_in_context_raised_mail(decision, events)) != len(decision.raised_mail_observations):
+        raise DecisionValidationError("raised_mail_observation_not_in_context")
+
+
 @dataclass(frozen=True, slots=True)
 class CoreOutcome:
     state: CoreState
@@ -115,6 +137,7 @@ class CoreOutcome:
     # The fixed turn id of a reply that announces a finish or cancel, held
     # on the plan until it is stored. None: an ordinary reply, any id.
     response_turn_id: str | None = None
+    raised_mail_observations: tuple[MailReference, ...] = ()
 
     def __post_init__(self) -> None:
         if self.state is CoreState.RESPONDED and (
@@ -504,6 +527,7 @@ class CoreAgent:
         # supporting memory did not persist.
         conflict_response: str | None = None
         conflict_provenance: ContentProvenance | None = None
+        conflict_raised_mail: tuple[MailReference, ...] = ()
         conflict_silent = False
         transient_attempts: tuple[CapabilityAttempt, ...] = plan_evidence
         memory_query_ids: set[str] = set()
@@ -603,6 +627,7 @@ class CoreAgent:
                 rendered_plan = self._rendered_plan(reasoning_context.active_goal)
                 self._emit_reasoning(purpose, purpose_reference, conversation_id)
                 decision = self._reasoner.decide(reasoning_context)
+                _validate_raised_mail(decision, conversation.events)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
                 return CoreOutcome(
@@ -811,6 +836,7 @@ class CoreAgent:
                 if decision.call is None:
                     conflict_response = decision.response
                     conflict_provenance = decision_provenance
+                    conflict_raised_mail = decision.raised_mail_observations
                     conflict_silent = decision.finish_silently
                 continue
             if proposal_error is not None:
@@ -1155,6 +1181,7 @@ class CoreAgent:
                         decision.memory_proposals, retention_until)
                     conflict_response = decision.response
                     conflict_provenance = decision_provenance
+                    conflict_raised_mail = decision.raised_mail_observations
                     conflict_silent = decision.finish_silently
                     continue
                 memory_conflicts = ()
@@ -1195,6 +1222,7 @@ class CoreAgent:
                     return CoreOutcome(
                         CoreState.RESPONDED if decision.response is not None else CoreState.CHECKPOINTED,
                         snapshot, response=decision.response, reason=mechanical_blocker,
+                        raised_mail_observations=decision.raised_mail_observations,
                         response_provenance=decision_provenance,
                         response_turn_id=reply_turn,
                     )
@@ -1245,6 +1273,7 @@ class CoreAgent:
                     CoreState.RESPONDED,
                     snapshot,
                     response=decision.response,
+                    raised_mail_observations=decision.raised_mail_observations,
                     reason="goal_proposal_rejected" if proposal_error else deferred_selection,
                     response_provenance=decision_provenance,
                     response_turn_id=reply_turn,
@@ -1508,6 +1537,7 @@ class CoreAgent:
                 response=None if conflict_silent else conflict_response,
                 reason="core_selected_silence" if conflict_silent else None,
                 response_provenance=None if conflict_silent else conflict_provenance,
+                raised_mail_observations=() if conflict_silent else conflict_raised_mail,
                 memory_state="unresolved_identity_conflict",
             )
         if (origin is CognitionOrigin.PERSON_TURN
@@ -1562,6 +1592,14 @@ class CoreAgent:
         self._emit_reasoning(ReasoningPurpose.PREPARING_RESPONSE, reason, conversation_id)
         try:
             decision = self._reasoner.decide(terminal_context)
+            # No reconsideration step remains. Preserve her reply without
+            # giving receipt coverage to references absent from this context.
+            retained = _in_context_raised_mail(decision, terminal_context.events)
+            dropped = len(decision.raised_mail_observations) - len(retained)
+            if dropped:
+                LOGGER.info("Terminal response dropped %d out-of-context mail observations", dropped)
+                decision = replace(decision, raised_mail_observations=retained)
+            _validate_raised_mail(decision, terminal_context.events)
         except Exception as error:
             LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
             return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
@@ -1584,6 +1622,7 @@ class CoreAgent:
             return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
         return CoreOutcome(
             CoreState.RESPONDED, snapshot, response=decision.response,
+            raised_mail_observations=decision.raised_mail_observations,
             reason=reason, response_provenance=provenance,
         )
 

@@ -15,6 +15,7 @@ from alx.contracts import (
     ContentOrigin, RetentionPolicy,
 )
 from alx.conversation.store import ConversationNotFound
+from alx.contracts.mail import MailReference
 from alx.core import CoreAgent, CoreOutcome, CoreState
 
 LOGGER = logging.getLogger(__name__)
@@ -46,27 +47,33 @@ class ConversationGateway:
         self._contextual_events = contextual_events or (lambda: ())
 
     def _store_response(self, conversation_id: str, outcome: CoreOutcome,
-                        retention_until: datetime) -> None:
+                        retention_until: datetime) -> str:
         """Store her reply. A plan's finish or cancel reply keeps its fixed id,
         and any earlier one the plan still holds is stored before it."""
         if outcome.response_turn_id is None or outcome.snapshot is None:
-            self._append_reply(conversation_id, self._identifier_factory(),
+            turn_id = outcome.response_turn_id or self._identifier_factory()
+            self._append_reply(conversation_id, turn_id,
                                outcome.response, outcome.response_provenance,
                                retention_until,
-                               None if outcome.snapshot is None else outcome.snapshot.state.goal_id)
-            return
+                               None if outcome.snapshot is None else outcome.snapshot.state.goal_id,
+                               outcome.raised_mail_observations)
+            return turn_id
         snapshot = outcome.snapshot
         for announcement in snapshot.state.execution_plan.announcements:
             self._append_reply(
                 conversation_id, announcement.turn_id, announcement.text,
                 outcome.response_provenance
                 if announcement.turn_id == outcome.response_turn_id
-                else snapshot.provenance, retention_until, snapshot.state.goal_id)
+                else snapshot.provenance, retention_until, snapshot.state.goal_id,
+                outcome.raised_mail_observations
+                if announcement.turn_id == outcome.response_turn_id else ())
             self._acknowledge(snapshot.state.goal_id, announcement.turn_id)
+        return outcome.response_turn_id
 
     def _append_reply(self, conversation_id: str, turn_id: str, text: str,
                       provenance, retention_until: datetime,
-                      response_goal_id: str | None = None) -> None:
+                      response_goal_id: str | None = None,
+                      raised_mail_observations: tuple[MailReference, ...] = ()) -> None:
         """Append one reply turn, unless that exact turn is already stored."""
         current = self._conversation_store.load(conversation_id)
         if any(item.turn_id == turn_id for item in current.turns):
@@ -74,7 +81,8 @@ class ConversationGateway:
         self._conversation_store.append(
             ConversationTurn(conversation_id, turn_id, ConversationOrigin.ALX_RESPONSE,
                              text, self._clock(), provenance=provenance,
-                             response_goal_id=response_goal_id),
+                             response_goal_id=response_goal_id,
+                             raised_mail_observations=raised_mail_observations),
             retention_until, current.revision,
         )
 
@@ -106,8 +114,6 @@ class ConversationGateway:
         what he is answering. Stored once per source thread and turn. False
         when that reply no longer exists (for example, it has expired).
         """
-        if source_conversation_id == target_conversation_id:
-            return True
         try:
             source = self._conversation_store.load(source_conversation_id)
         except ConversationNotFound:
@@ -116,6 +122,8 @@ class ConversationGateway:
                          and item.origin is ConversationOrigin.ALX_RESPONSE), None)
         if original is None:
             return False
+        if source_conversation_id == target_conversation_id:
+            return True
         try:
             target = self._conversation_store.load(target_conversation_id)
         except ConversationNotFound:
@@ -133,6 +141,11 @@ class ConversationGateway:
             max(target.retention_until, source.retention_until), target.revision,
         )
         return True
+
+    def response_delivered(self, conversation_id: str, turn_id: str) -> bool:
+        """Transport confirmation of this response, including person turns."""
+        return self._conversation_store.record_response_delivery(
+            conversation_id, turn_id, self._clock())
 
     def _acknowledge(self, goal_id: str, turn_id: str) -> None:
         try:
@@ -166,6 +179,11 @@ class ConversationGateway:
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
+        """Attach local facts, including exact delivered observation markers.
+
+        A raised marker neither filters observations nor acknowledges mail;
+        the Core decides what to say about every item still in context.
+        """
         started_at = monotonic()
         contextual = self._contextual_events()
         elapsed = monotonic() - started_at
@@ -179,6 +197,20 @@ class ConversationGateway:
             item.event_id: item
             for item in (*contextual, *additional)
         }
+        for event_id, event in events.items():
+            if event.kind not in ("mail.message_arrived", "mail.message_waiting"):
+                continue
+            coordinates = tuple(event.data.get(key) for key in ("mailbox_id", "uid_validity", "uid"))
+            raised_at = (
+                self._conversation_store.mail_observation_raised_at(MailReference(*coordinates))
+                if all(isinstance(value, str) and value.strip() for value in coordinates)
+                else None
+            )
+            events[event_id] = replace(event, data={
+                **event.data,
+                "already_raised_with_friedl": raised_at is not None,
+                "raised_with_friedl_at": None if raised_at is None else raised_at.isoformat(),
+            })
         return ConversationSnapshot(
             conversation.conversation_id,
             conversation.turns,
@@ -220,7 +252,8 @@ class ConversationGateway:
         conversation = self._with_contextual_events(conversation)
         outcome = self._core.process(conversation, retention_until, step_budget)
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            self._store_response(turn.conversation_id, outcome, retention_until)
+            outcome = replace(outcome, response_turn_id=self._store_response(
+                turn.conversation_id, outcome, retention_until))
         return outcome
 
     def receive_cognition_opportunity(
@@ -271,7 +304,8 @@ class ConversationGateway:
             ),
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            self._store_response(conversation_id, outcome, retention_until)
+            outcome = replace(outcome, response_turn_id=self._store_response(
+                conversation_id, outcome, retention_until))
         return outcome
 
     def receive_session_open(self, conversation_id: str, step_budget: int,
@@ -295,5 +329,6 @@ class ConversationGateway:
             step_budget, trigger_event_id=event.event_id,
         )
         if outcome.state is CoreState.RESPONDED and outcome.response is not None:
-            self._store_response(conversation_id, outcome, retention_until)
+            outcome = replace(outcome, response_turn_id=self._store_response(
+                conversation_id, outcome, retention_until))
         return outcome

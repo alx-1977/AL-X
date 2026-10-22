@@ -21,7 +21,7 @@ from typing import Any
 
 from alx.interfaces.phone import PHONE_CONVERSATION_ID
 from alx.contracts import AudioChunk, ResponseDelivery
-from alx.interfaces.live_voice import QueuedDelivery, VoiceEventKind, VoiceSession
+from alx.interfaces.live_voice import QueuedDelivery, StoredResponse, VoiceEventKind, VoiceSession
 
 
 LOGGER = logging.getLogger(__name__)
@@ -167,12 +167,13 @@ class LiveVoiceServer:
             # it. If it cannot be sent it takes the ordinary path below.
             identity = self._identify(conversation_id, response)
             if phone.send(response):
-                if conversation_id != PHONE_CONVERSATION_ID:
-                    self._relay_into(source_conversation_id, identity,
-                                     PHONE_CONVERSATION_ID)
+                if identity is not None:
+                    self._session.response_delivered(source_conversation_id, identity[0])
+                self._relay_into(source_conversation_id, identity,
+                                 PHONE_CONVERSATION_ID)
                 return ResponseDelivery.DELIVERED
         registered = self._delivery_queues.get(conversation_id) or []
-        identity = None if registered else self._identify(conversation_id, response)
+        identity = self._identify(conversation_id, response)
         if not registered:
             # A mail thread has no listener of its own. An absent session
             # makes this occasion undelivered evidence for a later Core turn.
@@ -210,8 +211,11 @@ class LiveVoiceServer:
                     # Detached between lookup and here.
                     continue
                 try:
-                    delivery = (QueuedDelivery(response, opportunity_id)
-                                if opportunity_id is not None else response)
+                    words = StoredResponse(response, identity[0] if identity else None,
+                                           source_conversation_id,
+                                           identity[1] if identity else None)
+                    delivery = (QueuedDelivery(words, opportunity_id)
+                                if opportunity_id is not None else words)
                     waiting.put_nowait(delivery)
                     if isinstance(delivery, QueuedDelivery):
                         self._queued_occasions.setdefault(waiting, []).append(delivery)
@@ -234,7 +238,7 @@ class LiveVoiceServer:
             accepted = acknowledged.get(timeout=self.DELIVERY_ACK_SECONDS)
         except queue.Empty:
             return ResponseDelivery.UNDELIVERABLE
-        if accepted and conversation_id != source_conversation_id:
+        if accepted:
             # Heard in his thread, so it is recorded in his thread: his answer
             # to it is then an answer to something his conversation holds.
             self._relay_into(source_conversation_id, identity, conversation_id)
@@ -248,6 +252,8 @@ class LiveVoiceServer:
 
     def _identify(self, conversation_id: str, text: str):
         """The stored reply being delivered, as (turn id, expiry), or None."""
+        if isinstance(text, StoredResponse):
+            return (text.turn_id, text.expires_at) if text.turn_id is not None else None
         locate = getattr(self, "_locate", None)
         if locate is None:
             return None

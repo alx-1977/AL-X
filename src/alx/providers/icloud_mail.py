@@ -956,7 +956,7 @@ class SQLiteMailObservationState:
 
     @staticmethod
     def _waiting_event(row) -> BackgroundEvent:
-        """A queued observation, marked as not yet raised with Friedl."""
+        """A queued observation; queue exposure alone proves no announcement."""
         return BackgroundEvent(
             f"mail:{row[1]}:{row[2]}:waiting",
             "mail.message_waiting",
