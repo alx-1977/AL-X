@@ -25,13 +25,17 @@ their new code against it. The broker does it and keeps the complete raw result.
 is allowed freely. Anything that changes something — send, delete, post, pay — needs your
 approval first, and that is enforced by the broker, not left to an instruction.
 
-Four things follow:
+Five things follow:
 
 - **She sees everything.** Every live run keeps the raw output (terminal bytes, the full
   email, the API reply) before anything cleans it up. Today's three failed usage-reader
   rounds would each have shown their cause the first time.
 - **She tests before paying for a review.** A check refuses a Greptile request until the
   changed code has been seen working against the real service.
+- **Faster fixes.** Today a small fix took her over an hour, where 20–30
+  minutes is realistic. Most of it went on rule tests found only after each
+  coding job and on running 4,400 tests one at a time (§13a). That is fixed
+  first.
 - **One sandbox.** The separate experiment sandbox is removed; experiments, coding,
   diagnosis and testing use one work room.
 - **New logins need almost no work.** Reading through a new login works through the same
@@ -366,11 +370,59 @@ relevant tool versions, and run a small boundary test when any of them changes.
 - Measure first: Core's ~55,000-token context per step should be broken down into fresh,
   cached and output tokens before more infrastructure is added (separate work).
 
+## 13a. Speed of the repair loop
+
+Measured on 2026-10-22, on the "stop repeat mail announcements" fix (PR #172).
+The change was small, and the same fix done directly would take about 20–30
+minutes. AL/X took well over an hour:
+
+| Step | Took |
+| --- | --- |
+| First coding job | 8 min |
+| GitHub checks | 6 min |
+| Greptile review 1 | 8 min |
+| Coding job: fix the review findings | 10 min |
+| Coding job: failed on a forbidden word in a rule test | 10 min |
+| Retry: failed on another forbidden word | 18 min |
+| Third try, then review 2 | … |
+
+Model thinking was a small share (about 30–40 s a step). The time went to the
+loop around it:
+
+1. **Rule tests found last.** The coding session runs only the tests for the
+   code it changed. The law-gate and wording tests run only in AL/X's full
+   suite after the session, so each failure costs a whole new coding job
+   (10–18 min) for a one-word fix. *Fix:* the coding session runs the
+   architecture, governance and wording tests itself before it finishes, and
+   the same session corrects what they find.
+2. **A fresh session per round.** Each new coding job re-reads the code from
+   scratch. *Fix:* a correction continues the same session (§13).
+3. **The full suite runs one test at a time.** Measured: 4,397 tests, 393 s.
+   88 % take under 0.1 s each (about 19 s together). The time is in 544
+   slower tests (374 s), almost all exercising the coding machinery itself
+   (real git repositories, processes, timeouts) plus 4 real-KiCad tests
+   (15 s). *Fix:* run the suite in parallel (expected 1–2 min instead of
+   6½), and run the slow coding-machinery tests in a coding job only when
+   that machinery changed. GitHub's law-gates still run everything before
+   merge.
+4. **A fixed 30-second pause** between installing an execution plan and its
+   first step, seen on most plans that day. *Fix:* find its purpose; remove
+   it or make it conditional.
+5. **Stale tests.** None found by timing. Do a file-by-file check when the
+   experiment sandbox is removed (§11), since its tests go with it.
+
+These do not depend on the broker and are built first (§14, phase 0).
+
 ## 14. Build order
 
 Each phase ends with a demonstration on a real case. Stop after each phase and use it on
 the next real failure before building more.
 
+0. **Speed of the loop (§13a).** Rule tests inside the coding session,
+   corrections in the same session, parallel test runs, slow machinery tests
+   only when affected, and the 30-second plan pause explained or removed.
+   *Done when* a small fix like PR #172 goes from coding to review in about
+   15 minutes, with no coding job lost to a rule test.
 1. **Raw capture.** The usage reader already returns `raw_output_tail` (#170). Extend this
    to full timed captures with input events, stored in the evidence store, with a summary.
    *Done when* a deliberately broken renderer's failure is diagnosable from the capture
