@@ -122,7 +122,6 @@ class ConversationGateway:
                          and item.origin is ConversationOrigin.ALX_RESPONSE), None)
         if original is None:
             return False
-        self.response_delivered(source_conversation_id, source_turn_id)
         if source_conversation_id == target_conversation_id:
             return True
         try:
@@ -180,7 +179,7 @@ class ConversationGateway:
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
-        """Attach local facts, including exact delivered observation receipts.
+        """Attach local facts, including exact delivered observation markers.
 
         A raised marker neither filters observations nor acknowledges mail;
         the Core decides what to say about every item still in context.

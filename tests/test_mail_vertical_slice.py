@@ -1069,6 +1069,7 @@ class ForegroundContextIsLocalTests(unittest.TestCase):
             Core(), store, clock=lambda: a.occurred_at,
             contextual_events=self.adapter.contextual_events)
         gateway.relay_response(source.conversation_id, "announcement", "friedl")
+        gateway.response_delivered(source.conversation_id, "announcement")
         # A stays held while two unrelated messages arrive.
         self.imap.items[3] = message("FMS statement", "Statement")
         self.imap.items[4] = message("Other mail", "Other")

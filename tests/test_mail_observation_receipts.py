@@ -63,6 +63,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertIsNone(self.store.mail_observation_raised_at(A))
         gateway.relay_response(source, outcome.response_turn_id, 'friedl')
+        gateway.response_delivered(source, outcome.response_turn_id)
         self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
         self.assertIsNone(self.store.mail_observation_raised_at(B))
         # Context continues showing the unseen arrival without inheriting a
@@ -76,8 +77,10 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(self.store.mail_observation_raised_at(A))
         self.assertIsNone(self.store.mail_observation_raised_at(B))
         gateway.relay_response(source, outcome.response_turn_id, 'friedl')
+        gateway.response_delivered(source, outcome.response_turn_id)
         gateway._clock = lambda: NOW + timedelta(minutes=10)
         gateway.relay_response(source, outcome.response_turn_id, 'friedl')
+        gateway.response_delivered(source, outcome.response_turn_id)
         self.store.close()
         self.store = SQLiteConversationStore(self.path)
         self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
@@ -114,6 +117,19 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(self.store.mail_observation_raised_at(A))
         asyncio.run(deliver(True))
         self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
+
+    def test_synthesis_without_text_send_cannot_confirm_delivery(self):
+        from alx.interfaces.live_voice import StoredResponse, VoiceSession
+
+        gateway, outcome, source = self.respond((A,), person=True)
+        session = VoiceSession(gateway, object(), None, 'friedl', 1, 30)
+
+        async def synthesize():
+            async for _ in session._speak(source, StoredResponse(outcome.response, outcome.response_turn_id)):
+                pass
+
+        asyncio.run(synthesize())
+        self.assertIsNone(self.store.mail_observation_raised_at(A))
 
     def test_terminal_response_excludes_observation_arriving_after_context(self):
         self.events = [event(A)]
@@ -225,8 +241,126 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(listener.get_nowait(), outcome.response)
 
         asyncio.run(accept())
+        self.assertIsNone(self.store.mail_observation_raised_at(A))
+        self.assertIsNone(self.store.mail_observation_raised_at(B))
+
+    def queued_browser_delivery(self, mode, occasion=True):
+        from alx.interfaces.live_voice import VoiceSession
+        from alx.interfaces.server import LiveVoiceServer
+
+        gateway, outcome, source = self.respond((A,))
+
+        class QuietTranscriber:
+            async def transcribe(self, audio):
+                await asyncio.Event().wait()
+                yield None
+
+        session = VoiceSession(gateway, QuietTranscriber(), None, 'friedl', 1, 30)
+        server = LiveVoiceServer(session, '127.0.0.1', 0, 16000,
+                                 Path(self.directory.name), relay=gateway.relay_response,
+                                 locate=gateway.locate_reply)
+
+        async def run():
+            listener = asyncio.Queue()
+            server._delivery_queues['friedl'] = [listener]
+            server._live_conversations = ['friedl']
+            server._delivery_loop = asyncio.get_running_loop()
+            await asyncio.to_thread(server.deliver, source, outcome.response,
+                                    'occasion' if occasion else None)
+            # Identical later wording must not replace the originating identity.
+            current = self.store.load(source)
+            self.store.append(ConversationTurn(
+                source, 'later', ConversationOrigin.ALX_RESPONSE, outcome.response, NOW,
+                raised_mail_observations=(B,)), KEEP, current.revision)
+            self.assertIsNone(self.store.mail_observation_raised_at(A))
+            if mode == 'close':
+                return
+
+            class Connection:
+                async def send(inner, frame):
+                    import json
+                    if json.loads(frame).get('type') == 'alx.text':
+                        self.assertIsNone(self.store.mail_observation_raised_at(A))
+                        if mode == 'cancel':
+                            raise asyncio.CancelledError
+                        if mode == 'fail':
+                            raise RuntimeError('text send failed')
+                    elif json.loads(frame).get('value') == 'listening':
+                        raise RuntimeError('end test exchange')
+
+            if mode == 'cancel':
+                with self.assertRaises(asyncio.CancelledError):
+                    await server._exchange_once(Connection(), 'friedl')
+            else:
+                self.assertFalse(await server._exchange_once(Connection(), 'friedl'))
+
+        asyncio.run(run())
+        self.assertEqual(self.store.mail_observation_raised_at(A), NOW if mode == 'success' else None)
+        self.assertIsNone(self.store.mail_observation_raised_at(B))
+
+    def test_queued_connection_close_does_not_raise_mail(self):
+        self.queued_browser_delivery('close')
+
+    def test_queued_text_send_failure_does_not_raise_mail(self):
+        self.queued_browser_delivery('fail')
+
+    def test_cancelled_queued_text_send_does_not_raise_mail(self):
+        self.queued_browser_delivery('cancel')
+
+    def test_queued_text_send_confirms_original_named_context(self):
+        self.queued_browser_delivery('success')
+
+    def test_background_response_without_occasion_keeps_identity(self):
+        self.queued_browser_delivery('success', occasion=False)
+
+    def test_relay_storage_is_not_delivery_confirmation(self):
+        gateway, outcome, source = self.respond((A,))
+        self.assertTrue(gateway.relay_response(source, outcome.response_turn_id, 'friedl'))
+        self.assertIsNone(self.store.mail_observation_raised_at(A))
+
+    def test_failed_phone_response_keeps_identity_for_browser_fallback(self):
+        from types import SimpleNamespace
+        from alx.interfaces.phone import PhoneLink
+        from alx.contracts.phone import IncomingMessage
+
+        gateway, outcome, source = self.respond((A,), person=True)
+
+        async def remote_turn(*args, **kwargs):
+            return outcome
+
+        link = PhoneLink(object(), SimpleNamespace(remote_turn=remote_turn),
+                         Path(self.directory.name) / 'cursor', lambda: ('here', None))
+        link.send = lambda text: False
+        fallback = []
+        link.fallback = fallback.append
+        asyncio.run(link._answer(IncomingMessage(1, 'hello', NOW)))
+        self.assertEqual(getattr(fallback[0], 'turn_id', None), outcome.response_turn_id)
+        self.assertEqual(getattr(fallback[0], 'conversation_id', None), 'phone')
+        self.assertIsNone(self.store.mail_observation_raised_at(A))
+
+    def test_background_phone_confirmation_requires_successful_send(self):
+        from types import SimpleNamespace
+        from alx.contracts import ResponseDelivery
+        from alx.interfaces.server import LiveVoiceServer
+
+        gateway, outcome, source = self.respond((A,))
+        accepted = False
+
+        def send(text):
+            self.assertIsNone(self.store.mail_observation_raised_at(A))
+            return accepted
+
+        server = LiveVoiceServer(
+            SimpleNamespace(response_delivered=gateway.response_delivered),
+            '127.0.0.1', 0, 16000, Path(self.directory.name),
+            relay=gateway.relay_response, locate=gateway.locate_reply,
+            phone=SimpleNamespace(carries=lambda _: True, send=send))
+        self.assertIs(server.deliver(source, outcome.response), ResponseDelivery.UNDELIVERABLE)
+        self.assertIsNone(self.store.mail_observation_raised_at(A))
+        accepted = True
+        self.assertIs(server.deliver(source, outcome.response), ResponseDelivery.DELIVERED)
         self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
-        self.assertEqual(self.store.mail_observation_raised_at(B), NOW)
+        self.assertIsNone(self.store.mail_observation_raised_at(B))
 
     def test_reference_validation_checks_mailbox_and_uid_validity(self):
         for ref in (MailReference('Other', '777', '1'), MailReference('INBOX', '888', '1')):
@@ -257,7 +391,7 @@ class ReceiptTests(unittest.TestCase):
         session = VoiceSession(gateway, object(), None, 'friedl', 1, 30)
 
         async def accept():
-            async for _ in session._speak(source, original):
+            async for _ in session._deliver_response(source, original):
                 pass
 
         asyncio.run(accept())
@@ -270,6 +404,12 @@ class ReceiptTests(unittest.TestCase):
             tree = ast.parse(path.read_text())
             names = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
             self.assertFalse(names & forbidden, path)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {'relay_response', '_speak'}:
+                    calls = {call.func.attr for call in ast.walk(node)
+                             if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)}
+                    self.assertNotIn('response_delivered', calls, path)
+                    self.assertNotIn('record_response_delivery', calls, path)
         store_source = (Path(__file__).resolve().parents[1] / 'src/alx/conversation/store.py').read_text()
         self.assertEqual(store_source.count('response_relays'), 1)
         self.assertIn('DROP TABLE IF EXISTS response_relays', store_source)
