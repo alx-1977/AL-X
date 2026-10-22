@@ -13,6 +13,32 @@ installed versions (see §15).
 
 ---
 
+## 0. Governing principle (Friedl, 2026-10-22)
+
+AL/X may do anything, except four things:
+
+1. **Spend money** (paid reviews or paid services) beyond what Friedl has approved,
+   without asking him.
+2. **Send, delete, post or pay** on Friedl's behalf beyond what he has already approved,
+   without asking him.
+3. **Change her own laws, identity or governance records** without his approval.
+4. **Read or reveal passwords and keys.** She uses them only through the tools that
+   hold them.
+
+Everything else she does, sees and decides herself: coding, tests, reviews within
+the allowance, merges by her own rule, GitHub, diagnosis and choice of approach.
+Friedl decides *what* the code should do; AL/X decides *how*.
+
+**Why:** AL/X was built allow-list style: she could see or do something only if a
+tool for it existed. Every "she can't see that" and "she isn't allowed to do that"
+this week was a missing tool, and patching them one at a time never ends (§2a).
+This is the same principle Claude Code works by, with one difference: AL/X works
+unattended, so the four exceptions are **enforced locks** (her safety gate and the
+broker), not a person watching.
+
+Her Laws already forbid the other thing Friedl does not want: fixed workflows,
+phrase matching and hard-coded wording (Laws 1–3). Nothing here changes them.
+
 ## 1. Summary for Friedl
 
 AL/X should be able to find and fix her own bugs, including bugs that only show up
@@ -70,6 +96,24 @@ Evidence from 2026-10-21:
 
 The paid review was being used as the debugger. A review checks whether a change is
 acceptable; a live run checks whether it works. The live run has to come first.
+
+## 2a. What she could not see about her own work (audit, 2026-10-22)
+
+Checked against the code and her stored records, not from memory.
+
+| # | She could not see | Effect |
+| --- | --- | --- |
+| 1 | Which coding tool and model is configured: not among the setup facts she is shown each turn | She did not know Grok was on |
+| 2 | Which tool and model did a coding job, or how long it took: the session reports both, but they are dropped before the result is stored | A wrong Codex/Grok comparison on 2026-10-22 |
+| 3 | When any action started or how long it took: an attempt records only when it was recorded | She cannot tell what is slow |
+| 4 | What her work costs: every reasoning call's tokens are stored, but no tool reads them | She cannot weigh a fix against its cost |
+| 5 | Why an outside service failed: many failures carry only a code (`provider_failed` for web pages and invoice capture, `operation_refused` without a reason, `message_unavailable`). Merge refusals already carry GitHub's own message; most others do not | She cannot diagnose and asks Friedl |
+| 6 | Her log beyond about 24 hours (this run and the one before) | Older problems are out of reach |
+| 7 | The coding session's own report after the turn ends: only the result survives | She cannot look back at what the agent said it did or skipped |
+
+What already works: goal history, the trace with durations (30 days), GitHub checks
+with log tails, review text as written, her own source at the running commit and
+main, her allowance, and undelivered messages.
 
 ## 3. Requirements (Friedl, 2026-10-21)
 
@@ -217,6 +261,42 @@ MIME tree, status line, and a short window around the anomaly. The summary is wh
 to a model by default (§9). A capture that fails a test becomes a regression fixture in
 the repository once secrets and personal content are removed. That is how the live
 usage-screen recording became the tests for #170.
+
+### 5.6a Seeing everything about herself
+
+One general, read-only capability replaces the specific self-readers. She can read:
+
+- her source and its history at any commit (log, show, diff, blame), independently
+  of the checkout;
+- every file in her runtime storage and every retained log;
+- every one of her stores, by read-only query (opened read-only; bounded rows);
+- the configuration she runs with: which models, providers, switches and limits;
+- the evidence store (§5.5), including raw outputs.
+
+**The only exception is passwords and keys.** `.env` and other credential files,
+login directories (Claude, Codex, Grok) and the Keychain are refused outright, and
+anything key-shaped in any output is masked, as `read_own_log` already does.
+
+Under Law 0 it replaces `read_own_source`, `read_own_log`, `read_own_trace` and
+`read_own_goals`; each is deleted with its registrations. The capabilities that read
+outside services (`read_claude_usage`, `read_reader_log`, GitHub checks and reviews)
+stay: they read other systems, not her records.
+
+### 5.6b Recording everything
+
+What is not recorded cannot be seen. Recording is a rule at the one point every
+action passes through, not a list per tool:
+
+- **The capability broker records** every call's start and end time and duration,
+  for every capability, past and future.
+- **Every failure carries the outside service's own words:** HTTP status and its
+  message, or the program's error output, bounded and with keys masked. A code alone
+  is not enough. An architecture test fails any provider failure path that drops
+  them.
+- **Coding results keep** the tool and model that ran, the session's start, duration
+  and its own report.
+- **Her setup facts include** the coding tool and model, beside the reasoning model.
+- **Logs are kept** for 30 days, rotated by size, and are all readable by §5.6a.
 
 ### 5.6 Review gate
 
@@ -413,12 +493,34 @@ loop around it:
 
 These do not depend on the broker and are built first (§14, phase 0).
 
+## 13b. Proposed decision D-060 (text for Friedl's approval)
+
+> **D-060 — AL/X may do anything except four things.**
+> AL/X may do anything except: (1) spend money beyond what Friedl has approved
+> without asking him; (2) send, delete, post or pay on his behalf beyond what he has
+> already approved without asking him; (3) change her laws, identity or governance
+> records without his approval; (4) read or reveal passwords and keys. Everything
+> else she sees, does and decides herself, including coding, tests, reviews within
+> the allowance, merges by her own rule, GitHub, diagnosis and the choice of
+> approach. Friedl decides what the code should do; she decides how. The four are
+> enforced by her safety gate and the broker, not by instruction. New capabilities
+> are designed against this list: a missing capability is a defect to fix, not a
+> boundary. This decision does not change the Laws; fixed workflows, phrase routing
+> and hard-coded wording remain forbidden by them. Existing decisions stay in force
+> until the work below replaces them; where one is narrower than this principle
+> without serving one of the four, it is to be amended.
+
 ## 14. Build order
 
 Each phase ends with a demonstration on a real case. Stop after each phase and use it on
 the next real failure before building more.
 
-0. **Speed of the loop (§13a).** Rule tests inside the coding session,
+0a. **See and record everything (§5.6a, §5.6b).** The general read capability,
+   recording at the broker, failures with the service's own words, coding results
+   with tool, model, duration and report, setup facts, 30-day logs. *Done when*
+   every gap in §2a is closed and AL/X can answer "which tool did job X, how long
+   did it take, what did it cost, and why did it fail" from her own records.
+0. **Speed of the loop (§13a). Done: PR #173, merged 2026-10-22.** Rule tests inside the coding session,
    corrections in the same session, parallel test runs, slow machinery tests
    only when affected, and the 30-second plan pause explained or removed.
    *Done when* a small fix like PR #172 goes from coding to review in about
