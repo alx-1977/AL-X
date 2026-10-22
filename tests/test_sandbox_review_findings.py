@@ -359,18 +359,20 @@ class Finding10AsyncioScannerTest(unittest.TestCase):
     def test_an_asyncio_execution_site_would_be_detected(self) -> None:
         from tests.test_sandbox_capability import SingleExecutionSiteTest
 
-        planted = REPOSITORY_ROOT / "src/alx/tools/asyncio_probe.py"
-        planted.write_text(
-            "import asyncio\n\n\n"
-            "async def run():\n"
-            "    await asyncio.create_subprocess_exec('echo')\n"
-        )
-        case = SingleExecutionSiteTest("test_no_production_module_calls_a_process_execution_function")
-        try:
+        # Planted outside the repository, so tests running in parallel never
+        # see it (PR #173).
+        with tempfile.TemporaryDirectory() as directory:
+            planted = Path(directory) / "asyncio_probe.py"
+            planted.write_text(
+                "import asyncio\n\n\n"
+                "async def run():\n"
+                "    await asyncio.create_subprocess_exec('echo')\n"
+            )
+            case = SingleExecutionSiteTest(
+                "test_no_production_module_calls_a_process_execution_function")
+            case.extra_modules = (planted,)
             with self.assertRaises(AssertionError):
                 case.test_no_production_module_calls_a_process_execution_function()
-        finally:
-            planted.unlink()
 
     def test_the_scanner_names_the_asyncio_entry_points(self) -> None:
         from tests.test_sandbox_capability import SingleExecutionSiteTest

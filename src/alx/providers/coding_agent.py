@@ -458,9 +458,15 @@ def build_briefing(
         "# Boundaries",
         *((
             "- You have a terminal, contained to this checkout with no network.",
-            "  Run the tests for the code you changed before you finish. Do not",
-            "  run the whole suite: AL/X runs it after you, and only her checks",
-            "  count. Which checks those are follows from the files you changed.",
+            "  Before you finish, run `python scripts/required_checks.py` with",
+            "  every file you changed, then run each command it prints and fix",
+            "  what fails, in this session. These are the checks AL/X runs after",
+            "  you, worked out from the files you changed. Some tests cannot run",
+            "  in your sandbox: a failure that says \"Operation not permitted\", or",
+            "  that git could not run, is the sandbox, not your change. Leave it;",
+            "  AL/X runs every check outside it. Do not run the whole suite",
+            "  unless it is printed: AL/X runs what she needs after you,",
+            "  and only her checks count.",
         ) if terminal else (
             "- You have no terminal in this task. You cannot run commands or tests.",
             "  AL/X runs the required checks after you finish and reads the results",

@@ -610,9 +610,20 @@ _GATE_SCRIPTS = frozenset({
 })
 _PYTEST_FLAGS = frozenset({
     "-q", "-v", "-x", "--tb=short", "--tb=line", "--tb=no",
+    # The one rootdir: tests/, so collection never touches the checkout root.
+    "--rootdir=tests",
 })
 _PYTEST_VALUE_FLAGS = frozenset({"-k"})
 _PYTEST_PLUGIN = "no:cacheprovider"
+# pytest-xdist's worker count: "auto" or a small number. It runs the same
+# tests in parallel processes (requirements.txt); it selects nothing.
+_PYTEST_WORKERS_FLAG = "-n"
+_PYTEST_MAX_WORKERS = 16
+# Matched as exact strings: str.isdigit() accepts characters such as "²" that
+# int() rejects, which raised instead of refusing (Greptile, PR #173).
+_PYTEST_WORKER_VALUES = frozenset(
+    {"auto", *(str(count) for count in range(1, _PYTEST_MAX_WORKERS + 1))}
+)
 
 
 def command_permitted(
@@ -672,7 +683,13 @@ def _pytest_args_permitted(
 ) -> bool:
     expecting_value = False
     expecting_plugin = False
+    expecting_workers = False
     for item in args:
+        if expecting_workers:
+            if item not in _PYTEST_WORKER_VALUES:
+                return False
+            expecting_workers = False
+            continue
         if expecting_plugin:
             if item != _PYTEST_PLUGIN:
                 return False
@@ -689,13 +706,16 @@ def _pytest_args_permitted(
         if item in _PYTEST_VALUE_FLAGS:
             expecting_value = True
             continue
+        if item == _PYTEST_WORKERS_FLAG:
+            expecting_workers = True
+            continue
         if item in _PYTEST_FLAGS:
             continue
         if item.startswith("-"):
             return False
         if not _path_in_worktree(item, worktree, blocked_paths):
             return False
-    return not expecting_value and not expecting_plugin
+    return not expecting_value and not expecting_plugin and not expecting_workers
 
 
 def _path_in_worktree(

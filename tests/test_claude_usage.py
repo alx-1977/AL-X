@@ -323,7 +323,8 @@ class DriverTests(unittest.TestCase):
                       'while os.read(0, 1) != b"\\r": pass\n'
                       f'os.write(1, {output.encode()!r})\n'
                       'while True: time.sleep(1)\n')
-            values = self.reader(0.9).read()
+            # Room for the 0.3 s settle twice over under a loaded parallel run.
+            values = self.reader(2.0).read()
             self.assertEqual(values['failure_code'], expected)
             self.assertIn(output, values['screen_capture'])
             self.assert_dead()

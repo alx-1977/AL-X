@@ -133,6 +133,35 @@ class Harness(unittest.TestCase):
         return asyncio.run(producer.tick())
 
 
+class WakeTests(Harness):
+    def test_a_wake_runs_the_tick_without_waiting_for_the_interval(self) -> None:
+        async def scenario() -> float:
+            advanced = asyncio.Event()
+
+            async def advance_plans() -> int:
+                advanced.set()
+                return 0
+
+            producer = DueCognitionSource(
+                self._source(), None, asyncio.Lock(), 30.0, advance_plans=advance_plans,
+            )
+            task = asyncio.create_task(producer.run())
+            await asyncio.sleep(0.05)       # run() is waiting on its interval
+            started = asyncio.get_running_loop().time()
+            producer.wake()
+            await asyncio.wait_for(advanced.wait(), 5)
+            elapsed = asyncio.get_running_loop().time() - started
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            return elapsed
+
+        self.assertLess(asyncio.run(scenario()), 1.0)
+
+    def test_a_wake_before_run_is_harmless(self) -> None:
+        DueCognitionSource(self._source(), None, asyncio.Lock(), 30.0).wake()
+
+
 class TickCostsNothingTests(Harness):
     def test_a_tick_with_nothing_due_makes_no_core_call(self) -> None:
         gateway = Gateway()
