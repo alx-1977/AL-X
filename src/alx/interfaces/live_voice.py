@@ -800,7 +800,7 @@ class VoiceSession:
         # The consumer has resumed after accepting the TEXT event. Keep the
         # original response identity across that asynchronous boundary; never
         # rediscover it by words or by the latest reply in the conversation.
-        await asyncio.to_thread(
+        await run_core_worker(
             self.response_delivered, conversation_id, getattr(response, "turn_id", None))
         if self._synthesizer is None:
             # No speech transport. Her wording already reached the console, and

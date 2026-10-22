@@ -115,13 +115,74 @@ class ReceiptTests(unittest.TestCase):
         asyncio.run(deliver(True))
         self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
 
-    def test_unknown_and_new_out_of_context_references_reject_entire_response(self):
+    def test_terminal_response_excludes_observation_arriving_after_context(self):
         self.events = [event(A)]
         gateway, outcome, source = self.respond((A, B), during=lambda: self.events.append(event(B)))
-        self.assertNotEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.raised_mail_observations, (A,))
         self.assertIsNone(self.store.mail_observation_raised_at(A))
         self.assertIsNone(self.store.mail_observation_raised_at(B))
         self.assertFalse(gateway.response_delivered(source, 'missing'))
+        self.assertTrue(gateway.response_delivered(source, outcome.response_turn_id))
+        self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
+        self.assertIsNone(self.store.mail_observation_raised_at(B))
+
+    def test_terminal_response_drops_stale_references_and_receipts_only_named_context(self):
+        self.events = [event(A)]
+        contexts = []
+
+        class Reasoner:
+            def decide(inner, context):
+                contexts.append(context)
+                # Arriving during reasoning does not put B in this turn's context.
+                self.events.append(event(B))
+                return AgentDecision(response='Core-authored announcement',
+                                     raised_mail_observations=(A, B))
+
+        core = CoreAgent(self.goals, Reasoner(), lambda call, state: None, ())
+        gateway = ConversationGateway(core, self.store, contextual_events=lambda: tuple(self.events),
+                                      clock=lambda: NOW)
+        with self.assertLogs('alx.core.loop', level='INFO') as logs:
+            outcome = gateway.receive_conversation_turn(ConversationTurn(
+                'friedl', 'person', ConversationOrigin.TYPED, 'What is waiting?', NOW), 1, KEEP)
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(contexts[-1].response_only_reason, 'decision_rejected')
+        self.assertTrue(any('dropped 1 out-of-context mail observations' in log
+                            for log in logs.output))
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, 'Core-authored announcement')
+        self.assertEqual(outcome.raised_mail_observations, (A,))
+        self.assertIsNone(self.store.mail_observation_raised_at(A))
+        self.assertIsNone(self.store.mail_observation_raised_at(B))
+        self.assertTrue(gateway.response_delivered('friedl', outcome.response_turn_id))
+        self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
+        self.assertIsNone(self.store.mail_observation_raised_at(B))
+
+    def test_main_loop_rejects_stale_reference_and_allows_reconsideration(self):
+        self.events = [event(A)]
+        contexts = []
+
+        class Reasoner:
+            def decide(inner, context):
+                contexts.append(context)
+                return AgentDecision(response='Rejected' if len(contexts) == 1 else 'Reconsidered',
+                                     raised_mail_observations=(A, B) if len(contexts) == 1 else ())
+
+        core = CoreAgent(self.goals, Reasoner(), lambda call, state: None, ())
+        gateway = ConversationGateway(core, self.store, contextual_events=lambda: tuple(self.events),
+                                      clock=lambda: NOW)
+        outcome = gateway.receive_conversation_turn(ConversationTurn(
+            'friedl', 'person', ConversationOrigin.TYPED, 'What is waiting?', NOW), 2, KEEP)
+        self.assertEqual(len(contexts), 2)
+        self.assertIsNone(contexts[-1].response_only_reason)
+        self.assertIn({'reason': 'decision_rejected',
+                       'subject': 'raised_mail_observation_not_in_context'}, contexts[-1].refused_calls)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, 'Reconsidered')
+        self.assertEqual(outcome.raised_mail_observations, ())
+        self.assertTrue(gateway.response_delivered('friedl', outcome.response_turn_id))
+        self.assertIsNone(self.store.mail_observation_raised_at(A))
+        self.assertIsNone(self.store.mail_observation_raised_at(B))
 
     def test_omitted_references_and_legacy_relay_do_not_prove_coverage(self):
         gateway, outcome, source = self.respond(())
@@ -170,8 +231,10 @@ class ReceiptTests(unittest.TestCase):
     def test_reference_validation_checks_mailbox_and_uid_validity(self):
         for ref in (MailReference('Other', '777', '1'), MailReference('INBOX', '888', '1')):
             with self.subTest(reference=ref):
-                _, outcome, _ = self.respond((ref,))
-                self.assertNotEqual(outcome.state, CoreState.RESPONDED)
+                gateway, outcome, source = self.respond((ref,))
+                self.assertEqual(outcome.state, CoreState.RESPONDED)
+                self.assertEqual(outcome.raised_mail_observations, ())
+                self.assertTrue(gateway.response_delivered(source, outcome.response_turn_id))
                 self.assertIsNone(self.store.mail_observation_raised_at(ref))
 
     def test_response_retained_after_memory_conflict_keeps_observation_coverage(self):

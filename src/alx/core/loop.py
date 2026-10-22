@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from alx.contracts.mail import MailReference
-
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from dataclasses import dataclass, replace
@@ -15,7 +13,7 @@ import logging
 from uuid import uuid4
 
 from alx.contracts import (
-    AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled,
+    AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled, BackgroundEvent,
     DecisionValidationError,
     AutonomousRequestUnbounded,
     CapabilityAttempt, CapabilityAttemptDisposition,
@@ -32,6 +30,7 @@ from alx.contracts import (
     ReasoningPurpose, TraceSink, TraceStatus, TraceSubsystem,
     emit_trace, history_evidence_ids,
 )
+from alx.contracts.mail import MailReference
 
 from alx.core.plan_results import (
     PlanResultClassification, PlanResultKind,
@@ -102,14 +101,24 @@ class CoreState(str, Enum):
     ERROR = "error"
 
 
-def _validate_raised_mail(decision, events) -> None:
+def _in_context_raised_mail(
+    decision: AgentDecision, events: Sequence[BackgroundEvent],
+) -> tuple[MailReference, ...]:
+    """Retain only named observations from the decision's mail context."""
     available = {
         (event.data.get("mailbox_id"), event.data.get("uid_validity"), event.data.get("uid"))
         for event in events
         if event.kind in ("mail.message_arrived", "mail.message_waiting")
     }
-    if any((ref.mailbox_id, ref.uid_validity, ref.uid) not in available
-           for ref in decision.raised_mail_observations):
+    return tuple(ref for ref in decision.raised_mail_observations
+                 if (ref.mailbox_id, ref.uid_validity, ref.uid) in available)
+
+
+def _validate_raised_mail(
+    decision: AgentDecision, events: Sequence[BackgroundEvent],
+) -> None:
+    """Refuse decisions naming observations absent from their mail context."""
+    if len(_in_context_raised_mail(decision, events)) != len(decision.raised_mail_observations):
         raise DecisionValidationError("raised_mail_observation_not_in_context")
 
 
@@ -1583,7 +1592,14 @@ class CoreAgent:
         self._emit_reasoning(ReasoningPurpose.PREPARING_RESPONSE, reason, conversation_id)
         try:
             decision = self._reasoner.decide(terminal_context)
-            _validate_raised_mail(decision, conversation.events)
+            # No reconsideration step remains. Preserve her reply without
+            # giving receipt coverage to references absent from this context.
+            retained = _in_context_raised_mail(decision, terminal_context.events)
+            dropped = len(decision.raised_mail_observations) - len(retained)
+            if dropped:
+                LOGGER.info("Terminal response dropped %d out-of-context mail observations", dropped)
+                decision = replace(decision, raised_mail_observations=retained)
+            _validate_raised_mail(decision, terminal_context.events)
         except Exception as error:
             LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
             return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")

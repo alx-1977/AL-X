@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from alx.contracts.mail import MailReference
-
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -12,6 +10,7 @@ from typing import Any
 from alx.contracts.continuity import AutonomousSpendAuthority
 from alx.contracts.cognition import AutonomousRequestUnbounded
 from alx.contracts.models import input_token_upper_bound
+from alx.contracts.mail import MailReference
 from alx.contracts import (
     MAX_MEMORY_RETRIEVAL_LIMIT,
     AgentDecision,
@@ -458,7 +457,7 @@ item need not be announced again unless something about it changed. In a respond
 action, name every observation your response raises in raised_mail_observations,
 using its exact mailbox_id, uid_validity and uid from this turn's mail context.
 Use an empty list if none are raised. Only named observations from this context
-receive receipts, and only after delivery; thread identity and timing imply nothing.
+are recorded as raised once delivery is confirmed; thread identity and timing imply nothing.
 Seeing them together lets you
 answer several at once rather than one interruption each: say whatever is worth
 saying, or nothing. You may release a waiting item by acknowledging it without
