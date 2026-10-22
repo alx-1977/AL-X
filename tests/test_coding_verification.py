@@ -611,6 +611,20 @@ class TestsFollowTheModulesTheyImport(unittest.TestCase):
             self.assertIn(name, argv)
         self.assertNotIn("tests/test_unrelated.py", argv)
 
+    def test_a_changed_test_file_is_seen_despite_the_cache(self) -> None:
+        root = self._root({
+            "src/alx/core/brain.py": "",
+            "tests/test_first.py": "import alx.core.brain\n",
+        })
+        self.assertIn("tests/test_first.py",
+                      self._targeted(("src/alx/core/brain.py",), root))
+        # A test added and one rewritten after the first index: both seen.
+        (root / "tests/test_added.py").write_text("import alx.core.brain\n")
+        (root / "tests/test_first.py").write_text("import alx.core.other\n")
+        argv = self._targeted(("src/alx/core/brain.py",), root)
+        self.assertIn("tests/test_added.py", argv)
+        self.assertNotIn("tests/test_first.py", argv)
+
     def test_the_real_instructions_reach_the_wording_tests(self) -> None:
         argv = self._targeted(("src/alx/core/model_reasoner.py",), REPOSITORY_ROOT)
         for name in ("tests/test_routine_invoice_processing.py", "tests/test_mail_reply.py"):

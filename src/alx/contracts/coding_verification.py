@@ -712,6 +712,14 @@ def _targeted_tests(
     return tuple(tests), tuple(unmapped)
 
 
+# The last index built, by checkout and by the name, size and modification
+# time of every test file: parsing all of them takes about 0.65 s, and on
+# 2026-10-22 rebuilding it for every policy pushed CI past its time limit.
+# A changed, added or removed test file changes the key, so an index is never
+# reused for files that changed under it.
+_IMPORT_INDEX: tuple[tuple[object, ...], dict[str, frozenset[str]]] | None = None
+
+
 def _test_imports(root: Path | None) -> dict[str, frozenset[str]]:
     """Each test module under tests/ and the `alx` modules it imports.
 
@@ -720,14 +728,20 @@ def _test_imports(root: Path | None) -> dict[str, frozenset[str]]:
     be a module. A file that does not parse imports nothing here; the test run
     itself reports it.
     """
+    global _IMPORT_INDEX
     found: dict[str, frozenset[str]] = {}
     if root is None:
         return found
     tests_dir = _as_path(root) / "tests"
     try:
         files = sorted(tests_dir.glob("test_*.py"))
+        stats = [file.stat() for file in files]
     except OSError:
         return found
+    key = (str(tests_dir.resolve()),
+           *((file.name, stat.st_size, stat.st_mtime_ns) for file, stat in zip(files, stats)))
+    if _IMPORT_INDEX is not None and _IMPORT_INDEX[0] == key:
+        return dict(_IMPORT_INDEX[1])
     for file in files:
         try:
             tree = ast.parse(file.read_text(encoding="utf-8"))
@@ -743,6 +757,7 @@ def _test_imports(root: Path | None) -> dict[str, frozenset[str]]:
                 modules.update(alias.name for alias in node.names
                                if alias.name == "alx" or alias.name.startswith("alx."))
         found[f"tests/{file.name}"] = frozenset(modules)
+    _IMPORT_INDEX = (key, dict(found))
     return found
 
 
