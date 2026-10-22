@@ -56,11 +56,31 @@ class DueCognitionSource:
         self._interval_seconds = interval_seconds
         self._reopen = reopen
         self._advance_plans = advance_plans
+        # Set by wake(): a tick runs now instead of at the end of the interval.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._woken: asyncio.Event | None = None
+
+    def wake(self) -> None:
+        """Ask for a tick now. Safe from any thread; it only schedules.
+
+        A newly installed plan's first step otherwise waits up to a whole
+        interval for the tick that starts it. The tick still decides what is
+        due; waking it early changes when it looks, not what it does.
+        """
+        loop, woken = self._loop, self._woken
+        if loop is not None and woken is not None:
+            loop.call_soon_threadsafe(woken.set)
 
     async def run(self) -> None:
         """Tick for the life of the process."""
+        self._loop = asyncio.get_running_loop()
+        self._woken = asyncio.Event()
         while True:
-            await asyncio.sleep(self._interval_seconds)
+            try:
+                await asyncio.wait_for(self._woken.wait(), self._interval_seconds)
+            except TimeoutError:
+                pass
+            self._woken.clear()
             try:
                 await self.tick()
             except asyncio.CancelledError:

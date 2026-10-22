@@ -224,6 +224,26 @@ class PlanHarness(unittest.TestCase):
         return agent
 
 
+class PlanRunnableSignalTests(PlanHarness):
+    """A runnable plan wakes the tick, so its first step does not wait for it."""
+
+    def test_installing_a_plan_tells_the_runtime_once(self):
+        agent = self.agent(Reasoner(install(plan(step("coding")))))
+        told: list[bool] = []
+        agent.plan_runnable_listener = lambda: told.append(True)
+        self.person(agent)
+        self.assertEqual(told, [True])
+        # The signal starts nothing itself: the step is still the tick's to run.
+        self.assertEqual(self.calls, [])
+
+    def test_a_turn_that_installs_no_plan_tells_nothing(self):
+        agent = self.agent(Reasoner(AgentDecision(response="Nothing to run.")))
+        told: list[bool] = []
+        agent.plan_runnable_listener = lambda: told.append(True)
+        self.person(agent)
+        self.assertEqual(told, [])
+
+
 class LifecycleTests(PlanHarness):
     """Acceptance invariants 1 and 2: Core only for judgment, and a wake never ends a plan."""
 

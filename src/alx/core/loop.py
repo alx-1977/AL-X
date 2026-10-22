@@ -348,6 +348,11 @@ class CoreAgent:
         # process. Content may be transient by contract, so after a restart
         # only durable metadata remains and an observation is made again.
         self._plan_evidence_cache: dict[str, CapabilityAttempt] = {}
+        # Told when a turn installs, resumes or accepts a plan, so its first
+        # step need not wait for the next due-cognition tick (up to 30 s on
+        # 2026-10-22, before every plan). Called on the turn's own thread; it
+        # must only schedule, never run, the plan. Set by the runtime.
+        self.plan_runnable_listener: Callable[[], None] | None = None
         # Evidence reads scheduled, and returned, in this process, by goal,
         # attention and evidence: each is read at most once per attention.
         self._evidence_scheduled: set[tuple[str, int, str]] = set()
@@ -3221,6 +3226,10 @@ class CoreAgent:
         self._emit(TraceSubsystem.PLAN, TraceStatus.INFO, _PLAN_LABELS[update.operation],
                    snapshot.conversation_id, count=len(plan.steps),
                    reference=_short_reference(snapshot.state.goal_id))
+        if (self.plan_runnable_listener is not None
+                and update.operation in (PlanOperation.INSTALL, PlanOperation.RESUME,
+                                         PlanOperation.ACCEPT)):
+            self.plan_runnable_listener()
         return snapshot, reply_turn
 
     def pending_plan_announcements(self) -> tuple[GoalSnapshot, ...]:

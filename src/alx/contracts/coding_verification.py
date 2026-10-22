@@ -60,7 +60,20 @@ ARCHITECTURE_GATE: tuple[str, ...] = ("python", "scripts/check_architecture.py")
 # test-file mapping is reported, and the architecture or governance gate still
 # runs when the changed path is one of theirs. The command stays so a separate
 # broader run can use the same argv the executor already knows.
-FULL_SUITE: tuple[str, ...] = ("python", "-m", "pytest", "-q", "-p", "no:cacheprovider")
+# pytest 8+ scans the directory it starts from, statting every entry. In the
+# coding session's sandbox `.env` at the checkout root is denied, so every
+# pytest run there failed at collection before running a test (found
+# 2026-10-22). Starting the scan at tests/ avoids the root; outside the sandbox
+# it changes nothing but the test ids' prefix.
+TEST_ROOT: tuple[str, ...] = ("--rootdir=tests",)
+FULL_SUITE: tuple[str, ...] = (
+    "python", "-m", "pytest", "-q", *TEST_ROOT, "-p", "no:cacheprovider", "-n", "auto",
+)
+# Parallel test runs (pytest-xdist). 4,397 tests took 393 s one at a time and
+# 96 s on 8 workers (2026-10-22). Starting workers costs a second or two, so a
+# targeted run uses them only from this many test files up.
+PARALLEL: tuple[str, ...] = ("-n", "auto")
+PARALLEL_MIN_TEST_FILES = 4
 
 # Modules whose tests are not named after the module. Each target is a file
 # that already imports or executes that module. A listed file that is not on
@@ -646,6 +659,7 @@ def _targeted_tests(
     """
     tests: list[str] = []
     unmapped: list[str] = []
+    importers: dict[str, frozenset[str]] | None = None
     for relative in changed:
         path = PurePosixPath(relative)
         if path.suffix != ".py":
@@ -672,6 +686,21 @@ def _targeted_tests(
         for candidate in _EXPLICIT_TESTS.get(relative, ()):
             if candidate not in candidates:
                 candidates.append(candidate)
+        # Every test module that imports the changed module. Named tests miss
+        # most of what a shared module affects: on 2026-10-22 a change to the
+        # Core's instructions mapped to 1 test file while 13 check their
+        # wording, and two coding jobs were lost to failures only the full
+        # suite found.
+        if path.parts[:2] == ("src", "alx") and root is not None:
+            if importers is None:
+                importers = _test_imports(root)
+            module = ".".join(PurePosixPath(relative).with_suffix("").parts[1:])
+            if module.endswith(".__init__"):
+                module = module[: -len(".__init__")]
+            for candidate in sorted(name for name, modules in importers.items()
+                                    if module in modules):
+                if candidate not in candidates:
+                    candidates.append(candidate)
         found = False
         for candidate in candidates:
             if exists(root, candidate):
@@ -681,6 +710,40 @@ def _targeted_tests(
         if not found:
             unmapped.append(relative)
     return tuple(tests), tuple(unmapped)
+
+
+def _test_imports(root: Path | None) -> dict[str, frozenset[str]]:
+    """Each test module under tests/ and the `alx` modules it imports.
+
+    Read from the files' syntax, never by importing them. For
+    `from alx.x import y` both `alx.x` and `alx.x.y` are recorded, since y may
+    be a module. A file that does not parse imports nothing here; the test run
+    itself reports it.
+    """
+    found: dict[str, frozenset[str]] = {}
+    if root is None:
+        return found
+    tests_dir = _as_path(root) / "tests"
+    try:
+        files = sorted(tests_dir.glob("test_*.py"))
+    except OSError:
+        return found
+    for file in files:
+        try:
+            tree = ast.parse(file.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            continue
+        modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                if node.module == "alx" or node.module.startswith("alx."):
+                    modules.add(node.module)
+                    modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+            elif isinstance(node, ast.Import):
+                modules.update(alias.name for alias in node.names
+                               if alias.name == "alx" or alias.name.startswith("alx."))
+        found[f"tests/{file.name}"] = frozenset(modules)
+    return found
 
 
 def _path_exists(root: Path | None, relative: str) -> bool:
@@ -850,10 +913,15 @@ def required_verification(
         # evidence and are not a reason to schedule the repository suite.
         # The gates above still run for the paths they govern.
         if targeted:
+            parallel = PARALLEL if len(targeted) >= PARALLEL_MIN_TEST_FILES else ()
+            # Only where the tests are all under tests/: a checkout without
+            # that directory would make pytest refuse the rootdir.
+            test_root = (TEST_ROOT if all(name.startswith("tests/") for name in targeted)
+                         else ())
             checks.append(
                 VerificationCheck(
                     "pytest_targeted",
-                    ("python", "-m", "pytest", "-q", *targeted),
+                    ("python", "-m", "pytest", "-q", *test_root, *parallel, *targeted),
                     "changed Python modules map to these tests: "
                     + ", ".join(targeted[:8]),
                 )
