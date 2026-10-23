@@ -777,6 +777,18 @@ class CodingAgent:
             state, "plan", in_flight=True, transition="CASE started"
         )
         started_at = state.telemetry.started_at
+
+        def job_facts() -> dict[str, Any]:
+            finished_at = self._clock()
+            return {
+                "tool": str(getattr(self._session, "provider_name", "") or ""),
+                "model": str(getattr(self._session, "model_name", "") or ""),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_seconds": max(0.0, (finished_at - started_at).total_seconds()),
+                "session_report": state.session_report,
+            }
+
         try:
             # D-033. One non-blocking OS lock is the entire concurrency
             # mechanism. It covers branch preflight through commit and is
@@ -799,16 +811,13 @@ class CodingAgent:
                     reset_cancellation(cancellation_token)
                     cancellation_token = None
                     outcome = self._cancelled_outcome(state)
-                finished_at = self._clock()
-                return replace(
-                    outcome,
-                    tool=str(getattr(self._session, "provider_name", "") or ""),
-                    model=str(getattr(self._session, "model_name", "") or ""),
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    duration_seconds=max(0.0, (finished_at - started_at).total_seconds()),
-                    session_report=state.session_report,
-                )
+                return replace(outcome, **job_facts())
+        except CodingError as error:
+            error.details.update({
+                key: value.isoformat() if isinstance(value, datetime) else value
+                for key, value in job_facts().items()
+            })
+            raise
         finally:
             if cancellation_token is not None:
                 reset_cancellation(cancellation_token)

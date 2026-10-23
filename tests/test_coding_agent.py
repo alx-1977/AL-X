@@ -202,13 +202,15 @@ class CodingRecordTests(unittest.TestCase):
         from alx.tools.goal_history import READ_OWN_GOALS, build_goal_history_executors
 
         report = "Changed the parser.\nSkipped the live service check.\n" + "detail " * 2000
-        for status in ("succeeded", "failed", "cancelled", "interrupted"):
+        for status in ("succeeded", "failed", "cancelled", "interrupted", "raised"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
                 current = [NOW]
 
                 def execute(request, state):
                     state.session_report = report
                     current[0] += timedelta(seconds=12.5)
+                    if status == "raised":
+                        raise CodingError("session_failed", reason_code="cli_failed")
                     return CodingOutcome(
                         status, "job result", (), (), False, None, "", "", (), NOW,
                     )
@@ -246,10 +248,16 @@ class CodingRecordTests(unittest.TestCase):
                     "finished_at": (NOW + timedelta(seconds=12.5)).isoformat(),
                     "duration_seconds": 12.5, "session_report": report,
                 }
-                self.assertIn("tool", attempt.result.values, attempt.result.failure)
+                if status == "raised":
+                    self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+                    self.assertEqual(attempt.result.failure["code"], "session_failed")
+                    self.assertEqual(attempt.result.failure["reason_code"], "cli_failed")
+                facts = (attempt.result.failure if status == "raised"
+                         else attempt.result.values)
                 for key, value in expected.items():
-                    self.assertEqual(attempt.result.values[key], value)
-                    self.assertEqual(attempt.result.durable_values[key], value)
+                    self.assertEqual(facts[key], value)
+                    if status != "raised":
+                        self.assertEqual(attempt.result.durable_values[key], value)
 
                 path = Path(directory) / "goals.sqlite3"
                 with SQLiteGoalStore(path) as store:
@@ -260,9 +268,12 @@ class CodingRecordTests(unittest.TestCase):
                     read = build_goal_history_executors(reopened, lambda: "read-1")[READ_OWN_GOALS]
                     history = read({"goal_id": "goal-1"})
                     self.assertEqual(history.state, CapabilityResultState.SUCCEEDED)
-                    stored = history.values["goals"][0]["state"]["attempts"][0][6][3]
+                    stored = history.values["goals"][0]["state"]["attempts"][0][6][
+                        4 if status == "raised" else 3
+                    ]
+                    facts = result.failure if status == "raised" else result.values
                     for key, value in expected.items():
-                        self.assertEqual(result.values[key], value)
+                        self.assertEqual(facts[key], value)
                         self.assertEqual(stored[key], value)
 
 

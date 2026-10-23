@@ -64,6 +64,22 @@ else:
     print(json.dumps({"text": "read everything", **end}), flush=True)
 """
 
+STREAMING_READER_LONG = """
+import json, sys, time
+fmt = sys.argv[sys.argv.index("--output-format") + 1]
+for step in range(10):
+    time.sleep(0.5)
+    event = {"type": "tool_call", "toolName": "read_file", "status": "completed"}
+    if fmt == "streaming-json":
+        print(json.dumps(event), flush=True)
+end = {"type": "end", "stopReason": "end_turn", "num_turns": 10}
+if fmt == "streaming-json":
+    print(json.dumps({"type": "text", "data": "read everything"}), flush=True)
+    print(json.dumps(end), flush=True)
+else:
+    print(json.dumps({"text": "read everything", **end}), flush=True)
+"""
+
 # Genuinely silent: a hung session must still be stopped.
 SILENT = """
 import time
@@ -95,11 +111,13 @@ class StreamedActivityTests(unittest.TestCase):
         self.assertEqual(command[command.index("--output-format") + 1], "streaming-json")
 
     def test_a_session_reading_past_the_stall_bound_is_not_stopped(self) -> None:
-        """Two seconds of reading, no file written, a one-second stall bound."""
-        result = self._session(_fake_cli(Path(self.directory.name), STREAMING_READER)) \
-            .run_session(self._request(), "briefing")
+        """Five seconds of reading, no file written, a three-second stall bound."""
+        # Allow Python startup under parallel load, as in PR #173.
+        result = self._session(
+            _fake_cli(Path(self.directory.name), STREAMING_READER_LONG), stall_seconds=3,
+        ).run_session(self._request(), "briefing")
         self.assertTrue(result.completed)
-        self.assertEqual(result.turns, 8)
+        self.assertEqual(result.turns, 10)
         self.assertEqual(result.report, "read everything")
 
     def test_a_silent_session_is_still_stopped_as_stalled(self) -> None:
@@ -120,7 +138,8 @@ class StreamedActivityTests(unittest.TestCase):
 
         cli = _fake_cli(Path(self.directory.name), STREAMING_READER)
         with mock.patch.object(coding_process, "run_coding_subprocess", record):
-            self._session(cli).run_session(self._request(), "briefing")
+            # Allow CLI startup under parallel load, as in PR #173; not a stall test.
+            self._session(cli, stall_seconds=5).run_session(self._request(), "briefing")
         self.assertEqual(len(seen["spool_to"]), 2)
         self.assertGreater(seen["output_limit_bytes"], 0)
         self.assertIsNone(seen["timeout"])
@@ -187,7 +206,8 @@ while True:
         from alx.providers import coding_subscription_session as base
         with mock.patch.object(base, "MAX_SESSION_OUTPUT_BYTES", 200_000):
             with self.assertRaises(CodingError) as raised:
-                self._session(_fake_cli(Path(self.directory.name), flood)) \
+                # Allow CLI startup under parallel load, as in PR #173; not a stall test.
+                self._session(_fake_cli(Path(self.directory.name), flood), stall_seconds=5) \
                     .run_session(self._request(), "briefing")
         self.assertEqual(raised.exception.code, "session_interrupted")
         self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
@@ -202,7 +222,8 @@ print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 1}), flu
         from alx.providers import coding_subscription_session as base
         with mock.patch.object(base, "MAX_SESSION_OUTPUT_BYTES", 100_000):
             with self.assertRaises(CodingError) as raised:
-                self._session(_fake_cli(Path(self.directory.name), burst)) \
+                # Allow CLI startup under parallel load, as in PR #173; not a stall test.
+                self._session(_fake_cli(Path(self.directory.name), burst), stall_seconds=5) \
                     .run_session(self._request(), "briefing")
         self.assertEqual(raised.exception.details["reason_code"], "session_output_limit")
 
@@ -215,7 +236,8 @@ print(json.dumps({"type": "end", "stopReason": "end_turn", "num_turns": 2}), flu
 """
         from alx.providers import coding_subscription_session as base
         with mock.patch.object(base, "MAX_EVENT_LINE_CHARACTERS", 10_000):
-            result = self._session(_fake_cli(Path(self.directory.name), big)) \
+            # Allow CLI startup under parallel load, as in PR #173; not a stall test.
+            result = self._session(_fake_cli(Path(self.directory.name), big), stall_seconds=5) \
                 .run_session(self._request(), "briefing")
         self.assertTrue(result.completed)
         self.assertEqual(result.report, "done")
@@ -229,7 +251,8 @@ print(json.dumps({"type": "end", "stopReason": "end_turn", "padding": "x" * 5000
         from alx.providers import coding_subscription_session as base
         with mock.patch.object(base, "MAX_EVENT_LINE_CHARACTERS", 10_000):
             with self.assertRaises(CodingError) as raised:
-                self._session(_fake_cli(Path(self.directory.name), big_end)) \
+                # Allow CLI startup under parallel load, as in PR #173; not a stall test.
+                self._session(_fake_cli(Path(self.directory.name), big_end), stall_seconds=5) \
                     .run_session(self._request(), "briefing")
         self.assertEqual(raised.exception.details["reason_code"], "session_event_oversized")
 
