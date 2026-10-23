@@ -1139,6 +1139,11 @@ async def run(repository_root: Path) -> None:
         "reasoning_model": (
             f"{provider_settings.reasoning.provider} {provider_settings.reasoning.model}"
         ),
+        "coding": {
+            "tool": provider_settings.coding.reasoning.provider,
+            "model": provider_settings.coding.reasoning.model,
+            "available": coding_runtime is not None,
+        },
         "voice_model": provider_settings.text_to_speech.model,
         "speech_recognition": (
             f"{provider_settings.speech_to_text.provider} "

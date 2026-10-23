@@ -561,12 +561,22 @@ class CodingOutcome:
     diff_preserved: bool = False
     preserved_branch: str = ""
     checkpoint: str = ""
+    tool: str = ""
+    model: str = ""
+    started_at: datetime | None = None
+    duration_seconds: float = 0.0
+    # The session's account, distinct from AL/X's verification evidence.
+    session_report: str = ""
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled", "interrupted"):
             raise ValueError("invalid coding outcome status")
         _required(self.summary, "summary")
         _aware(self.finished_at, "finished_at")
+        if self.started_at is not None:
+            _aware(self.started_at, "started_at")
+        if self.duration_seconds < 0:
+            raise ValueError("coding duration must not be negative")
         object.__setattr__(self, "files_changed", tuple(self.files_changed))
         object.__setattr__(self, "preexisting_dirty", tuple(self.preexisting_dirty))
         object.__setattr__(self, "commands", tuple(self.commands))
@@ -590,7 +600,7 @@ class CodingOutcome:
         }
 
     def durable_values(self) -> dict[str, object]:
-        """What survives in goal state: no file contents or command output."""
+        """Job facts and the session's report, without diffs or command output."""
         values: dict[str, object] = {
             "status": self.status,
             "files_changed": list(self.files_changed),
@@ -602,6 +612,11 @@ class CodingOutcome:
             "unresolved_count": len(self.unresolved_issues),
             "diff_digest": self.diff_digest,
             "finished_at": self.finished_at.isoformat(),
+            "tool": self.tool,
+            "model": self.model,
+            "started_at": self.started_at.isoformat() if self.started_at else "",
+            "duration_seconds": self.duration_seconds,
+            "session_report": self.session_report,
             "plan_summary": self.plan_summary,
             "commands": [item.durable_values() for item in self.commands],
         }

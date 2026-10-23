@@ -51,6 +51,7 @@ from alx.contracts.coding import (  # noqa: E402
     CodingCommandRecord,
     CodingCommit,
     CodingError,
+    CodingOutcome,
     CodingRequest,
     CodingSessionResult,
     GitWorkspaceState,
@@ -191,6 +192,78 @@ class RecordingSession:
 
 
 _FIXED = "def add(a, b):\n    return a + b\n"
+
+
+class CodingRecordTests(unittest.TestCase):
+    def test_job_facts_and_report_survive_storage_and_restart(self) -> None:
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from tests.test_goal_store import state as goal_state
+        from alx.tools.goal_history import READ_OWN_GOALS, build_goal_history_executors
+
+        report = "Changed the parser.\nSkipped the live service check.\n" + "detail " * 2000
+        for status in ("succeeded", "failed", "cancelled", "interrupted"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                current = [NOW]
+
+                def execute(request, state):
+                    state.session_report = report
+                    current[0] += timedelta(seconds=12.5)
+                    return CodingOutcome(
+                        status, "job result", (), (), False, None, "", "", (), NOW,
+                    )
+
+                session = SimpleNamespace(
+                    provider_name="codex_subscription", model_name="configured-model",
+                )
+                with patch.object(coding_agent_module, "canonical_repository_root",
+                                  return_value=Path(directory)), \
+                     patch.object(coding_agent_module, "coding_job_lock",
+                                  return_value=nullcontext()):
+                    agent = coding_agent_module.CodingAgent(
+                        PlanningModel(), session, repository=Path(directory),
+                        clock=lambda: current[0],
+                    )
+                    with patch.object(agent, "_run", side_effect=execute):
+                        runtime = build_coding_runtime(
+                            True, None, lambda: "call-1", agent=agent,
+                            repository=Path(directory),
+                        )
+                        broker = CapabilityBroker(
+                            CapabilityRegistry(runtime.definitions),
+                            SafetyGate(runtime.policies), runtime.executors,
+                        )
+                        call = CapabilityCall("call-1", RUN_CODING_TASK, {
+                            "task": "fix parser", "repair_branch": "fix/parser",
+                            "commit_message": "fix parser",
+                        })
+                        attempt = broker.dispatch(call, AuthorityContext(
+                            "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW,
+                        ))
+                expected = {
+                    "tool": "codex_subscription", "model": "configured-model",
+                    "started_at": NOW.isoformat(),
+                    "finished_at": (NOW + timedelta(seconds=12.5)).isoformat(),
+                    "duration_seconds": 12.5, "session_report": report,
+                }
+                self.assertIn("tool", attempt.result.values, attempt.result.failure)
+                for key, value in expected.items():
+                    self.assertEqual(attempt.result.values[key], value)
+                    self.assertEqual(attempt.result.durable_values[key], value)
+
+                path = Path(directory) / "goals.sqlite3"
+                with SQLiteGoalStore(path) as store:
+                    store.create(replace(goal_state(), attempts=(attempt,)),
+                                 "conversation-1", RETENTION)
+                with SQLiteGoalStore(path) as reopened:
+                    result = reopened.load("goal-1").state.attempts[0].result
+                    read = build_goal_history_executors(reopened, lambda: "read-1")[READ_OWN_GOALS]
+                    history = read({"goal_id": "goal-1"})
+                    self.assertEqual(history.state, CapabilityResultState.SUCCEEDED)
+                    stored = history.values["goals"][0]["state"]["attempts"][0][6][3]
+                    for key, value in expected.items():
+                        self.assertEqual(result.values[key], value)
+                        self.assertEqual(stored[key], value)
 
 
 class NativeExecutionTests(unittest.TestCase):
@@ -538,6 +611,9 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertIsNone(attempt.result.failure)
         values = attempt.result.values
         self.assertEqual(values["status"], "succeeded")
+        self.assertEqual(values["session_report"], "made the bounded change")
+        self.assertEqual(attempt.result.durable_values["session_report"],
+                         values["session_report"])
         baseline = values["baseline"]["head_sha"]
         commit_sha = values["commit_sha"]
         self.assertNotEqual(baseline, commit_sha)
