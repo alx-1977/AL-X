@@ -1,7 +1,8 @@
 # Proposal — Self-repair: AL/X diagnoses and fixes herself against real services
 
-**Status:** PROPOSAL. Not approved, not implemented. Requires Friedl's approval as a
-decision record (proposed D-060) before any code is written. AL/X's unpushed draft of a
+**Status:** The governing principle is approved as D-060 (§13b). The design here
+(broker, one work room, review gate) is still a PROPOSAL: not approved, not implemented,
+and needs Friedl's approval before any of it is built. AL/X's unpushed draft of a
 D-060 "trial run" on `feature/trial-run-capability` is superseded by this proposal and is
 to be dropped.
 **Authority:** Subordinate to the Laws of AL/X, `IDENTITY_AND_MEMORY.md` and
@@ -554,7 +555,7 @@ run record.
 
 ## 15. Open questions for Friedl
 
-1. Approve the direction (broker, one work room, review gate) as D-060?
+1. Approve the design (broker, one work room, review gate)? D-060 itself is approved.
 2. Retention: 7 days routine, 30 days after an incident closes?
 3. Who builds phases 1–3: Claude Code (the broker cannot be tested by AL/X before it
    exists), AL/X, or Claude Code for the broker with AL/X doing the rest?

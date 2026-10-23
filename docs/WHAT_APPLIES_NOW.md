@@ -47,7 +47,7 @@ These are the "beyond what he has approved" in exceptions 1, 2 and 5.
 | Email | any email (reply, new, forward, attachments), each with his approval of the exact wording | D-011 as amended by D-060 |
 | Mail housekeeping | mark read, flag, file, move to Trash: no approval | D-051 |
 | Supplier bills, DHL import bills | create, update, attach, authorise, any amount: no approval | D-018, D-020, D-021, D-022 |
-| Draft bills | delete a draft or submitted bill: no approval. Voiding an authorised bill is not approved | D-019, D-051 |
+| Draft bills | delete a draft or submitted bill after checking its invoice number and total, then confirm Xero discarded it. Each deletion needs his approval until he sets `ALX_XERO_UNATTENDED_BILL_DELETES=true`; after that, none. Voiding an authorised bill is not approved | D-019, D-051 |
 | Xero contacts | rename an existing contact; create a supplier contact when invoice evidence requires it | D-034, D-035 |
 | Xero sales | turn a quote into a DRAFT invoice for the purchase order that accepts it | D-037 |
 | Particle | full access to his Particle account, including irreversible calls | D-045 |
