@@ -8,6 +8,7 @@ away.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -154,6 +155,7 @@ class SQLiteUsageRecorder:
             # call's reservation, true cost and terminal state live nowhere
             # durable and spend cannot be audited after the fact.
             for column, definition in (
+                ("reported_fields", "TEXT"),
                 ("reservation_id", "TEXT NOT NULL DEFAULT ''"),
                 ("reserved_usd", "REAL NOT NULL DEFAULT 0.0"),
                 ("cost_usd", "REAL NOT NULL DEFAULT 0.0"),
@@ -304,6 +306,7 @@ class SQLiteUsageRecorder:
                             existing["id"],
                         ),
                     )
+                    self._record_fields(database, existing["id"], values)
                     database.commit()
                     return
             database.execute(
@@ -337,9 +340,72 @@ class SQLiteUsageRecorder:
                     failure_code,
                 ),
             )
+            row_id = database.execute("SELECT last_insert_rowid()").fetchone()[0]
+            self._record_fields(database, row_id, values)
             database.commit()
         finally:
             database.close()
+
+    USAGE_FIELDS = (
+        "input_tokens", "cached_tokens", "cache_write_tokens",
+        "output_tokens", "reasoning_tokens", "cost_usd",
+    )
+
+    @classmethod
+    def _record_fields(cls, database: sqlite3.Connection, row_id: int,
+                       values: Mapping[str, Any]) -> None:
+        # Presence survives separately from the legacy NOT NULL counters.
+        # A missing measurement must never be read back as a reported zero.
+        previous = database.execute(
+            "SELECT reported_fields FROM reasoning_calls WHERE id = ?", (row_id,),
+        ).fetchone()[0]
+        fields = set(json.loads(previous)) if previous is not None else set()
+        for name in cls.USAGE_FIELDS:
+            if name in values:
+                if values[name] is None:
+                    fields.discard(name)
+                else:
+                    fields.add(name)
+        database.execute(
+            "UPDATE reasoning_calls SET reported_fields = ? WHERE id = ?",
+            (json.dumps(sorted(fields)), row_id),
+        )
+
+    def between(self, start: datetime, end: datetime, limit: int = 500) -> dict[str, Any]:
+        """Bounded per-call records and full-window totals, from the one store."""
+        if not 0 < limit <= 500 or end <= start:
+            raise ValueError("invalid usage window or limit")
+        database = self._db()
+        try:
+            where = " FROM reasoning_calls WHERE occurred_at >= ? AND occurred_at < ?"
+            params = (start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat())
+            rows = database.execute(
+                "SELECT *" + where + " ORDER BY id LIMIT ?", (*params, limit + 1),
+            ).fetchall()
+            # Older rows did not retain field presence. Their token counters
+            # are available, but a default cost cannot establish a measurement.
+            totals = database.execute(
+                "SELECT COUNT(*) AS calls, " + ", ".join(
+                    f"SUM(CASE WHEN "
+                    + ("reported_fields IS NULL OR " if name != "cost_usd" else "")
+                    + "EXISTS (SELECT 1 FROM json_each(reported_fields) WHERE value = "
+                    + f"'{name}') THEN {name} END) AS {name}"
+                    for name in self.USAGE_FIELDS
+                ) + where, params,
+            ).fetchone()
+        finally:
+            database.close()
+        calls = []
+        for row in rows[:limit]:
+            item = dict(row)
+            reported = item.pop("reported_fields")
+            fields = (set(self.USAGE_FIELDS) - {"cost_usd"} if reported is None
+                      else set(json.loads(reported)))
+            for name in self.USAGE_FIELDS:
+                if name not in fields:
+                    item[name] = None
+            calls.append(item)
+        return {"calls": calls, "totals": dict(totals), "truncated": len(rows) > limit}
 
     def task(self, task_id: str) -> dict[str, Any]:
         """Return the rollup for one task."""
@@ -351,7 +417,8 @@ class SQLiteUsageRecorder:
                 "COALESCE(SUM(cached_tokens), 0) AS cached_tokens, "
                 "COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, "
                 "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-                "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens "
+                "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens, "
+                "COALESCE(SUM(cost_usd), 0) AS cost_usd "
                 "FROM reasoning_calls WHERE task_id = ?",
                 (task_id,),
             ).fetchone()

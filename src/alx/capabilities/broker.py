@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
+from datetime import UTC, datetime
 from collections.abc import Callable
 from time import monotonic
 from typing import Any, Mapping
@@ -44,37 +46,47 @@ class CapabilityBroker:
         self._subsystems = dict(subsystems or {})
 
     def dispatch(self, call: CapabilityCall, authority: AuthorityContext) -> CapabilityAttempt:
+        started_at = datetime.now(UTC)
+        started = monotonic()
+
+        def record(attempt: CapabilityAttempt,
+                   definition: CapabilityDefinition | None = None) -> CapabilityAttempt:
+            # One recording point, including refusals and raised executors.
+            duration = monotonic() - started
+            attempt = replace(attempt, started_at=started_at, duration_seconds=duration)
+            if definition is not None:
+                result = attempt.result
+                failure = None if result is None or result.failure is None else result.failure.get("code")
+                self._emit(
+                    definition, call,
+                    TraceStatus.REFUSED if attempt.disposition is CapabilityAttemptDisposition.REJECTED
+                    else TraceStatus.FAILED if result is None or result.state is CapabilityResultState.FAILED
+                    else TraceStatus.COMPLETED,
+                    reason_code=(attempt.reason_code or (failure if isinstance(failure, str) else None)
+                                 or ("partial" if result is not None
+                                     and result.state is CapabilityResultState.PARTIAL else None)),
+                    duration_ms=round(duration * 1000),
+                )
+            return attempt
+
         try:
             definition = self._registry.lookup(call.capability_id)
         except UnknownCapability:
-            return self._failed(call, "capability_unknown")
+            return record(self._failed(call, "capability_unknown"))
         if not definition.input_schema.accepts(call.arguments):
-            self._emit(definition, call, TraceStatus.REFUSED, reason_code="input_invalid")
-            return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False, reason_code="input_invalid")
+            return record(CapabilityAttempt(
+                call, CapabilityAttemptDisposition.REJECTED, False, reason_code="input_invalid",
+            ), definition)
         safety = self._safety.evaluate(call, authority)
         if not safety.allowed:
-            self._emit(definition, call, TraceStatus.REFUSED, reason_code=safety.reason)
-            return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False, reason_code=safety.reason)
+            return record(CapabilityAttempt(
+                call, CapabilityAttemptDisposition.REJECTED, False, reason_code=safety.reason,
+            ), definition)
         executor = self._implementations.get(call.capability_id)
         if executor is None:
-            return self._failed(call, "implementation_missing", invoked=False)
+            return record(self._failed(call, "implementation_missing", invoked=False), definition)
         self._emit(definition, call, TraceStatus.STARTED)
-        started_at = monotonic()
-        attempt = self._invoke(definition, call, executor)
-        result = attempt.result
-        failure = None if result is None or result.failure is None else result.failure.get("code")
-        self._emit(
-            definition, call,
-            TraceStatus.COMPLETED if result is not None
-            and result.state is not CapabilityResultState.FAILED else TraceStatus.FAILED,
-            reason_code=(
-                attempt.reason_code or (failure if isinstance(failure, str) else None)
-                or ("partial" if result is not None
-                    and result.state is CapabilityResultState.PARTIAL else None)
-            ),
-            duration_ms=round((monotonic() - started_at) * 1000),
-        )
-        return attempt
+        return record(self._invoke(definition, call, executor), definition)
 
     def _invoke(self, definition: CapabilityDefinition, call: CapabilityCall,
                 executor: Executor) -> CapabilityAttempt:
