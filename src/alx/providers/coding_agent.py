@@ -776,6 +776,19 @@ class CodingAgent:
         self._report_telemetry(
             state, "plan", in_flight=True, transition="CASE started"
         )
+        started_at = state.telemetry.started_at
+
+        def job_facts() -> dict[str, Any]:
+            finished_at = self._clock()
+            return {
+                "tool": str(getattr(self._session, "provider_name", "") or ""),
+                "model": str(getattr(self._session, "model_name", "") or ""),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_seconds": max(0.0, (finished_at - started_at).total_seconds()),
+                "session_report": state.session_report,
+            }
+
         try:
             # D-033. One non-blocking OS lock is the entire concurrency
             # mechanism. It covers branch preflight through commit and is
@@ -798,7 +811,13 @@ class CodingAgent:
                     reset_cancellation(cancellation_token)
                     cancellation_token = None
                     outcome = self._cancelled_outcome(state)
-                return outcome
+                return replace(outcome, **job_facts())
+        except CodingError as error:
+            error.details.update({
+                key: value.isoformat() if isinstance(value, datetime) else value
+                for key, value in job_facts().items()
+            })
+            raise
         finally:
             if cancellation_token is not None:
                 reset_cancellation(cancellation_token)
@@ -888,7 +907,6 @@ class CodingAgent:
             state.stage = resume_stage
             state.plan = resume.get("plan") if isinstance(resume.get("plan"), Mapping) else None
             state.files = tuple(str(item) for item in resume.get("files", ()))
-            state.session_report = "resumed preserved implementation"
             candidate = resume.get("commit_candidate_sha")
             state.commit_candidate_sha = candidate if isinstance(candidate, str) else ""
             state.deleted_files = tuple(str(item) for item in resume.get("deleted_files", ()))
@@ -935,7 +953,6 @@ class CodingAgent:
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_plan_invalid"))
             planning_failure = {}
             state.files = tuple(str(item) for item in resume.get("files", ()))
-            state.session_report = "resumed preserved implementation"
         else:
             state.stage = "planning"
             plan, planning_failure = self._planning_phase(request, workspace, review)
@@ -981,7 +998,9 @@ class CodingAgent:
         # "review" is a stage only checkpoints written before D-052 carry; it
         # resumes at verification like "test".
         if resume_stage in {"review", "test", "commit"}:
-            session = CodingSessionResult(True, state.session_report)
+            # No session ran on a verification-only resume. Its earlier
+            # report remains on the earlier job's durable result.
+            session = CodingSessionResult(True, "resumed preserved implementation")
             session_files = state.files
         else:
             state.stage = "execution"

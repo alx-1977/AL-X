@@ -143,6 +143,12 @@ class StartupSmokeTest(unittest.TestCase):
                 observed["provider_calls"] += 1
                 raise AssertionError("startup must not call a provider")
 
+            core_agent = live_voice.CoreAgent
+
+            def capture_core(*args, **kwargs):
+                observed["runtime_facts"] = kwargs["runtime_facts"]()
+                return core_agent(*args, **kwargs)
+
             from alx.continuity.due_source import DueCognitionSource
             from alx.interfaces.server import LiveVoiceServer
             from alx.bootstrap import providers as runtime_providers
@@ -154,6 +160,7 @@ class StartupSmokeTest(unittest.TestCase):
 
             patches = [
                 (live_voice, "load_environment", load_environment),
+                (live_voice, "CoreAgent", capture_core),
                 (LiveVoiceServer, "serve_forever", serve_forever),
                 (DueCognitionSource, "run", tick_forever),
                 (OpenAIReasoningModel, "complete", refuse_provider_call),
@@ -200,6 +207,25 @@ class StartupSmokeTest(unittest.TestCase):
         return observed
 
     # --- A. autonomous disabled ------------------------------------------
+
+    def test_setup_names_the_configured_coding_tool_and_model(self) -> None:
+        from alx.bootstrap import providers
+
+        for provider, model in (
+            ("codex_subscription", "gpt-5.6-luna"),
+            ("grok_subscription", "grok-4.6"),
+        ):
+            with self.subTest(provider=provider), \
+                 mock.patch.object(providers, "_build_coding_session", return_value=None), \
+                 mock.patch.object(providers, "_build_coding_model", return_value=None):
+                observed = self._run_runtime({
+                    "ALX_CODING_ENABLED": "true",
+                    "ALX_CODING_PROVIDER": provider,
+                    "ALX_CODING_MODEL": model,
+                })
+                self.assertEqual(observed["runtime_facts"]["setup"]["coding"], {
+                    "tool": provider, "model": model, "available": False,
+                })
 
     def test_the_runtime_starts_with_autonomous_cognition_disabled(self) -> None:
         observed = self._run_runtime({})
