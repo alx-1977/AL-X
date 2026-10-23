@@ -40,6 +40,7 @@ TRACE_DEFINITION = CapabilityDefinition(
     "Each step's time is local, with its offset. Also returns reasoning_usage: "
     "per-call input/output/cache tokens and cost_usd, plus full-window totals; "
     "null means unknown, not zero. Usage is for the time window across conversations, "
+    "A usage read failure is reported in reasoning_usage.failure; trace entries remain available. "
     "independent of trace filters. "
     "Window from/to, ISO 8601 (a time without an offset is local); default the "
     "last 24 hours, kept for 30 days. "
@@ -123,12 +124,16 @@ def build_self_diagnosis_executors(
             return failed(READ_OWN_TRACE, "arguments_unusable", str(error))
         try:
             entries, truncated = trace.between(start, end, problems, subsystem, limit)
-            usage = None if read_usage is None else read_usage(start, end, limit)
         except Exception as error:  # noqa: BLE001 - reported, not raised
             return failed(READ_OWN_TRACE, "unavailable", type(error).__name__)
         values = {"entries": entries, "truncated": truncated}
-        if usage is not None:
-            values["reasoning_usage"] = usage
+        if read_usage is not None:
+            try:
+                usage = read_usage(start, end, limit)
+            except Exception as error:  # noqa: BLE001 - preserve the successful trace read
+                usage = {"failure": {"code": "unavailable", "reason": type(error).__name__}}
+            if usage is not None:
+                values["reasoning_usage"] = usage
         return CapabilityResult(call_id_source(), READ_OWN_TRACE, CapabilityResultState.SUCCEEDED,
                                 values)
 

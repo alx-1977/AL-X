@@ -156,6 +156,7 @@ class SQLiteUsageRecorder:
             # durable and spend cannot be audited after the fact.
             for column, definition in (
                 ("reported_fields", "TEXT"),
+                ("research_measurement_version", "INTEGER NOT NULL DEFAULT 0"),
                 ("reservation_id", "TEXT NOT NULL DEFAULT ''"),
                 ("reserved_usd", "REAL NOT NULL DEFAULT 0.0"),
                 ("cost_usd", "REAL NOT NULL DEFAULT 0.0"),
@@ -360,15 +361,32 @@ class SQLiteUsageRecorder:
             "SELECT reported_fields FROM reasoning_calls WHERE id = ?", (row_id,),
         ).fetchone()[0]
         fields = set(json.loads(previous)) if previous is not None else set()
+        research = str(values.get("code", "")).startswith("research.")
         for name in cls.USAGE_FIELDS:
-            if name in values:
-                if values[name] is None:
+            if name in values or research:
+                measured = values.get("cost_measured" if name == "cost_usd" else "usage_measured")
+                if values.get(name) is None or measured is False or (research and measured is not True):
                     fields.discard(name)
                 else:
                     fields.add(name)
         database.execute(
-            "UPDATE reasoning_calls SET reported_fields = ? WHERE id = ?",
-            (json.dumps(sorted(fields)), row_id),
+            "UPDATE reasoning_calls SET reported_fields = ?, research_measurement_version = ? "
+            "WHERE id = ?",
+            (json.dumps(sorted(fields)), 1, row_id),
+        )
+
+    # Earlier research events mixed defaults and reservations with measurements.
+    # Even a populated reported_fields list on those rows cannot prove usage.
+    _RESEARCH = "(kind = 'research' OR reservation_id <> '')"
+
+    @classmethod
+    def _measured_sum(cls, name: str) -> str:
+        legacy_tokens = (f"(reported_fields IS NULL AND NOT {cls._RESEARCH}) OR "
+                         if name != "cost_usd" else "")
+        return (
+            f"SUM(CASE WHEN (NOT {cls._RESEARCH} OR research_measurement_version > 0) "
+            f"AND ({legacy_tokens}EXISTS (SELECT 1 FROM json_each(reported_fields) "
+            f"WHERE value = '{name}')) THEN {name} END)"
         )
 
     def between(self, start: datetime, end: datetime, limit: int = 500) -> dict[str, Any]:
@@ -382,14 +400,11 @@ class SQLiteUsageRecorder:
             rows = database.execute(
                 "SELECT *" + where + " ORDER BY id LIMIT ?", (*params, limit + 1),
             ).fetchall()
-            # Older rows did not retain field presence. Their token counters
-            # are available, but a default cost cannot establish a measurement.
+            # Older non-research counters remain available; legacy research
+            # events did not distinguish estimates or defaults from measurements.
             totals = database.execute(
                 "SELECT COUNT(*) AS calls, " + ", ".join(
-                    f"SUM(CASE WHEN "
-                    + ("reported_fields IS NULL OR " if name != "cost_usd" else "")
-                    + "EXISTS (SELECT 1 FROM json_each(reported_fields) WHERE value = "
-                    + f"'{name}') THEN {name} END) AS {name}"
+                    f"{self._measured_sum(name)} AS {name}"
                     for name in self.USAGE_FIELDS
                 ) + where, params,
             ).fetchone()
@@ -399,8 +414,11 @@ class SQLiteUsageRecorder:
         for row in rows[:limit]:
             item = dict(row)
             reported = item.pop("reported_fields")
+            version = item.pop("research_measurement_version")
             fields = (set(self.USAGE_FIELDS) - {"cost_usd"} if reported is None
                       else set(json.loads(reported)))
+            if (item["kind"] == "research" or item["reservation_id"]) and not version:
+                fields = set()
             for name in self.USAGE_FIELDS:
                 if name not in fields:
                     item[name] = None
@@ -412,13 +430,10 @@ class SQLiteUsageRecorder:
         database = self._db()
         try:
             row = database.execute(
-                "SELECT COUNT(*) AS calls, "
-                "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
-                "COALESCE(SUM(cached_tokens), 0) AS cached_tokens, "
-                "COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, "
-                "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-                "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens, "
-                "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+                "SELECT COUNT(*) AS calls, " + ", ".join(
+                    f"COALESCE({self._measured_sum(name)}, 0) AS {name}"
+                    for name in self.USAGE_FIELDS
+                ) + " "
                 "FROM reasoning_calls WHERE task_id = ?",
                 (task_id,),
             ).fetchone()

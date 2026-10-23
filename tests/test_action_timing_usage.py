@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.contracts import (
+    Cognition, ModelCompletion, ResearchQuestion, SpecialistQuestion, SpecialistError,
     CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
     GoalState, Objective, SideEffect, StructuredSchema, SuccessCriterion, ValueKind,
 )
@@ -20,6 +21,9 @@ from alx.goals import SQLiteGoalStore
 from alx.goals.store import _attempts, _goal_to_data
 from alx.observability.self_record import SQLiteTraceRecord
 from alx.observability.usage import SQLiteUsageRecorder
+from alx.observability.pricing import ConfiguredPricingWorstCase
+from alx.observability.research_budget import ResearchBudget, SQLiteResearchLedger
+from alx.specialists import ResearchSpecialist, ResearchTierModel
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.tools.goal_history import READ_OWN_GOALS, build_goal_history_executors
 from alx.tools.self_diagnosis import (
@@ -127,6 +131,117 @@ class ActionTimingTests(unittest.TestCase):
 
 
 class ReasoningUsageVisibilityTests(unittest.TestCase):
+    def test_usage_failure_keeps_successful_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = SQLiteTraceRecord(Path(directory) / "trace.db")
+            try:
+                now = datetime.now(UTC)
+                trace.record({"code": "trace", "at": now.isoformat(), "subsystem": "core",
+                              "status": "completed", "label": "Observed facts"})
+
+                def unavailable(*args):
+                    raise sqlite3.OperationalError("usage store locked")
+
+                result = build_self_diagnosis_executors(
+                    trace, lambda *args: ([], False), lambda: "read",
+                    clock=lambda: now + timedelta(seconds=1), read_usage=unavailable,
+                )[READ_OWN_TRACE]({})
+                self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+                self.assertEqual(len(result.values["entries"]), 1)
+                self.assertEqual(result.values["entries"][0]["label"], "Observed facts")
+                self.assertFalse(result.values["truncated"])
+                self.assertEqual(result.values["reasoning_usage"], {
+                    "failure": {"code": "unavailable", "reason": "OperationalError"}})
+                self.assertTrue(TRACE_DEFINITION.output_schema.accepts(result.values))
+            finally:
+                trace.close()
+
+    def test_production_research_events_preserve_measurement_provenance(self):
+        class Model:
+            supports_bounded_research = True
+
+            def complete(self, request):
+                if usage is None:
+                    raise RuntimeError("transport unavailable")
+                return ModelCompletion("openai", "gpt-5.4-nano", {"finding": "fact"}, usage)
+
+        cases = (
+            (None, False, False),  # transport failure
+            ({}, False, False),  # pricing cannot determine cost
+            ({"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+              "reasoning_tokens": 0}, False, False),  # normalized unknown usage
+            ({"input_tokens": 2, "output_tokens": 0, "cached_tokens": 0,
+              "reasoning_tokens": 0, "cache_write_tokens": 0}, True, True),
+            ({"input_tokens": 2, "output_tokens": 0, "cached_tokens": 0,
+              "reasoning_tokens": 0}, True, False),
+        )
+        for usage, measured, priced in cases:
+            with self.subTest(usage=usage, priced=priced), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                start = datetime.now(UTC) - timedelta(seconds=1)
+                recorder = SQLiteUsageRecorder(root / "usage.db")
+                events = []
+
+                def record(task, event):
+                    events.append(event)
+                    recorder.record(task, event)
+
+                prices = ConfiguredPricingWorstCase()
+                if measured and not priced:
+                    prices.cost_usd = lambda *args: None
+                specialist = ResearchSpecialist(
+                    {Cognition.SURVEY: ResearchTierModel("openai", "gpt-5.4-nano", Model())},
+                    SQLiteResearchLedger(root / "budget.db", ResearchBudget(1, 0.09)),
+                    prices, 4000, 1000, 0.09, telemetry_sink=record,
+                )
+                question = ResearchQuestion(SpecialistQuestion(
+                    "question", "Read the material", "material",
+                    {"type": "object", "properties": {"finding": {"type": "string"}}},
+                ))
+                if usage is None:
+                    with self.assertRaises(SpecialistError):
+                        specialist.answer(question)
+                else:
+                    specialist.answer(question)
+                result = SQLiteUsageRecorder(root / "usage.db").between(
+                    start, datetime.now(UTC) + timedelta(seconds=1))
+                self.assertEqual(result["totals"]["calls"], 1)
+                for name in ("input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens"):
+                    expected = usage[name] if measured else None
+                    self.assertEqual(result["calls"][0][name], expected)
+                    self.assertEqual(result["totals"][name], expected)
+                if priced:
+                    self.assertIsNotNone(result["calls"][0]["cost_usd"])
+                else:
+                    self.assertIsNone(result["calls"][0]["cost_usd"])
+                    self.assertIsNone(result["totals"]["cost_usd"])
+                    self.assertEqual(recorder.task("question")["cost_usd"], 0)
+                self.assertIs(events[-1]["usage_measured"], measured)
+                self.assertIs(events[-1]["cost_measured"], priced)
+
+    def test_legacy_research_records_and_events_do_not_establish_measurements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.db"
+            recorder = SQLiteUsageRecorder(path)
+            start = datetime.now(UTC) - timedelta(seconds=1)
+            for task in ("legacy-event", "legacy-row", "legacy-null"):
+                recorder.record(task, {
+                    "code": "research.completed", "kind": "research", "input_tokens": 0,
+                    "output_tokens": 0, "cost_usd": 0.09,
+                })
+            with sqlite3.connect(path) as database:
+                database.execute("ALTER TABLE reasoning_calls DROP COLUMN research_measurement_version")
+                database.execute("UPDATE reasoning_calls SET reported_fields = ? WHERE task_id = ?",
+                                 ('["input_tokens", "output_tokens", "cost_usd"]', "legacy-row"))
+                database.execute("UPDATE reasoning_calls SET reported_fields = NULL WHERE task_id = ?",
+                                 ("legacy-null",))
+            usage = SQLiteUsageRecorder(path).between(start, datetime.now(UTC) + timedelta(seconds=1))
+            self.assertEqual(usage["totals"]["calls"], 3)
+            for name in ("input_tokens", "output_tokens", "cost_usd"):
+                self.assertIsNone(usage["totals"][name])
+                for call in usage["calls"]:
+                    self.assertIsNone(call[name])
+
     def test_calls_and_full_window_totals_survive_reopen_and_are_readable(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "usage.sqlite3"
@@ -174,6 +289,7 @@ class ReasoningUsageVisibilityTests(unittest.TestCase):
             recorder.record("task", {"code": "research.reserved", "reservation_id": "one",
                                       "reserved_usd": 1})
             recorder.record("task", {"code": "research.completed", "reservation_id": "one",
+                                      "usage_measured": True, "cost_measured": True,
                                       "input_tokens": 3, "output_tokens": 1, "cost_usd": 0.1})
             usage = SQLiteUsageRecorder(path).between(
                 start, datetime.now(UTC) + timedelta(seconds=1))

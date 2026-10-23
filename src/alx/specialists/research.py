@@ -29,6 +29,7 @@ from alx.contracts.models import (
     PROTOCOL_INPUT_TOKEN_ALLOWANCE,
     input_token_upper_bound,
 )
+from alx.contracts.usage import usage_telemetry
 
 
 
@@ -183,6 +184,8 @@ class ResearchSpecialist:
                 "reservation_id": reservation.reservation_id,
                 "reserved_usd": reservation.reserved_usd,
                 "cost_usd": 0.0,
+                "usage_measured": False,
+                "cost_measured": False,
                 "outcome": "reserved",
             },
         )
@@ -257,6 +260,7 @@ class ResearchSpecialist:
                 "failed" if overrun > 0 else "succeeded",
                 "cost_overrun" if overrun > 0 else "",
                 usage,
+                cost_measured=actual is not None,
             ),
         )
         if overrun > 0:
@@ -329,6 +333,7 @@ class ResearchSpecialist:
         outcome: str,
         failure_code: str,
         usage: Mapping[str, Any],
+        cost_measured: bool = False,
     ) -> Mapping[str, Any]:
         return {
             "code": "research.completed",
@@ -339,12 +344,10 @@ class ResearchSpecialist:
             "reservation_id": reservation.reservation_id,
             "reserved_usd": reservation.reserved_usd,
             "cost_usd": cost,
+            "cost_measured": cost_measured,
             "outcome": outcome,
             "failure_code": failure_code,
-            "input_tokens": usage.get("input_tokens", 0),
-            "cached_tokens": usage.get("cached_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0),
-            "reasoning_tokens": usage.get("reasoning_tokens", 0),
+            **usage_telemetry(usage),
             "remaining_usd": round(self._ledger.remaining_usd(), 6),
         }
 
