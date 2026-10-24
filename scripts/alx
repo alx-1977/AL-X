@@ -228,6 +228,44 @@ status() {
   return 0
 }
 
+follow_log() {
+  local capture known seen
+  # EXIT runs after function locals unwind; retain child PIDs for cleanup.
+  log_followers=""
+  log_sleeper=""
+  local files=("$LOG")
+  # Existing files retain tail's default last-ten-lines startup view.
+  for capture in "$CAPTURE"*; do
+    [ -f "$capture" ] && files+=("$capture")
+  done
+  tail -F "${files[@]}" &
+  log_followers=$!
+  trap 'kill $log_followers ${log_sleeper:-} 2>/dev/null; wait' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  while :; do
+    # The collector creates a new name each UTC day. Re-expand the glob and
+    # start each new follower from the beginning, including output written
+    # before discovery. Arrays preserve spaces and shell metacharacters.
+    for capture in "$CAPTURE"*; do
+      [ -f "$capture" ] || continue
+      seen=0
+      for known in "${files[@]}"; do
+        [ "$known" = "$capture" ] && { seen=1; break; }
+      done
+      [ "$seen" = 0 ] || continue
+      files+=("$capture")
+      tail -n +1 -F "$capture" &
+      log_followers="$log_followers $!"
+    done
+    # Waiting on a background sleep lets signals run cleanup immediately.
+    sleep 1 &
+    log_sleeper=$!
+    wait "$log_sleeper"
+    log_sleeper=""
+  done
+}
+
 # Sourcing defines the functions without acting, so they can be tested.
 if (return 0 2>/dev/null); then return 0; fi
 
@@ -236,6 +274,6 @@ case "${1:-restart}" in
   start)   start ;;
   stop)    stop ;;
   status)  status ;;
-  log)     tail -F "$LOG" "$CAPTURE"* ;;
+  log)     follow_log ;;
   *) echo "usage: scripts/alx {restart|start|stop|status|log}"; exit 2 ;;
 esac
