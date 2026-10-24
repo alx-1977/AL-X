@@ -17,6 +17,8 @@ she is choosing from a list she can read, not guessing at a command language.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -130,7 +132,7 @@ def build_repository_operation_executors(
                 call_id,
                 REPOSITORY_OPERATION,
                 CapabilityResultState.FAILED,
-                failure={"code": error.code},
+                failure={"code": error.code, **failure_details(error)},
             )
         if not outcome.succeeded:
             # A refusal is still evidence: the record says which operation was

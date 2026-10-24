@@ -52,6 +52,7 @@ fi
 
 URL="http://127.0.0.1:8765"
 LOG="$ROOT/.alx/runtime/live_voice.log"
+CAPTURE="$ROOT/.alx/runtime/live_voice.process.log"
 STAMP="$ROOT/.alx/runtime/live_voice.config"
 PYTHON="${ALX_PYTHON:-python3}"
 PATTERN="alx.bootstrap.live_voice"
@@ -117,10 +118,12 @@ start() {
   fi
   local code; code="$(runtime_code)" || return 1
   mkdir -p "$(dirname "$LOG")"
-  [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev"
+  # Only process output is redirected here. Python owns the daily runtime log.
+  # Keep startup/import failures and uncaught tracebacks across restarts too.
+  [ -f "$CAPTURE" ] && mv "$CAPTURE" "$CAPTURE.$(date +%s).$$"
   rm -f "$STAMP"
   PYTHONPATH="$code/src" nohup "$PYTHON" -m "$PATTERN" --checkout "$ROOT" \
-    >"$LOG" 2>&1 &
+    >"$CAPTURE" 2>&1 &
   local pid=$!
   echo "started pid $pid (main@$(basename "$code"))"
   record_config "$pid" "$code"
@@ -136,7 +139,7 @@ start() {
   # reported as a live configuration.
   rm -f "$STAMP"
   echo "FAILED to come up. Last lines of $LOG:"
-  grep -v "connection rejected" "$LOG" 2>/dev/null | tail -15
+  tail -15 "$CAPTURE" "$LOG" 2>/dev/null
   return 1
 }
 
@@ -232,6 +235,6 @@ case "${1:-restart}" in
   start)   start ;;
   stop)    stop ;;
   status)  status ;;
-  log)     tail -f "$LOG" ;;
+  log)     tail -F "$LOG" "$CAPTURE" ;;
   *) echo "usage: scripts/alx {restart|start|stop|status|log}"; exit 2 ;;
 esac

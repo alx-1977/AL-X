@@ -16,12 +16,17 @@ was the trace on his screen. This lets her look.
 from __future__ import annotations
 
 import re
+import logging
+import time
+from logging.handlers import TimedRotatingFileHandler
 import sqlite3
 from collections import deque
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from threading import Lock
 from typing import Any
+
+from alx.contracts.diagnostics import mask_credentials as _mask
 
 TRACE_RETENTION = timedelta(days=30)
 MAX_RECORDS = 500
@@ -100,25 +105,46 @@ class SQLiteTraceRecord:
 
 _LINE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3} (\w+) ([\w.]+): (.*)$")
 _LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
-# Anything shaped like a credential is masked before she sees the line, and
-# ordinary text, paths included, is left alone.
-_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[^\s\"',]+")
-_ASSIGNED = re.compile(
-    r"(?i)\b(token|api[_-]?key|access[_-]?key|secret[_-]?key|secret|password|signature|"
-    r"authorization)(\s*[=:]\s*[\"']?)(?!\[masked\])([^\s\"',&]+)")
-_PREFIXED = re.compile(r"\b(sk|xi|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_\-]{8,}")
-# A long unbroken run of letters and digits (no slash, so never a path).
-_LONG = re.compile(r"(?<![/\w])[A-Za-z0-9+_\-]{40,}={0,2}(?![/\w])")
+# Shared masking also protects diagnostics before they enter failure storage.
+
 MAX_LINE_CHARACTERS = 400
-# One entry with its traceback, at most.
 MAX_ENTRY_CHARACTERS = 4000
+LOG_RETENTION = timedelta(days=30)
 
 
-def _mask(text: str) -> str:
-    text = _BEARER.sub(lambda match: f"{match.group(1)} [masked]", text)
-    text = _ASSIGNED.sub(lambda match: f"{match.group(1)}{match.group(2)}[masked]", text)
-    text = _PREFIXED.sub("[masked]", text)
-    return _LONG.sub("[masked]", text)
+def runtime_log_paths(path: Path) -> tuple[Path, ...]:
+    """The runtime log, its daily archives, and process output from the launcher."""
+    candidates = (
+        *path.parent.glob(path.name + ".*"),
+        path,
+        *path.parent.glob("live_voice.process.log*"),
+    )
+    return tuple(sorted(
+        (item for item in set(candidates) if item.is_file()),
+        key=lambda item: (item.stat().st_mtime, item.name),
+    ))
+
+
+class RuntimeLogHandler(TimedRotatingFileHandler):
+    """Daily logs with time-based retention; directory work only at startup/rotation."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        super().__init__(path, when="midnight", backupCount=0, encoding="utf-8")
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        self.prune()
+
+    def prune(self) -> None:
+        cutoff = time.time() - LOG_RETENTION.total_seconds()
+        active = {Path(self.baseFilename), Path(self.baseFilename).with_name("live_voice.process.log")}
+        for path in runtime_log_paths(Path(self.baseFilename)):
+            if path not in active and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+
+    def doRollover(self) -> None:
+        super().doRollover()
+        self.prune()
 
 
 def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
@@ -146,31 +172,47 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
         if contains and contains.lower() not in entry["message"].lower():
             return
         entry["message"] = _mask(entry["message"])
-        entries.append(entry)
+        newest = sorted([*entries, entry], key=lambda item: datetime.fromisoformat(item["at"]).timestamp())[-limit:]
+        entries.clear()
+        entries.extend(newest)
         matched += 1
 
     for path in paths:
         if not path.exists():
             continue
+        # Process output can precede logging entirely. Its file modification
+        # time is the only available timestamp; keep that provenance explicit.
+        raw_at = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        structured = False
         with open(path, encoding="utf-8", errors="replace") as handle:
             for raw in handle:
                 line = raw.rstrip("\n")
                 match = _LINE.match(line)
                 if match is None:
+                    if (current is not None and current["source"] == "process"
+                            and len(current["message"]) + min(len(line), MAX_LINE_CHARACTERS) + 1
+                            > MAX_ENTRY_CHARACTERS):
+                        keep(current)
+                        current = None
+                    if not structured and current is None and line.strip() and start <= raw_at < end:
+                        current = {"at": raw_at.isoformat(timespec="seconds"),
+                                   "level": "ERROR", "source": "process",
+                                   "timestamp_source": "file_mtime", "message": ""}
                     if (current is not None and line.strip()
                             and len(current["message"]) < MAX_ENTRY_CHARACTERS):
                         current["message"] = (current["message"] + "\n"
-                                              + line[:MAX_LINE_CHARACTERS])[:MAX_ENTRY_CHARACTERS]
+                                              + _mask(line)[:MAX_LINE_CHARACTERS])[:MAX_ENTRY_CHARACTERS]
                     continue
                 keep(current)
                 current = None
+                structured = True
                 at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
                 if not local_start <= at < local_end:
                     continue
                 # Local, as the log writes it, now with its offset stated.
                 current = {"at": at.astimezone().isoformat(timespec="seconds"),
                            "level": match.group(2),
-                           "source": match.group(3), "message": match.group(4)[:MAX_LINE_CHARACTERS]}
+                           "source": match.group(3), "message": _mask(match.group(4))[:MAX_LINE_CHARACTERS]}
         keep(current)
         current = None
     return list(entries), matched > limit

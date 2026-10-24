@@ -17,6 +17,8 @@ semantic judgement Law 1 keeps in the Core.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 from collections.abc import Callable
 from typing import Any, Mapping
 
@@ -141,7 +143,8 @@ def build_web_executors(
                 ASK_WEB_PAGE,
                 CapabilityResultState.FAILED,
                 failure={
-                    "code": code if code in WEB_FETCH_FAILURES else "provider_failed"
+                    "code": code if code in WEB_FETCH_FAILURES else "provider_failed",
+                    **failure_details(error)
                 },
             )
 

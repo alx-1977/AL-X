@@ -13,6 +13,8 @@ data to AL/X or to deterministic code, which decide what the answer means.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import service_message
+
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
@@ -20,11 +22,12 @@ from alx.contracts.records import StructuredData
 
 
 class SpecialistError(Exception):
-    """A sanitised specialist failure carrying no document content."""
+    """A specialist failure with an optional bounded, masked service diagnostic."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         if not isinstance(code, str) or not code.strip():
             raise ValueError("code must not be blank")
+        self.service_message = service_message(detail) if detail else ""
         self.code = code
         super().__init__(code)
 

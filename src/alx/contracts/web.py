@@ -13,6 +13,8 @@ them would be deciding what the retrieval meant.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import service_message
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -98,18 +100,15 @@ WEB_FETCH_FAILURES = (
 
 
 class WebRetrievalError(Exception):
-    """A refusal carrying one declared code and no retrieved content.
-
-    The code travels; the page does not. A failure that carried fragments of
-    what it failed to read would put unvalidated bytes on the failure channel,
-    where nothing is expecting untrusted content.
-    """
+    """A declared refusal with a bounded, credential-masked service diagnostic."""
 
     def __init__(self, code: str, detail: str = "") -> None:
         if code not in WEB_FETCH_FAILURES:
             raise ValueError(f"undeclared web failure code: {code}")
+        self.service_message = (service_message(detail)
+                                if detail and code in (PROVIDER_FAILED, RETRIEVAL_BLOCKED) else "")
         self.code = code
-        self.detail = detail
+        self.detail = service_message(detail) if detail else ""
         super().__init__(code)
 
 

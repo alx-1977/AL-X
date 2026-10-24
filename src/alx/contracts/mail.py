@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import AsyncIterator, Protocol
 
+from alx.contracts.diagnostics import service_message
+
 from alx.contracts.records import BackgroundEvent
 
 
@@ -241,10 +243,11 @@ class ReplyOutcome:
 
 
 class MailSendError(Exception):
-    """A sanitised send failure that never carries a credential or body."""
+    """A send failure with an optional bounded, masked server reply."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         _required(code, "code")
+        self.service_message = service_message(detail) if detail else ""
         self.code = code
         super().__init__(code)
 
@@ -256,8 +259,9 @@ MAIL_FLAG_COLOURS = ("orange", "none")
 
 
 class MailAccessError(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         _required(code, "code")
+        self.service_message = service_message(detail) if detail else ""
         self.code = code
         super().__init__(code)
 

@@ -38,6 +38,8 @@ repository findable.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import service_message
+
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -194,9 +196,10 @@ class RepositoryAuthorityError(Exception):
     def __init__(self, code: str, detail: str = "") -> None:
         if code not in REPOSITORY_FAILURES:
             raise ValueError(f"undeclared repository failure: {code}")
-        super().__init__(detail or code)
+        self.service_message = service_message(detail) if detail else ""
+        super().__init__(self.service_message or code)
         self.code = code
-        self.detail = detail
+        self.detail = self.service_message
 
 
 def valid_sha(value: object) -> bool:

@@ -51,7 +51,7 @@ safety = ["contracts"]
 tools = ["contracts", "specialists"]
 providers = ["contracts"]
 interfaces = ["contracts", "conversation"]
-observability = []
+observability = ["contracts"]
 specialists = ["contracts"]
 bootstrap = [
   "contracts",

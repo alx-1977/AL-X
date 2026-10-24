@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import service_message, service_response_message
+
 import base64
 import hashlib
 import json
@@ -80,9 +82,9 @@ def _validation_messages(response: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(found))
 
 
-def _raise_clean(code: str) -> None:
+def _raise_clean(code: str, detail: str = "") -> None:
     """Raise after handlers exit so request-bearing exceptions aren't chained."""
-    raise XeroAccessError(code)
+    raise XeroAccessError(code, detail)
 
 
 def _json_attachment_envelope(raw: bytes) -> Any | None:
@@ -495,23 +497,18 @@ class XeroAccountingAdapter:
             _raise_clean(unconfirmed_code or "response_missing")
         if allow_not_found and response.status_code == 404:
             return None
-        if response.status_code in (401, 403):
-            _raise_clean("permission_denied")
-        if response.status_code == 429:
-            _raise_clean("rate_limited")
-        if unconfirmed_code and response.status_code >= 500:
-            _raise_clean(unconfirmed_code)
         if response.status_code >= 400:
-            # Xero says why it refused in its validation messages. They go to
-            # the operator log only, bounded, so a refusal can be diagnosed;
-            # the error itself stays free of request and document content.
             messages = _validation_messages(response)
-            if messages:
-                LOGGER.warning(
-                    "Xero refused %s %s: %s", method, path.split("?", 1)[0],
-                    "; ".join(messages)[:500],
-                )
-            _raise_clean("request_rejected")
+            detail = service_message("; ".join(messages)) if messages else service_response_message(response.text)
+            code = (
+                "permission_denied" if response.status_code in (401, 403)
+                else "rate_limited" if response.status_code == 429
+                else unconfirmed_code if unconfirmed_code and response.status_code >= 500
+                else "request_rejected"
+            )
+            if detail:
+                LOGGER.warning("Xero refused %s %s: %s", method, path.split("?", 1)[0], detail)
+            _raise_clean(code, detail)
         if binary:
             content_type = response.headers.get("content-type", "")
             # Test doubles and a few HTTP shims expose no usable header. Xero
