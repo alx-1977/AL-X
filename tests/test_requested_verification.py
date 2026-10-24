@@ -207,6 +207,44 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
         self.assertFalse(required.passed)
         self.assertFalse(evidence.all_required_passed)
 
+    def test_a_derived_check_that_passes_alone_is_excused_and_named(self) -> None:
+        (self.root / "tests" / "test_flaky.py").write_text(
+            "from pathlib import Path\n"
+            "def test_flaky():\n"
+            "    marker = Path(__file__).with_name('ran-once')\n"
+            "    first = not marker.exists()\n"
+            "    marker.touch()\n"
+            "    assert not first\n", encoding="utf-8")
+        changed = ("tests/test_flaky.py",)
+        request = CodingRequest(task="t", job_id="j", worktree=str(self.root))
+        evidence, _run, _passed = self.agent._verify(
+            request, CodingWorkspace(str(self.root), ()), changed, [])
+        check = next(c for c in evidence.checks if c.name.startswith("pytest"))
+        self.assertTrue(check.passed)
+        self.assertEqual(check.baseline, "passed_alone:1")
+        self.assertEqual(check.findings, ("tests/test_flaky.py::test_flaky",))
+
+    def test_a_requested_command_is_never_excused_as_passing_alone(self) -> None:
+        (self.root / "tests" / "test_flaky.py").write_text(
+            "from pathlib import Path\n"
+            "def test_flaky():\n"
+            "    marker = Path(__file__).with_name('ran-once')\n"
+            "    first = not marker.exists()\n"
+            "    marker.touch()\n"
+            "    assert not first\n", encoding="utf-8")
+        changed = ("tests/test_flaky.py",)
+        derived = required_verification(changed, self.root).checks
+        pytest_check = next(c for c in derived if c.name.startswith("pytest"))
+        request = CodingRequest(task="t", job_id="j", worktree=str(self.root),
+                                requested_checks=(pytest_check.argv,))
+        with mock.patch.object(coding_agent, "same_main_pytest_failure",
+                               return_value=(False, "not on main")):
+            evidence, _run, _passed = self.agent._verify(
+                request, CodingWorkspace(str(self.root), ()), changed, [])
+        check = next(c for c in evidence.checks if c.argv == pytest_check.argv)
+        self.assertFalse(check.passed)
+        self.assertFalse(evidence.all_required_passed)
+
     def test_resume_accepts_evidence_that_passed_a_requested_command(self) -> None:
         request = CodingRequest(task="t", job_id="j", worktree=str(self.root),
                                 requested_checks=(self._pytest("tests/test_ok.py"),))

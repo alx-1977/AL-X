@@ -488,22 +488,12 @@ def pytest_failure_signature(
         is_error = title.startswith("ERROR at ")
         if is_error:
             title = re.sub(r"^ERROR at (?:setup|teardown|call) of ", "", title)
-        status, _, node = short[position].partition(" ")
-        path, separator, node = node.partition("::")
-        if not path or not separator:
+        status, _, rest = short[position].partition(" ")
+        full = _summary_node(rest)
+        if full is None:
             return None
-        depth = 0
-        for offset, character in enumerate(node):
-            if character == "[":
-                depth += 1
-            elif character == "]":
-                depth -= 1
-                if depth < 0:
-                    return None
-            elif depth == 0 and node.startswith(" - ", offset):
-                node = node[:offset]
-                break
-        if depth != 0:
+        path, separator, node = full.partition("::")
+        if not path or not separator:
             return None
         parts = node.split("::")
         identity = ".".join(parts)
@@ -519,6 +509,26 @@ MAX_FAILED_TEST_FINDINGS = 20
 MAX_FAILED_TEST_CHARACTERS = 300
 
 
+def _summary_node(rest: str) -> str | None:
+    """The node id at the start of a short-summary line, message cut off.
+
+    The message follows ` - `, but a parametrized id may contain ` - ` inside
+    its brackets (`test_x[left - right]`), so the cut is made only outside
+    brackets. None when the brackets do not balance.
+    """
+    depth = 0
+    for offset, character in enumerate(rest):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif depth == 0 and rest.startswith(" - ", offset):
+            return rest[:offset].strip()
+    return rest.strip() if depth == 0 else None
+
+
 def pytest_failed_tests(output: str) -> tuple[str, ...]:
     """The node identifiers pytest's short summary names as failed or errored.
 
@@ -532,7 +542,9 @@ def pytest_failed_tests(output: str) -> tuple[str, ...]:
         status, _, rest = line.partition(" ")
         if status not in {"FAILED", "ERROR"} or not rest.strip():
             continue
-        node = rest.split(" - ", 1)[0].strip()
+        # An id whose brackets do not balance is still a failure: kept with
+        # the plain cut, never dropped, so no failed test can go unlisted.
+        node = _summary_node(rest) or rest.split(" - ", 1)[0].strip()
         if node and node not in failed:
             failed.append(node[:MAX_FAILED_TEST_CHARACTERS])
         if len(failed) == MAX_FAILED_TEST_FINDINGS:
