@@ -10,10 +10,13 @@ code extracted from local `main` with git alone, importing nothing first.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -333,6 +336,80 @@ class LauncherItselfComesFromCommittedMain(unittest.TestCase):
         completed = self.run_launcher("bash", "scripts/alx", "status")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("no scripts/alx on local main", completed.stderr)
+
+
+class LogFollowDiscoversCaptures(unittest.TestCase):
+    def test_daily_files_are_discovered_once_and_followers_are_cleaned_up(self) -> None:
+        for initial_capture in (True, False):
+            with self.subTest(initial_capture=initial_capture), \
+                    tempfile.TemporaryDirectory(prefix="log follow [fixture] ") as directory:
+                root = Path(directory)
+                runtime = root / "runtime log"
+                capture = root / "process [output].log"
+                runtime.write_text("runtime-start\n")
+                first = Path(str(capture) + ".2026-10-24")
+                if initial_capture:
+                    first.write_text("".join(f"old-{n}\n" for n in range(15)))
+                pidfile = root / "followers"
+                # Record the actual tail PIDs so cleanup is checked after exit.
+                binary = root / "bin"
+                binary.mkdir()
+                wrapper = binary / "tail"
+                wrapper.write_text(
+                    '#!/bin/sh\nprintf "%s\\n" "$$" >> "$FOLLOWER_PIDS"\n'
+                    f'exec {shlex.quote(shutil.which("tail"))} "$@"\n'
+                )
+                wrapper.chmod(0o755)
+                output = root / "output"
+
+                def wait_for(predicate):
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        if predicate():
+                            return
+                        time.sleep(0.05)
+                    self.fail(f"log follow timed out: {output.read_text()}")
+
+                with output.open("w") as stream:
+                    process = subprocess.Popen(
+                        ["/bin/bash", "-c",
+                         'source "$1"; LOG="$2"; CAPTURE="$3"; follow_log',
+                         "log-test", str(ROOT / "scripts/alx"), str(runtime), str(capture)],
+                        stdout=stream, stderr=stream, start_new_session=True,
+                        env={**os.environ, "PATH": f"{binary}:{os.environ.get('PATH', '')}",
+                             "FOLLOWER_PIDS": str(pidfile)},
+                    )
+                    try:
+                        wait_for(lambda: "runtime-start\n" in output.read_text())
+                        if initial_capture:
+                            wait_for(lambda: "old-14\n" in output.read_text())
+                            self.assertNotIn("old-4\n", output.read_text())
+                            self.assertIn("old-5\n", output.read_text())
+                        new = Path(str(capture) + ".2026-10-25")
+                        # More than ten lines proves discovery reads from the start.
+                        new.write_text("".join(f"new-{n}\n" for n in range(15)))
+                        wait_for(lambda: "new-14\n" in output.read_text())
+                        self.assertIn("new-0\n", output.read_text())
+                        with new.open("a") as appended:
+                            appended.write("capture-continued\n")
+                        with runtime.open("a") as appended:
+                            appended.write("runtime-continued\n")
+                        wait_for(lambda: all(line in output.read_text() for line in
+                                             ("capture-continued\n", "runtime-continued\n")))
+                        self.assertEqual(output.read_text().count("new-0\n"), 1)
+                        self.assertEqual(len(pidfile.read_text().splitlines()), 2)
+                        process.terminate()
+                        process.wait(timeout=5)
+                        for pid in pidfile.read_text().splitlines():
+                            with self.assertRaises(ProcessLookupError):
+                                os.kill(int(pid), 0)
+                    finally:
+                        # Also contain followers if an assertion fails before cleanup.
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=5)
 
 
 class RuntimeEntryNamesItsCheckout(unittest.TestCase):
