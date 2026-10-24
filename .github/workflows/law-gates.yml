@@ -14,7 +14,9 @@ jobs:
   law-gates:
     name: law-gates
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The serial suite reached 5 minutes on main in October 2026 and every run
+    # of PR #177 was cancelled at the limit while still passing tests.
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
