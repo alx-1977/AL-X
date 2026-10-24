@@ -313,11 +313,12 @@ relevant now, and that judgement is yours.
 recent_finished_goals contains retained finished work begun or answered in this conversation,
 most recent completion first, bounded by count. The two most recent carry their context,
 progress and evidence, with attempts listed without their results; older ones are listed by
-id and objective. read_own_goals with a goal's id returns any of them in full.
-A stored result from an earlier turn too large to repeat on every turn is replaced by its
-size; read_own_goals with the goal's id returns it in full. Results from this turn are whole.
+id and objective. Every stored attempt result is a mechanical summary bounded to
+8,000 characters: long strings use head, original_length and sha256; long lists end
+with an _omitted_items count. read_own_goals returns the same bounded summary.
+A live result is seen whole only on the turn it arrives.
 read_own_goals searches retained goals across conversations by text, or reads a
-goal in full by exact id or unambiguous id prefix; it includes finished and unfinished work.
+goal's stored state by exact id or unambiguous id prefix; it includes finished and unfinished work.
 
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have
@@ -326,7 +327,7 @@ to continue an existing goal, include a create goal mutation to start a new one,
 leave both empty for ordinary conversation. Do not fold unrelated work into an existing
 goal, and do not start a second goal for work an unfinished goal already covers. If you
 need a goal's full state before acting on it, choose the select_goal action with its
-goal_id; the next step shows that goal in full. A goal update applies to the selected
+goal_id; the next step shows that goal's stored state. A goal update applies to the selected
 goal only. An effectful capability call requires an active goal. If active_goal is null and you
 choose an effectful call, include a create goal mutation with a concise objective and
 explicit success criteria in the same decision, or set goal_id to the unfinished goal
@@ -558,17 +559,10 @@ def _without_reused_ids(
     return proposed
 
 
-# A long-running goal accumulates every attempt and its full result values.
-# Resending all of them makes each reasoning call more expensive than the last,
-# so the prompt carries the recent ones verbatim and the rest as a compact
-# summary. This projects what is sent; the durable record keeps everything.
+# The store bounds each result; the prompt additionally summarizes older
+# attempts so long-running goals do not replay every observation each turn.
 VERBATIM_ATTEMPTS = 8
 VERBATIM_HISTORY = 12
-# A stored result is repeated on every turn while its goal is shown. One full
-# DRC report (222,000 characters) in a finished goal doubled every Core call on
-# 2026-10-20 and spent the subscription session within the hour. Larger
-# results are replaced by their size; read_own_goals returns them in full.
-STORED_RESULT_LIMIT = 16_000
 # Finished goals shown in full; older ones are listed by id and objective.
 DETAILED_FINISHED_GOALS = 2
 
@@ -600,18 +594,9 @@ def _recent(items: Sequence[Any], limit: int) -> list[Any]:
     return list(items[-limit:]) if len(items) > limit else list(items)
 
 
-def _stored_result(values: Any) -> Any:
-    plain = _plain(values)
-    size = len(json.dumps(plain, ensure_ascii=False, default=str))
-    if size <= STORED_RESULT_LIMIT:
-        return plain
-    return {"omitted_characters": size,
-            "read_in_full_with": "read_own_goals with this goal's id"}
-
-
 def _state_payload(
     state: GoalState, *, full_progress: bool = False,
-    finished: bool = False, this_turn: frozenset[str] = frozenset(),
+    finished: bool = False,
 ) -> dict[str, Any]:
     attempts = tuple(state.attempts)
     recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
@@ -661,15 +646,11 @@ def _state_payload(
                                          else item.repeated_recorded_at.isoformat()),
                 "repeated_reason_code": item.repeated_reason_code,
                 "result_state": None if item.result is None else item.result.state.value,
-                # A finished goal keeps what it found in its context, progress
-                # and evidence; the raw results stay in the store.
+                # Writes retain live observations for this turn; subsequent
+                # loads contain the store's bounded durable summaries.
                 "result_values": (
                     None if item.result is None or finished
-                    # This turn's own observation, shown whole; later turns
-                    # see its size if it is large.
-                    else _plain(item.result.values)
-                    if item.call is not None and item.call.call_id in this_turn
-                    else _stored_result(item.result.values)),
+                    else _plain(item.result.values)),
                 "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
             }
             for item in recent_attempts
@@ -1028,7 +1009,7 @@ def _context_payload(context: ReasoningContext) -> str:
             for index, item in enumerate(context.recent_finished_goals)
         ],
         "active_goal": (None if goal is None
-                        else _state_payload(goal, this_turn=frozenset(context.turn_call_ids))),
+                        else _state_payload(goal)),
         "transient_attempts": [
             _attempt_payload(item) for item in context.transient_attempts
         ],

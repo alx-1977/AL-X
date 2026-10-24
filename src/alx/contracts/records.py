@@ -574,10 +574,27 @@ class CapabilityResult:
     # succeeded in observing work that failed. None means the outcome its
     # state implies.
     outcome: ExecutionOutcome | None = None
+    # Store-owned recovery envelope. Never part of a result projection: values,
+    # durable_values and failure remain the public, bounded observation on load.
+    _recovery: StructuredData | None = field(default=None, repr=False, compare=False)
+
+    def recovery_values(self) -> StructuredData:
+        """Exact durable facts for mechanical readers, never model context."""
+        return self.durable_values if self._recovery is None else self._recovery["values"]
+
+    def observed_values(self) -> StructuredData:
+        """Full live observation, or exact recorded facts after storage reload."""
+        return self.values if self._recovery is None else self.recovery_values()
+
+    def recovery_failure(self) -> StructuredData | None:
+        """Exact failure facts for mechanical readers, never model context."""
+        return self.failure if self._recovery is None else self._recovery["failure"]
 
     def __post_init__(self) -> None:
         _required(self.call_id, "call_id")
         _required(self.capability_id, "capability_id")
+        if self._recovery is not None:
+            object.__setattr__(self, "_recovery", freeze_data(self._recovery))
         if self.outcome is not None:
             object.__setattr__(self, "outcome", ExecutionOutcome(self.outcome))
             if (self.outcome is ExecutionOutcome.SUCCESS
@@ -614,7 +631,7 @@ def outcome_of(result: CapabilityResult) -> ExecutionOutcome:
     if result.state is CapabilityResultState.SUCCEEDED:
         return ExecutionOutcome.SUCCESS
     if result.state is CapabilityResultState.FAILED and not (
-        result.failure or {}
+        result.recovery_failure() or {}
     ).get("requires_judgement"):
         return ExecutionOutcome.FAILURE
     return ExecutionOutcome.AMBIGUOUS

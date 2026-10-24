@@ -82,7 +82,7 @@ def captured_invoice_filing_scopes(
             or call.capability_id != CAPTURE_SUPPLIER_INVOICE
             or result is None
             or result.state is not CapabilityResultState.SUCCEEDED
-            or result.values.get("completed") is not True
+            or result.recovery_values().get("completed") is not True
         ):
             continue
         reference = {
@@ -133,15 +133,15 @@ def dhl_mail_scopes(state: GoalState | None) -> tuple[ApprovalScope, ...]:
             or call.capability_id != PROCESS_DHL_IMPORT
             or result is None
             or result.state is not CapabilityResultState.SUCCEEDED
-            or result.values.get("completed") is not True
+            or result.recovery_values().get("completed") is not True
         ):
             continue
-        drafted = result.values.get("stage") == "customs_documents"
-        for reference in references(result.values.get("source_mail")):
+        drafted = result.recovery_values().get("stage") == "customs_documents"
+        for reference in references(result.recovery_values().get("source_mail")):
             add(ApprovalScope(FILE_PROCESSED_MAIL_MESSAGE, reference))
             if drafted:
                 add(ApprovalScope(SET_MAIL_FLAG_COLOUR, {**reference, "colour": "orange"}))
-        for reference in references(result.values.get("customs_mail")):
+        for reference in references(result.recovery_values().get("customs_mail")):
             add(ApprovalScope(SET_MAIL_FLAG_COLOUR, {**reference, "colour": "none"}))
     return tuple(scopes)
 
@@ -172,9 +172,9 @@ def mail_post_reply_standing_scopes(
             or attempt.call.capability_id != SEND_MAIL_REPLY
             or attempt.result is None
             or attempt.result.state is not CapabilityResultState.SUCCEEDED
-            or attempt.result.values.get("accepted") is not True
+            or attempt.result.recovery_values().get("accepted") is not True
             or not isinstance(
-                attempt.result.values.get("source_has_attachments"), bool
+                attempt.result.recovery_values().get("source_has_attachments"), bool
             )
         ):
             continue
@@ -189,7 +189,7 @@ def mail_post_reply_standing_scopes(
             "mailbox_id", "uid_validity", "uid"
         ))
         if (
-            attempt.result.values.get("source_has_attachments") is False
+            attempt.result.recovery_values().get("source_has_attachments") is False
             and reference_key not in invoked_trash
         ):
             scopes.append(ApprovalScope(MOVE_MAIL_MESSAGE_TO_TRASH, reference))

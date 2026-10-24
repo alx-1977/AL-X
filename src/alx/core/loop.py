@@ -1501,8 +1501,8 @@ class CoreAgent:
             if (decision.call.capability_id in {
                 "request_external_review", "read_external_review", "merge_pull_request"
             } and attempt.result is not None
-                    and (attempt.result.failure or {}).get("requires_judgement")):
-                mechanical_blocker = str(attempt.result.failure["code"])
+                    and (attempt.result.recovery_failure() or {}).get("requires_judgement")):
+                mechanical_blocker = str(attempt.result.recovery_failure()["code"])
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
                         conversation_id, conversation, snapshot, reasoning_context,
@@ -2075,7 +2075,7 @@ class CoreAgent:
                                 "mailbox_id", "uid_validity", "uid"
                             )) != reference):
                         continue
-                    subject = attempt.result.values.get("subject")
+                    subject = attempt.result.recovery_values().get("subject")
                     if (attempt.result.state is CapabilityResultState.SUCCEEDED
                             and isinstance(subject, str) and subject.strip()):
                         source_subject = subject
@@ -2432,10 +2432,24 @@ class CoreAgent:
         This is also restart recovery; there is no other.
         """
         jobs = []
+        current_evidence = set()
         for goal_id in self._store.list_open_plan_goal_ids():
             try:
-                job = self._advance_plan(self._store.load(goal_id))
+                snapshot = self._store.load(goal_id)
+                plan = snapshot.state.execution_plan
+                if (snapshot.state.status is GoalStatus.ACTIVE
+                        and plan is not None and plan.attention is not None):
+                    current_evidence.update(
+                        (goal_id, plan.attention_seq, call_id)
+                        for call_id in plan.attention.evidence_call_ids
+                    )
+                job = self._advance_plan(snapshot)
             except Exception as error:  # noqa: BLE001 - one plan must not stop the rest
+                # Keep bookkeeping for a goal whose state could not be reconciled.
+                current_evidence.update(
+                    key for key in self._evidence_scheduled | self._evidence_settled
+                    if key[0] == goal_id
+                )
                 # Its durable state is whatever it last reached, so the next
                 # tick tries again from there.
                 LOGGER.warning("Plan reconciliation failed for goal %s: %s",
@@ -2443,6 +2457,8 @@ class CoreAgent:
                 continue
             if job is not None:
                 jobs.append(job)
+        self._evidence_scheduled.intersection_update(current_evidence)
+        self._evidence_settled.intersection_update(current_evidence)
         return tuple(jobs)
 
     def begin_planned_dispatch(self, job: PlannedDispatch) -> PlannedDispatch | None:
@@ -2633,6 +2649,7 @@ class CoreAgent:
         for call_id in plan.attention.evidence_call_ids:
             key = (state.goal_id, plan.attention_seq, call_id)
             if (call_id in self._plan_evidence_cache or key in self._evidence_scheduled
+                    or key in self._evidence_settled
                     or not self._needs_reread(state, call_id)):
                 continue
             stored = self._attempt_for(state, call_id)
@@ -3025,24 +3042,26 @@ class CoreAgent:
     ) -> tuple[GoalSnapshot, tuple[CapabilityAttempt, ...]]:
         """The results the plan's attention asks her to judge, in full.
 
-        The full result if it arrived in this process, or was read again on a
-        background worker after a restart; otherwise the durable record,
-        which carries only metadata. Nothing is dispatched here: a Core turn
-        never waits on an observation.
+        A live result is handed to one Core turn, then subsequent turns see
+        the bounded durable record. After restart a background observation
+        can supply fresh evidence once. Nothing is dispatched here: a Core
+        turn never waits on an observation.
         """
         plan = snapshot.state.execution_plan
         if plan is None or plan.attention is None:
             return snapshot, ()
         evidence = []
         for call_id in plan.attention.evidence_call_ids:
-            cached = self._plan_evidence_cache.get(call_id)
+            cached = self._plan_evidence_cache.pop(call_id, None)
             expires = (None if cached is None or cached.result is None
                        or cached.result.provenance is None
                        else cached.result.provenance.content_expires_at)
             if cached is not None and (expires is None or expires > self._clock()):
+                self._evidence_settled.add((
+                    snapshot.state.goal_id, plan.attention_seq, call_id,
+                ))
                 evidence.append(cached)
                 continue
-            self._plan_evidence_cache.pop(call_id, None)
             stored = next((item for item in snapshot.state.attempts
                            if item.call is not None and item.call.call_id == call_id), None)
             if stored is not None:
@@ -3655,18 +3674,18 @@ class CoreAgent:
     def _completed_unchanged_coding_result(item: CapabilityAttempt) -> bool:
         """Recognise durable no-op evidence recorded before the neutral status existed."""
         result = item.result
-        if result is None or result.failure is None:
+        if result is None or result.recovery_failure() is None:
             return False
-        values = result.durable_values
+        values = result.recovery_values()
         baseline = values.get("baseline")
         try:
             checkpoint = json.loads(values.get("checkpoint"))
         except (TypeError, ValueError):
             return False
         return (
-            result.failure.get("code") == "task_failed"
-            and result.failure.get("phase") == "test"
-            and result.failure.get("session_completed") is True
+            result.recovery_failure().get("code") == "task_failed"
+            and result.recovery_failure().get("phase") == "test"
+            and result.recovery_failure().get("session_completed") is True
             and values.get("status") == "failed"
             and values.get("file_count") == 0
             and values.get("diff_digest") == hashlib.sha256(b"").hexdigest()
@@ -3689,7 +3708,7 @@ class CoreAgent:
     @staticmethod
     def _is_coding_execution_failure(item: CapabilityAttempt) -> bool:
         """A durable Coding Agent run that failed after reaching implementation."""
-        failure = (item.result.failure or {}) if item.result is not None else {}
+        failure = (item.result.recovery_failure() or {}) if item.result is not None else {}
         return (
             item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
@@ -3725,7 +3744,7 @@ class CoreAgent:
     def _coding_execution_failures(state: GoalState) -> list[Mapping[str, Any]]:
         """Failures of durable Coding Agent runs that reached implementation."""
         return [
-            item.result.failure or {}
+            item.result.recovery_failure() or {}
             for item in state.attempts
             if CoreAgent._is_coding_execution_failure(item)
         ]
@@ -3739,7 +3758,7 @@ class CoreAgent:
     @staticmethod
     def _is_corrective_coding_dispatch(item: CapabilityAttempt) -> bool:
         """A correction AL/X dispatched that reached the preserved implementation."""
-        failure = (item.result.failure or {}) if item.result is not None else {}
+        failure = (item.result.recovery_failure() or {}) if item.result is not None else {}
         return (
             item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
@@ -3775,7 +3794,7 @@ class CoreAgent:
                 episode = []
             if (
                 cls._is_coding_execution_failure(item)
-                and (item.result.failure or {}).get("failure_class") != "request_conflict"
+                and (item.result.recovery_failure() or {}).get("failure_class") != "request_conflict"
             ):
                 episode.append(item)
         return episode
@@ -3794,8 +3813,8 @@ class CoreAgent:
         tree but leaves the same checks failing has not changed the failure.
         """
         result = item.result
-        failure = (result.failure or {}) if result is not None else {}
-        values = result.durable_values if result is not None else {}
+        failure = (result.recovery_failure() or {}) if result is not None else {}
+        values = result.recovery_values() if result is not None else {}
         failed_checks: list[list[object]] = []
         verification = values.get("verification")
         if isinstance(verification, Mapping):
@@ -3883,11 +3902,11 @@ class CoreAgent:
             result = attempt.result
             if result is None:
                 break
-            values = result.durable_values
+            values = result.recovery_values()
             legacy_timeout = (
                 result.state is CapabilityResultState.FAILED
-                and (result.failure or {}).get("code") == "session_failed"
-                and (result.failure or {}).get("reason_code") == "session_timeout"
+                and (result.recovery_failure() or {}).get("code") == "session_failed"
+                and (result.recovery_failure() or {}).get("reason_code") == "session_timeout"
             )
             is_interrupted = values.get("status") == "interrupted" or legacy_timeout
             if is_interrupted:
@@ -3933,7 +3952,7 @@ class CoreAgent:
             and item.implementation_invoked is True
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
-            and (item.result.failure or {}).get("code") == "planning_failed"
+            and (item.result.recovery_failure() or {}).get("code") == "planning_failed"
         )
 
     @classmethod

@@ -367,7 +367,7 @@ def goal_coding_branch(
             or result.state is not CapabilityResultState.SUCCEEDED
         ):
             continue
-        commit = result.durable_values.get("commit")
+        commit = result.recovery_values().get("commit")
         if not isinstance(commit, Mapping):
             continue
         branch, sha = commit.get("branch"), commit.get("commit_sha")
@@ -422,14 +422,14 @@ def build_coding_executors(
                 and (
                     item.result.state is CapabilityResultState.FAILED
                     or (item.result.state is CapabilityResultState.PARTIAL
-                        and item.result.durable_values.get("status") == "interrupted")
+                        and item.result.recovery_values().get("status") == "interrupted")
                 )
             }
             previous = recorded.get(resume_id)
             if previous is None:
                 return _failed(call_id, "git_refused", reason_code="resume_ownership_unproven",
                                implementation_reached=False)
-            raw_checkpoint = previous.result.durable_values.get("checkpoint")
+            raw_checkpoint = previous.result.recovery_values().get("checkpoint")
             try:
                 checkpoint = json.loads(raw_checkpoint)
             except (TypeError, ValueError):
@@ -496,7 +496,7 @@ def build_coding_executors(
                 # A correction answers recorded failure evidence. An interruption
                 # or a cancellation recorded none, and a commit-stage candidate
                 # has already passed the session it would reopen.
-                failure = previous.result.failure or {}
+                failure = previous.result.recovery_failure() or {}
                 if (previous.result.state is not CapabilityResultState.FAILED
                         or failure.get("code") == "coding_cancelled"):
                     return _failed(call_id, "arguments_unusable",

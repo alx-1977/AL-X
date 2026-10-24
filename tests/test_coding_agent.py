@@ -273,8 +273,18 @@ class CodingRecordTests(unittest.TestCase):
                     ]
                     facts = result.failure if status == "raised" else result.values
                     for key, value in expected.items():
-                        self.assertEqual(facts[key], value)
-                        self.assertEqual(stored[key], value)
+                        if key == "session_report":
+                            for summary in (facts[key], stored[key]):
+                                self.assertTrue(summary["head"])
+                                self.assertTrue(report.startswith(summary["head"]))
+                                self.assertEqual(summary["original_length"], len(report))
+                                self.assertEqual(
+                                    summary["sha256"],
+                                    hashlib.sha256(report.encode("utf-8")).hexdigest(),
+                                )
+                        else:
+                            self.assertEqual(facts[key], value)
+                            self.assertEqual(stored[key], value)
 
 
 class NativeExecutionTests(unittest.TestCase):

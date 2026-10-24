@@ -538,8 +538,8 @@ class FinishedHistoryTests(unittest.TestCase):
 
     def test_a_large_result_saved_this_turn_reaches_the_next_step_whole(self):
         """Greptile on PR 163: goal-bound results were capped before she read them."""
-        from alx.core.model_reasoner import STORED_RESULT_LIMIT
-        big = replace(shipment("big"), context={"notes": "x" * (STORED_RESULT_LIMIT + 1000)})
+        from alx.goals.result_summary import RESULT_LIMIT
+        big = replace(shipment("big"), context={"notes": "x" * (RESULT_LIMIT + 1000)})
         self.store.create(big, "c1", RETENTION)
         current = [None]
         broker = CapabilityBroker(
@@ -559,10 +559,10 @@ class FinishedHistoryTests(unittest.TestCase):
         attempts = json.loads(_context_payload(contexts[1]))["active_goal"]["attempts"]
         read = [item for item in attempts if item["call_id"] == "read-big"][0]
         self.assertEqual(read["result_values"]["goals"][0]["goal_id"], "big")
-        later = replace(contexts[1], turn_call_ids=())
+        later = replace(contexts[1], turn_call_ids=(), active_goal=self.store.load("big").state)
         attempts = json.loads(_context_payload(later))["active_goal"]["attempts"]
         read = [item for item in attempts if item["call_id"] == "read-big"][0]
-        self.assertIn("omitted_characters", read["result_values"])
+        self.assertEqual(read["result_values"]["goal_ids"], ["big"])
 
     def test_only_the_newest_finished_goals_are_shown_in_detail(self):
         for index in range(DETAILED_FINISHED_GOALS + 2):

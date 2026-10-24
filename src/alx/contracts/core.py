@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping, Protocol
@@ -292,6 +292,25 @@ class ReasoningContext:
     purpose: ReasoningPurpose | None = None
 
     def __post_init__(self) -> None:
+        # Private durable recovery facts are for mechanical readers only. Strip
+        # them at the context boundary, including attention evidence and recent
+        # finished work, before any reasoner can receive the record.
+        def public_attempt(attempt: CapabilityAttempt) -> CapabilityAttempt:
+            if attempt.result is None or attempt.result._recovery is None:
+                return attempt
+            return replace(attempt, result=replace(attempt.result, _recovery=None))
+
+        def public_state(state: GoalState) -> GoalState:
+            return replace(state, attempts=tuple(public_attempt(item) for item in state.attempts))
+
+        if self.active_goal is not None:
+            object.__setattr__(self, "active_goal", public_state(self.active_goal))
+        object.__setattr__(self, "recent_finished_goals", tuple(
+            replace(item, state=public_state(item.state)) for item in self.recent_finished_goals
+        ))
+        object.__setattr__(self, "transient_attempts", tuple(
+            public_attempt(item) for item in self.transient_attempts
+        ))
         object.__setattr__(self, "turns", tuple(self.turns))
         object.__setattr__(self, "unfinished_goals", tuple(self.unfinished_goals))
         object.__setattr__(self, "recent_finished_goals", tuple(self.recent_finished_goals))

@@ -3,7 +3,7 @@
 A long-running goal accumulated 65 attempts with full result values and resent
 all of them on every reasoning call, so each call cost more than the last. The
 prompt now carries recent detail plus a summary of the rest. Nothing durable is
-truncated: restart and audit still see every attempt.
+lost: restart and audit still see every attempt, with bounded result summaries.
 """
 
 from __future__ import annotations
@@ -30,12 +30,12 @@ from alx.contracts import (  # noqa: E402
     SuccessCriterion,
 )
 from alx.core.model_reasoner import (  # noqa: E402
-    STORED_RESULT_LIMIT,
     VERBATIM_ATTEMPTS,
     VERBATIM_HISTORY,
     _state_payload,
 )
 from alx.goals import SQLiteGoalStore  # noqa: E402
+from alx.goals.result_summary import RESULT_LIMIT  # noqa: E402
 
 
 def attempt(index: int, *, failed: bool = False) -> CapabilityAttempt:
@@ -72,7 +72,7 @@ def goal(attempts: int = 65, progress: int = 40) -> GoalState:
 
 def oversized_goal() -> GoalState:
     call = CapabilityCall("drc-1", "check_kicad_board", {})
-    report = {"violations": [{"description": "x" * 200} for _ in range(STORED_RESULT_LIMIT // 100)]}
+    report = {"violations": [{"description": "x" * 200} for _ in range(RESULT_LIMIT // 100)]}
     return GoalState(
         goal_id="goal-2",
         objective=Objective("turn:2", "check the board"),
@@ -92,18 +92,22 @@ class PromptSizeTests(unittest.TestCase):
     call and spent the subscription session within the hour.
     """
 
-    def test_an_oversized_stored_result_is_replaced_by_its_size(self) -> None:
-        values = _state_payload(oversized_goal())["attempts"][0]["result_values"]
-        self.assertGreater(values["omitted_characters"], STORED_RESULT_LIMIT)
-        self.assertIn("read_own_goals", values["read_in_full_with"])
+    def test_an_oversized_stored_result_keeps_a_bounded_summary(self) -> None:
+        with SQLiteGoalStore(":memory:") as store:
+            store.create(oversized_goal(), "conversation-1", datetime.now(UTC) + timedelta(days=30))
+            values = _state_payload(store.load("goal-2").state)["attempts"][0]["result_values"]
+        self.assertLess(len(json.dumps(values)), RESULT_LIMIT)
+        self.assertIn("violations", values)
 
     def test_this_turns_own_result_is_shown_whole(self) -> None:
         """Greptile on PR 163: a goal attempt saved this turn must reach the next step."""
         state = oversized_goal()
-        this_turn = _state_payload(state, this_turn=frozenset({"drc-1"}))
-        later_turn = _state_payload(state, this_turn=frozenset({"other"}))
+        with SQLiteGoalStore(":memory:") as store:
+            saved = store.create(state, "conversation-1", datetime.now(UTC) + timedelta(days=30))
+            this_turn = _state_payload(saved.state)
+            later_turn = _state_payload(store.load(state.goal_id).state)
         self.assertIn("violations", this_turn["attempts"][0]["result_values"])
-        self.assertIn("omitted_characters", later_turn["attempts"][0]["result_values"])
+        self.assertLess(len(json.dumps(later_turn)), len(json.dumps(this_turn)))
 
     def test_a_finished_goal_lists_attempts_without_results(self) -> None:
         attempts = _state_payload(oversized_goal(), finished=True)["attempts"]
