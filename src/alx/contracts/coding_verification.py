@@ -542,7 +542,9 @@ def pytest_failed_tests(output: str) -> tuple[str, ...]:
         status, _, rest = line.partition(" ")
         if status not in {"FAILED", "ERROR"} or not rest.strip():
             continue
-        node = _summary_node(rest)
+        # An id whose brackets do not balance is still a failure: kept with
+        # the plain cut, never dropped, so no failed test can go unlisted.
+        node = _summary_node(rest) or rest.split(" - ", 1)[0].strip()
         if node and node not in failed:
             failed.append(node[:MAX_FAILED_TEST_CHARACTERS])
         if len(failed) == MAX_FAILED_TEST_FINDINGS:

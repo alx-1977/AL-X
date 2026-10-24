@@ -987,6 +987,15 @@ class PassAloneRerunTests(unittest.TestCase):
         self.assertTrue(passed, reason)
         self.assertEqual(named, ("test_flaky.py::test_flaky[left - right]",))
 
+    def test_an_unreadable_id_beside_a_flaky_test_still_blocks(self) -> None:
+        self.write("test_flaky.py", _FLAKY_TEST)
+        self.write("test_bracket.py",
+                   "import pytest\n@pytest.mark.parametrize('v', [0], ids=['['])\n"
+                   "def test_bracket(v):\n    assert False\n")
+        passed, reason, _named = self.rerun()
+        self.assertFalse(passed)
+        self.assertEqual(reason, "failed_alone_too")
+
     def test_a_blocked_test_file_is_not_rerun(self) -> None:
         self.write("test_flaky.py", _FLAKY_TEST)
         self.assertEqual(self.rerun(("test_flaky.py",)), (False, "rerun_not_permitted", ()))
