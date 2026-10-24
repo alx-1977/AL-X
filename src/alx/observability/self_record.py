@@ -18,13 +18,14 @@ from __future__ import annotations
 import re
 import heapq
 import logging
+import os
 import time
 from logging.handlers import TimedRotatingFileHandler
 import sqlite3
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 
 from alx.contracts.diagnostics import mask_credentials as _mask
 
@@ -119,10 +120,15 @@ def runtime_log_paths(path: Path) -> tuple[Path, ...]:
         path,
         *path.parent.glob("live_voice.process.log*"),
     )
-    return tuple(sorted(
-        (item for item in set(candidates) if item.is_file()),
-        key=lambda item: (item.stat().st_mtime, item.name),
-    ))
+    existing = []
+    for item in set(candidates):
+        try:
+            if item.is_file():
+                existing.append((item.stat().st_mtime, item.name, item))
+        except FileNotFoundError:
+            # The capture owner may expire an archive during enumeration.
+            continue
+    return tuple(item for _, _, item in sorted(existing))
 
 
 class RuntimeLogHandler(TimedRotatingFileHandler):
@@ -137,9 +143,11 @@ class RuntimeLogHandler(TimedRotatingFileHandler):
 
     def prune(self) -> None:
         cutoff = time.time() - LOG_RETENTION.total_seconds()
-        active = {Path(self.baseFilename), Path(self.baseFilename).with_name("live_voice.process.log")}
-        for path in runtime_log_paths(Path(self.baseFilename)):
-            if path not in active and path.stat().st_mtime < cutoff:
+        active = Path(self.baseFilename)
+        for path in active.parent.glob(active.name + ".*"):
+            # The launcher's collector exclusively maintains process captures,
+            # including their archives, so it cannot race a second file owner.
+            if path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink(missing_ok=True)
 
     def doRollover(self) -> None:
@@ -149,13 +157,15 @@ class RuntimeLogHandler(TimedRotatingFileHandler):
 
 def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
              minimum_level: str = "INFO", contains: str = "",
-             limit: int = MAX_RECORDS) -> tuple[list[dict], bool]:
+             limit: int = MAX_RECORDS, *,
+             clock: Callable[[], datetime] | None = None) -> tuple[list[dict], bool]:
     """Log entries in [start, end) (local time, as the log writes it), oldest first.
 
     A traceback's lines belong to the entry above them. Each entry is masked
     and shortened; `truncated` says more matched than `limit`.
     """
     threshold = _LEVELS.get(minimum_level.upper(), 20)
+    start = max(start, (clock or (lambda: datetime.now(UTC)))() - LOG_RETENTION)
     local_start = start.astimezone().replace(tzinfo=None)
     local_end = end.astimezone().replace(tzinfo=None)
     # Only the newest `limit` are held; the rest are counted.
@@ -183,13 +193,15 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
                 heapq.heappushpop(entries, item)
 
     for path in paths:
-        if not path.exists():
+        try:
+            handle = open(path, encoding="utf-8", errors="replace")
+        except FileNotFoundError:
             continue
         # Process output can precede logging entirely. Its file modification
         # time is the only available timestamp; keep that provenance explicit.
-        raw_at = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
         structured = False
-        with open(path, encoding="utf-8", errors="replace") as handle:
+        with handle:
+            raw_at = datetime.fromtimestamp(os.fstat(handle.fileno()).st_mtime).astimezone()
             for raw in handle:
                 line = raw.rstrip("\n")
                 match = _LINE.match(line)

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
+from alx.contracts.diagnostics import failure_details
+
 from alx.contracts import (
     ModelMessage,
     ModelRequest,
@@ -62,7 +64,8 @@ class ModelSpecialist:
         try:
             completion = self._model.complete(request)
         except Exception as error:
-            raise SpecialistError(_failure_code(error)) from None
+            raise SpecialistError(_failure_code(error),
+                                  failure_details(error).get("service_message", "")) from None
         usage = completion.usage
         self.last_usage = usage if isinstance(usage, Mapping) else None
         values = completion.output

@@ -16,6 +16,8 @@ and the revision stay citable across a restart.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -212,8 +214,8 @@ def build_pull_request_checks_executors(
             )
         except CheckReadError as error:
             if error.code == "head_changed":
-                return _failed(call_id, error.code, actual_head=error.actual_head)
-            return _failed(call_id, error.code)
+                return _failed(call_id, error.code, actual_head=error.actual_head, **failure_details(error))
+            return _failed(call_id, error.code, **failure_details(error))
         except Exception as error:  # noqa: BLE001 - unclassified is still a fact
             # The type, never the message. A provider exception's wording can
             # carry the request that produced it, and this one carries a token.

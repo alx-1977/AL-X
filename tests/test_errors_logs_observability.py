@@ -292,8 +292,13 @@ class RetainedLogTests(unittest.TestCase):
                 path.write_text("before logging\nTraceback (most recent call last):\nRuntimeError: token=secret\n")
                 at = (now - timedelta(days=age)).timestamp()
                 os.utime(path, (at, at))
-            handler = RuntimeLogHandler(root / "live_voice.log")
-            handler.close()
+            from alx.observability.process_output import capture_output
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            try:
+                capture_output(read_fd, root / "live_voice.process.log", clock=lambda: now.timestamp())
+            finally:
+                os.close(read_fd)
             entries, _ = read_log(runtime_log_paths(root / "live_voice.log"),
                                   now - timedelta(days=30), now, "WARNING")
             self.assertEqual(len(entries), 1)
@@ -322,6 +327,14 @@ class RetainedLogTests(unittest.TestCase):
             package.mkdir(parents=True)
             for parent in (package, package.parent):
                 (parent / "__init__.py").write_text("")
+            # The launcher starts its capture writer from the same committed
+            # snapshot as the child. Include that real writer in the fixture.
+            for relative in ("observability/process_output.py", "observability/self_record.py",
+                             "contracts/diagnostics.py"):
+                target = package.parent / relative
+                target.parent.mkdir(exist_ok=True)
+                (target.parent / "__init__.py").write_text("")
+                target.write_text((ROOT / "src/alx" / relative).read_text())
             (package / "live_voice.py").write_text(
                 'print("before logging", flush=True)\nraise RuntimeError("uncaught startup failure")\n')
             script = f"""

@@ -18,6 +18,8 @@ schedule is right, and what to do about a problem, is AL/X's judgement.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import json
@@ -325,9 +327,9 @@ def build_reader_executors(
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
-    def failed(capability: str, code: str) -> CapabilityResult:
+    def failed(capability: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(call_id_source(), capability,
-                                CapabilityResultState.FAILED, failure={"code": code})
+                                CapabilityResultState.FAILED, failure={"code": code, **(failure_details(error) if error else {})})
 
     def provenance(at: datetime):
         return RetentionPolicy().non_mail(ContentOrigin.EXTERNAL, at)
@@ -339,7 +341,7 @@ def build_reader_executors(
             for product_id in product_ids:
                 devices.extend(fleet.devices(product_id))
         except ReaderAccessError as error:
-            return failed(REFRESH_READER_CALENDAR, error.code)
+            return failed(REFRESH_READER_CALENDAR, error.code, error)
         # A schedule that cannot be fetched now keeps the one last read, so a
         # BehaviorLive outage never empties a reader's day. Only BehaviorLive
         # saying the reader has no schedule removes it.
@@ -361,6 +363,7 @@ def build_reader_executors(
                 raw = configs.config(device.reader_uid)
             except ReaderAccessError as error:
                 summary["problems"] = (f"schedule_unavailable:{error.code}",)
+                summary.update(failure_details(error))
                 kept = previous.get(device.reader_uid)
                 if kept is not None and error.code not in _SCHEDULE_ABSENT:
                     carried = [item for item in previous_sessions
@@ -501,7 +504,7 @@ def build_reader_executors(
                               "started_at": at.isoformat(), "seconds": _seconds(at, done)})
                 return CapabilityResult(
                     call_id_source(), SEND_READER_SCHEDULE, CapabilityResultState.FAILED,
-                    failure={"code": error.code, "version": version,
+                    failure={"code": error.code, **failure_details(error), "version": version,
                              "commit_unconfirmed": unconfirmed},
                     outcome=ExecutionOutcome.AMBIGUOUS if unconfirmed else None,
                 )

@@ -16,6 +16,8 @@ recorded in the reader log, so it can be accounted for afterwards.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -101,9 +103,9 @@ def build_particle_executors(
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
-    def failed(capability: str, code: str) -> CapabilityResult:
+    def failed(capability: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(call_id_source(), capability, CapabilityResultState.FAILED,
-                                failure={"code": code})
+                                failure={"code": code, **(failure_details(error) if error else {})})
 
     def api_request(arguments: StructuredData) -> CapabilityResult:
         method = str(arguments.get("method") or "").upper()
@@ -124,7 +126,7 @@ def build_particle_executors(
                 log(now(), "particle", "particle_api",
                     {"method": method, "path": path, "failure": error.code,
                      "outcome_unknown": error.code in ("device_timeout", "connection_failed")})
-            return failed(PARTICLE_API_REQUEST, error.code)
+            return failed(PARTICLE_API_REQUEST, error.code, error)
         at = now()
         if changing:
             log(at, "particle", "particle_api",
@@ -156,7 +158,7 @@ def build_particle_executors(
                 log(now(), "particle", "particle_usage_report",
                     {"start": start, "end": end, "report_id": requested[0],
                      "failure": error.code})
-            return failed(READ_PARTICLE_USAGE, error.code)
+            return failed(READ_PARTICLE_USAGE, error.code, error)
         at = now()
         total = sum(row["data_operations"] for row in rows)
         log(at, "particle", "particle_usage_report",

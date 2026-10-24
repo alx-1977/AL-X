@@ -22,6 +22,8 @@ without the review text becoming a second evidence store.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 import logging
 from collections.abc import Callable
 from typing import Any, Mapping
@@ -143,7 +145,7 @@ def build_review_content_executors(
                 content.retrieved_at,
             )
         except ReviewReadError as error:
-            return _failed(call_id, error.code)
+            return _failed(call_id, error.code, **failure_details(error))
         except Exception as error:  # noqa: BLE001 - unclassified is still a fact
             # The type, never the message: a provider exception's wording can
             # carry the request that produced it, and this one carries a token.

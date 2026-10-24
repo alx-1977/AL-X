@@ -264,10 +264,10 @@ def build_web_search_executors(
     def run_search(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
 
-        def failed(code: str) -> CapabilityResult:
+        def failed(code: str, error: BaseException | None = None) -> CapabilityResult:
             return CapabilityResult(
                 call_id, ASK_WEB_SEARCH, CapabilityResultState.FAILED,
-                failure={"code": code},
+                failure={"code": code, **(failure_details(error) if error else {})},
             )
 
         try:
@@ -318,7 +318,7 @@ def build_web_search_executors(
                 _release(ledger, reservation, str(code or "provider_failed"))
             else:
                 _charge(ledger, reservation)
-            return failed(code if code in WEB_SEARCH_FAILURES else "search_provider_failed")
+            return failed(code if code in WEB_SEARCH_FAILURES else "search_provider_failed", error)
 
         _charge(ledger, reservation)
 

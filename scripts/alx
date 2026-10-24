@@ -118,12 +118,14 @@ start() {
   fi
   local code; code="$(runtime_code)" || return 1
   mkdir -p "$(dirname "$LOG")"
-  # Only process output is redirected here. Python owns the daily runtime log.
+  # The collector owns the capture file and expires output even while idle.
+  # Python owns the daily runtime log. The child keeps its PID and stdout/stderr
+  # stay connected through maintenance rather than writing to a removed inode.
   # Keep startup/import failures and uncaught tracebacks across restarts too.
   [ -f "$CAPTURE" ] && mv "$CAPTURE" "$CAPTURE.$(date +%s).$$"
   rm -f "$STAMP"
   PYTHONPATH="$code/src" nohup "$PYTHON" -m "$PATTERN" --checkout "$ROOT" \
-    >"$CAPTURE" 2>&1 &
+    > >(trap '' HUP; PYTHONPATH="$code/src" exec "$PYTHON" -m alx.observability.process_output "$CAPTURE") 2>&1 &
   local pid=$!
   echo "started pid $pid (main@$(basename "$code"))"
   record_config "$pid" "$code"
