@@ -348,7 +348,7 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
 
         class Attempt:
             def __init__(self, values):
-                self.result = type("R", (), {"values": values})()
+                self.result = type("R", (), {"recovery_values": lambda self: values})()
 
         self.assertTrue(completed(Attempt({"completed": True})))
         self.assertFalse(completed(Attempt({"completed": False})))

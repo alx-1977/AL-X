@@ -125,7 +125,7 @@ def classify_planned_result(
     observation = definition is not None and definition.plan_observation
     interrupted = (attempt.disposition is CapabilityAttemptDisposition.PENDING
                    or (result is not None
-                       and (result.failure or {}).get("code") == "dispatch_interrupted"))
+                       and (result.recovery_failure() or {}).get("code") == "dispatch_interrupted"))
     if interrupted:
         # An observation can simply be made again; anything else may already
         # have acted, and only she can say what to do about that.
@@ -296,8 +296,8 @@ def _document(attempt: CapabilityAttempt) -> Mapping[str, Any]:
     result = attempt.result
     return {
         "state": None if result is None else result.state.value,
-        "values": {} if result is None else result.values,
-        "failure": {} if result is None or result.failure is None else result.failure,
+        "values": {} if result is None else result.recovery_values(),
+        "failure": {} if result is None or result.recovery_failure() is None else result.recovery_failure(),
     }
 
 

@@ -1501,8 +1501,8 @@ class CoreAgent:
             if (decision.call.capability_id in {
                 "request_external_review", "read_external_review", "merge_pull_request"
             } and attempt.result is not None
-                    and (attempt.result.failure or {}).get("requires_judgement")):
-                mechanical_blocker = str(attempt.result.failure["code"])
+                    and (attempt.result.recovery_failure() or {}).get("requires_judgement")):
+                mechanical_blocker = str(attempt.result.recovery_failure()["code"])
                 if origin is CognitionOrigin.PERSON_TURN:
                     return self._respond_to_terminal_blocker(
                         conversation_id, conversation, snapshot, reasoning_context,
@@ -2075,7 +2075,7 @@ class CoreAgent:
                                 "mailbox_id", "uid_validity", "uid"
                             )) != reference):
                         continue
-                    subject = attempt.result.values.get("subject")
+                    subject = attempt.result.recovery_values().get("subject")
                     if (attempt.result.state is CapabilityResultState.SUCCEEDED
                             and isinstance(subject, str) and subject.strip()):
                         source_subject = subject
@@ -3674,18 +3674,18 @@ class CoreAgent:
     def _completed_unchanged_coding_result(item: CapabilityAttempt) -> bool:
         """Recognise durable no-op evidence recorded before the neutral status existed."""
         result = item.result
-        if result is None or result.failure is None:
+        if result is None or result.recovery_failure() is None:
             return False
-        values = result.durable_values
+        values = result.recovery_values()
         baseline = values.get("baseline")
         try:
             checkpoint = json.loads(values.get("checkpoint"))
         except (TypeError, ValueError):
             return False
         return (
-            result.failure.get("code") == "task_failed"
-            and result.failure.get("phase") == "test"
-            and result.failure.get("session_completed") is True
+            result.recovery_failure().get("code") == "task_failed"
+            and result.recovery_failure().get("phase") == "test"
+            and result.recovery_failure().get("session_completed") is True
             and values.get("status") == "failed"
             and values.get("file_count") == 0
             and values.get("diff_digest") == hashlib.sha256(b"").hexdigest()
@@ -3708,7 +3708,7 @@ class CoreAgent:
     @staticmethod
     def _is_coding_execution_failure(item: CapabilityAttempt) -> bool:
         """A durable Coding Agent run that failed after reaching implementation."""
-        failure = (item.result.failure or {}) if item.result is not None else {}
+        failure = (item.result.recovery_failure() or {}) if item.result is not None else {}
         return (
             item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
@@ -3744,7 +3744,7 @@ class CoreAgent:
     def _coding_execution_failures(state: GoalState) -> list[Mapping[str, Any]]:
         """Failures of durable Coding Agent runs that reached implementation."""
         return [
-            item.result.failure or {}
+            item.result.recovery_failure() or {}
             for item in state.attempts
             if CoreAgent._is_coding_execution_failure(item)
         ]
@@ -3758,7 +3758,7 @@ class CoreAgent:
     @staticmethod
     def _is_corrective_coding_dispatch(item: CapabilityAttempt) -> bool:
         """A correction AL/X dispatched that reached the preserved implementation."""
-        failure = (item.result.failure or {}) if item.result is not None else {}
+        failure = (item.result.recovery_failure() or {}) if item.result is not None else {}
         return (
             item.call is not None
             and item.call.capability_id == _RUN_CODING_TASK
@@ -3794,7 +3794,7 @@ class CoreAgent:
                 episode = []
             if (
                 cls._is_coding_execution_failure(item)
-                and (item.result.failure or {}).get("failure_class") != "request_conflict"
+                and (item.result.recovery_failure() or {}).get("failure_class") != "request_conflict"
             ):
                 episode.append(item)
         return episode
@@ -3813,8 +3813,8 @@ class CoreAgent:
         tree but leaves the same checks failing has not changed the failure.
         """
         result = item.result
-        failure = (result.failure or {}) if result is not None else {}
-        values = result.durable_values if result is not None else {}
+        failure = (result.recovery_failure() or {}) if result is not None else {}
+        values = result.recovery_values() if result is not None else {}
         failed_checks: list[list[object]] = []
         verification = values.get("verification")
         if isinstance(verification, Mapping):
@@ -3902,11 +3902,11 @@ class CoreAgent:
             result = attempt.result
             if result is None:
                 break
-            values = result.durable_values
+            values = result.recovery_values()
             legacy_timeout = (
                 result.state is CapabilityResultState.FAILED
-                and (result.failure or {}).get("code") == "session_failed"
-                and (result.failure or {}).get("reason_code") == "session_timeout"
+                and (result.recovery_failure() or {}).get("code") == "session_failed"
+                and (result.recovery_failure() or {}).get("reason_code") == "session_timeout"
             )
             is_interrupted = values.get("status") == "interrupted" or legacy_timeout
             if is_interrupted:
@@ -3952,7 +3952,7 @@ class CoreAgent:
             and item.implementation_invoked is True
             and item.result is not None
             and item.result.state is CapabilityResultState.FAILED
-            and (item.result.failure or {}).get("code") == "planning_failed"
+            and (item.result.recovery_failure() or {}).get("code") == "planning_failed"
         )
 
     @classmethod

@@ -42,6 +42,8 @@ class TableSpec:
     table: str
     identity_columns: tuple[str, ...]
     content_column: str
+    # A child row shares its owner's provenance and deletion/retention clock.
+    provenance_parent: tuple[str, str] | None = None
 
     @property
     def required_columns(self) -> frozenset[str]:
@@ -56,6 +58,8 @@ CONTENT_TABLES = (
         "turn_json",
     ),
     TableSpec("goal_state", "goals", ("goal_id",), "state_json"),
+    TableSpec("attempt_recovery", "attempt_recovery", ("goal_id", "ordinal"),
+              "facts_json", ("goals", "goal_id")),
     TableSpec(
         "legacy_goal_turn",
         "conversation_turns",
@@ -180,13 +184,18 @@ def _survey_database(runtime: Path, path: Path) -> list[RecordSurvey]:
             if not spec.required_columns.issubset(columns):
                 continue
             store = _store_name(runtime, path, spec.kind)
-            stamped = _provenance_state(columns, store)
-            selected = [f'"{item}"' for item in spec.identity_columns]
+            owner = spec.table if spec.provenance_parent is None else spec.provenance_parent[0]
+            stamped = _provenance_state(_columns(connection, owner), store)
+            selected = [f'"{spec.table}"."{item}"' for item in spec.identity_columns]
             if stamped:
-                selected.extend(f'"{item}"' for item in PROVENANCE_COLUMNS)
-            order = ", ".join(f'"{item}"' for item in spec.identity_columns)
+                selected.extend(f'"{owner}"."{item}"' for item in PROVENANCE_COLUMNS)
+            order = ", ".join(f'"{spec.table}"."{item}"' for item in spec.identity_columns)
+            source = f'"{spec.table}"'
+            if spec.provenance_parent is not None:
+                parent, key = spec.provenance_parent
+                source += f' LEFT JOIN "{parent}" USING ("{key}")'
             query = (
-                f'SELECT {", ".join(selected)} FROM "{spec.table}" '
+                f'SELECT {", ".join(selected)} FROM {source} '
                 f"ORDER BY {order}"
             )
             for row in connection.execute(query):

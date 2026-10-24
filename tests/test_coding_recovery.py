@@ -97,6 +97,12 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertTrue(first.diff_preserved)
         self.assertIsNone(first.commit)
         self.assertEqual(json.loads(first.checkpoint)["stage"], "execution")
+        # Real checkpoint content (plan, files, verification) can exceed the
+        # public summary's string bound. Extra retained evidence must not make
+        # the exact checkout/stage proof unusable after the store reopens.
+        first = replace(first, checkpoint=json.dumps({
+            **json.loads(first.checkpoint), "retained_evidence": "x" * 10_000,
+        }))
         original = CapabilityAttempt(
             CapabilityCall("job-1", "run_coding_task", {
                 "task": "fix add", "repair_branch": "fix/job-1",

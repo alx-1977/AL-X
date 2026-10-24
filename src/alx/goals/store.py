@@ -35,7 +35,7 @@ from alx.contracts.storage import serialized_store
 from alx.goals.result_summary import RESULT_LIMIT, bound_result, serialized_size
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -121,7 +121,7 @@ def _data(value: Any) -> Any:
     return value
 
 
-def _goal_to_data(goal: GoalState) -> dict[str, Any]:
+def _goal_to_data(goal: GoalState, recovery: list[Any] | None = None) -> dict[str, Any]:
     return {
         "objective": [goal.objective.source_reference, goal.objective.summary],
         "success_criteria": [[item.criterion_id, item.description] for item in goal.success_criteria],
@@ -132,7 +132,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
         "attempts": [
             [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.durable_arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
-             _recorded_result(item.result), item.reason_code,
+             _recorded_result(item.result, recovery), item.reason_code,
              _time_to_data(item.recorded_at), item.repeated_call_id,
              _time_to_data(item.repeated_recorded_at), item.repeated_reason_code,
              _time_to_data(item.started_at), item.duration_seconds]
@@ -151,12 +151,19 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
     }
 
 
-def _recorded_result(result: CapabilityResult | None) -> list[Any] | None:
+def _recorded_result(result: CapabilityResult | None, recovery: list[Any] | None = None) -> list[Any] | None:
     """The single recording boundary for all goal attempts, including plans.
 
     Keep live values untouched: the store's returned write snapshot is the
     executing turn's observation. All subsequent loads use this summary.
     """
+    if recovery is not None:
+        # Capture before bounding, at this one boundary. All durable fields are
+        # needed: plan conditions can address arbitrary structured result paths.
+        recovery.append(None if result is None else {
+            "values": _data(result.recovery_values()),
+            "failure": _data(result.recovery_failure()),
+        })
     if result is None:
         return None
     data = [result.call_id, result.capability_id, result.state.value, {}, None,
@@ -167,6 +174,29 @@ def _recorded_result(result: CapabilityResult | None) -> list[Any] | None:
     summary = bound_result({"values": result.durable_values, "failure": result.failure}, budget)
     data[3], data[4] = summary["values"], summary["failure"]
     return data
+
+
+def _legacy_recovery(result: CapabilityResult) -> dict[str, Any]:
+    """Recover intact legacy facts; a lossy summary is never an exact fact.
+
+    Drop a whole top-level fact if any part was summarized. Keeping a partial
+    list/object could satisfy a negated plan condition or grant partial scope.
+    Intact sibling facts survive. Previously discarded data is unrecoverable.
+    """
+    def summarized(value: Any) -> bool:
+        if isinstance(value, dict) or hasattr(value, "items"):
+            return (set(value) == {"head", "original_length", "sha256"}
+                    or any(key.lstrip("_") == "omitted_items" for key in value)
+                    or any(summarized(child) for child in value.values()))
+        return isinstance(value, (list, tuple)) and any(summarized(child) for child in value)
+
+    def intact(values: Any) -> Any:
+        return None if values is None else {
+            key: _data(value) for key, value in values.items() if not summarized(value)
+            and key.lstrip("_") != "omitted_items"
+        }
+
+    return {"values": intact(result.durable_values), "failure": intact(result.failure)}
 
 
 def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
@@ -634,11 +664,18 @@ class SQLiteGoalStore:
             # write. Change only attempt data, not revisions, retention clocks,
             # history ordering, or unrelated goal state. One atomic migration
             # covers all load/history/plan projections before the store opens.
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS attempt_recovery ("
+                "goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, "
+                "ordinal INTEGER NOT NULL, facts_json TEXT NOT NULL, "
+                "PRIMARY KEY(goal_id, ordinal))"
+            )
             for goal_id, state_json in self._connection.execute(
                 "SELECT goal_id, state_json FROM goals"
             ).fetchall():
                 data = json.loads(state_json)
-                attempts = _goal_to_data(_goal_from_data(goal_id, data))["attempts"]
+                state = self._with_recovery(_goal_from_data(goal_id, data), legacy=True)
+                attempts = json.loads(self._record_state(state))["attempts"]
                 if data.get("attempts") == attempts and "completed_actions" not in data:
                     continue
                 data["attempts"] = attempts
@@ -648,6 +685,33 @@ class SQLiteGoalStore:
                     (json.dumps(data, separators=(",", ":")), goal_id),
                 )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _with_recovery(self, state: GoalState, *, legacy: bool = False) -> GoalState:
+        facts = dict(self._connection.execute(
+            "SELECT ordinal, facts_json FROM attempt_recovery WHERE goal_id = ?",
+            (state.goal_id,),
+        ))
+        attempts = []
+        for ordinal, attempt in enumerate(state.attempts):
+            if attempt.result is not None:
+                envelope = (json.loads(facts[ordinal]) if ordinal in facts else
+                            _legacy_recovery(attempt.result) if legacy else
+                            {"values": {}, "failure": None})
+                attempt = replace(attempt, result=replace(attempt.result, _recovery=envelope))
+            attempts.append(attempt)
+        return replace(state, attempts=tuple(attempts))
+
+    def _record_state(self, state: GoalState) -> str:
+        """Persist private facts and public summary in the caller's transaction."""
+        recovery: list[Any] = []
+        data = _goal_to_data(state, recovery)
+        self._connection.execute("DELETE FROM attempt_recovery WHERE goal_id = ?", (state.goal_id,))
+        self._connection.executemany(
+            "INSERT INTO attempt_recovery(goal_id, ordinal, facts_json) VALUES (?, ?, ?)",
+            ((state.goal_id, ordinal, json.dumps(facts, separators=(",", ":")))
+             for ordinal, facts in enumerate(recovery) if facts is not None),
+        )
+        return json.dumps(data, separators=(",", ":"))
 
     def create(
         self,
@@ -667,7 +731,11 @@ class SQLiteGoalStore:
                 encoded = provenance_to_storage(provenance)
                 self._connection.execute(
                     "INSERT INTO goals(goal_id, revision, retention_until, state_json, conversation_id, content_origins, content_recorded_at, content_expires_at, mail_references, scope, updated_at, unfinished, project_id, finished_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (state.goal_id, 1, _time_to_data(retention_until), json.dumps(_goal_to_data(state), separators=(",", ":")), conversation_id, *encoded, scope_to_storage(scope), _time_to_data(written_at), _is_unfinished(state), None if scope is None else scope.project_id, None if _is_unfinished(state) else _time_to_data(written_at.astimezone(UTC)), _time_to_data(written_at)),
+                    (state.goal_id, 1, _time_to_data(retention_until), "{}", conversation_id, *encoded, scope_to_storage(scope), _time_to_data(written_at), _is_unfinished(state), None if scope is None else scope.project_id, None if _is_unfinished(state) else _time_to_data(written_at.astimezone(UTC)), _time_to_data(written_at)),
+                )
+                self._connection.execute(
+                    "UPDATE goals SET state_json = ? WHERE goal_id = ?",
+                    (self._record_state(state), state.goal_id),
                 )
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
@@ -681,7 +749,7 @@ class SQLiteGoalStore:
         ).fetchone()
         if row is None:
             raise GoalNotFound(goal_id)
-        return GoalSnapshot(_goal_from_data(goal_id, json.loads(row[2])), row[3], row[0], _time_from_data(row[1]), provenance_from_storage(*row[4:8]), scope_from_storage(row[8]))  # type: ignore[arg-type]
+        return GoalSnapshot(self._with_recovery(_goal_from_data(goal_id, json.loads(row[2]))), row[3], row[0], _time_from_data(row[1]), provenance_from_storage(*row[4:8]), scope_from_storage(row[8]))  # type: ignore[arg-type]
 
     def list_unfinished(
         self,
@@ -1126,7 +1194,7 @@ class SQLiteGoalStore:
             "WHERE goal_id = ? AND revision = ?",
             (
                 _time_to_data(retention_until),
-                json.dumps(_goal_to_data(state), separators=(",", ":")),
+                self._record_state(state),
                 *encoded,
                 _time_to_data(written_at),
                 _is_unfinished(state),
