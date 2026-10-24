@@ -133,7 +133,8 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
             [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.durable_arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
              None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs), None if item.result.outcome is None else item.result.outcome.value], item.reason_code,
              _time_to_data(item.recorded_at), item.repeated_call_id,
-             _time_to_data(item.repeated_recorded_at), item.repeated_reason_code]
+             _time_to_data(item.repeated_recorded_at), item.repeated_reason_code,
+             _time_to_data(item.started_at), item.duration_seconds]
             for item in goal.attempts
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
@@ -293,6 +294,8 @@ def _attempts(data: dict[str, Any]) -> tuple[CapabilityAttempt, ...]:
             item[9] if len(item) > 9 else None,
             _time_from_data(item[10]) if len(item) > 10 else None,
             item[11] if len(item) > 11 else None,
+            _time_from_data(item[12]) if len(item) > 12 else None,
+            item[13] if len(item) > 13 else None,
         ))
     return tuple(values)
 

@@ -8,6 +8,7 @@ away.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -154,6 +155,8 @@ class SQLiteUsageRecorder:
             # call's reservation, true cost and terminal state live nowhere
             # durable and spend cannot be audited after the fact.
             for column, definition in (
+                ("reported_fields", "TEXT"),
+                ("research_measurement_version", "INTEGER NOT NULL DEFAULT 0"),
                 ("reservation_id", "TEXT NOT NULL DEFAULT ''"),
                 ("reserved_usd", "REAL NOT NULL DEFAULT 0.0"),
                 ("cost_usd", "REAL NOT NULL DEFAULT 0.0"),
@@ -304,6 +307,7 @@ class SQLiteUsageRecorder:
                             existing["id"],
                         ),
                     )
+                    self._record_fields(database, existing["id"], values)
                     database.commit()
                     return
             database.execute(
@@ -337,21 +341,106 @@ class SQLiteUsageRecorder:
                     failure_code,
                 ),
             )
+            row_id = database.execute("SELECT last_insert_rowid()").fetchone()[0]
+            self._record_fields(database, row_id, values)
             database.commit()
         finally:
             database.close()
+
+    USAGE_FIELDS = (
+        "input_tokens", "cached_tokens", "cache_write_tokens",
+        "output_tokens", "reasoning_tokens", "cost_usd",
+    )
+
+    @classmethod
+    def _record_fields(cls, database: sqlite3.Connection, row_id: int,
+                       values: Mapping[str, Any]) -> None:
+        # Presence survives separately from the legacy NOT NULL counters.
+        # A missing measurement must never be read back as a reported zero.
+        previous = database.execute(
+            "SELECT reported_fields FROM reasoning_calls WHERE id = ?", (row_id,),
+        ).fetchone()[0]
+        fields = set(json.loads(previous)) if previous is not None else set()
+        research = (str(values.get("code", "")).startswith("research.")
+                    or values.get("kind") == "research" or bool(values.get("reservation_id")))
+        # Research counts can include normalisation defaults. Only the
+        # producer's per-field provenance establishes a measurement; the
+        # whole-event usage_measured flag cannot establish any breakdown.
+        confirmed = values.get("reported_fields", ())
+        for name in cls.USAGE_FIELDS:
+            if name in values or research:
+                measured = values.get("cost_measured" if name == "cost_usd" else "usage_measured")
+                if (values.get(name) is None
+                        or (name not in confirmed if research else measured is False)):
+                    fields.discard(name)
+                else:
+                    fields.add(name)
+        database.execute(
+            "UPDATE reasoning_calls SET reported_fields = ?, research_measurement_version = ? "
+            "WHERE id = ?",
+            (json.dumps(sorted(fields)), 2, row_id),
+        )
+
+    # Earlier research events mixed defaults and reservations with measurements.
+    # Even a populated reported_fields list on those rows cannot prove usage:
+    # version 1 inferred all token provenance from one usage_measured flag.
+    _RESEARCH = "(kind = 'research' OR reservation_id <> '')"
+
+    @classmethod
+    def _measured_sum(cls, name: str) -> str:
+        legacy_tokens = (f"(reported_fields IS NULL AND NOT {cls._RESEARCH}) OR "
+                         if name != "cost_usd" else "")
+        return (
+            f"SUM(CASE WHEN (NOT {cls._RESEARCH} OR research_measurement_version >= 2) "
+            f"AND ({legacy_tokens}EXISTS (SELECT 1 FROM json_each(reported_fields) "
+            f"WHERE value = '{name}')) THEN {name} END)"
+        )
+
+    def between(self, start: datetime, end: datetime, limit: int = 500) -> dict[str, Any]:
+        """Bounded per-call records and full-window totals, from the one store."""
+        if not 0 < limit <= 500 or end <= start:
+            raise ValueError("invalid usage window or limit")
+        database = self._db()
+        try:
+            where = " FROM reasoning_calls WHERE occurred_at >= ? AND occurred_at < ?"
+            params = (start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat())
+            rows = database.execute(
+                "SELECT *" + where + " ORDER BY id LIMIT ?", (*params, limit + 1),
+            ).fetchall()
+            # Older non-research counters remain available; legacy research
+            # events did not distinguish estimates or defaults from measurements.
+            totals = database.execute(
+                "SELECT COUNT(*) AS calls, " + ", ".join(
+                    f"{self._measured_sum(name)} AS {name}"
+                    for name in self.USAGE_FIELDS
+                ) + where, params,
+            ).fetchone()
+        finally:
+            database.close()
+        calls = []
+        for row in rows[:limit]:
+            item = dict(row)
+            reported = item.pop("reported_fields")
+            version = item.pop("research_measurement_version")
+            fields = (set(self.USAGE_FIELDS) - {"cost_usd"} if reported is None
+                      else set(json.loads(reported)))
+            if (item["kind"] == "research" or item["reservation_id"]) and version < 2:
+                fields = set()
+            for name in self.USAGE_FIELDS:
+                if name not in fields:
+                    item[name] = None
+            calls.append(item)
+        return {"calls": calls, "totals": dict(totals), "truncated": len(rows) > limit}
 
     def task(self, task_id: str) -> dict[str, Any]:
         """Return the rollup for one task."""
         database = self._db()
         try:
             row = database.execute(
-                "SELECT COUNT(*) AS calls, "
-                "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
-                "COALESCE(SUM(cached_tokens), 0) AS cached_tokens, "
-                "COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, "
-                "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-                "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens "
+                "SELECT COUNT(*) AS calls, " + ", ".join(
+                    f"COALESCE({self._measured_sum(name)}, 0) AS {name}"
+                    for name in self.USAGE_FIELDS
+                ) + " "
                 "FROM reasoning_calls WHERE task_id = ?",
                 (task_id,),
             ).fetchone()

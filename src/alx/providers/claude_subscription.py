@@ -552,7 +552,8 @@ class ClaudeSubscriptionReasoningModel:
             output, model, usage, envelope = self._parse(completed.stdout)
             self._require_schema(output, request)
             completion = ModelCompletion(
-                PROVIDER_NAME, model or self._model, output, usage
+                PROVIDER_NAME, model or self._model, output,
+                usage_telemetry(usage, envelope.get("usage")) if request.kind == "research" else usage,
             )
             with self._availability_lock:
                 self._consecutive_malformed = 0

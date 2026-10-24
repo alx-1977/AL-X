@@ -609,9 +609,10 @@ def _stored_result(values: Any) -> Any:
             "read_in_full_with": "read_own_goals with this goal's id"}
 
 
-def _state_payload(state: GoalState, *, full_progress: bool = False,
-                   finished: bool = False,
-                   this_turn: frozenset[str] = frozenset()) -> dict[str, Any]:
+def _state_payload(
+    state: GoalState, *, full_progress: bool = False,
+    finished: bool = False, this_turn: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     attempts = tuple(state.attempts)
     recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
     older_attempts = attempts[: len(attempts) - len(recent_attempts)]
@@ -653,6 +654,8 @@ def _state_payload(state: GoalState, *, full_progress: bool = False,
                 # nothing else is a refusal she cannot learn from.
                 "reason_code": item.reason_code or None,
                 "recorded_at": None if item.recorded_at is None else item.recorded_at.isoformat(),
+                "started_at": None if item.started_at is None else item.started_at.isoformat(),
+                "duration_seconds": item.duration_seconds,
                 "repeated_call_id": item.repeated_call_id,
                 "repeated_recorded_at": (None if item.repeated_recorded_at is None
                                          else item.repeated_recorded_at.isoformat()),
@@ -789,6 +792,8 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
         # hold is hers to reason from.
         "reason_code": item.reason_code or None,
         "recorded_at": None if item.recorded_at is None else item.recorded_at.isoformat(),
+        "started_at": None if item.started_at is None else item.started_at.isoformat(),
+        "duration_seconds": item.duration_seconds,
         "repeated_call_id": item.repeated_call_id,
         "repeated_recorded_at": (None if item.repeated_recorded_at is None
                                  else item.repeated_recorded_at.isoformat()),

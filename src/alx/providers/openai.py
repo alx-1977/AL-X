@@ -170,7 +170,11 @@ class OpenAIReasoningModel:
             # same numbers. Parsing the provider's own layout downstream is what
             # let cached tokens be priced as uncached.
             reported, usage = usage, normalise_usage(usage)
-            completion = ModelCompletion("openai", model, output, usage)
+            # Research persists its terminal usage event separately. Carry only
+            # reported counts so that event cannot turn normalised defaults
+            # into measured breakdowns.
+            completion_usage = usage_telemetry(usage, reported) if request.kind == "research" else usage
+            completion = ModelCompletion("openai", model, output, completion_usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from math import isfinite
 from types import MappingProxyType
 from typing import Mapping, TypeAlias, TYPE_CHECKING
 
@@ -631,12 +632,20 @@ class CapabilityAttempt:
     repeated_call_id: str | None = None
     repeated_recorded_at: datetime | None = None
     repeated_reason_code: str | None = None
+    started_at: datetime | None = None
+    duration_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        for name in ("recorded_at", "repeated_recorded_at"):
+        for name in ("recorded_at", "repeated_recorded_at", "started_at"):
             value = getattr(self, name)
             if value is not None:
                 _aware(value, name)
+        if self.duration_seconds is not None and (
+            isinstance(self.duration_seconds, bool)
+            or not isinstance(self.duration_seconds, (int, float))
+            or not isfinite(self.duration_seconds) or self.duration_seconds < 0
+        ):
+            raise ValueError("duration_seconds must be finite and non-negative")
         if not isinstance(self.disposition, CapabilityAttemptDisposition):
             raise TypeError("attempt disposition must be a CapabilityAttemptDisposition")
         if self.reason_code is not None:

@@ -37,7 +37,11 @@ TRACE_DEFINITION = CapabilityDefinition(
     READ_OWN_TRACE,
     "Read your own execution trace: every step you took, as shown on Friedl's screen "
     "(subsystem, status, label, capability or goal reference, reason code, duration). "
-    "Each step's time is local, with its offset. "
+    "Each step's time is local, with its offset. Also returns reasoning_usage: "
+    "per-call input/output/cache tokens and cost_usd, plus full-window totals; "
+    "null means unknown, not zero. Usage is for the time window across conversations, "
+    "independent of trace filters. "
+    "A usage read failure is reported in reasoning_usage.failure; trace entries remain available. "
     "Window from/to, ISO 8601 (a time without an offset is local); default the "
     "last 24 hours, kept for 30 days. "
     "problems_only returns only failed and refused steps; subsystem narrows to one "
@@ -48,7 +52,11 @@ TRACE_DEFINITION = CapabilityDefinition(
         {"from": _STRING, "to": _STRING, "problems_only": _BOOLEAN,
          "subsystem": _STRING, "limit": _INTEGER},
         (), extra_properties=False),
-    _RESULT,
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"entries": _OBJECTS, "truncated": _BOOLEAN,
+         "reasoning_usage": StructuredSchema(ValueKind.OBJECT)},
+        ("entries", "truncated"), extra_properties=False),
     SideEffect.NONE,
     _FAILURES,
 )
@@ -96,6 +104,7 @@ def build_self_diagnosis_executors(
     read_log: Callable[..., tuple[list[dict], bool]],
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
+    read_usage: Callable[..., dict[str, Any]] | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
@@ -117,8 +126,16 @@ def build_self_diagnosis_executors(
             entries, truncated = trace.between(start, end, problems, subsystem, limit)
         except Exception as error:  # noqa: BLE001 - reported, not raised
             return failed(READ_OWN_TRACE, "unavailable", type(error).__name__)
+        values = {"entries": entries, "truncated": truncated}
+        if read_usage is not None:
+            try:
+                usage = read_usage(start, end, limit)
+            except Exception as error:  # noqa: BLE001 - preserve the successful trace read
+                usage = {"failure": {"code": "unavailable", "reason": type(error).__name__}}
+            if usage is not None:
+                values["reasoning_usage"] = usage
         return CapabilityResult(call_id_source(), READ_OWN_TRACE, CapabilityResultState.SUCCEEDED,
-                                {"entries": entries, "truncated": truncated})
+                                values)
 
     def read_own_log(arguments: Mapping[str, Any]) -> CapabilityResult:
         try:

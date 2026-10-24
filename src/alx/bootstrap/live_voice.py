@@ -589,6 +589,7 @@ async def run(repository_root: Path) -> None:
              repository_root / ".alx/runtime/live_voice.log"),
             start, end, level, contains, limit),
         current_call_id.get,
+        read_usage=usage.between,
     ))
     permissions.add("self.read")
 
