@@ -29,7 +29,7 @@ from alx.contracts.models import (
     PROTOCOL_INPUT_TOKEN_ALLOWANCE,
     input_token_upper_bound,
 )
-from alx.contracts.usage import usage_telemetry
+from alx.contracts.usage import normalise_usage, usage_telemetry
 
 
 
@@ -335,6 +335,16 @@ class ResearchSpecialist:
         usage: Mapping[str, Any],
         cost_measured: bool = False,
     ) -> Mapping[str, Any]:
+        # The completion retains only provider-reported canonical breakdowns.
+        # Normalisation supplies validation defaults, but those defaults are
+        # never evidence that the provider reported a breakdown.
+        telemetry = usage_telemetry(normalise_usage(usage), usage)
+        reported_fields = [name for name in (
+            "input_tokens", "cached_tokens", "cache_write_tokens",
+            "output_tokens", "reasoning_tokens",
+        ) if name in telemetry]
+        if cost_measured:
+            reported_fields.append("cost_usd")
         return {
             "code": "research.completed",
             "kind": "research",
@@ -347,7 +357,8 @@ class ResearchSpecialist:
             "cost_measured": cost_measured,
             "outcome": outcome,
             "failure_code": failure_code,
-            **usage_telemetry(usage),
+            **telemetry,
+            "reported_fields": reported_fields,
             "remaining_usd": round(self._ledger.remaining_usd(), 6),
         }
 

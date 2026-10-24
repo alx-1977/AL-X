@@ -1,12 +1,17 @@
 """Phase 0a PR B: durable action timing and readable reasoning spend."""
 
 from datetime import UTC, datetime, timedelta
+from itertools import product
 from pathlib import Path
+import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -24,6 +29,7 @@ from alx.observability.usage import SQLiteUsageRecorder
 from alx.observability.pricing import ConfiguredPricingWorstCase
 from alx.observability.research_budget import ResearchBudget, SQLiteResearchLedger
 from alx.specialists import ResearchSpecialist, ResearchTierModel
+from alx.providers import OpenAIReasoningModel, XAIReasoningModel, ClaudeSubscriptionResearchModel
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.tools.goal_history import READ_OWN_GOALS, build_goal_history_executors
 from alx.tools.self_diagnosis import (
@@ -219,6 +225,94 @@ class ReasoningUsageVisibilityTests(unittest.TestCase):
                 self.assertIs(events[-1]["usage_measured"], measured)
                 self.assertIs(events[-1]["cost_measured"], priced)
 
+    def test_partial_provider_reports_survive_the_research_lifecycle(self):
+        for provider, details in product(
+            ("openai", "xai", "claude_subscription"),
+            ({}, {"cached_tokens": 0}, {"cache_write_tokens": 1}, {"reasoning_tokens": 0}),
+        ):
+            with self.subTest(provider=provider, details=details), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                start = datetime.now(UTC) - timedelta(seconds=1)
+                recorder = SQLiteUsageRecorder(root / "usage.db")
+                events = []
+
+                def record(task, event):
+                    events.append(event)
+                    recorder.record(task, event)
+
+                def respond(request):
+                    return httpx.Response(200, json={
+                        "model": "gpt-5.4-nano",
+                        "output": [{"type": "message", "content": [
+                            {"type": "output_text", "text": '{"finding":"fact"}'}]}],
+                        "choices": [{"message": {"content": '{"finding":"fact"}'}}],
+                        "usage": {"input_tokens": 100, "output_tokens": 2,
+                                  "input_tokens_details": details,
+                                  "output_tokens_details": details},
+                    })
+
+                with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+                    model = "gpt-5.4-nano"
+                    prices = ConfiguredPricingWorstCase()
+                    if provider == "claude_subscription":
+                        model = "claude-haiku-5-5"
+
+                        def run(command, **kwargs):
+                            return subprocess.CompletedProcess(command, 0, json.dumps({
+                                "subtype": "success", "structured_output": {"finding": "fact"},
+                                "usage": {"input_tokens": 100, "output_tokens": 2, **details},
+                            }), "")
+
+                        transport = ClaudeSubscriptionResearchModel(model, 30, runner=run,
+                                                                    telemetry_sink=record)
+                    else:
+                        adapter = OpenAIReasoningModel if provider == "openai" else XAIReasoningModel
+                        transport = adapter(model, "key", "https://provider.invalid", 30,
+                                            client=client, streaming=False, telemetry_sink=record)
+                        if provider == "xai":
+                            # Exercise the adapter without adding a production price.
+                            prices.is_priced = lambda *args: True
+                            prices.worst_case_usd = lambda *args: 0.01
+                            prices.cost_usd = lambda *args: 0.001
+                    specialist = ResearchSpecialist(
+                        {Cognition.SURVEY: ResearchTierModel(provider, model, transport)},
+                        SQLiteResearchLedger(root / "budget.db", ResearchBudget(1, 0.09)),
+                        prices, 4000, 1000, 0.09, telemetry_sink=record,
+                    )
+                    specialist.answer(ResearchQuestion(SpecialistQuestion(
+                        "question", "Read the material", "material",
+                        {"type": "object", "properties": {"finding": {"type": "string"}}},
+                    )))
+                result = SQLiteUsageRecorder(root / "usage.db").between(
+                    start, datetime.now(UTC) + timedelta(seconds=1))
+                self.assertEqual(result["totals"]["calls"], 1)
+                expected = {"input_tokens": 100, "output_tokens": 2, **details}
+                for name in SQLiteUsageRecorder.USAGE_FIELDS[:-1]:
+                    self.assertEqual(result["calls"][0][name], expected.get(name), name)
+                    self.assertEqual(result["totals"][name], expected.get(name), name)
+                self.assertEqual(set(events[-1]["reported_fields"]), set(expected) | {"cost_usd"})
+
+    def test_whole_event_flags_and_version_one_rows_are_not_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.db"
+            recorder = SQLiteUsageRecorder(path)
+            start = datetime.now(UTC) - timedelta(seconds=1)
+            event = {"code": "research.completed", "kind": "research",
+                     "usage_measured": True, "cost_measured": True,
+                     "input_tokens": 2, "output_tokens": 0, "cached_tokens": 0,
+                     "reasoning_tokens": 0, "cost_usd": 0.09}
+            recorder.record("legacy-event", event)
+            recorder.record("legacy-row", event)
+            with sqlite3.connect(path) as database:
+                database.execute("UPDATE reasoning_calls SET research_measurement_version = 1, "
+                                 "reported_fields = ? WHERE task_id = 'legacy-row'",
+                                 ('["input_tokens", "output_tokens", "cost_usd"]',))
+            result = SQLiteUsageRecorder(path).between(start, datetime.now(UTC) + timedelta(seconds=1))
+            for name in SQLiteUsageRecorder.USAGE_FIELDS:
+                self.assertIsNone(result["totals"][name], name)
+                for call in result["calls"]:
+                    self.assertIsNone(call[name], name)
+
     def test_legacy_research_records_and_events_do_not_establish_measurements(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "usage.db"
@@ -290,6 +384,7 @@ class ReasoningUsageVisibilityTests(unittest.TestCase):
                                       "reserved_usd": 1})
             recorder.record("task", {"code": "research.completed", "reservation_id": "one",
                                       "usage_measured": True, "cost_measured": True,
+                                      "reported_fields": ["input_tokens", "output_tokens", "cost_usd"],
                                       "input_tokens": 3, "output_tokens": 1, "cost_usd": 0.1})
             usage = SQLiteUsageRecorder(path).between(
                 start, datetime.now(UTC) + timedelta(seconds=1))

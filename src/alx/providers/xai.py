@@ -119,7 +119,8 @@ class XAIReasoningModel:
             if not isinstance(output, dict):
                 raise ValueError("structured output is not an object")
             reported, usage = usage, normalise_usage(usage)
-            completion = ModelCompletion("xai", model, output, usage)
+            completion_usage = usage_telemetry(usage, reported) if request.kind == "research" else usage
+            completion = ModelCompletion("xai", model, output, completion_usage)
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,

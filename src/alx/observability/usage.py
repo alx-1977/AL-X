@@ -361,22 +361,29 @@ class SQLiteUsageRecorder:
             "SELECT reported_fields FROM reasoning_calls WHERE id = ?", (row_id,),
         ).fetchone()[0]
         fields = set(json.loads(previous)) if previous is not None else set()
-        research = str(values.get("code", "")).startswith("research.")
+        research = (str(values.get("code", "")).startswith("research.")
+                    or values.get("kind") == "research" or bool(values.get("reservation_id")))
+        # Research counts can include normalisation defaults. Only the
+        # producer's per-field provenance establishes a measurement; the
+        # whole-event usage_measured flag cannot establish any breakdown.
+        confirmed = values.get("reported_fields", ())
         for name in cls.USAGE_FIELDS:
             if name in values or research:
                 measured = values.get("cost_measured" if name == "cost_usd" else "usage_measured")
-                if values.get(name) is None or measured is False or (research and measured is not True):
+                if (values.get(name) is None
+                        or (name not in confirmed if research else measured is False)):
                     fields.discard(name)
                 else:
                     fields.add(name)
         database.execute(
             "UPDATE reasoning_calls SET reported_fields = ?, research_measurement_version = ? "
             "WHERE id = ?",
-            (json.dumps(sorted(fields)), 1, row_id),
+            (json.dumps(sorted(fields)), 2, row_id),
         )
 
     # Earlier research events mixed defaults and reservations with measurements.
-    # Even a populated reported_fields list on those rows cannot prove usage.
+    # Even a populated reported_fields list on those rows cannot prove usage:
+    # version 1 inferred all token provenance from one usage_measured flag.
     _RESEARCH = "(kind = 'research' OR reservation_id <> '')"
 
     @classmethod
@@ -384,7 +391,7 @@ class SQLiteUsageRecorder:
         legacy_tokens = (f"(reported_fields IS NULL AND NOT {cls._RESEARCH}) OR "
                          if name != "cost_usd" else "")
         return (
-            f"SUM(CASE WHEN (NOT {cls._RESEARCH} OR research_measurement_version > 0) "
+            f"SUM(CASE WHEN (NOT {cls._RESEARCH} OR research_measurement_version >= 2) "
             f"AND ({legacy_tokens}EXISTS (SELECT 1 FROM json_each(reported_fields) "
             f"WHERE value = '{name}')) THEN {name} END)"
         )
@@ -417,7 +424,7 @@ class SQLiteUsageRecorder:
             version = item.pop("research_measurement_version")
             fields = (set(self.USAGE_FIELDS) - {"cost_usd"} if reported is None
                       else set(json.loads(reported)))
-            if (item["kind"] == "research" or item["reservation_id"]) and not version:
+            if (item["kind"] == "research" or item["reservation_id"]) and version < 2:
                 fields = set()
             for name in self.USAGE_FIELDS:
                 if name not in fields:
