@@ -122,7 +122,6 @@ start() {
   # Python owns the daily runtime log. The child keeps its PID and stdout/stderr
   # stay connected through maintenance rather than writing to a removed inode.
   # Keep startup/import failures and uncaught tracebacks across restarts too.
-  [ -f "$CAPTURE" ] && mv "$CAPTURE" "$CAPTURE.$(date +%s).$$"
   rm -f "$STAMP"
   PYTHONPATH="$code/src" nohup "$PYTHON" -m "$PATTERN" --checkout "$ROOT" \
     > >(trap '' HUP; PYTHONPATH="$code/src" exec "$PYTHON" -m alx.observability.process_output "$CAPTURE") 2>&1 &
@@ -141,7 +140,7 @@ start() {
   # reported as a live configuration.
   rm -f "$STAMP"
   echo "FAILED to come up. Last lines of process capture $CAPTURE and runtime log $LOG:"
-  tail -15 "$CAPTURE" "$LOG" 2>/dev/null
+  tail -15 "$CAPTURE"* "$LOG" 2>/dev/null
   return 1
 }
 
@@ -237,6 +236,6 @@ case "${1:-restart}" in
   start)   start ;;
   stop)    stop ;;
   status)  status ;;
-  log)     tail -F "$LOG" "$CAPTURE" ;;
+  log)     tail -F "$LOG" "$CAPTURE"* ;;
   *) echo "usage: scripts/alx {restart|start|stop|status|log}"; exit 2 ;;
 esac

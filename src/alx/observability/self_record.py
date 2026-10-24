@@ -174,6 +174,7 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
     entries: list[tuple[float, int, dict]] = []
     matched = 0
     current: dict | None = None
+    current_at = 0.0
 
     def keep(entry: dict | None) -> None:
         nonlocal matched
@@ -186,7 +187,7 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
         entry["message"] = _mask(entry["message"])
         matched += 1
         if limit:
-            item = (datetime.fromisoformat(entry["at"]).timestamp(), matched, entry)
+            item = (current_at, matched, entry)
             if len(entries) < limit:
                 heapq.heappush(entries, item)
             else:
@@ -212,6 +213,7 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
                         keep(current)
                         current = None
                     if not structured and current is None and line.strip() and start <= raw_at < end:
+                        current_at = raw_at.timestamp()
                         current = {"at": raw_at.isoformat(timespec="seconds"),
                                    "level": "ERROR", "source": "process",
                                    "timestamp_source": "file_mtime", "message": ""}
@@ -223,9 +225,11 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
                 keep(current)
                 current = None
                 structured = True
-                at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+                # Retention is exact even inside the cutoff second.
+                at = datetime.strptime(line[:23], "%Y-%m-%d %H:%M:%S,%f")
                 if not local_start <= at < local_end:
                     continue
+                current_at = at.timestamp()
                 # Local, as the log writes it, now with its offset stated.
                 current = {"at": at.astimezone().isoformat(timespec="seconds"),
                            "level": match.group(2),
