@@ -10,6 +10,8 @@ code extracted from local `main` with git alone, importing nothing first.
 from __future__ import annotations
 
 import os
+import select
+from contextlib import contextmanager
 import shlex
 import shutil
 import signal
@@ -339,6 +341,106 @@ class LauncherItselfComesFromCommittedMain(unittest.TestCase):
 
 
 class LogFollowDiscoversCaptures(unittest.TestCase):
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.05)
+        self.fail("log follow timed out")
+
+    @staticmethod
+    def stopped(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    @contextmanager
+    def following(self, pipe=False):
+        with tempfile.TemporaryDirectory(prefix="log follow [fixture] ") as directory:
+            root = Path(directory)
+            runtime = root / "runtime log"
+            capture = root / "process [output];$.log"
+            runtime.write_text("runtime-start\n")
+            daily = Path(str(capture) + ".2026-10-24")
+            daily.write_text("capture-start\n")
+            binary = root / "bin"
+            binary.mkdir()
+            # exec records the real children, including the polling sleeper.
+            for name in ("tail", "sleep"):
+                wrapper = binary / name
+                wrapper.write_text(
+                    '#!/bin/sh\nfor arg do :; done\n'
+                    f'printf "%s %s %s\\n" {name} "$$" "$arg" >> "$CHILD_PIDS"\n'
+                    f'exec {shlex.quote(shutil.which(name))} "$@"\n'
+                )
+                wrapper.chmod(0o755)
+            pidfile = root / "children"
+            output = root / "output"
+            with output.open("w") as stream:
+                process = subprocess.Popen(
+                    ["/bin/bash", "-c",
+                     'source "$1"; LOG="$2"; CAPTURE="$3"; follow_log',
+                     "log-test", str(ROOT / "scripts/alx"), str(runtime), str(capture)],
+                    stdout=subprocess.PIPE if pipe else stream, stderr=stream,
+                    start_new_session=True,
+                    # Background runners may inherit ignored SIGINT; Bash cannot trap it.
+                    preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+                    env={**os.environ, "PATH": f"{binary}:{os.environ.get('PATH', '')}",
+                         "CHILD_PIDS": str(pidfile)},
+                )
+                try:
+                    self.wait_for(lambda: pidfile.exists() and
+                                  "sleep " in pidfile.read_text())
+                    yield process, runtime, daily, output, pidfile
+                finally:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=5)
+                    if process.stdout is not None:
+                        process.stdout.close()
+
+    def test_closed_output_pipe_stops_followers_and_sleeper(self):
+        with self.following(pipe=True) as (process, runtime, daily, output, pidfile):
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0])
+            self.assertTrue(os.read(process.stdout.fileno(), 4096))
+            process.stdout.close()
+            # Only the runtime tail attempts another write. Its exit must
+            # also stop the idle capture tail and the polling sleeper.
+            with runtime.open("a") as stream:
+                stream.write("after-reader-closed\n")
+            process.wait(timeout=5)
+            for line in pidfile.read_text().splitlines():
+                self.assertTrue(self.stopped(int(line.split(" ", 2)[1])), line)
+
+    def test_deleted_capture_is_retired_and_recreated_from_the_start(self):
+        with self.following() as (process, runtime, daily, output, pidfile):
+            self.wait_for(lambda: "capture-start\n" in output.read_text())
+            followers = [line.split(" ", 2) for line in pidfile.read_text().splitlines()
+                         if line.startswith("tail ")]
+            # On the old code the shared startup tail's last argument is the
+            # capture too, so this identifies its follower before and after.
+            capture_pid = int(next((row[1] for row in followers
+                                    if row[2] == str(daily)), followers[-1][1]))
+            daily.unlink()
+            self.wait_for(lambda: self.stopped(capture_pid))
+            self.assertIsNone(process.poll())
+            with runtime.open("a") as stream:
+                stream.write("runtime-after-delete\n")
+            self.wait_for(lambda: "runtime-after-delete\n" in output.read_text())
+            daily.write_text("".join(f"recreated-{n}\n" for n in range(15)))
+            self.wait_for(lambda: "recreated-14\n" in output.read_text())
+            self.assertIn("recreated-0\n", output.read_text())
+            self.assertEqual(output.read_text().count("recreated-0\n"), 1)
+            process.terminate()
+            process.wait(timeout=5)
+            for line in pidfile.read_text().splitlines():
+                self.assertTrue(self.stopped(int(line.split(" ", 2)[1])), line)
+
     def test_daily_files_are_discovered_once_and_followers_are_cleaned_up(self) -> None:
         for initial_capture in (True, False):
             with self.subTest(initial_capture=initial_capture), \
@@ -376,6 +478,8 @@ class LogFollowDiscoversCaptures(unittest.TestCase):
                          'source "$1"; LOG="$2"; CAPTURE="$3"; follow_log',
                          "log-test", str(ROOT / "scripts/alx"), str(runtime), str(capture)],
                         stdout=stream, stderr=stream, start_new_session=True,
+                        # Background runners may inherit ignored SIGINT; Bash cannot trap it.
+                        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
                         env={**os.environ, "PATH": f"{binary}:{os.environ.get('PATH', '')}",
                              "FOLLOWER_PIDS": str(pidfile)},
                     )
@@ -397,8 +501,9 @@ class LogFollowDiscoversCaptures(unittest.TestCase):
                         wait_for(lambda: all(line in output.read_text() for line in
                                              ("capture-continued\n", "runtime-continued\n")))
                         self.assertEqual(output.read_text().count("new-0\n"), 1)
-                        self.assertEqual(len(pidfile.read_text().splitlines()), 2)
-                        process.terminate()
+                        self.assertEqual(len(pidfile.read_text().splitlines()),
+                                         3 if initial_capture else 2)
+                        process.send_signal(signal.SIGTERM if initial_capture else signal.SIGINT)
                         process.wait(timeout=5)
                         for pid in pidfile.read_text().splitlines():
                             with self.assertRaises(ProcessLookupError):
