@@ -978,6 +978,15 @@ class PassAloneRerunTests(unittest.TestCase):
         self.assertNotIn("test_fine.py", " ".join(rerun_argv))
         self.assertNotIn("-n", rerun_argv)
 
+    def test_a_parametrized_id_containing_the_message_separator_is_rerun_whole(self) -> None:
+        self.write("test_flaky.py", _FLAKY_TEST.replace(
+            "def test_flaky():",
+            "import pytest\n@pytest.mark.parametrize('v', [0], ids=['left - right'])\n"
+            "def test_flaky(v):"))
+        passed, reason, named = self.rerun()
+        self.assertTrue(passed, reason)
+        self.assertEqual(named, ("test_flaky.py::test_flaky[left - right]",))
+
     def test_a_blocked_test_file_is_not_rerun(self) -> None:
         self.write("test_flaky.py", _FLAKY_TEST)
         self.assertEqual(self.rerun(("test_flaky.py",)), (False, "rerun_not_permitted", ()))
