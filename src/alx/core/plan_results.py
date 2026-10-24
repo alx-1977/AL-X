@@ -296,7 +296,7 @@ def _document(attempt: CapabilityAttempt) -> Mapping[str, Any]:
     result = attempt.result
     return {
         "state": None if result is None else result.state.value,
-        "values": {} if result is None else result.recovery_values(),
+        "values": {} if result is None else result.observed_values(),
         "failure": {} if result is None or result.recovery_failure() is None else result.recovery_failure(),
     }
 

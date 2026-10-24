@@ -191,7 +191,7 @@ def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> 
 def _completed(attempt) -> bool:
     """True only when a capture actually finished its work."""
     result = getattr(attempt, "result", None)
-    values = None if result is None else result.recovery_values()
+    values = None if result is None else result.observed_values()
     return bool(values and values.get("completed") is True)
 
 

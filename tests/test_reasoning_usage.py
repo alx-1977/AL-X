@@ -447,7 +447,7 @@ class BillSettlementWiringTests(unittest.TestCase):
 
         class Attempt:
             def __init__(self, values):
-                self.result = type("R", (), {"recovery_values": lambda self: values})()
+                self.result = type("R", (), {"observed_values": lambda self: values})()
 
         # A finished DHL import settles.
         self.assertTrue(completed(Attempt({"completed": True, "stage": "dhl_invoice"})))

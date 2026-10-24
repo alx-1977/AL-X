@@ -25,6 +25,43 @@ def reload_goal(tmp_path, state):
     return SQLiteGoalStore(path, clock=lambda: NOW)
 
 
+def test_live_plan_condition_uses_field_omitted_from_recovery():
+    from alx.contracts import ExecutionPlan
+    from alx.core.plan_results import reduce_plan
+
+    state = goal({'goals': [], 'truncated': False}, capability_id='read_own_goals')
+    attempt = state.attempts[0]
+    attempt = replace(attempt, result=replace(
+        attempt.result, durable_values={'goal_ids': [], 'truncated': False}))
+    step = ExecutionStep(attempt.call, (PlanCondition('values.goals', []),))
+    classification = classify_planned_result(step, attempt, None)
+    assert classification.kind is PlanResultKind.ADVANCE
+    plan = ExecutionPlan('plan-1', None, None, None, (step,))
+    assert reduce_plan(plan, classification, NOW).cursor == 1
+
+
+def test_observed_values_are_live_until_reload_and_never_change_recovery(tmp_path):
+    from alx.bootstrap.live_voice import _completed
+
+    facts = {'goal_ids': (), 'truncated': False, 'exact': 'x' * 10000}
+    state = goal({'goals': [], 'completed': True}, capability_id='read_own_goals')
+    attempt = state.attempts[0]
+    result = replace(attempt.result, durable_values=facts)
+    state = replace(state, attempts=(replace(attempt, result=result),))
+    assert result.observed_values() == result.values
+    assert result.recovery_values() == facts
+    assert _completed(state.attempts[0])
+    with reload_goal(tmp_path, state) as store:
+        loaded = store.load(state.goal_id)
+        result = loaded.state.attempts[0].result
+        assert result.observed_values() == result.recovery_values() == facts
+        assert 'goals' not in result.observed_values()
+        assert result.values['exact'] != facts['exact']
+        assert not _completed(loaded.state.attempts[0])
+        store.replace(loaded.state, loaded.retention_until, loaded.revision)
+        assert store.load(state.goal_id).state.attempts[0].result.observed_values() == facts
+
+
 def test_large_checkpoint_resumes_after_close_and_reopen(tmp_path):
     checkpoint = {'job_id': 'call-1', 'branch': 'fix/work', 'stage': 'execution',
                   'plan': {'files': ['file-' + str(i) for i in range(1000)]}}

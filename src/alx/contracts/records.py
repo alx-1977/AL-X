@@ -582,6 +582,10 @@ class CapabilityResult:
         """Exact durable facts for mechanical readers, never model context."""
         return self.durable_values if self._recovery is None else self._recovery["values"]
 
+    def observed_values(self) -> StructuredData:
+        """Full live observation, or exact recorded facts after storage reload."""
+        return self.values if self._recovery is None else self.recovery_values()
+
     def recovery_failure(self) -> StructuredData | None:
         """Exact failure facts for mechanical readers, never model context."""
         return self.failure if self._recovery is None else self._recovery["failure"]
