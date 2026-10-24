@@ -141,3 +141,26 @@ def test_legacy_migration_shrinks_disk_preserves_metadata_and_completion_evidenc
 def test_no_projection_size_replacement_path_remains():
     from alx.core import model_reasoner
     assert not hasattr(model_reasoner, "_stored_result")
+
+
+def test_protocol_describes_bounded_stored_results_and_one_turn_live_results():
+    from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
+    from alx.tools.goal_history import DEFINITION
+
+    protocol = " ".join(PROTOCOL_INSTRUCTIONS.split())
+    for fact in (
+        "Every stored attempt result is a mechanical summary bounded to 8,000 characters",
+        "long strings use head, original_length and sha256",
+        "long lists end with an _omitted_items count",
+        "read_own_goals returns the same bounded summary",
+        "A live result is seen whole only on the turn it arrives",
+    ):
+        assert fact in protocol
+    assert "same bounded attempt result summaries" in DEFINITION.purpose
+    for obsolete in (
+        "replaced by its size", "too large to repeat", "returns it in full",
+        "returns any of them in full", "goal in full", "without truncation",
+        "omitted_characters", "read_in_full_with",
+    ):
+        assert obsolete not in protocol
+        assert obsolete not in DEFINITION.purpose

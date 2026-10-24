@@ -313,11 +313,12 @@ relevant now, and that judgement is yours.
 recent_finished_goals contains retained finished work begun or answered in this conversation,
 most recent completion first, bounded by count. The two most recent carry their context,
 progress and evidence, with attempts listed without their results; older ones are listed by
-id and objective. read_own_goals with a goal's id returns any of them in full.
-A stored result from an earlier turn too large to repeat on every turn is replaced by its
-size; read_own_goals with the goal's id returns it in full. Results from this turn are whole.
+id and objective. Every stored attempt result is a mechanical summary bounded to
+8,000 characters: long strings use head, original_length and sha256; long lists end
+with an _omitted_items count. read_own_goals returns the same bounded summary.
+A live result is seen whole only on the turn it arrives.
 read_own_goals searches retained goals across conversations by text, or reads a
-goal in full by exact id or unambiguous id prefix; it includes finished and unfinished work.
+goal's stored state by exact id or unambiguous id prefix; it includes finished and unfinished work.
 
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have
@@ -326,7 +327,7 @@ to continue an existing goal, include a create goal mutation to start a new one,
 leave both empty for ordinary conversation. Do not fold unrelated work into an existing
 goal, and do not start a second goal for work an unfinished goal already covers. If you
 need a goal's full state before acting on it, choose the select_goal action with its
-goal_id; the next step shows that goal in full. A goal update applies to the selected
+goal_id; the next step shows that goal's stored state. A goal update applies to the selected
 goal only. An effectful capability call requires an active goal. If active_goal is null and you
 choose an effectful call, include a create goal mutation with a concise objective and
 explicit success criteria in the same decision, or set goal_id to the unfinished goal

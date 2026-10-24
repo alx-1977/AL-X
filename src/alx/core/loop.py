@@ -2432,10 +2432,24 @@ class CoreAgent:
         This is also restart recovery; there is no other.
         """
         jobs = []
+        current_evidence = set()
         for goal_id in self._store.list_open_plan_goal_ids():
             try:
-                job = self._advance_plan(self._store.load(goal_id))
+                snapshot = self._store.load(goal_id)
+                plan = snapshot.state.execution_plan
+                if (snapshot.state.status is GoalStatus.ACTIVE
+                        and plan is not None and plan.attention is not None):
+                    current_evidence.update(
+                        (goal_id, plan.attention_seq, call_id)
+                        for call_id in plan.attention.evidence_call_ids
+                    )
+                job = self._advance_plan(snapshot)
             except Exception as error:  # noqa: BLE001 - one plan must not stop the rest
+                # Keep bookkeeping for a goal whose state could not be reconciled.
+                current_evidence.update(
+                    key for key in self._evidence_scheduled | self._evidence_settled
+                    if key[0] == goal_id
+                )
                 # Its durable state is whatever it last reached, so the next
                 # tick tries again from there.
                 LOGGER.warning("Plan reconciliation failed for goal %s: %s",
@@ -2443,6 +2457,8 @@ class CoreAgent:
                 continue
             if job is not None:
                 jobs.append(job)
+        self._evidence_scheduled.intersection_update(current_evidence)
+        self._evidence_settled.intersection_update(current_evidence)
         return tuple(jobs)
 
     def begin_planned_dispatch(self, job: PlannedDispatch) -> PlannedDispatch | None:

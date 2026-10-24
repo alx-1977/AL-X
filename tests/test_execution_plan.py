@@ -1684,6 +1684,30 @@ class EvidenceConcurrencyTests(PlanHarness):
         agent.finish_planned_dispatch(job, attempt)
         self.assertNotIn(job.evidence_for, agent._plan_evidence_cache)
 
+    def test_evidence_bookkeeping_keeps_current_attention_and_drops_finished_goals(self):
+        self.needing_judgment_after_restart()
+        self.outputs["review"] = JUDGE
+        agent = self.agent()
+        for seq in range(1, 6):
+            current = self.plan_of()
+            self.set_goal(execution_plan=replace(
+                current, attention_seq=seq, attention=replace(current.attention, seq=seq)))
+            (job,) = agent.advance_due_plans()
+            job = agent.begin_planned_dispatch(job)
+            agent.finish_planned_dispatch(job, agent.run_planned_dispatch(job))
+            key = ("goal", seq, job.evidence_for)
+            self.assertEqual(agent._evidence_scheduled, {key})
+            self.assertEqual(agent._evidence_settled, {key})
+            # Consume the live observation, retaining settlement for this attention.
+            agent._plan_evidence(self.store.load("goal"))
+            self.assertEqual(agent.advance_due_plans(), ())
+            self.assertTrue(agent.plan_evidence_ready("goal"))
+            self.assertEqual(agent._evidence_settled, {key})
+        self.set_goal(status=GoalStatus.CANCELLED, stop_reason=GoalStopReason.CANCELLED)
+        agent.advance_due_plans()
+        self.assertEqual(agent._evidence_scheduled, set())
+        self.assertEqual(agent._evidence_settled, set())
+
 
 class OrphanedEvidenceReadTests(PlanHarness):
     """TREX: an evidence read stopped mid-flight must recover on ticks alone."""
