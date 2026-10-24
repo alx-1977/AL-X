@@ -32,9 +32,10 @@ from alx.contracts.scope import (
     scope_to_storage,
 )
 from alx.contracts.storage import serialized_store
+from alx.goals.result_summary import RESULT_LIMIT, bound_result, serialized_size
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -131,7 +132,7 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "progress": [[item.record_id, item.summary, list(item.evidence_refs)] for item in goal.progress],
         "attempts": [
             [None if item.call is None else item.call.call_id, None if item.call is None else item.call.capability_id, None if item.call is None else _data(item.call.durable_arguments), None if item.call is None else item.call.approval_id, item.disposition.value, item.implementation_invoked,
-             None if item.result is None else [item.result.call_id, item.result.capability_id, item.result.state.value, _data(item.result.durable_values), _data(item.result.failure), list(item.result.evidence_refs), None if item.result.outcome is None else item.result.outcome.value], item.reason_code,
+             _recorded_result(item.result), item.reason_code,
              _time_to_data(item.recorded_at), item.repeated_call_id,
              _time_to_data(item.repeated_recorded_at), item.repeated_reason_code,
              _time_to_data(item.started_at), item.duration_seconds]
@@ -148,6 +149,24 @@ def _goal_to_data(goal: GoalState) -> dict[str, Any]:
         "status": goal.status.value,
         "stop_reason": None if goal.stop_reason is None else goal.stop_reason.value,
     }
+
+
+def _recorded_result(result: CapabilityResult | None) -> list[Any] | None:
+    """The single recording boundary for all goal attempts, including plans.
+
+    Keep live values untouched: the store's returned write snapshot is the
+    executing turn's observation. All subsequent loads use this summary.
+    """
+    if result is None:
+        return None
+    data = [result.call_id, result.capability_id, result.state.value, {}, None,
+            list(result.evidence_refs),
+            None if result.outcome is None else result.outcome.value]
+    # Reserve the exact serialized wrapper, including identities and refs.
+    budget = RESULT_LIMIT - serialized_size(data)
+    summary = bound_result({"values": result.durable_values, "failure": result.failure}, budget)
+    data[3], data[4] = summary["values"], summary["failure"]
+    return data
 
 
 def _plan_to_data(plan: ExecutionPlan | None) -> dict[str, Any] | None:
@@ -611,6 +630,23 @@ class SQLiteGoalStore:
                     self._connection.execute(
                         f'ALTER TABLE pending_memory_batches ADD COLUMN "{column}" TEXT'
                     )
+            # Normalize old attempts through the same serializer used by every
+            # write. Change only attempt data, not revisions, retention clocks,
+            # history ordering, or unrelated goal state. One atomic migration
+            # covers all load/history/plan projections before the store opens.
+            for goal_id, state_json in self._connection.execute(
+                "SELECT goal_id, state_json FROM goals"
+            ).fetchall():
+                data = json.loads(state_json)
+                attempts = _goal_to_data(_goal_from_data(goal_id, data))["attempts"]
+                if data.get("attempts") == attempts and "completed_actions" not in data:
+                    continue
+                data["attempts"] = attempts
+                data.pop("completed_actions", None)
+                self._connection.execute(
+                    "UPDATE goals SET state_json = ? WHERE goal_id = ?",
+                    (json.dumps(data, separators=(",", ":")), goal_id),
+                )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def create(

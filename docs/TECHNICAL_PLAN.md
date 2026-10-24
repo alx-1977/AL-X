@@ -55,6 +55,29 @@ No runtime source is accepted before Phase 0 is complete.
 - implement the SQLite goal store with schema migration from its first version;
 - prove create, inspect, correct, retain, delete, stop, and restart behaviour.
 
+Attempt results have one recording boundary: `goals/store.py::_recorded_result`,
+called by the shared goal serializer for create, replace and memory-batch writes.
+Execution-plan steps record their observations as those same goal attempts;
+there is no separate step-result store. Values use the capability's existing
+durable projection and share a budget with failure details. Strings over 2,000
+characters become a head, original character length and SHA-256; lists keep at
+most 50 entries including an omitted-item count. The whole serialized result,
+including identifiers and summary metadata, fits within 8,000 characters using
+ASCII JSON escaping and default whitespace. Aggregate overflow shortens heads
+and omits container tails with explicit counts; finite space cannot preserve
+arbitrarily many keys. This is mechanical retention, not semantic summarization.
+
+The write snapshot and original capability response retain live values for the
+executing Core turn and execution-plan condition evaluation. Reloaded goals,
+later Core context and `read_own_goals` expose stored summaries.
+The execution-plan evidence cache hands a live observation to one Core turn,
+then uses its durable summary on later turns of the same attention.
+Schema migration
+11 normalizes existing attempts through the same recording boundary atomically,
+without changing goal revisions, retention or ordering timestamps. Evidence,
+progress and decisions still cite attempts by call id; result text is not an
+evidence identity. The former prompt-only size replacement is removed.
+
 ### Phase 2 — Capability and safety boundaries
 
 - implement the primitive capability contract, registry, and broker;

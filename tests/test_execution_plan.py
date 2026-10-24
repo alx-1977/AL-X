@@ -816,6 +816,54 @@ class ReplacedPlanRestartTests(PlanHarness):
 
 
 class RestartEvidenceTests(PlanHarness):
+    def test_large_step_result_is_classified_whole_and_recorded_bounded(self):
+        text = "x" * 500_000
+        agent = self.installed(step("coding", completion=(
+            PlanCondition("values.git_diff", text),
+        )))
+        self.outputs["coding"] = outcome(values={"git_diff": text, "exit_code": 0})
+        self.work(agent)
+        self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
+        stored = self.state().attempts[-1].result
+        self.assertEqual(stored.values["git_diff"]["original_length"], len(text))
+        self.assertEqual(stored.values["exit_code"], 0)
+
+    def test_large_step_failure_reaches_one_core_turn_whole_then_uses_summary(self):
+        text = "x" * 500_000
+        agent = self.installed(step("coding"))
+        self.outputs["coding"] = outcome(
+            CapabilityResultState.FAILED, failure={"code": "failed", "log": text})
+        self.work(agent)
+        reasoner = Reasoner(
+            AgentDecision(response="Examining the failure.", goal_id="goal"),
+            AgentDecision(response="Still examining it.", goal_id="goal"),
+        )
+        self.same_process(agent, reasoner)
+        self.occasion(agent)
+        self.assertEqual(reasoner.contexts[0].transient_attempts[-1].result.failure["log"], text)
+        self.occasion(agent)
+        later = reasoner.contexts[1].transient_attempts[-1].result.failure["log"]
+        self.assertEqual(later["original_length"], len(text))
+        self.assertNotIn(self.state().attempts[-1].call.call_id, agent._plan_evidence_cache)
+
+    def test_consumed_live_observation_is_not_read_again_for_the_same_attention(self):
+        agent = self.installed(step("review", wait=10))
+        self.outputs["review"] = outcome(
+            values={"findings": "x" * 500_000}, result_outcome=ExecutionOutcome.AMBIGUOUS)
+        self.work(agent)
+        reasoner = Reasoner(
+            AgentDecision(response="Examining the findings.", goal_id="goal"),
+            AgentDecision(response="Still examining them.", goal_id="goal"),
+        )
+        self.same_process(agent, reasoner)
+        self.occasion(agent)
+        self.work(agent)
+        self.assertEqual(self.names(), ["review"])
+        self.assertTrue(agent.plan_evidence_ready("goal"))
+        self.occasion(agent)
+        findings = reasoner.contexts[1].transient_attempts[-1].result.values["findings"]
+        self.assertEqual(findings["original_length"], 500_000)
+
     def test_effectful_evidence_after_restart_is_its_durable_record_never_a_rerun(self):
         agent = self.installed(step("coding"))
         self.outputs["coding"] = FAILED

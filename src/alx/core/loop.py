@@ -2633,6 +2633,7 @@ class CoreAgent:
         for call_id in plan.attention.evidence_call_ids:
             key = (state.goal_id, plan.attention_seq, call_id)
             if (call_id in self._plan_evidence_cache or key in self._evidence_scheduled
+                    or key in self._evidence_settled
                     or not self._needs_reread(state, call_id)):
                 continue
             stored = self._attempt_for(state, call_id)
@@ -3025,24 +3026,26 @@ class CoreAgent:
     ) -> tuple[GoalSnapshot, tuple[CapabilityAttempt, ...]]:
         """The results the plan's attention asks her to judge, in full.
 
-        The full result if it arrived in this process, or was read again on a
-        background worker after a restart; otherwise the durable record,
-        which carries only metadata. Nothing is dispatched here: a Core turn
-        never waits on an observation.
+        A live result is handed to one Core turn, then subsequent turns see
+        the bounded durable record. After restart a background observation
+        can supply fresh evidence once. Nothing is dispatched here: a Core
+        turn never waits on an observation.
         """
         plan = snapshot.state.execution_plan
         if plan is None or plan.attention is None:
             return snapshot, ()
         evidence = []
         for call_id in plan.attention.evidence_call_ids:
-            cached = self._plan_evidence_cache.get(call_id)
+            cached = self._plan_evidence_cache.pop(call_id, None)
             expires = (None if cached is None or cached.result is None
                        or cached.result.provenance is None
                        else cached.result.provenance.content_expires_at)
             if cached is not None and (expires is None or expires > self._clock()):
+                self._evidence_settled.add((
+                    snapshot.state.goal_id, plan.attention_seq, call_id,
+                ))
                 evidence.append(cached)
                 continue
-            self._plan_evidence_cache.pop(call_id, None)
             stored = next((item for item in snapshot.state.attempts
                            if item.call is not None and item.call.call_id == call_id), None)
             if stored is not None:

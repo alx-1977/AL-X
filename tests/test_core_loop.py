@@ -640,7 +640,7 @@ class CoreTests(unittest.TestCase):
         attempt = CapabilityAttempt(
             call, CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult("call-1", "inspect", CapabilityResultState.SUCCEEDED,
-                             {"value": 7}),
+                             {"value": 7, "git_diff": "x" * 500_000}),
         )
         criteria = (
             SuccessCriterion("criterion-1", "inspection recorded"),
@@ -650,6 +650,8 @@ class CoreTests(unittest.TestCase):
             goal(success_criteria=criteria, attempts=(attempt,)),
             "conversation-1", RETENTION,
         )
+        stored_result = self.store.load("goal-1").state.attempts[0].result
+        self.assertEqual(stored_result.values["git_diff"]["original_length"], 500_000)
         recorded = Evidence(
             "evidence-inspection", "inspection_result",
             supports=("criterion-1",), source_references=("attempt:call-1",),
