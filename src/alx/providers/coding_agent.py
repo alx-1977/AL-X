@@ -81,6 +81,7 @@ from alx.providers.coding_process import (
     files_from_git_status,
     inspect_git,
     is_test_command,
+    failed_tests_pass_alone,
     run_permitted_command,
     same_main_pytest_failure,
 )
@@ -1517,19 +1518,25 @@ class CodingAgent:
                 continue
             passed = _check_passed(record, check.name)
             baseline = ""
-            # Only the derived pytest checks may be excused as already failing
-            # on main, and only when AL/X did not require that same command:
-            # deduplication runs a requested argv once under its derived name,
-            # and must not turn her requirement into an excusable check.
+            findings: tuple[str, ...] = ()
+            # Only the derived pytest checks may be excused, as passing alone
+            # or as already failing on main, and only when AL/X did not require
+            # that same command: deduplication runs a requested argv once
+            # under its derived name, and must not turn her requirement into
+            # an excusable check. Tests that pass alone stay named in findings.
             if (not passed and check.name.startswith("pytest")
                     and check.argv not in request.requested_checks):
-                passed, baseline = same_main_pytest_failure(
-                    record, workspace.root,
-                    FULL_SUITE_COMMAND_SECONDS if check.name == "pytest_full"
-                    else DEFAULT_VERIFICATION_COMMAND_SECONDS,
-                    tuple((item.name, item.argv) for item in checks),
+                passed, baseline, findings = failed_tests_pass_alone(
+                    record, workspace.root, DEFAULT_VERIFICATION_COMMAND_SECONDS,
+                    workspace.blocked_paths,
                 )
-            findings: tuple[str, ...] = ()
+                if not passed:
+                    passed, baseline = same_main_pytest_failure(
+                        record, workspace.root,
+                        FULL_SUITE_COMMAND_SECONDS if check.name == "pytest_full"
+                        else DEFAULT_VERIFICATION_COMMAND_SECONDS,
+                        tuple((item.name, item.argv) for item in checks),
+                    )
             if not passed:
                 if check.name.startswith("pytest"):
                     findings = pytest_failed_tests(record.stdout)

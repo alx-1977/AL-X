@@ -45,7 +45,12 @@ from alx.contracts.coding import (
     path_matches_blocked,
 )
 from alx.providers.coding_containment import CREDENTIAL_DENY_GLOBS
-from alx.contracts.coding_verification import pytest_failure_signature
+from alx.contracts.coding_verification import (
+    MAX_FAILED_TEST_CHARACTERS,
+    MAX_FAILED_TEST_FINDINGS,
+    pytest_failed_tests,
+    pytest_failure_signature,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -963,6 +968,49 @@ def same_main_pytest_failure(
             subprocess.TimeoutExpired, CodingError) as error:
         return False, f"baseline_comparison_failed:{type(error).__name__}"
 
+
+
+def failed_tests_pass_alone(
+    branch: CodingCommandRecord, worktree: Path, timeout_seconds: int,
+    blocked_paths: tuple[str, ...] = (),
+) -> tuple[bool, str, tuple[str, ...]]:
+    """Run only the tests a pytest check failed, once, on their own.
+
+    A timing-sensitive test can fail under a loaded parallel run and pass
+    alone. A different set fails each time, so main's failures never matched
+    and jobs were blocked on tests they did not break (Friedl, 2026-10-23).
+    Passing alone is recorded, never hidden: the tests are returned by name
+    so AL/X can have them fixed. Any doubt leaves the check failed.
+    """
+    if branch.timed_out or branch.exit_status != 1 or not branch.permitted:
+        return False, "rerun_uncomparable", ()
+    failed = pytest_failed_tests(branch.stdout)
+    # A full or clipped list may be missing a failure the rerun would skip.
+    if (not failed or len(failed) >= MAX_FAILED_TEST_FINDINGS
+            or any(len(node) >= MAX_FAILED_TEST_CHARACTERS for node in failed)):
+        return False, "rerun_failures_unlisted", ()
+    # The allowlist checks a node identifier as a whole path, so the file it
+    # names is held to the worktree and blocked-path rules here as well.
+    for node in failed:
+        test_file = node.split("::", 1)[0]
+        if (not _path_in_worktree(test_file, worktree, blocked_paths)
+                or not (worktree / test_file).is_file()):
+            return False, "rerun_not_permitted", ()
+    argv = ["python", "-m", "pytest", "-q", "-p", _PYTEST_PLUGIN, *failed]
+    if not command_permitted(argv, worktree, blocked_paths):
+        return False, "rerun_not_permitted", ()
+    try:
+        rerun = run_permitted_command(
+            argv, worktree, timeout_seconds=timeout_seconds,
+            blocked_paths=blocked_paths,
+        )
+    except CodingError as error:
+        if error.code == "coding_cancelled":
+            raise
+        return False, f"rerun_failed_to_run:{error.code}", ()
+    if rerun.timed_out or rerun.exit_status != 0:
+        return False, "failed_alone_too", ()
+    return True, f"passed_alone:{len(failed)}", failed
 
 @dataclass(frozen=True, slots=True)
 class GitEvidence:

@@ -39,7 +39,8 @@ from alx.contracts.coding_verification import (  # noqa: E402
     pytest_failure_signature,
 )
 from alx.providers.coding_process import (  # noqa: E402
-    command_permitted, run_permitted_command, same_main_pytest_failure,
+    command_permitted, failed_tests_pass_alone, run_permitted_command,
+    same_main_pytest_failure,
 )
 from alx.providers import coding_process  # noqa: E402
 
@@ -918,6 +919,85 @@ class MainBaselineComparisonTests(unittest.TestCase):
             "=== short test summary info ===\nFAILED test_sample.py::test_existing\n"
         )
         self.assertIsNone(pytest_failure_signature(mismatched, self.root))
+
+
+
+# Fails the first time it runs in a checkout and passes after: the shape of a
+# timing test that loses under a loaded parallel run and wins alone.
+_FLAKY_TEST = (
+    "from pathlib import Path\n"
+    "def test_flaky():\n"
+    "    marker = Path(__file__).with_name('ran-once')\n"
+    "    first = not marker.exists()\n"
+    "    marker.touch()\n"
+    "    assert not first\n"
+)
+
+
+class PassAloneRerunTests(unittest.TestCase):
+    """A failed pytest check reruns only its failed tests, once, alone."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.argv = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+
+    def write(self, name: str, text: str) -> None:
+        (self.root / name).write_text(text, encoding="utf-8")
+
+    def rerun(self, blocked: tuple[str, ...] = ()) -> tuple[bool, str, tuple[str, ...]]:
+        branch = run_permitted_command(self.argv, self.root, output_characters=0)
+        return failed_tests_pass_alone(branch, self.root, 30, blocked)
+
+    def test_a_test_that_passes_alone_is_excused_and_named(self) -> None:
+        self.write("test_flaky.py", _FLAKY_TEST)
+        self.write("test_fine.py", "def test_fine():\n    assert True\n")
+        passed, reason, named = self.rerun()
+        self.assertTrue(passed)
+        self.assertEqual(reason, "passed_alone:1")
+        self.assertEqual(named, ("test_flaky.py::test_flaky",))
+
+    def test_a_test_that_fails_alone_too_still_blocks(self) -> None:
+        self.write("test_bad.py", "def test_bad():\n    assert False\n")
+        self.assertEqual(self.rerun(), (False, "failed_alone_too", ()))
+
+    def test_one_real_failure_beside_a_flaky_one_still_blocks(self) -> None:
+        self.write("test_flaky.py", _FLAKY_TEST)
+        self.write("test_bad.py", "def test_bad():\n    assert False\n")
+        self.assertEqual(self.rerun(), (False, "failed_alone_too", ()))
+
+    def test_only_the_failed_tests_are_rerun(self) -> None:
+        self.write("test_flaky.py", _FLAKY_TEST)
+        self.write("test_fine.py", "def test_fine():\n    assert True\n")
+        with patch.object(coding_process, "run_permitted_command",
+                          wraps=coding_process.run_permitted_command) as run:
+            self.rerun()
+        rerun_argv = run.call_args_list[-1].args[0]
+        self.assertEqual(rerun_argv[-1], "test_flaky.py::test_flaky")
+        self.assertNotIn("test_fine.py", " ".join(rerun_argv))
+        self.assertNotIn("-n", rerun_argv)
+
+    def test_a_blocked_test_file_is_not_rerun(self) -> None:
+        self.write("test_flaky.py", _FLAKY_TEST)
+        self.assertEqual(self.rerun(("test_flaky.py",)), (False, "rerun_not_permitted", ()))
+
+    def test_a_list_that_may_be_clipped_is_not_trusted(self) -> None:
+        failures = "".join(
+            f"def test_{index}():\n    assert False\n" for index in range(25)
+        )
+        self.write("test_many.py", failures)
+        self.assertEqual(self.rerun()[:2], (False, "rerun_failures_unlisted"))
+
+    def test_an_interrupted_or_timed_out_run_is_not_compared(self) -> None:
+        self.write("test_broken.py", "import missing_module_for_collection_error\n")
+        self.assertEqual(self.rerun(), (False, "rerun_uncomparable", ()))
+        timed_out = coding_process.CodingCommandRecord(
+            tuple(self.argv), -1, "FAILED test_x.py::test_x", "", True, True)
+        self.assertEqual(
+            failed_tests_pass_alone(timed_out, self.root, 30),
+            (False, "rerun_uncomparable", ()),
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
