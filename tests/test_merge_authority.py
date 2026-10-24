@@ -41,7 +41,7 @@ from alx.contracts.review_content import (  # noqa: E402
     ReviewReadError,
 )
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools.repository import MERGE_PULL_REQUEST  # noqa: E402
+from alx.tools.repository import DEFINITION, MERGE_PULL_REQUEST  # noqa: E402
 
 
 HEAD = "a" * 40
@@ -93,6 +93,16 @@ class Reviews:
 
 
 class MergeAuthorityTest(unittest.TestCase):
+    def test_description_states_the_d046_review_gate(self) -> None:
+        purpose = DEFINITION.purpose
+        self.assertIn("Greptile has finished a review of this exact head", purpose)
+        self.assertIn("confidence score of 5/5 (D-046)", purpose)
+        self.assertIn("Any new commit needs a new review", purpose)
+        self.assertIn("Remarks beside a 5/5 are AL/X's to weigh and do not refuse the merge", purpose)
+        self.assertIn("Waits boundedly for required checks", purpose)
+        self.assertNotIn("D-042", purpose)
+        self.assertNotIn("raised no findings", purpose)
+
     def _runtime(self, provider, reviews=None):
         return build_repository_runtime(
             True, "owner/repo", "token", lambda: "call-1", provider=provider,

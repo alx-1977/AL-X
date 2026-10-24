@@ -51,9 +51,9 @@ DEFINITION = CapabilityDefinition(
     "commit that was reviewed, and the merge does not happen if the branch has "
     "moved since. Waits boundedly for required checks, then merges and syncs "
     "the canonical checkout to main. A safe rebase stops for new review approval. "
-    "Refused unless the configured external reviewer has finished a review of "
-    "this exact head and raised no findings in it; resolving review threads "
-    "does not change that, only a new head with a new clean review does (D-042). "
+    "Refused unless Greptile has finished a review of this exact head with a "
+    "confidence score of 5/5 (D-046). Any new commit needs a new review. "
+    "Remarks beside a 5/5 are AL/X's to weigh and do not refuse the merge. "
     "Review judgement is made before this is called.",
     StructuredSchema(
         ValueKind.OBJECT,
