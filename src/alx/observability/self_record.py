@@ -16,11 +16,11 @@ was the trace on his screen. This lets her look.
 from __future__ import annotations
 
 import re
+import heapq
 import logging
 import time
 from logging.handlers import TimedRotatingFileHandler
 import sqlite3
-from collections import deque
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from threading import Lock
@@ -159,7 +159,9 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
     local_start = start.astimezone().replace(tzinfo=None)
     local_end = end.astimezone().replace(tzinfo=None)
     # Only the newest `limit` are held; the rest are counted.
-    entries: deque[dict] = deque(maxlen=limit)
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    entries: list[tuple[float, int, dict]] = []
     matched = 0
     current: dict | None = None
 
@@ -172,10 +174,13 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
         if contains and contains.lower() not in entry["message"].lower():
             return
         entry["message"] = _mask(entry["message"])
-        newest = sorted([*entries, entry], key=lambda item: datetime.fromisoformat(item["at"]).timestamp())[-limit:]
-        entries.clear()
-        entries.extend(newest)
         matched += 1
+        if limit:
+            item = (datetime.fromisoformat(entry["at"]).timestamp(), matched, entry)
+            if len(entries) < limit:
+                heapq.heappush(entries, item)
+            else:
+                heapq.heappushpop(entries, item)
 
     for path in paths:
         if not path.exists():
@@ -215,7 +220,7 @@ def read_log(paths: tuple[Path, ...], start: datetime, end: datetime,
                            "source": match.group(3), "message": _mask(match.group(4))[:MAX_LINE_CHARACTERS]}
         keep(current)
         current = None
-    return list(entries), matched > limit
+    return [entry for _, _, entry in sorted(entries)], matched > limit
 
 
 # How many coding briefings are kept, newest first.

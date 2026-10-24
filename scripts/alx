@@ -138,7 +138,7 @@ start() {
   # Nothing is running under this record, so it must not survive to be
   # reported as a live configuration.
   rm -f "$STAMP"
-  echo "FAILED to come up. Last lines of $LOG:"
+  echo "FAILED to come up. Last lines of process capture $CAPTURE and runtime log $LOG:"
   tail -15 "$CAPTURE" "$LOG" 2>/dev/null
   return 1
 }

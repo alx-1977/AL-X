@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from alx.contracts.diagnostics import service_message
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -100,13 +101,18 @@ WEB_FETCH_FAILURES = (
 
 
 class WebRetrievalError(Exception):
-    """A declared refusal with a bounded, credential-masked service diagnostic."""
+    """A declared refusal with a technical detail, never fetched page content.
+
+    A fetched page is untrusted third-party content, not a service diagnostic,
+    and must never reach the failure channel. Only HTTP status text may travel
+    as a service_message.
+    """
 
     def __init__(self, code: str, detail: str = "") -> None:
         if code not in WEB_FETCH_FAILURES:
             raise ValueError(f"undeclared web failure code: {code}")
-        self.service_message = (service_message(detail)
-                                if detail and code in (PROVIDER_FAILED, RETRIEVAL_BLOCKED) else "")
+        self.service_message = (detail if re.fullmatch(r"status [0-9]{3}", detail)
+                                and code in (PROVIDER_FAILED, RETRIEVAL_BLOCKED) else "")
         self.code = code
         self.detail = service_message(detail) if detail else ""
         super().__init__(code)

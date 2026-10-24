@@ -48,6 +48,14 @@ from alx.contracts.storage import serialized_store
 
 
 ConnectionFactory = Callable[..., Any]
+
+
+def _reply_text(reply) -> str:
+    """Render IMAP reply items as text rather than bytes representations."""
+    return "; ".join(
+        item.decode("utf-8", errors="replace") if isinstance(item, bytes) else str(item)
+        for item in reply or ()
+    )
 LOGGER = logging.getLogger(__name__)
 
 
@@ -1283,7 +1291,7 @@ class ICloudMailAdapter:
         try:
             status, reply = connection.select("INBOX", readonly=True)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             validity = _uid_validity(connection)
             status, values = connection.uid("search", None, "ALL")
             if status != "OK":
@@ -1344,14 +1352,14 @@ class ICloudMailAdapter:
         try:
             status, reply = connection.select(self._quoted(reference.mailbox_id), readonly=True)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             status, values = connection.uid(
                 "fetch", reference.uid, "(BODY.PEEK[])"
             )
             if status != "OK":
-                raise MailAccessError("message_unavailable", str(values))
+                raise MailAccessError("message_unavailable", _reply_text(values))
             return BytesParser(policy=policy.default).parsebytes(_payload(values))
         finally:
             self._close(connection)
@@ -1398,7 +1406,7 @@ class ICloudMailAdapter:
                 self._quoted(criteria.mailbox_id), readonly=True
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             validity = _uid_validity(connection)
             terms: list[str] = []
             if criteria.sender:
@@ -1733,7 +1741,7 @@ class ICloudMailAdapter:
                 self._quoted(reference.mailbox_id), readonly=False
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             return self._move_selected(connection, reference, mailbox)
@@ -1745,7 +1753,7 @@ class ICloudMailAdapter:
         try:
             status, reply = connection.select(self._quoted(reference.mailbox_id), readonly=False)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             status, values = connection.list()
@@ -1764,7 +1772,7 @@ class ICloudMailAdapter:
                 self._quoted(reference.mailbox_id), readonly=False
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             status, _ = connection.uid(
@@ -1794,7 +1802,7 @@ class ICloudMailAdapter:
                 self._quoted(reference.mailbox_id), readonly=False
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             cleared = " ".join(("\\Flagged", *self._COLOUR_KEYWORDS))
@@ -1825,7 +1833,7 @@ class ICloudMailAdapter:
         try:
             status, reply = connection.select(self._quoted(mailbox), readonly=True)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable", str(reply))
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             validity = _uid_validity(connection)
             status, data = connection.uid("SEARCH", None, *criteria)
             if status != "OK":

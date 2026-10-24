@@ -197,9 +197,9 @@ class RepositoryAuthorityError(Exception):
         if code not in REPOSITORY_FAILURES:
             raise ValueError(f"undeclared repository failure: {code}")
         self.service_message = service_message(detail) if detail else ""
-        super().__init__(self.service_message or code)
+        super().__init__(detail or code)
         self.code = code
-        self.detail = self.service_message
+        self.detail = detail
 
 
 def valid_sha(value: object) -> bool:

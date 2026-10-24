@@ -45,6 +45,9 @@ def service_response_message(body: object) -> str:
         try:
             body = json.loads(body)
         except (ValueError, TypeError):
+            stripped = body.strip().lower()
+            if stripped.startswith("<") or "<html" in stripped or "<!doctype" in stripped:
+                return ""
             return service_message(body)
     if isinstance(body, dict):
         for name in ("message", "Message", "detail", "error", "error_description", "error_message"):

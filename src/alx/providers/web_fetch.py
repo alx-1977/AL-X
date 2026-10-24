@@ -21,8 +21,6 @@ page that turns out to be an empty shell around JavaScript is reported as
 
 from __future__ import annotations
 
-from alx.contracts.diagnostics import service_response_message
-
 import gzip
 import re
 import zlib
@@ -369,16 +367,9 @@ class HttpWebFetchProvider:
     ) -> WebPage:
         status = response.status_code
         if status >= 400:
-            # Bound the read even for a streaming or hostile error response.
-            raw = bytearray()
-            for chunk in response.iter_bytes(chunk_size=4096):
-                raw.extend(chunk[:4096 - len(raw)])
-                if len(raw) >= 4096:
-                    break
-            message = service_response_message(bytes(raw)) or f"status {status}"
             raise WebRetrievalError(
                 RETRIEVAL_BLOCKED if status in (401, 403, 429) else PROVIDER_FAILED,
-                message,
+                f"status {status}",
             )
 
         content_type = response.headers.get("content-type", "")

@@ -68,6 +68,7 @@ LOG_DEFINITION = CapabilityDefinition(
     "for 30 days. Window from/to uses ISO 8601; a time without an offset is local. "
     "The default window is the last 24 hours. Untimestamped process output uses "
     "the file modification time, labelled timestamp_source=file_mtime. "
+    "Process output is shown at ERROR level. "
     "minimum_level is INFO, WARNING or ERROR (default "
     "WARNING); contains keeps entries with that text. Anything shaped like a key is "
     "masked. Up to 500 entries, the newest kept; truncated says when more matched.",
