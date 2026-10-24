@@ -12,6 +12,8 @@ here chooses a model, a tier or a budget.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 from collections.abc import Callable
 from typing import Any, Mapping
 
@@ -147,7 +149,7 @@ def build_research_executors(
                 call_id,
                 ASK_RESEARCH_QUESTION,
                 CapabilityResultState.FAILED,
-                failure={"code": code},
+                failure={"code": code, **failure_details(error)},
             )
         finding = answer.get("finding") if isinstance(answer, Mapping) else None
         if not isinstance(finding, str) or not finding.strip():

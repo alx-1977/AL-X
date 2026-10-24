@@ -14,6 +14,8 @@ fields so downstream `checked_invoice` stays authoritative.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import service_response_message
+
 import json
 from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
@@ -251,7 +253,7 @@ class LlamaParseExtractor:
                     raise SpecialistError("answer_not_structured")
                 return result
             if status == "FAILED":
-                raise SpecialistError("provider_failed")
+                raise SpecialistError("provider_failed", service_response_message(body))
             if status == "CANCELLED":
                 raise SpecialistError("provider_failed")
             if status not in ("PENDING", "RUNNING"):
@@ -280,7 +282,7 @@ def _default_filename(media_type: str) -> str:
 
 def _json_object(response: httpx.Response) -> dict[str, Any]:
     if response.status_code < 200 or response.status_code >= 300:
-        raise SpecialistError("provider_failed")
+        raise SpecialistError("provider_failed", service_response_message(response.text))
     try:
         body = response.json()
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):

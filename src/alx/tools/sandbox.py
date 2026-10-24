@@ -22,6 +22,8 @@ earlier one wrote.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 import logging
 from collections.abc import Callable
 from typing import Any, Mapping
@@ -167,7 +169,7 @@ def build_sandbox_executors(
         try:
             outcome = run_experiment(request)
         except SandboxError as error:
-            return _failed(call_id, error.code)
+            return _failed(call_id, error.code, **failure_details(error))
         except Exception:  # noqa: BLE001 - an unclassified failure is still a fact
             LOGGER.warning("Sandbox run failed for one experiment")
             return _failed(call_id, "sandbox_unavailable")
@@ -195,10 +197,10 @@ def build_sandbox_executors(
     return {RUN_SANDBOX_EXPERIMENT: run}
 
 
-def _failed(call_id: str, code: str) -> CapabilityResult:
+def _failed(call_id: str, code: str, **details: Any) -> CapabilityResult:
     return CapabilityResult(
         call_id,
         RUN_SANDBOX_EXPERIMENT,
         CapabilityResultState.FAILED,
-        failure={"code": code},
+        failure={"code": code, **details},
     )

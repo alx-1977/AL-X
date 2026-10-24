@@ -48,6 +48,14 @@ from alx.contracts.storage import serialized_store
 
 
 ConnectionFactory = Callable[..., Any]
+
+
+def _reply_text(reply) -> str:
+    """Render IMAP reply items as text rather than bytes representations."""
+    return "; ".join(
+        item.decode("utf-8", errors="replace") if isinstance(item, bytes) else str(item)
+        for item in reply or ()
+    )
 LOGGER = logging.getLogger(__name__)
 
 
@@ -1281,9 +1289,9 @@ class ICloudMailAdapter:
         """
         connection = self._open()
         try:
-            status, _ = connection.select("INBOX", readonly=True)
+            status, reply = connection.select("INBOX", readonly=True)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             validity = _uid_validity(connection)
             status, values = connection.uid("search", None, "ALL")
             if status != "OK":
@@ -1342,16 +1350,16 @@ class ICloudMailAdapter:
     def _read_parsed(self, reference: MailReference):
         connection = self._open()
         try:
-            status, _ = connection.select(self._quoted(reference.mailbox_id), readonly=True)
+            status, reply = connection.select(self._quoted(reference.mailbox_id), readonly=True)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             status, values = connection.uid(
                 "fetch", reference.uid, "(BODY.PEEK[])"
             )
             if status != "OK":
-                raise MailAccessError("message_unavailable")
+                raise MailAccessError("message_unavailable", _reply_text(values))
             return BytesParser(policy=policy.default).parsebytes(_payload(values))
         finally:
             self._close(connection)
@@ -1394,11 +1402,11 @@ class ICloudMailAdapter:
         """Search stable message identifiers without changing mail state."""
         connection = self._open()
         try:
-            status, _ = connection.select(
+            status, reply = connection.select(
                 self._quoted(criteria.mailbox_id), readonly=True
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             validity = _uid_validity(connection)
             terms: list[str] = []
             if criteria.sender:
@@ -1729,11 +1737,11 @@ class ICloudMailAdapter:
             raise MailAccessError("mailbox_unavailable")
         connection = self._open()
         try:
-            status, _ = connection.select(
+            status, reply = connection.select(
                 self._quoted(reference.mailbox_id), readonly=False
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             return self._move_selected(connection, reference, mailbox)
@@ -1743,9 +1751,9 @@ class ICloudMailAdapter:
     def move_to_trash(self, reference: MailReference) -> MailMoveResult:
         connection = self._open()
         try:
-            status, _ = connection.select(self._quoted(reference.mailbox_id), readonly=False)
+            status, reply = connection.select(self._quoted(reference.mailbox_id), readonly=False)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             status, values = connection.list()
@@ -1760,11 +1768,11 @@ class ICloudMailAdapter:
         """Set only the standard IMAP Seen flag on one stable message reference."""
         connection = self._open()
         try:
-            status, _ = connection.select(
+            status, reply = connection.select(
                 self._quoted(reference.mailbox_id), readonly=False
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             status, _ = connection.uid(
@@ -1790,11 +1798,11 @@ class ICloudMailAdapter:
             raise MailAccessError("flag_update_failed")
         connection = self._open()
         try:
-            status, _ = connection.select(
+            status, reply = connection.select(
                 self._quoted(reference.mailbox_id), readonly=False
             )
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             if _uid_validity(connection) != reference.uid_validity:
                 raise MailAccessError("identifier_stale")
             cleared = " ".join(("\\Flagged", *self._COLOUR_KEYWORDS))
@@ -1823,9 +1831,9 @@ class ICloudMailAdapter:
             criteria.extend(("KEYWORD" if keyword in wanted else "UNKEYWORD", keyword))
         connection = self._open()
         try:
-            status, _ = connection.select(self._quoted(mailbox), readonly=True)
+            status, reply = connection.select(self._quoted(mailbox), readonly=True)
             if status != "OK":
-                raise MailAccessError("mailbox_unavailable")
+                raise MailAccessError("mailbox_unavailable", _reply_text(reply))
             validity = _uid_validity(connection)
             status, data = connection.uid("SEARCH", None, *criteria)
             if status != "OK":

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import service_message
+
 import re
 from datetime import UTC, datetime
 from typing import Any, Mapping, Protocol
@@ -42,11 +44,12 @@ CONTACT_CREATION_UNCONFIRMED = "contact_creation_unconfirmed"
 
 
 class XeroAccessError(Exception):
-    """A sanitised Xero failure carrying no request, token, or document."""
+    """A Xero failure retaining only its code and bounded, masked service diagnostic."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         if not isinstance(code, str) or not code.strip():
             raise ValueError("code must not be blank")
+        self.service_message = service_message(detail) if detail else ""
         self.code = code
         super().__init__(code)
 

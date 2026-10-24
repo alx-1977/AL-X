@@ -366,10 +366,11 @@ class HttpWebFetchProvider:
         expires_at: float,
     ) -> WebPage:
         status = response.status_code
-        if status in (401, 403, 429):
-            raise WebRetrievalError(RETRIEVAL_BLOCKED, f"status {status}")
         if status >= 400:
-            raise WebRetrievalError(PROVIDER_FAILED, f"status {status}")
+            raise WebRetrievalError(
+                RETRIEVAL_BLOCKED if status in (401, 403, 429) else PROVIDER_FAILED,
+                f"status {status}",
+            )
 
         content_type = response.headers.get("content-type", "")
         media = content_type.split(";")[0].strip().lower()

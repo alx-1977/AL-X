@@ -10,6 +10,8 @@ is reported rather than repeated.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import service_message
+
 import smtplib
 import ssl
 from collections.abc import Callable
@@ -142,17 +144,24 @@ class ICloudMailSender:
                 refused = connection.send_message(
                     document, from_addr=self._address, to_addrs=addresses
                 )
-            except smtplib.SMTPRecipientsRefused:
-                raise MailSendError("recipients_refused") from None
-            except smtplib.SMTPResponseException:
-                raise MailSendError("send_rejected") from None
+            except smtplib.SMTPRecipientsRefused as error:
+                code = "recipients_refused"
+                detail = service_message("; ".join(
+                    service_message(value[1]) for value in error.recipients.values()))
+            except smtplib.SMTPResponseException as error:
+                code = "send_rejected"
+                detail = service_message(error.smtp_error)
             except Exception as error:
                 # The server may or may not have accepted the message. It is
                 # never retried here; the Core resolves an ambiguous outcome by
                 # looking for the transmitted identifier.
-                raise MailSendError("send_outcome_unknown") from None
+                code, detail = "send_outcome_unknown", ""
+            else:
+                code, detail = "", ""
         finally:
             self._close(connection)
+        if code:
+            raise MailSendError(code, detail)
         refused_addresses = tuple(sorted(refused or {}))
         return ReplyOutcome(
             transmitted_message_id=message_id,

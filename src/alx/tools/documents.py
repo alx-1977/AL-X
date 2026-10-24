@@ -9,6 +9,8 @@ anything should happen next.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -120,10 +122,10 @@ def build_document_executors(
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
-    def failed(code: str) -> CapabilityResult:
+    def failed(code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(), READ_MAIL_DOCUMENT, CapabilityResultState.FAILED,
-            failure={"code": code},
+            failure={"code": code, **(failure_details(error) if error else {})},
         )
 
     def read_document(arguments: StructuredData) -> CapabilityResult:
@@ -147,9 +149,9 @@ def build_document_executors(
         except ValueError:
             return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(error.code)
+            return failed(error.code, error)
         except SpecialistError as error:
-            return failed(error.code)
+            return failed(error.code, error)
         return CapabilityResult(
             call_id_source(),
             READ_MAIL_DOCUMENT,

@@ -13,6 +13,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from alx.contracts.diagnostics import failure_details
+
 from alx.contracts import (
     Cognition,
     ModelMessage,
@@ -203,7 +205,8 @@ class ResearchSpecialist:
                     "failed", failure_code, {},
                 ),
             )
-            raise SpecialistError(failure_code) from None
+            raise SpecialistError(failure_code,
+                                  failure_details(error).get("service_message", "")) from None
 
         values = completion.output
         if not isinstance(values, Mapping):

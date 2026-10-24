@@ -117,7 +117,7 @@ from alx.observability import BudgetExceeded, SandboxBudget, SQLiteUsageRecorder
 from alx.observability.usage import bill_budget_for
 from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
-from alx.observability.self_record import SQLiteTraceRecord, keep_briefing, read_log
+from alx.observability.self_record import SQLiteTraceRecord, keep_briefing, read_log, RuntimeLogHandler, runtime_log_paths
 from alx.providers.self_restart import start_restart
 from alx.tools.self_restart import (
     DEFINITION as SELF_RESTART_DEFINITION,
@@ -585,8 +585,7 @@ async def run(repository_root: Path) -> None:
         # Where the launcher (scripts/alx) writes the log, whatever the
         # storage root is set to.
         lambda start, end, level, contains, limit: read_log(
-            (repository_root / ".alx/runtime/live_voice.log.prev",
-             repository_root / ".alx/runtime/live_voice.log"),
+            runtime_log_paths(repository_root / ".alx/runtime/live_voice.log"),
             start, end, level, contains, limit),
         current_call_id.get,
         read_usage=usage.between,
@@ -1589,7 +1588,7 @@ def main(argv: list[str] | None = None) -> None:
     repository_root = parser.parse_args(argv).checkout.resolve()
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[RuntimeLogHandler(repository_root / ".alx/runtime/live_voice.log")],
     )
     logging.getLogger("websockets.server").addFilter(_AnsweredPageRequests())
     try:

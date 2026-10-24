@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Mapping, Sequence
@@ -458,12 +460,12 @@ def build_mail_executors(
     processed_mailbox: str = "",
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
-    def failed(capability_id: str, code: str) -> CapabilityResult:
+    def failed(capability_id: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
             capability_id,
             CapabilityResultState.FAILED,
-            failure={"code": code},
+            failure={"code": code, **(failure_details(error) if error else {})},
         )
 
     def move_result(
@@ -510,7 +512,7 @@ def build_mail_executors(
         except ValueError:
             return failed(READ_MAIL_MESSAGE, "arguments_unusable")
         except MailAccessError as error:
-            return failed(READ_MAIL_MESSAGE, error.code)
+            return failed(READ_MAIL_MESSAGE, error.code, error)
         # durable_values records the reference, subject, sender, received_at,
         # participants, threading identifiers, and has_attachments. The body is
         # copied only into the result values, so it is not durable.
@@ -557,7 +559,7 @@ def build_mail_executors(
         except (TypeError, ValueError):
             return failed(SEARCH_MAIL_MESSAGES, "arguments_unusable")
         except MailAccessError as error:
-            return failed(SEARCH_MAIL_MESSAGES, error.code)
+            return failed(SEARCH_MAIL_MESSAGES, error.code, error)
         values = {
             "messages": tuple(
                 {
@@ -592,7 +594,7 @@ def build_mail_executors(
         except ValueError:
             return failed(ACKNOWLEDGE_MAIL_MESSAGE, "arguments_unusable")
         except MailAccessError as error:
-            return failed(ACKNOWLEDGE_MAIL_MESSAGE, error.code)
+            return failed(ACKNOWLEDGE_MAIL_MESSAGE, error.code, error)
         return CapabilityResult(
             call_id_source(),
             ACKNOWLEDGE_MAIL_MESSAGE,
@@ -607,7 +609,7 @@ def build_mail_executors(
         except ValueError:
             return failed(LIST_MAIL_ATTACHMENTS, "arguments_unusable")
         except MailAccessError as error:
-            return failed(LIST_MAIL_ATTACHMENTS, error.code)
+            return failed(LIST_MAIL_ATTACHMENTS, error.code, error)
         values = {
             "reference": _reference_values(reference),
             "attachments": tuple(_attachment_values(item) for item in attachments),
@@ -628,7 +630,7 @@ def build_mail_executors(
         except ValueError:
             return failed(READ_MAIL_ATTACHMENT, "arguments_unusable")
         except MailAccessError as error:
-            return failed(READ_MAIL_ATTACHMENT, error.code)
+            return failed(READ_MAIL_ATTACHMENT, error.code, error)
         durable = {"reference": _reference_values(reference), **_attachment_values(attachment)}
         return CapabilityResult(
             call_id_source(), READ_MAIL_ATTACHMENT,
@@ -647,7 +649,7 @@ def build_mail_executors(
         except ValueError:
             return failed(FILE_PROCESSED_MAIL_MESSAGE, "arguments_unusable")
         except MailAccessError as error:
-            return failed(FILE_PROCESSED_MAIL_MESSAGE, error.code)
+            return failed(FILE_PROCESSED_MAIL_MESSAGE, error.code, error)
         return move_result(
             FILE_PROCESSED_MAIL_MESSAGE, reference, outcome, "mailbox_id", "filed",
         )
@@ -659,7 +661,7 @@ def build_mail_executors(
         except ValueError:
             return failed(MOVE_MAIL_MESSAGE_TO_TRASH, "arguments_unusable")
         except MailAccessError as error:
-            return failed(MOVE_MAIL_MESSAGE_TO_TRASH, error.code)
+            return failed(MOVE_MAIL_MESSAGE_TO_TRASH, error.code, error)
         return move_result(
             MOVE_MAIL_MESSAGE_TO_TRASH, reference, outcome, "trash_mailbox_id", "moved",
         )
@@ -671,7 +673,7 @@ def build_mail_executors(
         except ValueError:
             return failed(MARK_MAIL_MESSAGE_SEEN, "arguments_unusable")
         except MailAccessError as error:
-            return failed(MARK_MAIL_MESSAGE_SEEN, error.code)
+            return failed(MARK_MAIL_MESSAGE_SEEN, error.code, error)
         return CapabilityResult(
             call_id_source(),
             MARK_MAIL_MESSAGE_SEEN,
@@ -689,7 +691,7 @@ def build_mail_executors(
         except ValueError:
             return failed(SET_MAIL_FLAG_COLOUR, "arguments_unusable")
         except MailAccessError as error:
-            return failed(SET_MAIL_FLAG_COLOUR, error.code)
+            return failed(SET_MAIL_FLAG_COLOUR, error.code, error)
         return CapabilityResult(
             call_id_source(),
             SET_MAIL_FLAG_COLOUR,
@@ -730,7 +732,7 @@ def build_send_executors(
         except (ValueError, MailAccessError) as error:
             return CapabilityResult(
                 call_id_source(), SEND_MAIL_REPLY, CapabilityResultState.FAILED,
-                failure={"code": getattr(error, "code", "arguments_unusable")},
+                failure={"code": getattr(error, "code", "arguments_unusable"), **failure_details(error)},
             )
         try:
             reply = _outbound_reply(arguments, source)
@@ -748,7 +750,7 @@ def build_send_executors(
                 call_id_source(),
                 SEND_MAIL_REPLY,
                 CapabilityResultState.FAILED,
-                failure={"code": error.code},
+                failure={"code": error.code, **failure_details(error)},
             )
         values: dict[str, Any] = {
             "transmitted_message_id": outcome.transmitted_message_id,

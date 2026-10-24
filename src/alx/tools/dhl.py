@@ -19,6 +19,8 @@ customs documents.
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -196,14 +198,15 @@ def build_dhl_executors(
     now = clock or (lambda: datetime.now(UTC))
 
     def failed(
-        code: str, documents: Sequence[Mapping[str, str]] = ()
+        code: str, documents: Sequence[Mapping[str, str]] = (),
+        error: BaseException | None = None,
     ) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
             PROCESS_DHL_IMPORT,
             CapabilityResultState.FAILED,
             {"documents": tuple(documents)} if documents else {},
-            failure={"code": code},
+            failure={"code": code, **(failure_details(error) if error else {})},
         )
 
     def returned(
@@ -1321,11 +1324,11 @@ def build_dhl_executors(
         except ValueError:
             return failed("arguments_unusable", classified)
         except MailAccessError as error:
-            return failed(error.code, classified)
+            return failed(error.code, classified, error)
         except DhlDocumentError as error:
-            return failed(error.code, classified)
+            return failed(error.code, classified, error)
         except XeroAccessError as error:
-            return failed(error.code, classified)
+            return failed(error.code, classified, error)
         return replace(
             result,
             values={**result.values, "documents": classified},

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from alx.contracts.diagnostics import failure_details
+
 import hashlib
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -1062,12 +1064,12 @@ def build_xero_executors(
     dhl_classifier: Callable[[bytes], str] | None = None,
     today: Callable[[], date] = date.today,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
-    def failed(capability_id: str, code: str) -> CapabilityResult:
+    def failed(capability_id: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
             capability_id,
             CapabilityResultState.FAILED,
-            failure={"code": code},
+            failure={"code": code, **(failure_details(error) if error else {})},
         )
 
     def invoke(
@@ -1078,7 +1080,7 @@ def build_xero_executors(
         except ValueError:
             return failed(capability_id, "arguments_unusable")
         except XeroAccessError as error:
-            return failed(capability_id, error.code)
+            return failed(capability_id, error.code, error)
         return CapabilityResult(
             call_id_source(), capability_id, CapabilityResultState.SUCCEEDED, values
         )
@@ -1384,7 +1386,7 @@ def build_xero_executors(
                 failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "bill_payload")},
             )
         except MailAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
         except XeroAccessError as error:
             # account_mapping_invalid means AL/X supplied an account or tax type
             # this organisation does not have. Choosing a replacement would be
@@ -1394,7 +1396,7 @@ def build_xero_executors(
                     "account_or_tax_unresolved",
                     "a supplied account code or tax type is not active in this organisation",
                 )
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
 
     def capture_invoice(arguments: StructuredData) -> CapabilityResult:
         """Read a document, resolve it against records, and commit if certain.
@@ -1551,11 +1553,11 @@ def build_xero_executors(
                 failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "capture_input")},
             )
         except MailAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
         except SpecialistError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
         except XeroAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code)
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
 
         # Everything is unambiguous, so the same commit path runs directly
         # rather than returning to AL/X to be told to do what is already known.
@@ -1717,7 +1719,7 @@ def build_xero_executors(
         except XeroAccessError as error:
             if error.code == CONTACT_CREATION_UNCONFIRMED:
                 return unconfirmed(name, "")
-            return failed(CREATE_XERO_CONTACT, error.code)
+            return failed(CREATE_XERO_CONTACT, error.code, error)
         contact_id = str(written.get("ContactID") or "")
         if not contact_id:
             return unconfirmed(name, "")
@@ -1956,9 +1958,9 @@ def build_xero_executors(
         except ValueError:
             return failed(INVOICE_XERO_QUOTE, "arguments_unusable")
         except MailAccessError as error:
-            return failed(INVOICE_XERO_QUOTE, error.code)
+            return failed(INVOICE_XERO_QUOTE, error.code, error)
         except XeroAccessError as error:
-            return failed(INVOICE_XERO_QUOTE, error.code)
+            return failed(INVOICE_XERO_QUOTE, error.code, error)
 
     return {
         SEARCH_XERO_CONTACTS: search_contacts,

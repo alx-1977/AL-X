@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from alx.contracts.diagnostics import failure_details
+
 from alx.contracts import (
     CapabilityDefinition, CapabilityResult, CapabilityResultState,
     ContentOrigin, RetentionPolicy, SideEffect, StructuredSchema, ValueKind,
@@ -59,10 +61,10 @@ def build_ship24_executors(
     def track(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
 
-        def failed(code: str) -> CapabilityResult:
+        def failed(code: str, error: BaseException | None = None) -> CapabilityResult:
             return CapabilityResult(
                 call_id, TRACK_SHIPMENT, CapabilityResultState.FAILED,
-                failure={"code": code},
+                failure={"code": code, **(failure_details(error) if error else {})},
             )
 
         number = arguments.get("tracking_number")
@@ -76,7 +78,7 @@ def build_ship24_executors(
             result = provider.track(number, courier)
         except Exception as error:
             code = getattr(error, "code", None)
-            return failed(code if code in _FAILURES else "provider_failed")
+            return failed(code if code in _FAILURES else "provider_failed", error)
         at = datetime.now(UTC)
         return CapabilityResult(
             call_id, TRACK_SHIPMENT, CapabilityResultState.SUCCEEDED,
