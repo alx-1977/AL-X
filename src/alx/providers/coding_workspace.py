@@ -7,7 +7,7 @@ plan's inspection targets, listing the root to ground planning, and
 normalising blocked paths into the deny entries the sandbox is built from.
 
 Enforcement during the session itself belongs to the kernel, in
-`alx.providers.coding_sandbox`. Keeping these checks here as well is not a
+`alx.providers.coding_containment`. Keeping these checks here as well is not a
 second execution path: nothing in this module can open a file the session
 edits.
 """

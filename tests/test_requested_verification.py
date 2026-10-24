@@ -208,13 +208,7 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
         self.assertFalse(evidence.all_required_passed)
 
     def test_a_derived_check_that_passes_alone_is_excused_and_named(self) -> None:
-        (self.root / "tests" / "test_flaky.py").write_text(
-            "from pathlib import Path\n"
-            "def test_flaky():\n"
-            "    marker = Path(__file__).with_name('ran-once')\n"
-            "    first = not marker.exists()\n"
-            "    marker.touch()\n"
-            "    assert not first\n", encoding="utf-8")
+        self._write_flaky_test()
         changed = ("tests/test_flaky.py",)
         request = CodingRequest(task="t", job_id="j", worktree=str(self.root))
         evidence, _run, _passed = self.agent._verify(
@@ -224,7 +218,7 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
         self.assertEqual(check.baseline, "passed_alone:1")
         self.assertEqual(check.findings, ("tests/test_flaky.py::test_flaky",))
 
-    def test_a_requested_command_is_never_excused_as_passing_alone(self) -> None:
+    def _write_flaky_test(self) -> None:
         (self.root / "tests" / "test_flaky.py").write_text(
             "from pathlib import Path\n"
             "def test_flaky():\n"
@@ -232,18 +226,52 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
             "    first = not marker.exists()\n"
             "    marker.touch()\n"
             "    assert not first\n", encoding="utf-8")
+
+    def test_a_requested_command_is_excused_as_passing_alone_but_never_by_main(self) -> None:
+        """Friedl, 2026-10-24: her own pytest run gets the rerun alone too.
+
+        Deduplicated under the derived name, a requested command still may
+        not be excused as already failing on main.
+        """
+        self._write_flaky_test()
         changed = ("tests/test_flaky.py",)
         derived = required_verification(changed, self.root).checks
         pytest_check = next(c for c in derived if c.name.startswith("pytest"))
         request = CodingRequest(task="t", job_id="j", worktree=str(self.root),
                                 requested_checks=(pytest_check.argv,))
         with mock.patch.object(coding_agent, "same_main_pytest_failure",
-                               return_value=(False, "not on main")):
+                               return_value=(True, "same failure on main")) as main:
             evidence, _run, _passed = self.agent._verify(
                 request, CodingWorkspace(str(self.root), ()), changed, [])
         check = next(c for c in evidence.checks if c.argv == pytest_check.argv)
+        self.assertTrue(check.passed)
+        self.assertEqual(check.baseline, "passed_alone:1")
+        self.assertEqual(check.findings, ("tests/test_flaky.py::test_flaky",))
+        main.assert_not_called()
+
+    def test_a_named_requested_check_is_excused_as_passing_alone(self) -> None:
+        """A `requested_N` check, not deduplicated, is judged by its command."""
+        self._write_flaky_test()
+        with mock.patch.object(coding_agent, "same_main_pytest_failure",
+                               return_value=(True, "same failure on main")) as main:
+            evidence, _run, _commands = self._verify(self._pytest("tests/test_flaky.py"))
+        check = next(c for c in evidence.checks if c.name == "requested_1")
+        self.assertTrue(check.passed)
+        self.assertEqual(check.baseline, "passed_alone:1")
+        self.assertEqual(check.findings, ("tests/test_flaky.py::test_flaky",))
+        self.assertTrue(evidence.all_required_passed)
+        main.assert_not_called()
+
+    def test_a_failing_requested_check_names_its_failed_tests(self) -> None:
+        with mock.patch.object(coding_agent, "same_main_pytest_failure",
+                               return_value=(True, "same failure on main")) as main:
+            evidence, _run, _commands = self._verify(self._pytest("tests/test_bad.py"))
+        check = next(c for c in evidence.checks if c.name == "requested_1")
         self.assertFalse(check.passed)
+        self.assertEqual(check.baseline, "failed_alone_too")
+        self.assertEqual(check.findings, ("tests/test_bad.py::test_bad",))
         self.assertFalse(evidence.all_required_passed)
+        main.assert_not_called()
 
     def test_resume_accepts_evidence_that_passed_a_requested_command(self) -> None:
         request = CodingRequest(task="t", job_id="j", worktree=str(self.root),

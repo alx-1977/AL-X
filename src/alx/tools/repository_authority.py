@@ -55,10 +55,11 @@ _PURPOSE = (
     "Operations and their arguments — "
     + describe_operations()
     + ". Ordinary destructive work is permitted: a feature branch may be "
-    "deleted, force-pushed, reset or rebased. The single refusal is an "
-    "operation that would irrecoverably destroy the canonical AL/X system "
-    "itself, reported as `self_preservation`. Decides nothing about whether "
-    "an operation is a good idea."
+    "deleted, force-pushed, reset or rebased. Refused, as `self_preservation`: "
+    "an operation that would irrecoverably destroy the canonical AL/X system "
+    "itself, and any push to main, commit on main or local merge into main, "
+    "because code reaches main only through merge_pull_request. Decides "
+    "nothing about whether an operation is a good idea."
 )
 
 

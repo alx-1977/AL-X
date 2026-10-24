@@ -1,12 +1,11 @@
-"""Coding retry protection bounds failure episodes, not a goal's coding work.
+"""Coding retry protection: at most four counted failures in a row per goal.
 
-Repeating a failed attempt without a new diagnosis is a repeat against the
-same open episode and is refused after two failures, however it is worded. A
-correction AL/X diagnoses against a recorded failure closes that episode and
-may run under the same goal, on the exact preserved checkout, with the
-recorded failure reproduced into the coding session. Corrections are bounded
-too: they must answer evidence recorded since the last one, may not repeat a
-diagnosis, and at most two may answer the same failure.
+Friedl's rule of 2026-10-24. A succeeded coding job resets the count. A
+correction is a job like any other: it may run under the same goal, on the
+exact preserved checkout, with the recorded failure reproduced into the
+coding session, and it counts like any other job. Failures that say nothing
+about the code (quota, login, CLI crash, interruption, infrastructure)
+do not count.
 """
 
 from __future__ import annotations
@@ -117,10 +116,6 @@ def corrective(resume: str, action: str) -> CapabilityCall:
     })
 
 
-def plain(resume: str) -> CapabilityCall:
-    return CapabilityCall("probe", "run_coding_task", {"resume_job_id": resume})
-
-
 def recorded_case() -> GoalState:
     """The shape of the GitHub-checks goal as its durable record holds it.
 
@@ -137,168 +132,192 @@ def recorded_case() -> GoalState:
     )
 
 
-class FailureEpisodeAccounting(unittest.TestCase):
-    def test_two_failures_on_unchanged_evidence_exhaust_one_episode(self):
-        state = recorded_case()
-        self.assertEqual(
-            [item.call.call_id for item in CoreAgent._open_coding_failure_episode(state)],
-            ["resume-04", "resume-05"],
-        )
-        for call in (plain("resume-05"), plain("resume-01"),
-                     CapabilityCall("fresh", "run_coding_task", {"task": "reworded"})):
-            with self.subTest(call=call.arguments):
-                self.assertEqual(
-                    CoreAgent._coding_exhaustion_reason(state, call),
-                    "coding_retry_exhausted",
-                )
+def failed(call_id: str, failure: dict, values: dict | None = None,
+           state: CapabilityResultState = CapabilityResultState.FAILED,
+           arguments: dict | None = None) -> CapabilityAttempt:
+    return CapabilityAttempt(
+        CapabilityCall(call_id, "run_coding_task", arguments or {"task": call_id}),
+        CapabilityAttemptDisposition.EXECUTED, True,
+        CapabilityResult(call_id, "run_coding_task", state,
+                         {"status": "failed", **(values or {})}, failure),
+    )
 
-    def test_a_distinct_evidence_backed_correction_is_allowed_under_the_same_goal(self):
-        state = recorded_case()
-        call = corrective("resume-05", "Both provider stubs omit the new read; add it.")
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state, call))
+
+def uncounted_failures() -> tuple[CapabilityAttempt, ...]:
+    """Failures that say nothing about the code the job was given."""
+    commit_checkpoint = json.dumps({"stage": "commit", "state_digest": "c" * 64})
+    return (
+        failed("quota", {"code": "session_failed", "reason_code": "usage_exhausted"}),
+        failed("login", {"code": "session_failed", "reason_code": "unauthenticated"}),
+        failed("crash", {"code": "session_failed", "reason_code": "session_exited"}),
+        failed("provider", {"code": "provider_failed", "phase": "execution"}),
+        failed("unavailable", {"code": "coding_unavailable"}),
+        failed("sandbox", {"code": "sandbox_unusable"}),
+        failed("dispatch", {"code": "dispatch_interrupted"}),
+        failed("interrupted", {"code": "session_interrupted"},
+               {"status": "interrupted"}, CapabilityResultState.PARTIAL),
+        failed("cancelled", {"code": "coding_cancelled", "phase": "test"}),
+        failed("arguments", {"code": "arguments_unusable"}),
+        failed("before", {"code": "git_refused", "reason_code": "canonical_checkout_dirty",
+                          "implementation_reached": False}),
+        failed("test-infra", {"code": "required_verification_failed",
+                              "failure_class": "test_infrastructure"}),
+        failed("commit-infra", {"code": "git_refused",
+                                "failure_class": "commit_infrastructure"}),
+        failed("commit-phase", {"code": "git_refused", "phase": "commit"}),
+        failed("commit-stage", {"code": "task_failed"},
+               {"checkpoint": commit_checkpoint}),
+        failed("reviewer", {"code": "review_failed", "phase": "local_review",
+                            "review_classification": "infrastructure"}),
+    )
+
+
+class ConsecutiveFailureAccounting(unittest.TestCase):
+    """Friedl, 2026-10-24: at most four counted failures in a row per goal."""
+
+    def test_four_counted_failures_in_a_row_exhaust_the_goal(self):
+        three = tuple(verification_failed(f"f{n}", {"task": "a"}) for n in range(3))
+        self.assertEqual(CoreAgent._consecutive_coding_failures(goal(*three)), 3)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(goal(*three)))
+        four = goal(*three, verification_failed("f3", {"task": "a"}))
+        self.assertEqual(CoreAgent._consecutive_coding_failures(four), 4)
+        self.assertEqual(
+            CoreAgent._coding_exhaustion_reason(four), "coding_retry_exhausted"
+        )
+
+    def test_a_success_resets_the_count(self):
+        state = goal(
+            *(verification_failed(f"f{n}", {"task": "a"}) for n in range(3)),
+            succeeded("ok"),
+            *(verification_failed(f"g{n}", {"task": "b"}) for n in range(3)),
+        )
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state), 3)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
+
+    def test_the_refused_third_correction_of_2026_10_24_is_allowed(self):
+        """Corrections of earlier, solved failures no longer count against a new one.
+
+        A failing AL/X-requested check records no test identifiers, so
+        unrelated failures looked identical and the third, different
+        correction was refused as coding_correction_exhausted.
+        """
+        state = goal(
+            verification_failed("f1", {"task": "a"}),
+            verification_failed("c1", {"resume_job_id": "f1",
+                                       "corrective_action": "first fix"}),
+            succeeded("c2"),
+            verification_failed("f2", {"task": "b"}),
+            verification_failed("c3", {"resume_job_id": "f2",
+                                       "corrective_action": "second fix"}),
+        )
+        call = corrective("c3", "a third, different fix")
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state), 2)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
         self.assertIsNone(CoreAgent._coding_interruption_exhaustion_reason(state, call))
         self.assertIsNone(CoreAgent._binding_rejected_call(state, call, NOW))
 
-    def test_old_timeout_interruptions_do_not_count(self):
+    def test_a_correction_is_counted_like_any_job_and_never_refused_as_the_same(self):
+        same = ("tests/test_x.py::T::test_one",)
         state = goal(
-            timed_out("t1", {"task": "work"}),
-            timed_out("t2", {"resume_job_id": "t1"}),
-            timed_out("t3", {"resume_job_id": "t2"}),
-            verification_failed("f1", {"resume_job_id": "t3"}),
+            verification_failed("f1", {"task": "a"}, tests=same),
+            verification_failed("c1", {"resume_job_id": "f1",
+                                       "corrective_action": "stub one"}, tests=same),
+            verification_failed("c2", {"resume_job_id": "c1",
+                                       "corrective_action": "stub one"}, tests=same),
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(state), 1)
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state, plain("f1")))
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state), 3)
+        # The same diagnosis of the same failure again is AL/X's judgement.
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
+        self.assertIsNone(CoreAgent._binding_rejected_call(
+            state, corrective("c2", "stub one"), NOW
+        ))
+        fourth = verification_failed(
+            "c3", {"resume_job_id": "c2", "corrective_action": "stub two"}, tests=same,
+        )
+        self.assertEqual(
+            CoreAgent._coding_exhaustion_reason(goal(*state.attempts, fourth)),
+            "coding_retry_exhausted",
+        )
 
-    def test_stale_refusals_do_not_count_as_implementation_failures(self):
+    def test_failures_that_say_nothing_about_the_code_do_not_count(self):
+        for item in uncounted_failures():
+            with self.subTest(failure=item.call.call_id):
+                self.assertFalse(CoreAgent._counts_as_coding_failure(item))
+        state = goal(
+            *(verification_failed(f"f{n}", {"task": "a"}) for n in range(3)),
+            *uncounted_failures(), *uncounted_failures(),
+        )
+        # Neither counted nor a reset: three stays three.
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state), 3)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
+        state = goal(*state.attempts, verification_failed("f3", {"task": "a"}))
+        self.assertEqual(
+            CoreAgent._coding_exhaustion_reason(state), "coding_retry_exhausted"
+        )
+
+    def test_failures_about_the_task_count(self):
+        counted = (
+            failed("planning", {"code": "planning_failed", "phase": "planning",
+                                "implementation_reached": False}),
+            failed("conflict", {"code": "required_verification_failed",
+                                "failure_class": "request_conflict"}),
+            failed("verification", {"code": "required_verification_failed",
+                                    "phase": "test"}),
+            failed("task", {"code": "task_failed"}),
+        )
+        for item in counted:
+            with self.subTest(failure=item.call.call_id):
+                self.assertTrue(CoreAgent._counts_as_coding_failure(item))
+        self.assertEqual(
+            CoreAgent._coding_exhaustion_reason(goal(*counted)), "coding_retry_exhausted"
+        )
+
+    def test_stale_refusals_do_not_count(self):
         state = goal(
             refused("r1", {"task": "x"}, "coding_retry_exhausted"),
-            refused("r2", {"task": "y"}, "coding_retry_exhausted"),
+            refused("r2", {"task": "y"}, "coding_correction_exhausted"),
             verification_failed("f1", {"task": "z"}),
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(state), 1)
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state, plain("f1")))
-        # Remaining evidence: the refusals are still in the durable record.
-        self.assertEqual(
-            [item.reason_code for item in state.attempts[:2]],
-            ["coding_retry_exhausted"] * 2,
-        )
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state), 1)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
         # Recorded before the latest run, so they describe older evidence.
         self.assertFalse(CoreAgent._coding_retry_already_exhausted(
             state, "coding_retry_exhausted"
         ))
-
-    def test_a_success_resolves_the_episode(self):
-        state = goal(
-            verification_failed("f1", {"task": "a"}),
-            verification_failed("f2", {"task": "a"}),
-            succeeded("ok"),
-        )
-        self.assertEqual(CoreAgent._failed_coding_executions(state), 0)
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(
-            state, CapabilityCall("next", "run_coding_task", {"task": "next"})
+        # A refusal of a retired bound does not bind an identical call.
+        self.assertIsNone(CoreAgent._binding_rejected_call(
+            state, CapabilityCall("again", "run_coding_task", {"task": "y"}), NOW
         ))
 
-    def test_a_blank_diagnosis_is_judged_as_a_plain_retry(self):
+    def test_the_recorded_timeouts_do_not_count(self):
         state = recorded_case()
-        for value in ("   ", None):
-            with self.subTest(value=value):
-                call = CapabilityCall("probe", "run_coding_task", {
-                    "resume_job_id": "resume-05", "corrective_action": value,
-                })
-                self.assertEqual(
-                    CoreAgent._coding_exhaustion_reason(state, call),
-                    "coding_retry_exhausted",
-                )
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state), 2)
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
 
-    def test_a_correction_must_answer_a_failure_in_the_open_episode(self):
-        state = recorded_case()
-        # The parent checkpoint is a timeout, not recorded failure evidence.
-        self.assertEqual(
-            CoreAgent._coding_exhaustion_reason(state, corrective("resume-01", "fix")),
-            "coding_correction_unanchored",
-        )
-        self.assertEqual(
-            CoreAgent._coding_exhaustion_reason(state, corrective("unknown", "fix")),
-            "coding_correction_unanchored",
-        )
+    def test_the_bound(self):
+        from alx.core.loop import _MAX_CONSECUTIVE_CODING_FAILURES
+        self.assertEqual(_MAX_CONSECUTIVE_CODING_FAILURES, 4)
 
-    def test_repeated_no_progress_corrections_stay_bounded(self):
-        same = ("tests/test_x.py::T::test_one", "tests/test_x.py::T::test_two")
-        first = verification_failed("f1", {"task": "a"}, tests=same)
-        c1 = verification_failed(
-            "c1", {"resume_job_id": "f1", "corrective_action": "stub one"},
-            tests=same, digest="e" * 64,
-        )
-        # c1 changed the tree but the same tests still fail: no progress.
-        state = goal(first, c1)
-        self.assertEqual(
-            [item.call.call_id for item in CoreAgent._open_coding_failure_episode(state)],
-            ["c1"],
-        )
-        self.assertEqual(
-            CoreAgent._coding_exhaustion_reason(state, corrective("c1", "  STUB   one ")),
-            "coding_correction_repeated",
-        )
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state, corrective("c1", "stub two")))
-        c2 = verification_failed(
-            "c2", {"resume_job_id": "c1", "corrective_action": "stub two"},
-            tests=same, digest="f" * 64,
-        )
-        state = goal(first, c1, c2)
-        self.assertEqual(
-            CoreAgent._coding_exhaustion_reason(state, corrective("c2", "a third idea")),
-            "coding_correction_exhausted",
-        )
-        # A plain retry of the correction's own failure is bounded as usual.
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(state, plain("c2")))
-        again = verification_failed("c2-again", {"resume_job_id": "c2"}, tests=same)
-        self.assertEqual(
-            CoreAgent._coding_exhaustion_reason(goal(first, c1, c2, again), plain("c2")),
-            "coding_retry_exhausted",
-        )
-
-    def test_a_correction_that_changes_the_failure_opens_new_evidence(self):
-        first = verification_failed("f1", {"task": "a"}, tests=("t::one", "t::two"))
-        c1 = verification_failed(
-            "c1", {"resume_job_id": "f1", "corrective_action": "fix one"},
-            tests=("t::two",),
-        )
-        c2 = verification_failed(
-            "c2", {"resume_job_id": "c1", "corrective_action": "fix two"},
-            tests=("t::three",),
-        )
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(
-            goal(first, c1, c2), corrective("c2", "fix three")
-        ))
-
-    def test_a_correction_refused_before_implementation_neither_closes_nor_counts(self):
-        state = recorded_case()
-        before = CapabilityAttempt(
-            CapabilityCall("c1", "run_coding_task", {
-                "resume_job_id": "resume-05", "corrective_action": "fix stubs",
-            }),
-            CapabilityAttemptDisposition.EXECUTED, True,
-            CapabilityResult("c1", "run_coding_task", CapabilityResultState.FAILED,
-                             failure={"code": "git_refused",
-                                      "reason_code": "resume_state_changed",
-                                      "implementation_reached": False}),
-        )
-        state = replace(state, attempts=(*state.attempts, before))
-        self.assertEqual(CoreAgent._failed_coding_executions(state), 2)
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(
-            state, corrective("resume-05", "fix stubs")
-        ))
-
-    def test_the_bounds(self):
-        from alx.core.loop import (
-            _MAX_CORRECTIONS_PER_FAILURE, _MAX_FAILED_CODING_EXECUTIONS,
-        )
-        self.assertEqual(_MAX_FAILED_CODING_EXECUTIONS, 2)
-        self.assertEqual(_MAX_CORRECTIONS_PER_FAILURE, 2)
+    def test_no_other_coding_bound_remains(self):
+        import alx.core.loop as loop
+        for retired in (
+            "_MAX_FAILED_CODING_EXECUTIONS", "_MAX_CORRECTIONS_PER_FAILURE",
+            "_MAX_PLANNING_CODING_FAILURES", "_MAX_REQUEST_CONFLICT_CODING_EXECUTIONS",
+            "_CODING_CORRECTION_REFUSALS",
+        ):
+            self.assertFalse(hasattr(loop, retired), retired)
+        for retired in (
+            "_open_coding_failure_episode", "_failed_coding_executions",
+            "_coding_failure_signature", "_coding_correction_refusal",
+            "_request_conflict_coding_executions", "_planning_coding_failures",
+            "_coding_execution_failures", "_is_corrective_coding_dispatch",
+            "_is_coding_execution_failure",
+        ):
+            self.assertFalse(hasattr(CoreAgent, retired), retired)
 
 
 class CoreOwnsTheTransition(unittest.TestCase):
-    """No reset, no new goal and no override: Core dispatches the correction."""
+    """No reset, no new goal and no override: Core dispatches until the bound."""
 
     def process(self, state, decisions, dispatch, steps=None):
         directory = tempfile.TemporaryDirectory()
@@ -319,7 +338,7 @@ class CoreOwnsTheTransition(unittest.TestCase):
         ).process(conversation, RETENTION, steps or 4)
         return outcome, store
 
-    def test_core_refuses_the_replay_and_dispatches_the_correction(self):
+    def test_core_dispatches_a_retry_and_a_correction_under_the_bound(self):
         dispatched = []
 
         def dispatch(call, authority):
@@ -341,17 +360,31 @@ class CoreOwnsTheTransition(unittest.TestCase):
             AgentDecision(response="Repaired.", goal_id="goal-a"),
         ]
         outcome, store = self.process(recorded_case(), lambda _: script.pop(0), dispatch)
-        attempts = store.load("goal-a").state.attempts
-        self.assertEqual([call.call_id for call in dispatched], ["repair"])
-        self.assertEqual(attempts[-2].reason_code, "coding_retry_exhausted")
-        self.assertEqual(attempts[-1].call.call_id, "repair")
-        self.assertIsNone(attempts[-1].call.approval_id)
+        self.assertEqual([call.call_id for call in dispatched], ["replay", "repair"])
         self.assertEqual(outcome.response, "Repaired.")
-        # Restart: a fresh read of the durable goal reaches the same verdicts.
-        reread = store.load("goal-a").state
-        self.assertEqual(CoreAgent._failed_coding_executions(reread), 0)
+        # Restart: a fresh read of the durable goal reaches the same verdict.
+        self.assertEqual(
+            CoreAgent._consecutive_coding_failures(store.load("goal-a").state), 0
+        )
 
-    def test_a_correction_loop_that_makes_no_progress_terminates(self):
+    def test_a_correction_after_four_failures_in_a_row_is_refused(self):
+        state = goal(*(verification_failed(f"f{n}", {"task": "a"}) for n in range(4)))
+        script = [
+            AgentDecision(call=CapabilityCall("repair", "run_coding_task", {
+                "resume_job_id": "f3", "corrective_action": "a new diagnosis",
+            }), goal_id="goal-a"),
+            AgentDecision(response="Four in a row failed.", goal_id="goal-a"),
+        ]
+        outcome, store = self.process(
+            state, lambda _: script.pop(0),
+            lambda *_: self.fail("exhaustion must not reach dispatch"),
+        )
+        attempts = store.load("goal-a").state.attempts
+        self.assertEqual(attempts[-1].reason_code, "coding_retry_exhausted")
+        self.assertFalse(attempts[-1].implementation_invoked)
+        self.assertEqual(outcome.response, "Four in a row failed.")
+
+    def test_a_job_loop_that_never_succeeds_terminates_at_four(self):
         dispatched = []
         same = ("tests/test_x.py::T::test_one",)
 
@@ -363,9 +396,8 @@ class CoreOwnsTheTransition(unittest.TestCase):
         counter = iter(range(1, 100))
 
         def decisions(context):
-            # A model that never stops: always a fresh diagnosis of the latest
-            # failure, alternating with a plain retry.
-            # The first step selects the goal, so none is loaded yet.
+            # A model that never stops: corrections alternating with retries
+            # of the latest failure. The first step selects the goal.
             attempts = context.active_goal.attempts if context.active_goal else ()
             latest = ([item.call.call_id for item in attempts
                        if item.result is not None
@@ -384,14 +416,10 @@ class CoreOwnsTheTransition(unittest.TestCase):
             goal(verification_failed("f0", {"task": "a"}, tests=same)),
             decisions, dispatch, steps=40,
         )
-        refusals = [item.reason_code for item in store.load("goal-a").state.attempts
-                    if item.disposition is CapabilityAttemptDisposition.REJECTED]
-        # Two corrections, each followed by one plain retry, then both bounds.
-        self.assertEqual(dispatched, ["call-1", "call-2", "call-3", "call-4"])
-        self.assertTrue(refusals)
-        self.assertTrue(set(refusals) <= {
-            "coding_retry_exhausted", "coding_correction_exhausted",
-        })
+        refusals = {item.reason_code for item in store.load("goal-a").state.attempts
+                    if item.disposition is CapabilityAttemptDisposition.REJECTED}
+        self.assertEqual(dispatched, ["call-1", "call-2", "call-3"])
+        self.assertEqual(refusals, {"coding_retry_exhausted"})
         self.assertNotEqual(outcome.state.value, "error")
 
 
@@ -458,7 +486,7 @@ class CorrectiveSessionCarriesTheFailure(unittest.TestCase):
             1 for item in self.planner.requests
             if item.output_schema_name == "alx_coding_plan"
         ))
-        self.assertEqual(CoreAgent._failed_coding_executions(self.goal), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(self.goal), 0)
 
     def test_a_correction_that_does_not_repair_is_not_committed(self):
         self.failed_job()
@@ -470,11 +498,8 @@ class CorrectiveSessionCarriesTheFailure(unittest.TestCase):
         self.assertFalse(result.values.get("commit_sha"))
         checkpoint = json.loads(result.durable_values["checkpoint"])
         self.assertEqual(checkpoint["corrective_action"], "try subtraction")
-        # That failure opened the next episode; the correction closed the first.
-        self.assertEqual(
-            [item.call.call_id for item in CoreAgent._open_coding_failure_episode(self.goal)],
-            ["job-2"],
-        )
+        # The correction's failure counts like any other job's.
+        self.assertEqual(CoreAgent._consecutive_coding_failures(self.goal), 2)
 
     def test_an_interrupted_correction_resumes_with_its_diagnosis(self):
         self.failed_job()
@@ -488,7 +513,7 @@ class CorrectiveSessionCarriesTheFailure(unittest.TestCase):
             "resume_job_id": "job-1", "corrective_action": "return a + b",
         }, Interrupted())
         self.assertIs(first.state, CapabilityResultState.PARTIAL)
-        self.assertIsNone(CoreAgent._coding_exhaustion_reason(self.goal, plain("job-2")))
+        self.assertIsNone(CoreAgent._coding_exhaustion_reason(self.goal))
         session = RecordingSession(edits={"app.py": _FIXED})
         result = self.run_call("job-3", {"resume_job_id": "job-2"}, session)
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED, result.failure)

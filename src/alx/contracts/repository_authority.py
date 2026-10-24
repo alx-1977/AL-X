@@ -34,6 +34,11 @@ What is refused is the small set of operations after which there would be no
 AL/X to recover anything: destroying the canonical checkout, destroying the
 canonical `main` history, or removing the configuration that makes the canonical
 repository findable.
+
+Beside it, one route rule (Friedl, 2026-10-24): code reaches `main` only by a
+reviewed GitHub merge. So a push of any kind whose target is `main`, and a
+local commit or merge while the checkout is on `main`, are refused under the
+same reason code.
 """
 
 from __future__ import annotations
@@ -325,13 +330,18 @@ class RepositoryCheckoutStatus:
 
 # ---- the one invariant ----------------------------------------------------
 
-# Operations that destroy history or files rather than adding to them. Only
-# these can trip the invariant; everything else adds a commit, a ref or a
-# fetched object, and adding cannot end AL/X's existence.
-_DESTRUCTIVE: frozenset[Operation] = frozenset({
+# Operations the invariant examines. Most destroy history or files rather
+# than adding to them. PUSH, COMMIT and LOCAL_MERGE add, but on `main` they
+# would put code there without the reviewed GitHub merge that is the only route
+# to it (2026-10-24), so they are examined too. Everything else adds a commit,
+# a ref or a fetched object somewhere that is not `main`.
+_GUARDED: frozenset[Operation] = frozenset({
     Operation.DELETE_BRANCH,
     Operation.DELETE_REMOTE_BRANCH,
+    Operation.PUSH,
     Operation.FORCE_PUSH,
+    Operation.COMMIT,
+    Operation.LOCAL_MERGE,
     Operation.RESET,
     Operation.REBASE,
     Operation.REMOVE_WORKTREE,
@@ -556,8 +566,14 @@ def refuse_if_self_destructive(
     recoverable through the ordinary mechanisms git provides. Losing the
     canonical system is not a mistake anybody recovers from, and that is the
     distinction this draws.
+
+    One route rule sits beside it: code reaches canonical `main` only through
+    a reviewed GitHub merge. A push or force-push whose target is `main`, and a
+    commit or local merge with `main` checked out, are refused. For a push,
+    `ref` is the branch argument as given, so a refspec (`HEAD:main`) or a
+    remote and branch (`origin main`) is judged by its destination.
     """
-    if operation not in _DESTRUCTIVE:
+    if operation not in _GUARDED:
         return ""
 
     # The checkout she runs from. Removing it as a worktree would take the
@@ -575,6 +591,11 @@ def refuse_if_self_destructive(
             )
 
     named = ref.strip()
+    if operation in (Operation.PUSH, Operation.FORCE_PUSH):
+        # The destination of whatever was written: the last word of
+        # `origin main`, the right side of `HEAD:main`, without a `+` force.
+        words = named.split()
+        named = (words[-1] if words else "").rsplit(":", 1)[-1].lstrip("+")
     if not named:
         return ""
     # `refs/heads/main`, `origin/main` and `main` are the same branch said
@@ -608,6 +629,16 @@ def refuse_if_self_destructive(
         return (
             f"rewriting {system.branch} would discard the canonical history "
             "AL/X is recovered from; it advances by merge"
+        )
+    if operation is Operation.PUSH:
+        return (
+            f"code reaches {system.branch} only through a reviewed pull request "
+            "merge; pushing to it directly is refused"
+        )
+    if operation in (Operation.COMMIT, Operation.LOCAL_MERGE):
+        return (
+            f"{system.branch} is checked out; code reaches {system.branch} only "
+            "through a reviewed pull request merge, so commit on a feature branch"
         )
     return ""
 

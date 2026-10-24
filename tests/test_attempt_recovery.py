@@ -134,20 +134,7 @@ def test_coding_branch_uses_exact_facts_after_reload(tmp_path):
     with reload_goal(tmp_path, state) as store:
         continuation = goal_coding_branch(store.load(state.goal_id).state, branch)
         assert continuation is not None
-        assert continuation.permitted_heads == frozenset({'a' * 40})
-
-
-def test_failure_signature_survives_large_checkpoint_lists_and_failure(tmp_path):
-    from tests.test_coding_failure_episodes import verification_failed
-    attempt = verification_failed('job', {}, tests=tuple('test-' + str(i) for i in range(100)))
-    values = dict(attempt.result.values)
-    values['checkpoint'] = json.dumps({**json.loads(values['checkpoint']), 'padding': 'x' * 10000})
-    attempt = replace(attempt, result=replace(attempt.result, values=values, durable_values=values,
-                      failure={**attempt.result.failure, 'reason_code': 'x' * 10000}))
-    state = replace(goal({}), attempts=(attempt,))
-    expected = CoreAgent._coding_failure_signature(attempt)
-    with reload_goal(tmp_path, state) as store:
-        assert CoreAgent._coding_failure_signature(store.load(state.goal_id).state.attempts[0]) == expected
+        assert continuation.branch == branch
 
 
 @pytest.mark.parametrize('legacy_shape', ['attempts', 'completed_actions', 'bounded'])
@@ -249,7 +236,7 @@ def test_legacy_noop_and_failure_classification_survive_reload(tmp_path):
     with reload_goal(tmp_path, state) as store:
         attempt = store.load(state.goal_id).state.attempts[0]
         assert CoreAgent._completed_unchanged_coding_result(attempt)
-        assert not CoreAgent._is_coding_execution_failure(attempt)
+        assert not CoreAgent._counts_as_coding_failure(attempt)
         assert outcome_of(attempt.result) is ExecutionOutcome.AMBIGUOUS
 
 
@@ -257,8 +244,10 @@ def test_legacy_noop_and_failure_classification_survive_reload(tmp_path):
     {'code': 'planning_failed', 'phase': 'planning', 'implementation_reached': False},
     {'code': 'task_failed', 'failure_class': 'request_conflict', 'phase': 'test'},
     {'code': 'review_failed', 'review_classification': 'infrastructure'},
+    {'code': 'git_refused', 'phase': 'commit'},
+    {'code': 'session_failed', 'reason_code': 'usage_exhausted'},
 ])
-def test_coding_failure_and_correction_guards_ignore_summary_omissions(tmp_path, facts):
+def test_coding_failure_count_ignores_summary_omissions(tmp_path, facts):
     failure = {**{f'item_{i}': i for i in range(1000)}, **facts}
     state = goal({'status': 'failed'}, failure, capability_id='run_coding_task')
     attempt = state.attempts[0]
@@ -266,11 +255,10 @@ def test_coding_failure_and_correction_guards_ignore_summary_omissions(tmp_path,
         attempt.call, arguments={'corrective_action': 'diagnosed'}, durable_arguments=None)),))
     with reload_goal(tmp_path, state) as store:
         loaded = store.load(state.goal_id).state
-        for read in (CoreAgent._is_coding_execution_failure, CoreAgent._is_corrective_coding_dispatch):
-            assert read(loaded.attempts[0]) == read(state.attempts[0])
-        for read in (CoreAgent._coding_execution_failures, CoreAgent._planning_coding_failures,
-                     CoreAgent._request_conflict_coding_executions, CoreAgent._failed_coding_executions):
-            assert read(loaded) == read(state)
+        assert (CoreAgent._counts_as_coding_failure(loaded.attempts[0])
+                == CoreAgent._counts_as_coding_failure(state.attempts[0]))
+        assert (CoreAgent._consecutive_coding_failures(loaded)
+                == CoreAgent._consecutive_coding_failures(state))
 
 
 @pytest.mark.parametrize('write', ['replace', 'memory_batch'])

@@ -377,6 +377,84 @@ class SelfPreservationTests(RealRepositoryHarness):
         self.assertEqual(protected.failure_code, "self_preservation")
 
 
+class MainIsReachedOnlyByMergeTests(RealRepositoryHarness):
+    """Code reaches main only through a reviewed GitHub merge (2026-10-24).
+
+    repository_operation could push straight to main: PUSH, COMMIT and
+    LOCAL_MERGE were outside the invariant. Every spelling of main as a push
+    target is refused, and so is committing or merging with main checked out.
+    """
+
+    SPELLINGS = (
+        "main", "refs/heads/main", "origin/main", "remotes/origin/main",
+        "refs/remotes/origin/main", "HEAD:main", "fix/thing:main",
+        "HEAD:refs/heads/main", "+HEAD:main", "origin main", "origin HEAD:main",
+        " main ",
+    )
+
+    def test_no_spelling_of_main_can_be_pushed(self) -> None:
+        self.branch("fix/thing")
+        remote_main = git(self.remote, "rev-parse", "refs/heads/main")
+        for operation in (Operation.PUSH, Operation.FORCE_PUSH):
+            for spelling in self.SPELLINGS:
+                with self.subTest(operation=operation.value, branch=spelling):
+                    outcome = self.perform(operation, branch=spelling)
+                    self.assertFalse(outcome.succeeded)
+                    self.assertEqual(outcome.failure_code, "self_preservation")
+        self.assertEqual(git(self.remote, "rev-parse", "refs/heads/main"), remote_main)
+
+    def test_pushing_main_while_on_main_is_refused(self) -> None:
+        self.commit("local.txt")
+        remote_main = git(self.remote, "rev-parse", "refs/heads/main")
+        outcome = self.perform(Operation.PUSH, branch="main")
+        self.assertEqual(outcome.failure_code, "self_preservation")
+        self.assertIn("reviewed pull request", outcome.refusal_reason)
+        self.assertEqual(git(self.remote, "rev-parse", "refs/heads/main"), remote_main)
+
+    def test_commit_on_main_is_refused(self) -> None:
+        before = git(self.local, "rev-parse", "HEAD")
+        (self.local / "x.txt").write_text("x\n")
+        self.assertTrue(self.perform(Operation.STAGE, paths=["x.txt"]).succeeded)
+        outcome = self.perform(Operation.COMMIT, message="straight onto main")
+        self.assertEqual(outcome.failure_code, "self_preservation")
+        self.assertEqual(outcome.source_ref, "main")
+        self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
+
+    def test_local_merge_into_main_is_refused(self) -> None:
+        self.branch("fix/thing")
+        git(self.local, "checkout", "-q", "main")
+        before = git(self.local, "rev-parse", "HEAD")
+        outcome = self.perform(Operation.LOCAL_MERGE, revision="fix/thing")
+        self.assertEqual(outcome.failure_code, "self_preservation")
+        self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
+
+    def test_a_decoy_branch_argument_does_not_free_a_commit_on_main(self) -> None:
+        (self.local / "x.txt").write_text("x\n")
+        self.perform(Operation.STAGE, paths=["x.txt"])
+        outcome = self.perform(Operation.COMMIT, message="m", branch="fix/decoy")
+        self.assertEqual(outcome.failure_code, "self_preservation")
+
+    def test_feature_branch_work_is_unaffected(self) -> None:
+        for name in ("fix/main", "feat/main-menu", "mainline"):
+            with self.subTest(branch=name):
+                git(self.local, "checkout", "-q", "-b", name, "main")
+                (self.local / f"{name.replace('/', '-')}.txt").write_text("x\n")
+                self.perform(Operation.STAGE, paths=[f"{name.replace('/', '-')}.txt"])
+                self.assertTrue(self.perform(Operation.COMMIT, message=name).succeeded)
+                self.assertTrue(self.perform(
+                    Operation.LOCAL_MERGE, revision="main").succeeded)
+                pushed = self.perform(Operation.PUSH, branch=name)
+                self.assertTrue(pushed.succeeded, pushed)
+                self.assertEqual(git(self.remote, "rev-parse", f"refs/heads/{name}"),
+                                 git(self.local, "rev-parse", "HEAD"))
+
+    def test_a_detached_commit_is_not_on_main(self) -> None:
+        git(self.local, "checkout", "-q", "--detach")
+        (self.local / "x.txt").write_text("x\n")
+        self.perform(Operation.STAGE, paths=["x.txt"])
+        self.assertTrue(self.perform(Operation.COMMIT, message="detached").succeeded)
+
+
 class OrdinaryDestructiveWorkTests(RealRepositoryHarness):
     """Losing work is allowed. Losing AL/X is not.
 
@@ -425,6 +503,7 @@ class OrdinaryDestructiveWorkTests(RealRepositoryHarness):
 
     def test_files_can_be_removed_as_ordinary_work(self) -> None:
         """Refactoring herself is not self-destruction."""
+        git(self.local, "checkout", "-q", "-b", "fix/remove-seed")
         (self.local / "seed.txt").unlink()
         staged = self.perform(Operation.STAGE, paths=["seed.txt"])
         self.assertTrue(staged.succeeded)
@@ -522,14 +601,15 @@ class OrdinaryOperationTests(RealRepositoryHarness):
     def test_local_merge_cherry_pick_and_revert(self) -> None:
         self.branch("fix/thing")
         picked = git(self.local, "rev-parse", "HEAD")
-        git(self.local, "checkout", "-q", "main")
+        # On a feature branch: main is never merged into locally.
+        git(self.local, "checkout", "-q", "-b", "fix/base", "main")
         merged = self.perform(Operation.LOCAL_MERGE, revision="fix/thing")
         self.assertTrue(merged.succeeded)
         reverted = self.perform(Operation.REVERT, revision=picked)
         self.assertTrue(reverted.succeeded)
 
         # Cherry-pick, on its own branch so it has something to carry.
-        git(self.local, "checkout", "-q", "-b", "fix/other", "HEAD~2")
+        git(self.local, "checkout", "-q", "-b", "fix/other", "main")
         carried = self.perform(Operation.CHERRY_PICK, revision=picked)
         self.assertTrue(carried.succeeded)
         self.assertIn(

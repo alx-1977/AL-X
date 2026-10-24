@@ -100,7 +100,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
             refused("coding_retry_exhausted"),
         )
         call = CapabilityCall("new-resume", "run_coding_task", RESUME)
-        self.assertEqual(CoreAgent._failed_coding_executions(state), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state), 0)
         self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
         self.assertFalse(CoreAgent._repeats_rejected_call(state, call, NOW))
         dispatched = []
@@ -132,14 +132,14 @@ class RejectedCallRevalidationTests(unittest.TestCase):
                 CapabilityCall(call_id, "run_coding_task", {"task": call_id}),
                 CapabilityAttemptDisposition.EXECUTED, True,
                 CapabilityResult(call_id, "run_coding_task", CapabilityResultState.FAILED,
-                                 failure={"code": "session_failed"}),
-            ) for call_id in ("failure-1", "failure-2")
+                                 failure={"code": "task_failed"}),
+            ) for call_id in ("failure-1", "failure-2", "failure-3", "failure-4")
         )
         state = goal(*failures, refused("coding_retry_exhausted"))
         reasoner = Reasoner(
             AgentDecision(call=CapabilityCall("new-resume", "run_coding_task", RESUME),
                           goal_id="goal-a"),
-            AgentDecision(response="Two implementation failures exhausted this job.",
+            AgentDecision(response="Four implementation failures exhausted this job.",
                           goal_id="goal-a"),
         )
         outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))

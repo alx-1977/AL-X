@@ -1097,12 +1097,18 @@ def files_from_git_status(status: str) -> tuple[str, ...]:
 
 
 def is_test_command(argv: tuple[str, ...]) -> bool:
+    if is_pytest_command(argv):
+        return True
+    return (len(argv) >= 3 and Path(argv[0]).name.lower() in _PYTHON_NAMES
+            and argv[1] == "-m" and argv[2] == "unittest")
+
+
+def is_pytest_command(argv: tuple[str, ...]) -> bool:
+    """Whether this command runs pytest, whose summary names failed tests."""
     if not argv:
         return False
     name = Path(argv[0]).name.lower()
     if name == "pytest":
         return True
-    return name in _PYTHON_NAMES and len(argv) >= 3 and argv[1] == "-m" and argv[2] in {
-        "pytest",
-        "unittest",
-    }
+    return (name in _PYTHON_NAMES and len(argv) >= 3 and argv[1] == "-m"
+            and argv[2] == "pytest")

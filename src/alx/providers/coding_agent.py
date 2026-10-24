@@ -80,6 +80,7 @@ from alx.providers.coding_process import (
     command_permitted,
     files_from_git_status,
     inspect_git,
+    is_pytest_command,
     is_test_command,
     failed_tests_pass_alone,
     run_permitted_command,
@@ -170,22 +171,6 @@ def _before_implementation(error: CodingError) -> CodingError:
     return error
 
 
-# pytest's "no tests were collected". What it means depends entirely on what
-# was asked for.
-#
-# For the full suite it is not a failure: a repository with no tests has nothing
-# there to fail, and reading it as failure made a Python change in such a
-# repository permanently uncommittable — the same shape as the defect this whole
-# change removes, one class of verification standing in for verification itself.
-#
-# For a *targeted* run it is a failure. The whole basis for running targeted
-# tests instead of the suite is that these specific files cover the change; if
-# they collect nothing, that basis was false and nothing was verified. Accepting
-# it there would let a job commit having executed no test at all. Found in
-# review on PR #54.
-_PYTEST_NOTHING_COLLECTED = 5
-
-
 def recorded_verification_proves(
     verification: VerificationEvidence, request: CodingRequest,
     job_files: tuple[str, ...], repository: Path,
@@ -229,17 +214,14 @@ def requested_verification(
     return tuple(checks)
 
 
-def _check_passed(record: CodingCommandRecord, check_name: str = "") -> bool:
-    """Whether one verification command's result counts as passing."""
-    if record.timed_out:
-        return False
-    if record.exit_status == 0:
-        return True
-    return (
-        check_name == "pytest_full"
-        and is_test_command(record.argv)
-        and record.exit_status == _PYTEST_NOTHING_COLLECTED
-    )
+def _check_passed(record: CodingCommandRecord) -> bool:
+    """Whether one verification command's result counts as passing.
+
+    Only a clean exit passes. pytest's exit 5, nothing collected, is a failure
+    for every check: a targeted run that collects nothing verified nothing,
+    and a requested command is AL/X's requirement as written (PR #54 review).
+    """
+    return not record.timed_out and record.exit_status == 0
 
 
 # Per failed check, enough of a pytest report to show each failure body and
@@ -870,13 +852,20 @@ class CodingAgent:
                 review = self._review_to_address(request, self._head())
                 branch = continue_feature_branch(
                     self._repository, request.continuation.branch,
-                    request.continuation.permitted_heads,
                 )
             else:
-                # Read before the branch is cut, from the commit it is cut
-                # from: a refusal after the switch left the checkout off main
-                # with no checkpoint to resume from (PR #148 review).
-                review = self._review_to_address(request, self._head())
+                # A review describes the pull request's branch, and a new job
+                # starts from main, so addressing one is only possible by
+                # continuing that branch. Refused before anything is planned
+                # or switched, rather than reading main's HEAD and reporting
+                # the review as unavailable.
+                if request.review_pull_request is not None:
+                    raise CodingError(
+                        "arguments_unusable",
+                        reason_code="review_pull_request_requires_continuation",
+                        pull_request_number=request.review_pull_request,
+                    )
+                review = ""
                 branch = prepare_feature_branch(
                     self._repository, request.repair_branch.strip()
                 )
@@ -1255,7 +1244,9 @@ class CodingAgent:
         # result as a complete repair, so the untruncated count decides
         # whether a commit is possible at all. Found in review on 2026-09-12:
         # the bound inside `commit_job_changes` compared an already-truncated
-        # tuple against the same number and so could never fire.
+        # tuple against the same number and so could never fire. This is now
+        # the only enforcement of MAX_STAGED_FILES: every commit passes here
+        # first, and it gives AL/X `too_many_files_to_commit`.
         complete_files = self._files_changed(
             (), git_status, preexisting_dirty,
             self._modified_preexisting(workspace, preexisting_fingerprints),
@@ -1493,8 +1484,7 @@ class CodingAgent:
                         # runs once under the derived name.
                         timeout_seconds=(
                             FULL_SUITE_COMMAND_SECONDS
-                            if check.name == "pytest_full"
-                            or check.argv in request.requested_checks
+                            if check.argv in request.requested_checks
                             else DEFAULT_VERIFICATION_COMMAND_SECONDS
                         ),
                         blocked_paths=workspace.blocked_paths,
@@ -1516,29 +1506,30 @@ class CodingAgent:
             if not record.permitted or (record.exit_status == -1 and not record.timed_out):
                 results.append(check)
                 continue
-            passed = _check_passed(record, check.name)
+            passed = _check_passed(record)
             baseline = ""
             findings: tuple[str, ...] = ()
-            # Only the derived pytest checks may be excused, as passing alone
-            # or as already failing on main, and only when AL/X did not require
-            # that same command: deduplication runs a requested argv once
-            # under its derived name, and must not turn her requirement into
-            # an excusable check. Tests that pass alone stay named in findings.
-            if (not passed and check.name.startswith("pytest")
-                    and check.argv not in request.requested_checks):
+            # Judged by the command, not the check's name, so AL/X's own
+            # pytest run (`requested_N`) is treated like a derived one: its
+            # failed tests are named, and each gets one rerun alone, recorded
+            # in findings when it passes (Friedl, 2026-10-24). Already failing
+            # on main excuses only a derived check AL/X did not require:
+            # deduplication runs a requested argv once under its derived
+            # name, and must not turn her requirement into that excuse.
+            is_pytest = is_pytest_command(record.argv)
+            if not passed and is_pytest:
                 passed, baseline, findings = failed_tests_pass_alone(
                     record, workspace.root, DEFAULT_VERIFICATION_COMMAND_SECONDS,
                     workspace.blocked_paths,
                 )
-                if not passed:
+                if not passed and check.argv not in request.requested_checks:
                     passed, baseline = same_main_pytest_failure(
                         record, workspace.root,
-                        FULL_SUITE_COMMAND_SECONDS if check.name == "pytest_full"
-                        else DEFAULT_VERIFICATION_COMMAND_SECONDS,
+                        DEFAULT_VERIFICATION_COMMAND_SECONDS,
                         tuple((item.name, item.argv) for item in checks),
                     )
             if not passed:
-                if check.name.startswith("pytest"):
+                if is_pytest:
                     findings = pytest_failed_tests(record.stdout)
                 if failure_output is not None:
                     failure_output[check.name] = _failure_excerpt(record, worktree)

@@ -46,7 +46,6 @@ from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.contracts.coding import (  # noqa: E402
     CODING_FAILURES,
     DEFAULT_VERIFICATION_COMMAND_SECONDS,
-    MAX_STEP_BUDGET,
     MAX_TASK_CHARACTERS,
     CodingCommandRecord,
     CodingCommit,
@@ -798,38 +797,66 @@ class NativeExecutionTests(unittest.TestCase):
             )
         return head, seen, reader
 
-    def _run_with_reader(self, reader, model, session, **arguments):
+    def _run_with_reader(self, reader, model, session, *, state=None,
+                         briefing_sink=None, **arguments):
         repository = arguments.pop("worktree")
         arguments.setdefault("repair_branch", "fix/call-1")
         arguments.setdefault("commit_message", "complete coding job")
+        identity = f"call-{len(state.attempts) + 1}" if state is not None else "call-1"
+        extra = {"briefing_sink": briefing_sink} if briefing_sink is not None else {}
         runtime = build_coding_runtime(
-            True, model, lambda: "call-1", session=session,
+            True, model, lambda: identity, session=session,
             repository=Path(repository), review_reader=reader,
+            goal_state_source=lambda: state, **extra,
         )
         broker = CapabilityBroker(
             CapabilityRegistry(runtime.definitions), SafetyGate(runtime.policies),
             runtime.executors,
         )
         return broker.dispatch(
-            CapabilityCall("call-1", RUN_CODING_TASK, arguments),
+            CapabilityCall(identity, RUN_CODING_TASK, arguments),
             AuthorityContext("friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW),
         )
+
+    def _continued_review_job(self, reader, model, session, worktree, **arguments):
+        """A review is addressed on the pull request's branch, so by continuing it.
+
+        A first job commits on `feat/goal`; the review job continues that
+        branch, and the review it reads is for the branch's HEAD.
+        """
+        state = GoalState("goal-a", Objective("turn:t", "development"),
+                          (SuccessCriterion("c", "done"),))
+        first = self._run_with_reader(
+            reader, PlanningModel(), RecordingSession(edits={"app.py": _FIXED}),
+            state=state, worktree=str(worktree), task="first change",
+            repair_branch="feat/goal", commit_message="first change",
+        )
+        self.assertEqual(first.result.state, CapabilityResultState.SUCCEEDED,
+                         first.result.failure)
+        state = replace(state, attempts=(first,))
+        attempt = self._run_with_reader(
+            reader, model, session, state=state, worktree=str(worktree),
+            task="address the review", repair_branch="feat/goal",
+            commit_message="address the review", continue_goal_branch=True,
+            review_pull_request=147, **arguments,
+        )
+        return first.result.values["commit_sha"], attempt
 
     def test_the_reviewers_own_words_reach_the_session_and_the_plan(self) -> None:
         """D-052a: on 2026-10-16 AL/X retold Greptile's findings, and three
         rounds missed what the reviewer had actually said."""
         worktree = _worktree(self.root)
-        head, seen, reader = self._review(
+        _head, seen, reader = self._review(
             worktree,
             summary='<h2><img alt="badge" src="x.svg">Confidence Score: 4/5</h2>'
                     "<p>Old replies still reach Core &amp; anchor the answer.</p>",
             comments=(("**Exclude the claimed wording** from history.", "src/app.py", 12),),
         )
-        session = RecordingSession(edits={"app.py": _FIXED})
+        session = RecordingSession(edits={"notes.md": "Addressed.\n"})
         model = PlanningModel()
-        attempt = self._run_with_reader(reader, model, session, task="address the review",
-                                        worktree=str(worktree), review_pull_request=147)
+        head, attempt = self._continued_review_job(reader, model, session, worktree)
         self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED, attempt.result.failure)
+        self.assertEqual(len(seen), 1)
         self.assertEqual((seen[0].pull_request_number, seen[0].head_sha), (147, head))
         briefing = session.calls[0][1]
         self.assertIn("Old replies still reach Core & anchor the answer.", briefing)
@@ -846,22 +873,13 @@ class NativeExecutionTests(unittest.TestCase):
         worktree = _worktree(self.root)
         _head, _seen, reader = self._review(worktree, summary="Fix the lock release.")
         kept = []
-        session = RecordingSession(edits={"app.py": _FIXED})
-        runtime = build_coding_runtime(
-            True, PlanningModel(), lambda: "call-1", session=session,
-            repository=worktree, review_reader=reader,
+        session = RecordingSession(edits={"notes.md": "Addressed.\n"})
+        _head, attempt = self._continued_review_job(
+            reader, PlanningModel(), session, worktree,
             briefing_sink=lambda job_id, text: kept.append((job_id, text)),
         )
-        CapabilityBroker(
-            CapabilityRegistry(runtime.definitions), SafetyGate(runtime.policies),
-            runtime.executors,
-        ).dispatch(
-            CapabilityCall("call-1", RUN_CODING_TASK, {
-                "task": "address the review", "repair_branch": "fix/call-1",
-                "commit_message": "fix", "review_pull_request": 147,
-            }),
-            AuthorityContext("friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW),
-        )
+        self.assertEqual(attempt.result.state, CapabilityResultState.SUCCEEDED,
+                         attempt.result.failure)
         self.assertEqual(len(kept), 1)
         self.assertEqual(kept[0][1], session.calls[0][1])
         self.assertIn("Fix the lock release.", kept[0][1])
@@ -869,23 +887,39 @@ class NativeExecutionTests(unittest.TestCase):
     def test_no_review_of_the_starting_revision_refuses_before_any_change(self) -> None:
         worktree = _worktree(self.root)
         _head, _seen, reader = self._review(worktree, available=False)
-        session = RecordingSession(edits={"app.py": _FIXED})
+        session = RecordingSession(edits={"notes.md": "Addressed.\n"})
         model = PlanningModel()
-        attempt = self._run_with_reader(reader, model, session, task="address the review",
-                                        worktree=str(worktree), review_pull_request=147)
+        head, attempt = self._continued_review_job(reader, model, session, worktree)
         self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
         self.assertEqual(attempt.result.failure["code"], "review_unavailable")
         self.assertIs(attempt.result.failure["implementation_reached"], False)
         self.assertEqual(session.calls, [])
         self.assertEqual(model.requests, [])
+        self.assertEqual(subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip(), head)
 
-    def test_a_refused_review_leaves_the_checkout_on_main(self) -> None:
-        """PR #148 review: refusing after the branch was cut stranded the job."""
+    def test_a_new_job_cannot_address_a_review(self) -> None:
+        """2026-10-24: a new job starts from main, so it read main's review.
+
+        No review describes main, so every such job failed as
+        `review_unavailable`, which named the wrong problem. Addressing a
+        review means continuing the pull request's branch, and a new job is
+        refused as such before anything is read, planned or switched.
+        """
         worktree = _worktree(self.root)
-        _head, _seen, reader = self._review(worktree, available=False)
-        self._run_with_reader(reader, PlanningModel(), RecordingSession(),
-                              task="address the review", worktree=str(worktree),
-                              review_pull_request=147)
+        _head, seen, reader = self._review(worktree, summary="Fix the lock release.")
+        session = RecordingSession(edits={"app.py": _FIXED})
+        model = PlanningModel()
+        attempt = self._run_with_reader(reader, model, session, task="address the review",
+                                        worktree=str(worktree), review_pull_request=147)
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        self.assertEqual(attempt.result.failure["code"], "arguments_unusable")
+        self.assertEqual(attempt.result.failure["reason_code"],
+                         "review_pull_request_requires_continuation")
+        self.assertIs(attempt.result.failure["implementation_reached"], False)
+        self.assertEqual(seen, [])
+        self.assertEqual(session.calls, [])
+        self.assertEqual(model.requests, [])
         branch = subprocess.check_output(
             ["git", "branch", "--show-current"], cwd=worktree, text=True).strip()
         self.assertEqual(branch, FIXTURE_BRANCH)
@@ -1011,53 +1045,27 @@ class NativeExecutionTests(unittest.TestCase):
         )
         self.assertIn("diff_check", values["verification"]["ran"])
 
-    def test_a_suite_that_collected_nothing_is_not_a_failed_suite(self) -> None:
-        """pytest exit 5 on an explicit broader run means nothing was collected.
+    def test_only_a_clean_exit_passes_a_check(self) -> None:
+        """pytest exit 5, nothing collected, verified nothing.
 
-        Reading that as a failure made a repository with no tests permanently
-        uncommittable. A targeted run is different: those files were the
-        reason the suite was not used, so collecting nothing there is a
-        failure. Found by CI on PR #54.
+        A targeted run collecting nothing proves false the basis for running
+        those files instead of the suite (PR #54 review). The exit-5 excusal
+        for a `pytest_full` check is gone with that check: no policy emits it.
         """
         from alx.providers.coding_agent import _check_passed
 
-        collected_nothing = CodingCommandRecord(
-            ("python", "-m", "pytest", "-q"), 5, "no tests ran", "", False, True
-        )
-        self.assertTrue(_check_passed(collected_nothing, "pytest_full"))
-        # But a *targeted* run collecting nothing is a failure: the basis for
-        # running those files instead of the suite is that they cover the
-        # change, and collecting nothing proves that basis false. Accepting it
-        # would let a job commit having executed no test at all.
-        self.assertFalse(_check_passed(collected_nothing, "pytest_targeted"))
-        # A genuine test failure is still a failure.
-        self.assertFalse(
-            _check_passed(
-                CodingCommandRecord(
-                    ("python", "-m", "pytest", "-q"), 1, "", "", False, True
-                ),
-                "pytest_full",
-            )
-        )
-        # And exit 5 is forgiven only for a test command; a gate exiting 5 is
-        # a gate that failed.
-        self.assertFalse(
-            _check_passed(
-                CodingCommandRecord(
-                    ("python", "scripts/check_governance.py"), 5, "", "", False, True
-                ),
-                "governance_gate",
-            )
-        )
+        def record(argv, status, timed_out=False):
+            return CodingCommandRecord(argv, status, "", "", timed_out, True)
+
+        pytest = ("python", "-m", "pytest", "-q")
+        self.assertTrue(_check_passed(record(pytest, 0)))
+        self.assertFalse(_check_passed(record(pytest, 5)))
+        self.assertFalse(_check_passed(record(pytest, 1)))
+        self.assertFalse(_check_passed(record(("python", "scripts/check_governance.py"), 5)))
         # A timeout is never a pass, whatever it exited with.
-        self.assertFalse(
-            _check_passed(
-                CodingCommandRecord(
-                    ("python", "-m", "pytest", "-q"), 5, "", "", True, True
-                ),
-                "pytest_full",
-            )
-        )
+        self.assertFalse(_check_passed(record(pytest, 0, timed_out=True)))
+        source = Path(coding_agent_module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("pytest_full", source)
 
     def test_supplied_test_guidance_cannot_choose_the_verification(self) -> None:
         """Verification is derived from files, never from prose in the request.
@@ -1248,7 +1256,7 @@ class NativeExecutionTests(unittest.TestCase):
             "checkout_clean": True, "session_completed": True,
         })
         self.assertEqual(first.result.durable_values["no_change_evidence"]["head_sha"], main_sha)
-        self.assertEqual(CoreAgent._failed_coding_executions(GoalState(
+        self.assertEqual(CoreAgent._consecutive_coding_failures(GoalState(
             "goal-a", Objective("turn:t", "improve app"),
             (SuccessCriterion("c", "done"),), attempts=(first,),
         )), 0)

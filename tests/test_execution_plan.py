@@ -2090,7 +2090,6 @@ class PlannedCallIdentityTests(PlanHarness):
             "context": "Acceptance test of background execution plans in a scratch clone.",
             "repair_branch": "acceptance/pr95-marker",
             "commit_message": "docs: add throwaway acceptance run marker for PR #95",
-            "step_budget": 8,
         }), ()))
         agent = CoreAgent(self.store, Reasoner(install(workflow)), dispatch,
                           (*DEFINITIONS, CODING), clock=lambda: self.now,
