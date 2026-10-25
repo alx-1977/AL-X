@@ -418,6 +418,21 @@ class CommittingIsRefusedRatherThanWidened(GitOutcome):
             "too_many_files_to_commit", result.values["unresolved_issues"]
         )
 
+    def test_the_commit_bound_is_enforced_once(self) -> None:
+        """2026-10-24: the bound was checked here and twice more in git.
+
+        Every commit passes the Coding Agent's check first, which is the one
+        that gives AL/X `too_many_files_to_commit`; the git copies could not
+        be reached.
+        """
+        from alx.providers import coding_agent, coding_git
+
+        self.assertNotIn("too_many_files", Path(coding_git.__file__).read_text())
+        self.assertFalse(hasattr(coding_git, "MAX_STAGED_FILES"))
+        self.assertEqual(
+            Path(coding_agent.__file__).read_text().count("> MAX_STAGED_FILES"), 1
+        )
+
     def test_commit_authorisation_uses_the_complete_inherited_dirt(self) -> None:
         """Finding 1: the bounded status path must not decide what may stage.
 

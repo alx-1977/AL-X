@@ -17,6 +17,8 @@ makes the evidence worth having: "pushed" is a claim, while `fix/x 3a1f9c2 ->
 The one refusal is `refuse_if_self_destructive`, consulted before any argv is
 built. It protects the canonical checkout and canonical `main`, and nothing
 else — a feature branch may be deleted, force-pushed, reset or rebased freely.
+`main` is also never pushed, committed on or locally merged into: code reaches
+it only through a reviewed GitHub merge.
 """
 
 from __future__ import annotations
@@ -405,7 +407,10 @@ class RepositoryAuthority:
         branch the command would never have touched. The record has to describe
         the same operation the decision was about.
         """
-        if operation in (Operation.RESET, Operation.REBASE):
+        if operation in (
+            Operation.RESET, Operation.REBASE, Operation.COMMIT, Operation.AMEND,
+            Operation.CHERRY_PICK, Operation.REVERT, Operation.LOCAL_MERGE,
+        ):
             return self._checked_out_branch()
         return str(
             arguments.get("branch")

@@ -30,7 +30,7 @@ from alx.contracts import (  # noqa: E402
     TranscriptionEvent,
     TranscriptionState,
 )
-from alx.contracts.coding import CodingTelemetry  # noqa: E402
+from alx.contracts.coding import CODING_STALL_SECONDS, CodingTelemetry  # noqa: E402
 from alx.interfaces import (  # noqa: E402
     VoiceActivityStatus,
     VoiceDiagnosticFeed,
@@ -251,8 +251,24 @@ class CodingTelemetryPresentationTests(unittest.TestCase):
     def test_non_in_flight_inactivity_still_stalls(self) -> None:
         activity = VoiceActivityStatus()
         activity.set_coding_owner_alive(lambda: True)
-        activity.publish_coding(self._telemetry(in_flight=False))
+        activity.publish_coding(self._telemetry(
+            in_flight=False,
+            last_activity_at=NOW - timedelta(seconds=CODING_STALL_SECONDS),
+        ))
         self.assertTrue(activity.coding_snapshot(NOW)["stalled"])
+
+    def test_the_stalled_label_waits_for_the_session_watchdog(self) -> None:
+        """Three quiet minutes is not a stall: the watchdog allows 600 s."""
+        from alx.config.settings import DEFAULT_CODING_SESSION_STALL_SECONDS
+
+        self.assertEqual(CODING_STALL_SECONDS, DEFAULT_CODING_SESSION_STALL_SECONDS)
+        activity = VoiceActivityStatus()
+        activity.set_coding_owner_alive(lambda: True)
+        activity.publish_coding(self._telemetry(
+            in_flight=False,
+            last_activity_at=NOW - timedelta(seconds=CODING_STALL_SECONDS - 1),
+        ))
+        self.assertFalse(activity.coding_snapshot(NOW)["stalled"])
 
     def test_terminal_result_remains_authoritative(self) -> None:
         activity = VoiceActivityStatus()

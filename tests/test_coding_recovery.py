@@ -274,7 +274,14 @@ class CodingRecoveryTests(unittest.TestCase):
             return CodingAgent(PlanningModel(), session, repository=self.root,
                                review_reader=reader)
 
-        request = replace(self.request, review_pull_request=147)
+        # A review is addressed by continuing the pull request's branch; a new
+        # job with one is refused before anything runs (2026-10-24).
+        subprocess.run(["git", "switch", "-q", "-c", "feat/goal"], cwd=self.root, check=True)
+        from alx.contracts.coding import BranchContinuation
+        request = replace(
+            self.request, review_pull_request=147, repair_branch="feat/goal",
+            continuation=BranchContinuation("feat/goal"),
+        )
         with patch.object(coding_agent_module, "commit_job_changes", committed_then_unverified):
             first = agent().run(request)
         self.assertEqual(len(reads), 1)

@@ -22,8 +22,6 @@ from alx.contracts.coding_verification import (
 )
 
 
-DEFAULT_STEP_BUDGET = 16
-MAX_STEP_BUDGET = 32
 MAX_PLANNING_ATTEMPTS = 3
 # The native agent runs its own tool loop, so AL/X no longer counts model
 # turns. What remains bounded is the verification AL/X performs afterwards.
@@ -48,7 +46,6 @@ DEFAULT_VERIFICATION_COMMAND_SECONDS = 180
 # Kept for an explicit broader run. A missing test mapping does not select it.
 FULL_SUITE_COMMAND_SECONDS = 600
 MAX_COMMAND_SECONDS = 600
-MAX_FILE_CHARACTERS = 256_000
 MAX_COMMAND_OUTPUT_CHARACTERS = 16_000
 MAX_DIFF_CHARACTERS = 32_000
 MAX_REPORTED_FILES = 50
@@ -76,7 +73,11 @@ MAX_STAGED_FILES = MAX_REPORTED_FILES
 # exceeding it fails closed. Well above any real worktree; the live incident
 # that motivated the git capability involved roughly 2,000 dirty paths.
 MAX_INSPECTED_ENTRIES = 10_000
-CODING_STALL_SECONDS = 120
+# When the console labels a quiet job "stalled". It matches the watchdog that
+# actually stops a silent session, ALX_CODING_SESSION_STALL_SECONDS (default
+# 600, config/settings.py DEFAULT_CODING_SESSION_STALL_SECONDS), so the label
+# no longer cries stall at two minutes for a job the watchdog still trusts.
+CODING_STALL_SECONDS = 600
 
 
 # Broker-accepted CapabilityResult failure codes. Review outcomes must be
@@ -87,7 +88,6 @@ CODING_FAILURES = (
     "worktree_unusable",
     "path_outside_repository",
     "path_not_permitted",
-    "file_too_large",
     "command_not_permitted",
     "execution_timeout",
     "provider_failed",
@@ -277,18 +277,19 @@ def branch_name_permitted(name: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class BranchContinuation:
-    """Goal-derived branch ownership, injected only by the executor."""
+    """A branch this goal's own coding work used, injected only by the executor.
+
+    Ownership is the branch, not a commit on it (2026-10-24): a hand commit,
+    or a rebase and force-push of the pull request, moves HEAD without making
+    the branch any less this goal's. The checkout must still be on this
+    branch and clean before a continued job may edit.
+    """
 
     branch: str
-    permitted_heads: frozenset[str]
 
     def __post_init__(self) -> None:
         if not branch_name_permitted(self.branch) or self.branch == "main":
             raise ValueError("continuation branch is not permitted")
-        heads = frozenset(self.permitted_heads)
-        if not heads or any(not isinstance(head, str) or not head.strip() for head in heads):
-            raise ValueError("continuation requires recorded commit SHAs")
-        object.__setattr__(self, "permitted_heads", heads)
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,7 +313,6 @@ class CodingRequest:
     # prose is guidance for the session, while these are checks the job is
     # verified by. Each still passes the command allowlist when it runs.
     requested_checks: tuple[tuple[str, ...], ...] = ()
-    step_budget: int = DEFAULT_STEP_BUDGET
     blocked_paths: tuple[str, ...] = ()
     # Core decides whether a job's result should be handed back as a branch and
     # a commit at all, and what to call it. Left unset, the job behaves as it
@@ -374,10 +374,6 @@ class CodingRequest:
             for item in criteria
         ):
             raise ValueError("acceptance criteria must be non-blank bounded strings")
-        if not isinstance(self.step_budget, int) or isinstance(self.step_budget, bool):
-            raise TypeError("step_budget must be an integer")
-        if not 1 <= self.step_budget <= MAX_STEP_BUDGET:
-            raise ValueError("step_budget must be within the permitted bound")
         blocked = tuple(self.blocked_paths)
         object.__setattr__(self, "blocked_paths", blocked)
         # The caller's own limit is enforced where the request is parsed; the
@@ -676,14 +672,11 @@ __all__ = [
     "DEFAULT_COMMAND_SECONDS",
     "DEFAULT_VERIFICATION_COMMAND_SECONDS",
     "FULL_SUITE_COMMAND_SECONDS",
-    "DEFAULT_STEP_BUDGET",
     "MAX_COMMAND_OUTPUT_CHARACTERS",
     "MAX_COMMAND_SECONDS",
     "MAX_DIFF_CHARACTERS",
-    "MAX_FILE_CHARACTERS",
     "MAX_REPORTED_COMMANDS",
     "MAX_REPORTED_FILES",
-    "MAX_STEP_BUDGET",
     "MAX_PLANNING_ATTEMPTS",
     "MAX_VERIFICATION_COMMANDS",
     "MAX_BRANCH_NAME_CHARACTERS",

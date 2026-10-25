@@ -1,27 +1,13 @@
 """The bounds the coding runtime enforces must be visible before dispatch.
 
 The live DHL job of 2026-09-11 spent two of its five attempts discovering
-constraints by rejection:
+constraints by rejection, one of them a worktree name ("AL-X") that was not a
+path on disk. The capability purpose is the one authoritative model-visible
+text rendered per capability, so such facts are stated there.
 
-    call-dhl-diag-001  arguments_unusable   step_budget=40, maximum is 32
-    call-dhl-diag-002  worktree_unusable    "AL-X" resolved to a path that
-                                            does not exist
-
-Both refusals were correct and carried precise diagnostics, and the Core
-corrected itself. But neither constraint was visible in the capability
-catalogue beforehand. StructuredSchema describes kinds, not numeric ranges or
-path semantics, so step_budget reached the Core as {"kind": "integer"} with no
-ceiling and worktree as {"kind": "string"} with nothing saying it is a path on
-disk rather than a project name.
-
-The capability purpose is the one authoritative model-visible text rendered per
-capability, so both facts are stated there. MAX_STEP_BUDGET is interpolated
-rather than written out, so the number the Core is told cannot drift from the
-one the executor applies.
-
-Nothing about validation changes. These tests prove the constraints are
-visible, that the stated ceiling is the enforced ceiling, and that invalid
-values still fail closed.
+step_budget was removed on 2026-10-24: it was validated and advertised, but
+nothing read it once the native agent ran its own tool loop. A new call that
+supplies it is now refused by the schema rather than silently ignored.
 """
 
 from __future__ import annotations
@@ -33,7 +19,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts.coding import MAX_STEP_BUDGET  # noqa: E402
 from alx.core.model_reasoner import _catalogue_payload  # noqa: E402
 from alx.tools.coding import DEFINITION, build_coding_executors  # noqa: E402
 
@@ -43,22 +28,25 @@ def catalogue_entry() -> dict:
     return payload["capabilities"][0]
 
 
-class TheStepBudgetCeilingIsVisible(unittest.TestCase):
-    def test_the_catalogue_states_the_maximum_step_budget(self) -> None:
-        purpose = catalogue_entry()["purpose"]
-        self.assertIn(f"from 1 to {MAX_STEP_BUDGET}", purpose)
-        self.assertIn("step_budget is optional", purpose)
-
-    def test_the_stated_ceiling_is_the_enforced_ceiling(self) -> None:
-        """Interpolated, so prose cannot drift from the executor's rule."""
-        self.assertEqual(MAX_STEP_BUDGET, 32)
-        self.assertIn(str(MAX_STEP_BUDGET), catalogue_entry()["purpose"])
-        # The same constant the validator applies.
-        import inspect
+class TheStepBudgetIsGone(unittest.TestCase):
+    def test_no_step_budget_is_advertised_validated_or_carried(self) -> None:
+        from alx.contracts import coding as contract
+        from alx.contracts.coding import CodingRequest
         from alx.tools import coding
 
-        source = inspect.getsource(coding._optional_step_budget)
-        self.assertIn("MAX_STEP_BUDGET", source)
+        entry = catalogue_entry()
+        self.assertNotIn("step_budget", entry["purpose"])
+        self.assertNotIn("step_budget", entry["input_schema"]["properties"])
+        self.assertNotIn("step_budget", DEFINITION.durable_input_fields)
+        self.assertFalse(hasattr(coding, "_optional_step_budget"))
+        self.assertFalse(hasattr(contract, "MAX_STEP_BUDGET"))
+        self.assertFalse(hasattr(contract, "DEFAULT_STEP_BUDGET"))
+        self.assertFalse(hasattr(CodingRequest("x", "job-1"), "step_budget"))
+
+    def test_a_supplied_step_budget_is_refused_by_the_schema(self) -> None:
+        call = {"task": "x", "repair_branch": "fix/x", "commit_message": "x"}
+        self.assertTrue(DEFINITION.input_schema.accepts(call))
+        self.assertFalse(DEFINITION.input_schema.accepts({**call, "step_budget": 8}))
 
 
 class TheCheckoutIsNotSomethingCoreNames(unittest.TestCase):
@@ -87,19 +75,6 @@ class InvalidValuesStillFailClosed(unittest.TestCase):
         executors = build_coding_executors(lambda request: None, lambda: "call-1")
         return executors["run_coding_task"](arguments)
 
-    def test_a_step_budget_over_the_maximum_is_still_refused(self) -> None:
-        result = self._run({
-            "task": "x", "step_budget": MAX_STEP_BUDGET + 1,
-        })
-        self.assertEqual(result.state.value, "failed")
-        self.assertEqual(result.failure["code"], "arguments_unusable")
-        self.assertEqual(result.failure["invalid_field"], "step_budget")
-
-    def test_a_step_budget_of_zero_is_still_refused(self) -> None:
-        result = self._run({"task": "x", "step_budget": 0})
-        self.assertEqual(result.state.value, "failed")
-        self.assertEqual(result.failure["invalid_field"], "step_budget")
-
     def test_a_worktree_that_does_not_exist_is_still_refused(self) -> None:
         """The live "AL-X" case: a name, not a path that exists.
 
@@ -114,13 +89,6 @@ class InvalidValuesStillFailClosed(unittest.TestCase):
         self.assertEqual(caught.exception.code, "worktree_unusable")
         self.assertEqual(caught.exception.details["reason_code"], "missing")
 
-    def test_the_maximum_step_budget_itself_is_accepted(self) -> None:
-        """The boundary the catalogue states is usable, not off by one."""
-        from alx.contracts.coding import CodingRequest
-
-        request = CodingRequest("x", "job-1", step_budget=MAX_STEP_BUDGET)
-        self.assertEqual(request.step_budget, MAX_STEP_BUDGET)
-
 
 class ExistingValidCallsAreUnchanged(unittest.TestCase):
     def test_the_input_schema_carries_no_path(self) -> None:
@@ -133,8 +101,6 @@ class ExistingValidCallsAreUnchanged(unittest.TestCase):
         entry = catalogue_entry()
         schema = entry["input_schema"]
         self.assertEqual(schema.get("required", []), [])
-        self.assertIn("step_budget", schema["properties"])
-        self.assertEqual(schema["properties"]["step_budget"]["kind"], "integer")
         self.assertNotIn("worktree", schema["properties"])
 
     def test_a_new_call_still_requires_its_task(self) -> None:
@@ -143,14 +109,6 @@ class ExistingValidCallsAreUnchanged(unittest.TestCase):
         )["run_coding_task"]({"repair_branch": "fix/new", "commit_message": "fix"})
         self.assertEqual(result.failure["code"], "arguments_unusable")
         self.assertEqual(result.failure["invalid_field"], "task")
-
-    def test_a_call_without_a_step_budget_keeps_the_default(self) -> None:
-        """Omitting it is valid and unchanged: the default still applies."""
-        from alx.contracts.coding import DEFAULT_STEP_BUDGET, CodingRequest
-
-        request = CodingRequest("x", "job-1")
-        self.assertEqual(request.step_budget, DEFAULT_STEP_BUDGET)
-        self.assertLessEqual(request.step_budget, MAX_STEP_BUDGET)
 
 
 if __name__ == "__main__":

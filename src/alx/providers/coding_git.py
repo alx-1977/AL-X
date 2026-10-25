@@ -50,7 +50,6 @@ from alx.contracts.coding import (
     MAX_INSPECTED_ENTRIES,
     MAX_COMMIT_MESSAGE_CHARACTERS,
     MAX_COMMAND_OUTPUT_CHARACTERS,
-    MAX_STAGED_FILES,
     MAX_REPAIR_BRANCH_ATTEMPTS,
     branch_name_permitted,
     CodingCommit,
@@ -607,10 +606,12 @@ def prepare_feature_branch(repository: Path, requested_branch: str) -> str:
     )
 
 
-def continue_feature_branch(
-    repository: Path, branch: str, permitted_heads: frozenset[str]
-) -> str:
-    """Verify a goal-owned continuation without changing any Git state."""
+def continue_feature_branch(repository: Path, branch: str) -> str:
+    """Verify a goal-owned continuation without changing any Git state.
+
+    Ownership is the branch, proven by the goal's own coding records before
+    this is called; its HEAD may be a hand commit or a rebase (2026-10-24).
+    """
     root = canonical_repository_root(repository)
     if not branch_name_permitted(branch) or branch == "main":
         raise CodingError("git_refused", reason_code="branch_name_not_permitted")
@@ -620,8 +621,6 @@ def continue_feature_branch(
             "git_refused", reason_code="continuation_branch_mismatch",
             current_branch=current,
         )
-    if read_head_sha(root) not in permitted_heads:
-        raise CodingError("git_refused", reason_code="continuation_ownership_unproven")
     if _dirty_paths(root):
         raise CodingError("git_refused", reason_code="canonical_checkout_dirty")
     return branch
@@ -770,12 +769,6 @@ def _authorised_paths(
         # A delete-only repair is legitimate, so emptiness is judged on both
         # input kinds together by the caller rather than on this one alone.
         return ()
-    if len(files) > MAX_STAGED_FILES:
-        raise CodingError(
-            "git_refused",
-            reason_code="too_many_files",
-            received_count=len(files),
-        )
     inherited = {item for item in inherited_dirty}
     authorised: list[str] = []
     for item in files:
@@ -829,8 +822,8 @@ def _refuse_uncommittable(root: Path, paths: tuple[str, ...]) -> None:
         return
     # `-q` answers with an exit status and takes one path at a time: 0 if it
     # is ignored, 1 if not. One process per path is the cost of an answer that
-    # cannot be truncated or miscounted, and the set is already bounded by
-    # MAX_STAGED_FILES before this runs.
+    # cannot be truncated or miscounted, and the Coding Agent has already
+    # refused a job changing more than MAX_STAGED_FILES before any commit.
     for path in paths:
         result = _run(root, ["git", "check-ignore", "-q", "--", path])
         if result.exit_status == 0:
@@ -989,12 +982,6 @@ def _authorised_change_set(
     authorised = tuple(dict.fromkeys((*authorised_files, *authorised_deletions)))
     if not authorised:
         raise CodingError("git_refused", reason_code="no_job_owned_changes")
-    if len(authorised) > MAX_STAGED_FILES:
-        raise CodingError(
-            "git_refused",
-            reason_code="too_many_files",
-            received_count=len(authorised),
-        )
     return authorised_files, authorised_deletions, authorised
 
 

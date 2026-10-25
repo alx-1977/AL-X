@@ -1,8 +1,8 @@
-"""The Coding Agent failed-run fuse is durable, episode-scoped, and pre-dispatch.
+"""The Coding Agent failed-run fuse is durable, goal-scoped, and pre-dispatch.
 
-Failures count within the open failure episode of a durable goal: since the
-last succeeded job or dispatched correction. tests/test_coding_failure_episodes.py
-covers the episode boundaries and the correction bound.
+Friedl, 2026-10-24: at most four counted coding failures in a row on one
+goal; a succeeded job resets the count. tests/test_coding_failure_episodes.py
+covers what counts and corrections.
 """
 
 from __future__ import annotations
@@ -39,6 +39,9 @@ def attempt(call_id: str, *, failed=True, invoked=True, disposition=CapabilityAt
         return CapabilityAttempt(call, disposition, False, reason_code="input_invalid")
     result = CapabilityResult(call_id, "run_coding_task", CapabilityResultState.FAILED if failed else CapabilityResultState.SUCCEEDED, failure={"code": failure_code} if failed else None)
     return CapabilityAttempt(call, disposition, invoked, result, "executor_error" if disposition is CapabilityAttemptDisposition.BROKER_FAILURE else None)
+
+
+FOUR_FAILURES = tuple(attempt(f"failure-{n}") for n in range(4))
 
 
 def planning_failure(call_id: str):
@@ -88,12 +91,12 @@ class CodingRetryFuseTests(unittest.TestCase):
             ),
         )
         goal = state(old, current)
-        self.assertEqual(CoreAgent._failed_coding_executions(goal), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(goal), 0)
         self.assertIsNone(CoreAgent._coding_exhaustion_reason(goal))
         self.assertIsNone(CoreAgent._coding_interruption_exhaustion_reason(
             goal, CapabilityCall("next", "run_coding_task", {"resume_job_id": "current"})
         ))
-        self.assertEqual(CoreAgent._failed_coding_executions(state(
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(
             old, current, attempt("implementation-error")
         )), 1)
 
@@ -124,7 +127,7 @@ class CodingRetryFuseTests(unittest.TestCase):
                 state(*chain), CapabilityCall("5", "run_coding_task", {"resume_job_id": "4"})
             ), "coding_interruption_exhausted",
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(state(*chain)), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(*chain)), 0)
 
     def test_completed_unchanged_historical_job_does_not_spend_retry(self):
         checkpoint = {
@@ -149,9 +152,7 @@ class CodingRetryFuseTests(unittest.TestCase):
                            "session_completed": True},
             ),
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(state(old_noop)), 0)
-        self.assertEqual(CoreAgent._request_conflict_coding_executions(state(old_noop)), 0)
-        self.assertEqual(CoreAgent._planning_coding_failures(state(old_noop)), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(old_noop)), 0)
         self.assertIsNone(CoreAgent._coding_exhaustion_reason(
             state(attempt("earlier-failure"), old_noop)
         ))
@@ -174,7 +175,7 @@ class CodingRetryFuseTests(unittest.TestCase):
                     CapabilityCall("failed", "run_coding_task", {"task": "work"}),
                     CapabilityAttemptDisposition.EXECUTED, True, result,
                 )
-                self.assertEqual(CoreAgent._failed_coding_executions(state(failed)), 1)
+                self.assertEqual(CoreAgent._consecutive_coding_failures(state(failed)), 1)
 
     def test_stage_infrastructure_and_cancellation_do_not_spend_implementation_retry(self):
         failures = [
@@ -194,35 +195,22 @@ class CodingRetryFuseTests(unittest.TestCase):
                                  CapabilityResultState.FAILED, failure=failure),
             ) for index, failure in enumerate(failures)
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 0)
-
-    def test_correction_failure_counts_after_an_earlier_review_transport_failure(self):
-        failure = {
-            "code": "session_failed", "phase": "local_review",
-            "review_classification": "infrastructure",
-        }
-        item = CapabilityAttempt(
-            CapabilityCall("correction", "run_coding_task", {"task": "work"}),
-            CapabilityAttemptDisposition.EXECUTED, True,
-            CapabilityResult("correction", "run_coding_task",
-                             CapabilityResultState.FAILED, failure=failure),
-        )
-        self.assertEqual(CoreAgent._failed_coding_executions(state(item)), 1)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(*attempts)), 0)
 
     def test_changed_arguments_do_not_change_goal_scoped_identity(self):
-        self.assertEqual(CoreAgent._failed_coding_executions(state(attempt("first"), attempt("rewritten"))), 2)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(attempt("first"), attempt("rewritten"))), 2)
 
     def test_success_and_pre_effect_rejection_do_not_consume_allowance(self):
-        self.assertEqual(CoreAgent._failed_coding_executions(state(attempt("ok", failed=False), attempt("rejected", disposition=CapabilityAttemptDisposition.REJECTED))), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(attempt("ok", failed=False), attempt("rejected", disposition=CapabilityAttemptDisposition.REJECTED))), 0)
 
     def test_pre_effect_argument_validation_does_not_consume_allowance(self):
         invalid = attempt("invalid", failure_code="arguments_unusable")
-        self.assertEqual(CoreAgent._failed_coding_executions(state(invalid, attempt("ran"))), 1)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(invalid, attempt("ran"))), 1)
 
     def test_invoked_broker_failure_counts_but_noninvoked_does_not(self):
         counted = attempt("reached", disposition=CapabilityAttemptDisposition.BROKER_FAILURE)
         not_counted = attempt("not-reached", disposition=CapabilityAttemptDisposition.BROKER_FAILURE, invoked=False)
-        self.assertEqual(CoreAgent._failed_coding_executions(state(counted, not_counted)), 1)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(counted, not_counted)), 1)
 
     def test_exhaustion_never_dispatches_or_creates_pending_and_reaches_reasoner(self):
         now = datetime(2026, 9, 16, tzinfo=UTC)
@@ -247,7 +235,7 @@ class CodingRetryFuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
             self.addCleanup(store.close)
-            store.create(state(attempt("first"), attempt("second")), "conversation", retention)
+            store.create(state(*FOUR_FAILURES), "conversation", retention)
             schema = StructuredSchema(ValueKind.OBJECT)
             capability = CapabilityDefinition("run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL)
             reasoner = Reasoner()
@@ -261,7 +249,7 @@ class CodingRetryFuseTests(unittest.TestCase):
             self.assertEqual(attempts[-1].reason_code, "coding_retry_exhausted")
             self.assertFalse(attempts[-1].implementation_invoked)
             self.assertIsNot(attempts[-1].disposition, CapabilityAttemptDisposition.PENDING)
-            self.assertEqual(len(reasoner.contexts[1].active_goal.attempts), 3)
+            self.assertEqual(len(reasoner.contexts[1].active_goal.attempts), 5)
 
     def test_same_and_reworded_attempts_after_exhaustion_stay_stably_exhausted(self):
         now = datetime(2026, 9, 16, tzinfo=UTC)
@@ -280,7 +268,7 @@ class CodingRetryFuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
             self.addCleanup(store.close)
-            store.create(state(attempt("first"), attempt("second")), "conversation", retention)
+            store.create(state(*FOUR_FAILURES), "conversation", retention)
             schema = StructuredSchema(ValueKind.OBJECT)
             capability = CapabilityDefinition("run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL)
             agent = CoreAgent(store, Reasoner(), lambda *_: self.fail("must not dispatch"), (capability,), clock=lambda: now)
@@ -441,13 +429,12 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
             ["canonical_checkout_not_on_main"] * 2,
         )
         # The third job reached the planning provider and failed before a plan
-        # reached deterministic validation, so neither allowance is spent.
+        # reached deterministic validation, so nothing is counted.
         self.assertEqual(self.model.calls, 1)
-        self.assertEqual(CoreAgent._failed_coding_executions(state(*attempts)), 0)
-        self.assertEqual(CoreAgent._planning_coding_failures(state(*attempts)), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(*attempts)), 0)
 
     def test_an_implementation_reaching_failure_still_counts(self) -> None:
-        reached = attempt("reached", failure_code="provider_failed")
+        reached = attempt("reached", failure_code="task_failed")
         refused = CapabilityAttempt(
             CapabilityCall("refused", "run_coding_task", {"task": "x"}),
             CapabilityAttemptDisposition.EXECUTED, True,
@@ -461,7 +448,7 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            CoreAgent._failed_coding_executions(state(refused, refused, reached)), 1
+            CoreAgent._consecutive_coding_failures(state(refused, refused, reached)), 1
         )
 
 
@@ -492,13 +479,11 @@ def before_implementation(call_id: str):
     return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
 
 
-class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
-    """Three classes, two bounds, no reset.
+class TaskFailuresShareOneBound(unittest.TestCase):
+    """Implementation, planning and request-conflict failures share one count.
 
-    Genuine implementation failures spend D-028's allowance of two. A run whose
-    required verification only the request's own blocked paths stopped is a
-    request conflict: Core can correct the plan and dispatch again, but at most
-    two per goal. A refusal before implementation spends neither.
+    Each is about the task, so each counts toward the four in a row; a
+    refusal before implementation counts toward nothing.
     """
 
     def process(self, attempts, calls):
@@ -550,28 +535,35 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
             final = store.load("goal-a").state.attempts
         refused = [
             item for item in final
-            if item.reason_code in {
-                "coding_retry_exhausted",
-                "coding_planning_exhausted",
-            }
+            if item.reason_code == "coding_retry_exhausted"
         ]
         return dispatched, refused
 
-    def test_the_classes_are_counted_apart(self) -> None:
+    def test_the_classes_are_counted_together(self) -> None:
         goal = state(
-            conflict("c1"), attempt("i1"), before_implementation("p1"), conflict("c2")
+            conflict("c1"), attempt("i1"), before_implementation("p1"),
+            planning_failure("plan"),
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
-        self.assertEqual(CoreAgent._request_conflict_coding_executions(goal), 2)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(goal), 3)
 
-    def test_genuine_implementation_failures_still_exhaust_the_allowance(self) -> None:
+    def test_four_task_failures_in_a_row_exhaust_the_goal(self) -> None:
         dispatched, refused = self.process(
-            [conflict("c1"), attempt("i1"), attempt("i2")], ["next"]
+            [conflict("c1"), attempt("i1"), planning_failure("plan"), attempt("i2")],
+            ["next"],
         )
         self.assertEqual(dispatched, [])
         self.assertEqual(len(refused), 1)
         self.assertEqual(refused[0].reason_code, "coding_retry_exhausted")
         self.assertEqual(self.last_outcome.response, "done")
+
+    def test_a_succeeded_job_reopens_the_goal(self) -> None:
+        ok = attempt("ok", failed=False)
+        dispatched, refused = self.process(
+            [*FOUR_FAILURES, ok, attempt("i1"), attempt("i2"), attempt("i3")],
+            ["next"],
+        )
+        self.assertEqual(dispatched, ["next"])
+        self.assertEqual(refused, [])
 
     def test_refusals_before_implementation_spend_nothing(self) -> None:
         dispatched, refused = self.process(
@@ -592,17 +584,6 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
             ["corrected"],
         )
         self.assertEqual(dispatched, ["corrected"])
-        self.assertEqual(refused, [])
-
-    def test_planning_and_implementation_allowances_are_independent(self) -> None:
-        planning = planning_failure("plan")
-        goal = state(attempt("implementation"), planning)
-        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
-        self.assertEqual(CoreAgent._planning_coding_failures(goal), 1)
-        dispatched, refused = self.process(
-            [attempt("implementation"), planning], ["next-implementation"]
-        )
-        self.assertEqual(dispatched, ["next-implementation"])
         self.assertEqual(refused, [])
 
     def test_nonvalidation_planning_errors_do_not_consume_the_allowance(self) -> None:
@@ -630,23 +611,20 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(CoreAgent._planning_coding_failures(state(*failures)), 0)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(*failures)), 0)
         dispatched, refused = self.process(failures, ["next-plan"])
         self.assertEqual(dispatched, ["next-plan"])
         self.assertEqual(refused, [])
 
-    def test_two_planning_jobs_exhaust_only_the_planning_allowance(self) -> None:
-        planning = [
-            planning_failure("plan-1"),
-            planning_failure("plan-2"),
-        ]
+    def test_planning_failures_count_toward_the_same_bound(self) -> None:
+        planning = [planning_failure(f"plan-{n}") for n in range(4)]
+        self.assertEqual(CoreAgent._consecutive_coding_failures(state(*planning)), 4)
         dispatched, refused = self.process(planning, ["reworded-plan"])
         self.assertEqual(dispatched, [])
         self.assertEqual(
             [item.reason_code for item in refused],
-            ["coding_planning_exhausted"],
+            ["coding_retry_exhausted"],
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(state(*planning)), 0)
         self.assertEqual(self.last_outcome.state.value, "responded")
         self.assertEqual(self.last_outcome.response, "done")
 
@@ -679,10 +657,7 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
             self.addCleanup(goals.close)
             self.addCleanup(conversations.close)
             goals.create(
-                state(
-                    planning_failure("plan-1"),
-                    planning_failure("plan-2"),
-                ),
+                state(*(planning_failure(f"plan-{n}") for n in range(4))),
                 "conversation",
                 retention,
             )
@@ -713,10 +688,10 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         self.assertEqual(persisted.turns[-1].content, outcome.response)
 
     def test_repeated_request_conflicts_cannot_loop(self) -> None:
-        # Two conflicts reach the bound whatever the wording of the next plan,
+        # Four conflicts reach the bound whatever the wording of the next plan,
         # and the refusal is recorded once, however often Core asks again.
         dispatched, refused = self.process(
-            [conflict("c1"), conflict("c2")], ["reworded", "reworded-again"]
+            [conflict(f"c{n}") for n in range(4)], ["reworded", "reworded-again"]
         )
         self.assertEqual(dispatched, [])
         self.assertEqual(len(refused), 1)
@@ -725,21 +700,11 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         )
         self.assertEqual(self.last_outcome.response, "done")
 
-    def test_each_bound_refuses_on_its_own(self) -> None:
-        dispatched, _ = self.process([conflict("c1"), attempt("i1")], ["next"])
-        self.assertEqual(dispatched, ["next"])
-        dispatched, refused = self.process(
-            [conflict("c1"), attempt("i1"), conflict("c2")], ["next"]
-        )
-        self.assertEqual(dispatched, [])
-        self.assertEqual(len(refused), 1)
-        self.assertEqual(self.last_outcome.response, "done")
-
     def test_an_error_carrying_a_class_reaches_core_without_it(self) -> None:
         """Only the Coding Agent's own verification records assign the class.
 
         A CodingError raised anywhere, carrying `failure_class`, reaches Core
-        without it and so spends the implementation allowance like any other.
+        without it, so it cannot claim an uncounted infrastructure class.
         """
         self.assertNotIn(
             "failure_class",
@@ -764,19 +729,7 @@ class RequestConflictsHaveTheirOwnBound(unittest.TestCase):
         goal = state(
             CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
         )
-        self.assertEqual(CoreAgent._failed_coding_executions(goal), 1)
-        self.assertEqual(CoreAgent._request_conflict_coding_executions(goal), 0)
-
-    def test_the_bounds(self) -> None:
-        from alx.core.loop import (
-            _MAX_FAILED_CODING_EXECUTIONS,
-            _MAX_PLANNING_CODING_FAILURES,
-            _MAX_REQUEST_CONFLICT_CODING_EXECUTIONS,
-        )
-
-        self.assertEqual(_MAX_FAILED_CODING_EXECUTIONS, 2)
-        self.assertEqual(_MAX_PLANNING_CODING_FAILURES, 2)
-        self.assertEqual(_MAX_REQUEST_CONFLICT_CODING_EXECUTIONS, 2)
+        self.assertEqual(CoreAgent._consecutive_coding_failures(goal), 1)
 
 
 class TheVerificationChangeDoesNotTouchTheRetryAccounting(unittest.TestCase):
@@ -784,19 +737,19 @@ class TheVerificationChangeDoesNotTouchTheRetryAccounting(unittest.TestCase):
 
     The verification model changed underneath it: a job can now fail because a
     law gate failed rather than because pytest did. The fuse is indifferent to
-    the reason — it counts failed coding executions in the open episode — and this holds
+    the reason — it counts failed coding executions in a row — and this holds
     that indifference explicitly, so a later change to the limits or to what
     counts as a failure has to break a test that says so.
     """
 
     def test_the_allowance_and_its_limit_are_unchanged(self) -> None:
-        from alx.core.loop import _MAX_FAILED_CODING_EXECUTIONS
+        from alx.core.loop import _MAX_CONSECUTIVE_CODING_FAILURES
 
-        self.assertEqual(_MAX_FAILED_CODING_EXECUTIONS, 2)
+        self.assertEqual(_MAX_CONSECUTIVE_CODING_FAILURES, 4)
 
     def test_a_verification_failure_consumes_one_allowance_like_any_other(self) -> None:
         """A required-check failure is one failed execution, not a new class."""
-        counted = CoreAgent._failed_coding_executions(
+        counted = CoreAgent._consecutive_coding_failures(
             state(
                 attempt("first", failure_code="required_verification_failed"),
                 attempt("second", failure_code="task_failed"),
@@ -807,7 +760,7 @@ class TheVerificationChangeDoesNotTouchTheRetryAccounting(unittest.TestCase):
     def test_a_succeeded_unverified_job_still_consumes_nothing(self) -> None:
         """Success is success; the fuse counts failures only."""
         self.assertEqual(
-            CoreAgent._failed_coding_executions(
+            CoreAgent._consecutive_coding_failures(
                 state(attempt("ok", failed=False), attempt("also-ok", failed=False))
             ),
             0,

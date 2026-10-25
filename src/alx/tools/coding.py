@@ -31,7 +31,6 @@ from alx.contracts import (
 )
 from alx.contracts.coding import (
     CODING_FAILURES,
-    DEFAULT_STEP_BUDGET,
     MAX_BLOCKED_PATHS,
     MAX_BLOCKED_PATH_CHARACTERS,
     MAX_CONTEXT_CHARACTERS,
@@ -42,7 +41,6 @@ from alx.contracts.coding import (
     MAX_CRITERION_CHARACTERS,
     MAX_BRANCH_NAME_CHARACTERS,
     MAX_COMMIT_MESSAGE_CHARACTERS,
-    MAX_STEP_BUDGET,
     MAX_REPAIR_BRANCH_ATTEMPTS,
     MAX_TASK_CHARACTERS,
     BranchContinuation,
@@ -154,11 +152,10 @@ _VERIFICATION = StructuredSchema(
 
 DEFINITION = CapabilityDefinition(
     RUN_CODING_TASK,
-    # The two bounds the runtime enforces are stated here because the
-    # structured schema cannot carry them: StructuredSchema describes kinds,
-    # not numeric ranges or path semantics. MAX_STEP_BUDGET is interpolated
-    # rather than written out, so the stated ceiling cannot drift from the one
-    # the executor applies.
+    # Bounds the runtime enforces are stated here because the structured
+    # schema cannot carry them: StructuredSchema describes kinds, not numeric
+    # ranges or path semantics. Constants are interpolated rather than written
+    # out, so a stated bound cannot drift from the one the executor applies.
     "Execute one bounded software-engineering job in the configured canonical "
     "checkout. "
     "For a tiny improvement you selected yourself, check current main with the "
@@ -169,17 +166,18 @@ DEFINITION = CapabilityDefinition(
     "the checkout on main through repository_operation before a new job. "
     "By default the job requires clean main, then "
     "creates and switches to the requested new feature branch before the coding "
-    "session may edit. With continue_goal_branch=true, it instead verifies a "
-    "clean checkout of repair_branch whose HEAD is a durable successfully "
-    "verified Coding Agent commit recorded for this active goal on that same "
-    "branch, including when a later verified commit for the goal exists on "
-    "another branch. "
+    "session may edit. With continue_goal_branch=true, it instead continues on "
+    "repair_branch without switching: repair_branch must be a branch an earlier "
+    "coding job of this active goal created or worked on, whether that job "
+    "succeeded or failed, it may not be main, and the checkout must already be "
+    "on it and clean. Its HEAD may be any commit, including a hand commit or a "
+    "rebased, force-pushed pull request branch. A branch no coding job of this "
+    "goal used is refused. "
     "AL/X must position the checkout first. Only one implementation job may hold "
     "the checkout at a "
     "time. No repository path is accepted. repair_branch and commit_message are "
     "required; the job's own changed files are committed on that branch once every "
-    f"required check passes. step_budget is optional and must be from 1 to {MAX_STEP_BUDGET}. "
-    "Required verification may or "
+    "required check passes. Required verification may or "
     "may not include tests, and includes the law gates when the change touches "
     "the paths they govern. "
     f"verification_commands takes up to {MAX_REQUESTED_CHECKS} exact argv arrays "
@@ -201,7 +199,10 @@ DEFINITION = CapabilityDefinition(
     "not push, merge, deploy, or request an external review. "
     "No second model reviews the diff: the checks, and the external review "
     "you request on the pull request, are the review. To address that review, "
-    "give review_pull_request: the job reads the reviewer's summary and "
+    "give review_pull_request together with continue_goal_branch=true or a "
+    "resume, since a review is of an existing branch; a new job with it is "
+    "refused as arguments_unusable (review_pull_request_requires_continuation). "
+    "The job reads the reviewer's summary and "
     "comments for the exact revision it starts from and hands them to the "
     "session word for word, with the instruction to reproduce each finding in "
     "a failing test before fixing it. Do not retell the findings in task; name "
@@ -230,7 +231,6 @@ DEFINITION = CapabilityDefinition(
             "verification_commands": StructuredSchema(
                 ValueKind.ARRAY, items=_STRING_ARRAY
             ),
-            "step_budget": _INTEGER,
             "blocked_paths": _STRING_ARRAY,
             "repair_branch": _STRING,
             "commit_message": _STRING,
@@ -296,7 +296,7 @@ DEFINITION = CapabilityDefinition(
     durable_input_fields=(
         "task", "context", "acceptance_criteria", "test_guidance",
         "verification_commands",
-        "step_budget", "blocked_paths", "repair_branch", "commit_message",
+        "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
         "resume_job_id", "corrective_action", "review_pull_request",
     ),
@@ -354,35 +354,67 @@ _OUTCOME_ISSUE_CODES = (
 def goal_coding_branch(
     state: GoalState | None, repair_branch: str
 ) -> BranchContinuation | None:
-    """Durable successful Coding Agent commits recorded for this goal on one branch."""
-    heads: list[str] = []
+    """repair_branch, if this goal's own coding work created or used it.
+
+    Ownership is the branch, not a commit (2026-10-24): a hand commit, or a
+    merge that rebased and force-pushed the pull request, moves HEAD without
+    making the branch any less this goal's. Every run_coding_task attempt of
+    the goal that reached implementation counts, succeeded or failed: the
+    branch it recorded, or the repair_branch it was asked for when it recorded
+    none. A recorded branch wins because a taken name gets a numbered branch
+    (feat/x-2), and the taken feat/x was never this goal's. One malformed
+    record proves nothing about its branch and is skipped; it never disables
+    continuation for the whole goal.
+    """
     for attempt in (() if state is None else state.attempts):
-        result = attempt.result
-        if (
-            attempt.disposition is not CapabilityAttemptDisposition.EXECUTED
-            or not attempt.implementation_invoked
-            or attempt.call is None
-            or attempt.call.capability_id != RUN_CODING_TASK
-            or result is None
-            or result.state is not CapabilityResultState.SUCCEEDED
-        ):
-            continue
-        commit = result.recovery_values().get("commit")
-        if not isinstance(commit, Mapping):
-            continue
-        branch, sha = commit.get("branch"), commit.get("commit_sha")
-        try:
-            validated = BranchContinuation(branch, frozenset({sha}))
-        except (TypeError, ValueError):
-            return None
-        if validated.branch == repair_branch:
-            heads.append(sha)
-    if not heads:
-        return None
+        if repair_branch in _attempt_branches(attempt):
+            # Only permitted names reach the set, so this cannot raise.
+            return BranchContinuation(repair_branch)
+    return None
+
+
+def _attempt_branches(attempt: Any) -> frozenset[str]:
+    """Branches one recorded coding attempt worked on, or none."""
+    result = attempt.result
+    if (
+        attempt.disposition is not CapabilityAttemptDisposition.EXECUTED
+        or not attempt.implementation_invoked
+        or attempt.call is None
+        or attempt.call.capability_id != RUN_CODING_TASK
+        or result is None
+    ):
+        return frozenset()
+    failure = result.recovery_failure()
+    if isinstance(failure, Mapping) and failure.get("implementation_reached") is False:
+        # Refused before the feature branch existed: nothing used it.
+        return frozenset()
+    values = result.recovery_values()
+    commit = values.get("commit")
+    no_change = values.get("no_change_evidence")
     try:
-        return BranchContinuation(repair_branch, frozenset(heads))
+        checkpoint = json.loads(values.get("checkpoint"))
     except (TypeError, ValueError):
-        return None
+        checkpoint = None
+    recorded = _permitted_branches((
+        values.get("branch"),
+        commit.get("branch") if isinstance(commit, Mapping) else None,
+        checkpoint.get("branch") if isinstance(checkpoint, dict) else None,
+        # A job that found nothing to change records its branch only here.
+        no_change.get("branch") if isinstance(no_change, Mapping) else None,
+    ))
+    return recorded or _permitted_branches(
+        (attempt.call.arguments.get("repair_branch"),)
+    )
+
+
+def _permitted_branches(candidates: tuple[object, ...]) -> frozenset[str]:
+    branches = set()
+    for candidate in candidates:
+        try:
+            branches.add(BranchContinuation(candidate).branch)
+        except (TypeError, ValueError):
+            continue
+    return frozenset(branches)
 
 
 def build_coding_executors(
@@ -478,7 +510,7 @@ def build_coding_executors(
                 return _failed(call_id, "git_refused", reason_code="resume_checkpoint_invalid",
                                implementation_reached=False)
             for field in ("task", "context", "acceptance_criteria", "test_guidance",
-                          "step_budget", "blocked_paths", "commit_message"):
+                          "blocked_paths", "commit_message"):
                 if field in arguments and getattr(request, field) != getattr(original_request, field):
                     return _failed(call_id, "arguments_unusable", reason_code="resume_request_changed",
                                    implementation_reached=False)
@@ -670,9 +702,6 @@ def parse_coding_arguments(
     requested_checks, error = _optional_verification_commands(arguments)
     if error is not None:
         return None, error
-    budget, error = _optional_step_budget(arguments)
-    if error is not None:
-        return None, error
     blocked, error = _optional_blocked_paths(arguments)
     if error is not None:
         return None, error
@@ -731,7 +760,6 @@ def parse_coding_arguments(
             context=context,
             test_guidance=guidance,
             requested_checks=requested_checks,
-            step_budget=budget,
             blocked_paths=blocked,
             repair_branch=branch,
             commit_message=message,
@@ -860,26 +888,6 @@ def _optional_criteria(
             )
         criteria.append(item)
     return tuple(criteria), None
-
-
-def _optional_step_budget(
-    arguments: Mapping[str, Any],
-) -> tuple[int, dict[str, object] | None]:
-    if "step_budget" not in arguments or arguments["step_budget"] is None:
-        return DEFAULT_STEP_BUDGET, None
-    value = arguments["step_budget"]
-    if not isinstance(value, int) or isinstance(value, bool):
-        return 0, _argument_failure(
-            "step_budget", "not_integer", "step_budget must be an integer"
-        )
-    if not 1 <= value <= MAX_STEP_BUDGET:
-        return 0, _argument_failure(
-            "step_budget",
-            "out_of_range",
-            f"step_budget must be an integer from 1 to {MAX_STEP_BUDGET}",
-            received=value,
-        )
-    return value, None
 
 
 def _optional_blocked_paths(

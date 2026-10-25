@@ -615,23 +615,6 @@ class NarrowedRefusalsUnderD029V1(Worktree):
         self.assertIn("newdir/nested/b.py", dirt)
         self.assertNotIn("newdir/", dirt)
 
-    def test_a_bare_file_count_is_bounded(self) -> None:
-        from alx.contracts.coding import MAX_STAGED_FILES
-
-        checkout_branch(self.root, "repair/target")
-        names = []
-        for index in range(MAX_STAGED_FILES + 5):
-            name = f"f{index:03d}.py"
-            (self.root / name).write_text("x\n")
-            names.append(name)
-
-        with self.assertRaises(CodingError) as caught:
-            commit_job_changes(
-                self.root, "repair/target", "repair", tuple(names)
-            )
-
-        self.assertEqual(caught.exception.details["reason_code"], "too_many_files")
-
     def test_a_filename_containing_glob_characters_stages_literally(self) -> None:
         """Paths are exact filenames, never patterns.
 
