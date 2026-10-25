@@ -428,6 +428,20 @@ class MainIsReachedOnlyByMergeTests(RealRepositoryHarness):
         self.assertEqual(outcome.failure_code, "self_preservation")
         self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
 
+    def test_amend_cherry_pick_and_revert_on_main_are_refused(self) -> None:
+        self.branch("fix/thing")
+        git(self.local, "checkout", "-q", "main")
+        before = git(self.local, "rev-parse", "HEAD")
+        for operation, arguments in (
+            (Operation.AMEND, {"message": "rewritten on main"}),
+            (Operation.CHERRY_PICK, {"revision": "fix/thing"}),
+            (Operation.REVERT, {"revision": "HEAD"}),
+        ):
+            with self.subTest(operation=operation):
+                outcome = self.perform(operation, **arguments)
+                self.assertEqual(outcome.failure_code, "self_preservation")
+                self.assertEqual(git(self.local, "rev-parse", "HEAD"), before)
+
     def test_a_decoy_branch_argument_does_not_free_a_commit_on_main(self) -> None:
         (self.local / "x.txt").write_text("x\n")
         self.perform(Operation.STAGE, paths=["x.txt"])

@@ -331,7 +331,8 @@ class RepositoryCheckoutStatus:
 # ---- the one invariant ----------------------------------------------------
 
 # Operations the invariant examines. Most destroy history or files rather
-# than adding to them. PUSH, COMMIT and LOCAL_MERGE add, but on `main` they
+# than adding to them. PUSH and the commit-writing operations (COMMIT, AMEND,
+# CHERRY_PICK, REVERT, LOCAL_MERGE) add, but on `main` they
 # would put code there without the reviewed GitHub merge that is the only route
 # to it (2026-10-24), so they are examined too. Everything else adds a commit,
 # a ref or a fetched object somewhere that is not `main`.
@@ -341,6 +342,9 @@ _GUARDED: frozenset[Operation] = frozenset({
     Operation.PUSH,
     Operation.FORCE_PUSH,
     Operation.COMMIT,
+    Operation.AMEND,
+    Operation.CHERRY_PICK,
+    Operation.REVERT,
     Operation.LOCAL_MERGE,
     Operation.RESET,
     Operation.REBASE,
@@ -635,7 +639,10 @@ def refuse_if_self_destructive(
             f"code reaches {system.branch} only through a reviewed pull request "
             "merge; pushing to it directly is refused"
         )
-    if operation in (Operation.COMMIT, Operation.LOCAL_MERGE):
+    if operation in (
+        Operation.COMMIT, Operation.AMEND, Operation.CHERRY_PICK,
+        Operation.REVERT, Operation.LOCAL_MERGE,
+    ):
         return (
             f"{system.branch} is checked out; code reaches {system.branch} only "
             "through a reviewed pull request merge, so commit on a feature branch"

@@ -273,6 +273,16 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
         self.assertFalse(evidence.all_required_passed)
         main.assert_not_called()
 
+    def test_a_long_failing_requested_run_still_names_its_failed_test(self) -> None:
+        # Assertion output far beyond the stored-output bound: the summary
+        # naming the failed test comes last and must still be read.
+        (self.root / "tests" / "test_long.py").write_text(
+            "def test_long():\n    print('x' * 40000)\n    assert False\n", encoding="utf-8")
+        evidence, _run, _commands = self._verify(self._pytest("tests/test_long.py"))
+        check = next(c for c in evidence.checks if c.name == "requested_1")
+        self.assertFalse(check.passed)
+        self.assertEqual(check.findings, ("tests/test_long.py::test_long",))
+
     def test_resume_accepts_evidence_that_passed_a_requested_command(self) -> None:
         request = CodingRequest(task="t", job_id="j", worktree=str(self.root),
                                 requested_checks=(self._pytest("tests/test_ok.py"),))

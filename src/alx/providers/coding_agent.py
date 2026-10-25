@@ -1488,7 +1488,7 @@ class CodingAgent:
                             else DEFAULT_VERIFICATION_COMMAND_SECONDS
                         ),
                         blocked_paths=workspace.blocked_paths,
-                        output_characters=0 if check.name.startswith("pytest") else MAX_COMMAND_OUTPUT_CHARACTERS,
+                        output_characters=0 if is_pytest_command(check.argv) else MAX_COMMAND_OUTPUT_CHARACTERS,
                     )
                 except CodingError as error:
                     if error.code == "coding_cancelled":

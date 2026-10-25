@@ -390,6 +390,7 @@ def _attempt_branches(attempt: Any) -> frozenset[str]:
         return frozenset()
     values = result.recovery_values()
     commit = values.get("commit")
+    no_change = values.get("no_change_evidence")
     try:
         checkpoint = json.loads(values.get("checkpoint"))
     except (TypeError, ValueError):
@@ -398,6 +399,8 @@ def _attempt_branches(attempt: Any) -> frozenset[str]:
         values.get("branch"),
         commit.get("branch") if isinstance(commit, Mapping) else None,
         checkpoint.get("branch") if isinstance(checkpoint, dict) else None,
+        # A job that found nothing to change records its branch only here.
+        no_change.get("branch") if isinstance(no_change, Mapping) else None,
     ))
     return recorded or _permitted_branches(
         (attempt.call.arguments.get("repair_branch"),)

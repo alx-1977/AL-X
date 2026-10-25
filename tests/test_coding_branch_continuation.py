@@ -138,6 +138,13 @@ class Ownership(unittest.TestCase):
                                failure={'code': 'required_verification_failed'})
         self.assertEqual(goal_coding_branch(goal(checkpointed), 'feat/z-3'),
                          BranchContinuation('feat/z-3'))
+        # Nothing to change: the numbered branch is recorded only as evidence.
+        unchanged = attempt({'task': 'w', 'repair_branch': 'feat/n'},
+                            {'status': 'no_change_required',
+                             'no_change_evidence': {'branch': 'feat/n-2'}}, '4')
+        self.assertIsNone(goal_coding_branch(goal(unchanged), 'feat/n'))
+        self.assertEqual(goal_coding_branch(goal(unchanged), 'feat/n-2'),
+                         BranchContinuation('feat/n-2'))
 
     def test_a_malformed_record_is_skipped_not_fatal(self):
         good = recorded('feat/a', 'a', '1')

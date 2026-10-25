@@ -408,7 +408,8 @@ class RepositoryAuthority:
         the same operation the decision was about.
         """
         if operation in (
-            Operation.RESET, Operation.REBASE, Operation.COMMIT, Operation.LOCAL_MERGE,
+            Operation.RESET, Operation.REBASE, Operation.COMMIT, Operation.AMEND,
+            Operation.CHERRY_PICK, Operation.REVERT, Operation.LOCAL_MERGE,
         ):
             return self._checked_out_branch()
         return str(
