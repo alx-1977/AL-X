@@ -192,6 +192,10 @@ def _strip_tags(content: str) -> str:
             parts.append(content[index:next_mark])
             index = next_mark
             continue
+        if not _is_markup_start(content, index):
+            parts.append("<")
+            index += 1
+            continue
         open_end, _self_closing = _open_tag_end(content, index)
         if open_end is None:
             parts.append(content[index:])
@@ -201,13 +205,21 @@ def _strip_tags(content: str) -> str:
     return "".join(parts)
 
 
+def _is_markup_start(content: str, index: int) -> bool:
+    """Only an ASCII letter, `/`, `!`, or `?` immediately after `<` starts markup."""
+    if index + 1 >= len(content) or content[index] != "<":
+        return False
+    following = content[index + 1]
+    return "a" <= following <= "z" or "A" <= following <= "Z" or following in "/!?"
+
+
 def _is_name_boundary(character: str) -> bool:
     """A tag name ends at whitespace, `/`, or `>`."""
     return character.isspace() or character in "/>"
 
 
 def _noise_tag_at(content: str, index: int) -> str | None:
-    if index >= len(content) or content[index] != "<":
+    if not _is_markup_start(content, index):
         return None
     for name in _NOISE_NAMES:
         after = index + 1 + len(name)
@@ -247,6 +259,9 @@ def _ordinary_markup_end(content: str, start: int) -> int:
     one is a marker of its own, so the text before it is kept and that marker
     is read next. With no `>` and no such marker, the rest of the part is text.
     """
+    # A literal `<` cannot begin attributes or consume a later real tag.
+    if not _is_markup_start(content, start):
+        return start + 1
     quote = ""
     position = start + 1
     limit = len(content)
