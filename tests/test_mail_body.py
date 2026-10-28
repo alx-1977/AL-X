@@ -93,6 +93,70 @@ class FakeImap:
 
 
 class MailBodyExtractionTests(unittest.TestCase):
+    def test_literal_less_than_and_apostrophe_do_not_expose_style(self) -> None:
+        text = body(single(
+            "<p>Price < 5 and it's discounted.</p>"
+            "<style>CSS_RULE</style><p>Tracking ABC123</p>",
+            "html",
+        ))
+        self.assertIn("Price < 5 and it's discounted.", text)
+        self.assertIn("Tracking ABC123", text)
+        for hidden in ("CSS_RULE", "<p>", "</p>", "<style>", "</style>"):
+            self.assertNotIn(hidden, text)
+
+    def test_literal_less_than_stays_visible_around_excluded_markup(self) -> None:
+        for literal in (
+            "< 5", "<5", "<=5", "<'value'", '<"value"', "<é", "<Ω",
+            "<ſtyle>", "<ſcript>",
+            "< /style>", "< /script>", "< /STYLE >", "<\t/style>", "<",
+        ):
+            for quote in ("'", '"'):
+                for excluded in (
+                    "<style>CSS_RULE</style>",
+                    "<script>JS_RULE</script>",
+                    "<!-- COMMENT_RULE -->",
+                ):
+                    with self.subTest(literal=literal, quote=quote, excluded=excluded):
+                        visible = f"Price {literal} and {quote}discounted"
+                        text = body(single(
+                            f"<p>{visible}{excluded} offer{quote}</p><p>Tracking ABC123</p>",
+                            "html",
+                        ))
+                        self.assertEqual(
+                            text, f"{visible}  offer{quote}  Tracking ABC123",
+                        )
+
+    def test_literal_less_than_immediately_before_excluded_markup(self) -> None:
+        for excluded in (
+            "<style>CSS_RULE</style>",
+            "<script>JS_RULE</script>",
+            "<!-- COMMENT_RULE -->",
+        ):
+            for quote in ("'", '"'):
+                with self.subTest(excluded=excluded, quote=quote):
+                    text = body(single(
+                        f"<p>Price {quote}discounted <{excluded} offer{quote}</p>",
+                        "html",
+                    ))
+                    self.assertEqual(text, f"Price {quote}discounted <  offer{quote}")
+
+    def test_literal_less_than_at_end_of_html_is_visible(self) -> None:
+        # MIMEText preserves the actual end of input without set_content's newline.
+        for visible in ("Price <", "It's discounted <", 'Say "discounted" <'):
+            with self.subTest(visible=visible):
+                self.assertEqual(body(MIMEText(visible, "html", "utf-8").as_bytes()), visible)
+
+    def test_spaced_noise_closers_do_not_end_excluded_blocks(self) -> None:
+        for name in ("style", "script"):
+            for closer in (f"< /{name}>", f"< /{name.upper()} >", f"<\t/{name}>"):
+                with self.subTest(name=name, closer=closer):
+                    text = body(single(
+                        f"<p>Before</p><{name}>HIDDEN {closer} STILL_HIDDEN"
+                        f"</{name}><p>Tracking ABC123</p>",
+                        "html",
+                    ))
+                    self.assertEqual(text, "Before   Tracking ABC123")
+
     def test_digikey_shaped_alternative_uses_html_and_drops_css(self) -> None:
         raw = alternative(".", digikey_html())
         text = body(raw)
