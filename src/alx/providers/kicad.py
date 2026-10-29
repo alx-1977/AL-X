@@ -215,7 +215,8 @@ def normalized_manufacturing(data):
             pass
     # Remove only complete metadata records, preserving geometry sharing a line.
     gerber_source = re.sub(r'G04[^*]*\*', '', gerber_source)
-    gerber_source = re.sub(r'%TF\.(?:CreationDate|GenerationSoftware),[^*]*\*%', '', gerber_source)
+    # SameCoordinates only tags files that share an origin; geometry is compared below.
+    gerber_source = re.sub(r'%TF\.(?:CreationDate|GenerationSoftware|SameCoordinates),[^*]*\*%', '', gerber_source)
     lines = gerber_source.splitlines()
     return [line.rstrip() for line in lines if not (
         not line.strip()
@@ -392,10 +393,14 @@ class KiCadProvider:
             staging.mkdir(parents=True)
             board = root / 'project' / meta['board']
             layers = sexpr(board.read_text()).one('layers')
-            layer_names = [n.children[1] for n in layers.children if isinstance(n, Node)]
-            self._run('pcb', 'export', 'gerbers', '--layers', ','.join(layer_names), '--no-protel-ext',
+            self._run('pcb', 'export', 'gerbers', '--board-plot-params',
                       '--output', str(staging) + '/', board)
-            self._run('pcb', 'export', 'drill', '--output', str(staging) + '/', board)
+            drill_options = ['--excellon-separate-th'] if arguments.get('separate_drills', False) else []
+            drill_origin = arguments.get('drill_origin', 'absolute')
+            if drill_origin not in ('absolute', 'plot'):
+                raise KiCadError('arguments_unusable')
+            drill_options += ['--drill-origin', drill_origin]
+            self._run('pcb', 'export', 'drill', *drill_options, '--output', str(staging) + '/', board)
             generated = inventory(staging)
             if not generated:
                 raise KiCadError('invalid_report')
@@ -412,8 +417,8 @@ class KiCadProvider:
                     if len(matching) == 1:
                         aliases = [str(n).replace('.', '_') for n in matching[0].children[1:]
                                    if n != 'user' and n != 'signal']
-                        candidates = [name for name in generated if name in {
-                            board.stem + '-' + layer + '.gbr' for layer in aliases}]
+                        candidates = [name for name in generated if Path(name).stem in {
+                            board.stem + '-' + layer for layer in aliases}]
                 if len(candidates) != 1 or candidates[0] in mapping:
                     raise KiCadError('rename_ambiguous')
                 mapping[candidates[0]] = value

@@ -138,6 +138,11 @@ for item in board.GetDrawings():
     # GetLayerName() returns the display name (F.Silkscreen in this fixture).
     if item.GetLayer() == pcbnew.F_SilkS:
         item.SetLayer(pcbnew.User_1)
+plot = board.GetPlotOptions()
+selection = plot.GetLayerSelection()
+selection.AddLayer(pcbnew.User_1)
+plot.SetLayerSelection(selection)
+board.SetPlotOptions(plot)
 pcbnew.SaveBoard(sys.argv[1], board)
 '''})
             self.assertEqual(edited.state, CapabilityResultState.SUCCEEDED, edited.failure)

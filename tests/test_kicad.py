@@ -857,6 +857,37 @@ class KiCadTests(unittest.TestCase):
         self.assertFalse((dest / 'top.gbr').exists())
         self.assertEqual(inventory(dest), {k: v for k, v in before.items() if k != 'top.gbr'})
 
+    def test_manufacturing_saved_plot_settings_and_separate_drills(self):
+        checked = self.check()
+        for option in (None, False, True):
+            calls = []
+            def runner(argv, **kwargs):
+                calls.append(argv)
+                target = Path(argv[argv.index('--output') + 1])
+                if argv[3] == 'gerbers':
+                    (target / 'test-F_Cu.gtl').write_text('%TF.FileFunction,Copper,L1,Top*%\nX1Y2D01*\n')
+                else:
+                    names = ('test-PTH.drl', 'test-NPTH.drl') if '--excellon-separate-th' in argv else ('test.drl',)
+                    for name in names:
+                        (target / name).write_text('M48\nT1C0.25\n')
+                return SimpleNamespace(returncode=0)
+            runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
+            args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/' + str(option),
+                    'renames': {'F.Cu': 'top.gbr'}}
+            if option is not None:
+                args['separate_drills'] = option
+            result = runtime.executors['export_kicad_manufacturing'](args)
+            self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+            gerbers, drill = calls
+            self.assertIn('--board-plot-params', gerbers)
+            self.assertNotIn('--layers', gerbers)
+            self.assertNotIn('--no-protel-ext', gerbers)
+            self.assertEqual('--excellon-separate-th' in drill, option is True)
+            expected = {'top.gbr', 'test-PTH.drl', 'test-NPTH.drl'} if option else {'top.gbr', 'test.drl'}
+            self.assertEqual({Path(p).name for p in result.values['files_written']}, expected)
+        result = runtime.executors['export_kicad_manufacturing'](dict(args, separate_drills='yes'))
+        self.assertEqual(result.failure['code'], 'arguments_unusable')
+
     def test_manufacturing_comparison_ignores_dates_comments_and_generator(self):
         from alx.providers.kicad import compare_manufacturing
         import zipfile

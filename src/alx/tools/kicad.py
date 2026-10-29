@@ -76,13 +76,18 @@ DEFINITIONS = (
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('export_kicad_manufacturing',
         'Export Gerbers and drill files from an untainted work copy through KiCad CLI. '
+        'Gerbers use the board saved plot settings, including layer selection and Protel '
+        'extensions. separate_drills (default false) separates plated and non-plated Excellon files. '
+        'drill_origin is absolute (default) or plot, the drill/aux origin the Gerbers use when the '
+        'board plot settings use it. '
         'output_dir is relative to the original project. Optional renames map generated file '
         'or layer names to exact manufacturer filenames; ambiguous mappings return. Optional '
         'zip_name adds a zip. Publication only adds files and refuses existing targets before '
         'writing. A concurrent collision may leave added files, reported in recovery; never '
         'deletes or overwrites. compare_with is a previous zip/folder under home; comparison '
         'by final filename ignores Gerber comments and creation/generator metadata.',
-        obj({'work_copy_id': S, 'output_dir': S, 'renames': MAP, 'zip_name': S, 'compare_with': S},
+        obj({'work_copy_id': S, 'output_dir': S, 'renames': MAP, 'zip_name': S, 'compare_with': S,
+             'separate_drills': B, 'drill_origin': S},
             ('work_copy_id', 'output_dir')),
         obj({'files_written': array(S), 'comparison': COMPARISON, 'staging_path': S}),
         SideEffect.EFFECTFUL, FAILURES),
