@@ -33,7 +33,7 @@ FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid
             'cli_failed', 'cli_timeout', 'render_failed', 'footprint_ambiguous', 'board_open',
             'original_changed', 'work_copy_changed', 'work_copy_tainted', 'work_copy_busy',
             'script_failed', 'export_would_overwrite', 'rename_ambiguous', 'unsupported_file',
-            'project_too_large', 'verification_failed', 'unavailable')
+            'project_too_large', 'evidence_full', 'verification_failed', 'unavailable')
 
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
@@ -44,7 +44,8 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'items_added': array(BOARD_ITEM), 'items_removed': array(BOARD_ITEM),
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
-    'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S},
+    'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
+    'after_copy_path': S},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -70,8 +71,10 @@ DEFINITIONS = (
         'child processes. May edit board, project and rules freely. Returns a bounded plain '
         'change report, structural board diff and DRC totals before/after. Failed edits '
         'restore the copy; uncertain restoration taints it durably. When diffs_truncated, '
-        'full_diff_path holds the complete diff and before_copy_path the copy from before the '
-        'edit, both readable with read_reference_file. Review the report before '
+        'full_diff_path holds the complete diff and before_copy_path/after_copy_path copies '
+        'from before and after the edit; later edits keep them. Read them with '
+        'read_reference_file, continuing long text with offset. evidence_full when retained '
+        'evidence would exceed its own limit; the edit is then undone. Review the report before '
         'requesting write-back approval; a new revision invalidates previous approval.',
         obj({'work_copy_id': S, 'script': S}),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
@@ -99,9 +102,11 @@ DEFINITIONS = (
         'under home, including iCloud Drive. Refuses credential paths and symlink escapes. '
         'Folders list entries; images give dimensions; PDFs give per-page text; Altium '
         'projects give contents and OLE documents give stream names when board records '
-        'cannot be decoded; text/Gerber/KiCad give bounded text. Zip lists entries or reads '
+        'cannot be decoded; text/Gerber/KiCad give bounded text; offset (characters, default 0) '
+        'continues truncated text at offset plus the length already read. Also reads retained '
+        'KiCad edit evidence paths. Zip lists entries or reads '
         'one named entry. iCloud placeholders return not_downloaded. Does not interpret content.',
-        obj({'path': S, 'entry': S}, ('path',)), REFERENCE, SideEffect.NONE, FAILURES),
+        obj({'path': S, 'entry': S, 'offset': I}, ('path',)), REFERENCE, SideEffect.NONE, FAILURES),
     CapabilityDefinition('find_kicad_library_footprint',
         'Read installed library footprint candidates and pad counts. Supply library_id '
         '(Library:Footprint or exact footprint name), or designator and work_copy_id. '

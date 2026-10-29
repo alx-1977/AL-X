@@ -1016,18 +1016,68 @@ class KiCadTests(unittest.TestCase):
         self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn('(layer "User.1")', (self.project / 'test.kicad_pcb').read_text())
 
-    def test_cut_short_edit_report_keeps_full_diff_and_before_copy(self):
+    LONG_EDIT = ("import sys\nfrom pathlib import Path\n"
+                 "(Path(sys.argv[1]).parent / 'notes.txt').write_text(''.join('line %d\\n' % i for i in range(5000)))\n")
+
+    def test_cut_short_edit_report_keeps_full_diff_and_before_after_copies(self):
         checked = self.check()
-        script = ("import sys\nfrom pathlib import Path\n"
-                  "(Path(sys.argv[1]).parent / 'notes.txt').write_text(''.join('line %d\\n' % i for i in range(5000)))\n")
-        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=script)
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.LONG_EDIT)
         report = edited['change_report']
         self.assertTrue(report['diffs_truncated'])
-        full = Path(report['full_diff_path']).read_text()
-        self.assertIn('+line 4999', full)
-        before = Path(report['before_copy_path'])
+        self.assertIn('+line 4999', Path(report['full_diff_path']).read_text())
+        before, after = Path(report['before_copy_path']), Path(report['after_copy_path'])
         self.assertEqual((before / 'test.kicad_pcb').read_text(), BOARD)
         self.assertFalse((before / 'notes.txt').exists())
+        self.assertIn('line 4999', (after / 'notes.txt').read_text())
+        # A later edit with a short report keeps the earlier evidence.
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                     script="import sys\nfrom pathlib import Path\n(Path(sys.argv[1]).parent / 'notes.txt').write_text('short')\n")
+        self.assertIn('line 4999', (after / 'notes.txt').read_text())
+        self.assertTrue((before / 'test.kicad_pcb').is_file())
+
+    def test_full_diff_reads_to_the_end_through_reference_reading(self):
+        checked = self.check()
+        report = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              script=self.LONG_EDIT)['change_report']
+        text, offset = '', 0
+        while True:
+            page = self.success('read_reference_file', path=report['full_diff_path'], offset=offset)
+            text += page['text']
+            offset += len(page['text'])
+            if not page['truncated']:
+                break
+        self.assertEqual(text, Path(report['full_diff_path']).read_text())
+        self.assertGreater(offset, 24000)
+        listed = self.success('read_reference_file', path=report['before_copy_path'])
+        self.assertIn('test.kicad_pcb', [e['name'] for e in listed['entries']])
+        self.failure('arguments_unusable', 'read_reference_file', path=report['before_copy_path'], offset=1)
+        # Elsewhere in AL/X storage nothing is readable, including the work copy itself.
+        root = Path(report['full_diff_path']).parents[2]
+        for path in (root / 'metadata.json', root / 'project' / 'test.kicad_pcb', root.parent):
+            self.failure('path_denied', 'read_reference_file', path=str(path))
+
+    def test_retained_evidence_does_not_count_towards_project_limits(self):
+        checked = self.check()
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.LONG_EDIT)
+        root = self.settings.work_root / checked['work_copy_id']
+        project_bytes = sum(p.stat().st_size for p in (root / 'project').rglob('*') if p.is_file())
+        with patch('alx.providers.kicad.MAX_PROJECT_BYTES', project_bytes + 20000):
+            edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                                  script=self.LONG_EDIT.replace("'line", "'row"))
+            self.assertTrue(edited['change_report']['diffs_truncated'])
+            self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                         script="print('unchanged')\n")
+
+    def test_evidence_over_its_own_limit_undoes_the_edit(self):
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        with patch('alx.providers.kicad.MAX_EVIDENCE_BYTES', 1000):
+            result = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.LONG_EDIT)
+        self.assertEqual(result.failure['code'], 'evidence_full')
+        self.assertEqual(result.failure['recovery']['rollback_status'], 'restored')
+        self.assertFalse((root / 'project' / 'notes.txt').exists())
+        self.assertEqual(list((root / 'evidence').iterdir()), [])
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="print('ok')\n")
 
     def test_job_file_is_found_before_renames(self):
         checked = self.check()

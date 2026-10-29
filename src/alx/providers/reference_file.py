@@ -29,14 +29,16 @@ def credential_path(path):
         or 'keychain' in p for p in parts)
 
 
-def reference_path(path, *, roots=None):
+def reference_path(path, *, roots=None, protected=True):
     raw = Path(path).expanduser()
     if not raw.is_absolute():
         raise ReferenceError('path_denied')
     resolved = raw.resolve()
     roots = (Path.home().resolve(),) if roots is None else roots
-    if (credential_path(raw) or credential_path(resolved)
-            or not any(resolved.is_relative_to(r) for r in roots)):
+    inside = [r for r in roots if resolved.is_relative_to(r)]
+    # An unprotected root is trusted as a whole; names below it are still checked.
+    checked = (raw, resolved) if protected else tuple(resolved.relative_to(r) for r in inside)
+    if not inside or any(credential_path(p) for p in checked):
         raise ReferenceError('path_denied')
     return resolved
 
@@ -155,7 +157,7 @@ def ole_stream_names(data):
             'truncated': len(names) > MAX_ENTRIES, 'board_records_decoded': False}
 
 
-def content_facts(name, data):
+def content_facts(name, data, start=0):
     suffix = Path(name).suffix.casefold()
     if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) >= 24:
         width, height = struct.unpack('>II', data[16:24])
@@ -225,15 +227,26 @@ def content_facts(name, data):
         raise ReferenceError('unsupported_file')
     text = data.decode('utf-16' if data.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8', errors='replace')
     result = dict(kind='altium_project' if suffix == '.prjpcb' else 'text',
-                  text=text[:MAX_TEXT], truncated=len(text) > MAX_TEXT)
+                  text=text[start:start + MAX_TEXT], truncated=len(text) > start + MAX_TEXT)
     if suffix == '.prjpcb':
         result['documents'] = [line.partition('=')[2].strip() for line in text.splitlines()
                                if line.casefold().startswith('documentpath=')][:MAX_ENTRIES]
     return result
 
 
-def read_reference(arguments):
-    path = reference_path(arguments['path'])
+def read_reference(arguments, *, roots=None, protected=True):
+    offset = arguments.get('offset', 0)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ReferenceError('arguments_unusable')
+    facts = facts_at(arguments, offset, roots, protected)
+    # Only text continues from an offset; elsewhere it would silently be ignored.
+    if offset and facts['kind'] not in ('text', 'altium_project'):
+        raise ReferenceError('arguments_unusable')
+    return facts
+
+
+def facts_at(arguments, offset, roots, protected):
+    path = reference_path(arguments['path'], roots=roots, protected=protected)
     placeholder = path.with_name('.' + path.name + '.icloud')
     if path.name.endswith('.icloud') or (not path.exists() and placeholder.is_file()):
         return {'kind': 'not_downloaded', 'path': str(path)}
@@ -250,7 +263,7 @@ def read_reference(arguments):
                 truncated = True
                 break
             try:
-                safe = reference_path(child)
+                safe = reference_path(child, roots=roots, protected=protected)
             except ReferenceError:
                 continue
             entries.append({'name': child.name, 'kind': 'folder' if safe.is_dir() else 'file'})
@@ -263,10 +276,10 @@ def read_reference(arguments):
             if selected is not None:
                 if selected not in {e.filename for e in entries if not e.is_dir()}:
                     raise ReferenceError('arguments_unusable')
-                return dict(content_facts(selected, bundle.read(selected)), entry=selected)
+                return dict(content_facts(selected, bundle.read(selected), offset), entry=selected)
             return dict(kind='zip', entries=[{'name': e.filename, 'bytes': e.file_size}
                                              for e in entries[:MAX_ENTRIES]],
                         truncated=len(entries) > MAX_ENTRIES)
     if 'entry' in arguments:
         raise ReferenceError('arguments_unusable')
-    return content_facts(path.name, data)
+    return content_facts(path.name, data, offset)

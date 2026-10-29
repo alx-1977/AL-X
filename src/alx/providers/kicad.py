@@ -33,6 +33,8 @@ ITEMS_PER_FINDING = 4
 MAX_PROJECT_ENTRIES = 20000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
+# Retained edit evidence has its own limit, outside the project limits.
+MAX_EVIDENCE_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class KiCadError(Exception):
@@ -50,13 +52,14 @@ def bounded(path, roots, *, protected=True):
     return resolved
 
 
-def inventory(root, *, exclude=()):
+def inventory(root, *, exclude=frozenset()):
+    exclude = frozenset(exclude)
     result = {}
     total = 0
     entries = 0
     for path in root.rglob('*'):
-        # Only exact transaction-owned paths, never a filename pattern.
-        if path in exclude:
+        # Only exact transaction-owned paths and their contents, never a filename pattern.
+        if path in exclude or not exclude.isdisjoint(path.parents):
             continue
         entries += 1
         if entries > MAX_PROJECT_ENTRIES:
@@ -72,6 +75,19 @@ def inventory(root, *, exclude=()):
                 raise KiCadError('project_too_large')
             result[path.relative_to(root).as_posix()] = sha(path)
     return result
+
+
+def evidence_bytes(folder):
+    """Size of retained edit evidence; refuses anything but plain files and folders."""
+    total = 0
+    if folder.is_symlink():
+        raise KiCadError('path_denied')
+    for path in folder.rglob('*') if folder.exists() else ():
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise KiCadError('path_denied')
+        if path.is_file():
+            total += path.stat().st_size
+    return total
 
 
 def sha(path):
@@ -269,7 +285,15 @@ class KiCadProvider:
         return reference_path(raw)
 
     def read_reference(self, arguments):
-        return read_reference(arguments)
+        raw = Path(arguments['path']).expanduser().absolute()
+        if not raw.resolve().is_relative_to(self.work_root):
+            return read_reference(arguments)
+        # Inside AL/X storage only retained edit evidence is readable.
+        parts = raw.resolve().relative_to(self.work_root).parts
+        if len(parts) < 2 or parts[1] != 'evidence':
+            raise KiCadError('path_denied')
+        root, _ = self._load(parts[0])
+        return read_reference(arguments, roots=(root / 'evidence',), protected=False)
 
     @contextmanager
     def _locked(self, work_copy_id):
@@ -302,7 +326,6 @@ class KiCadProvider:
             self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
             script_path = root / ('edit-' + uuid.uuid4().hex + '.py')
             stage = 'before_drc'
-            keep_snapshot = False
             try:
                 before = self._drc(root, meta)['totals']
                 facts_before = board_facts(board.read_text())
@@ -343,19 +366,28 @@ class KiCadProvider:
                 truncated = len(diffs) < len(changed) or any(d['truncated'] for d in diffs)
                 report.update(file_diffs=diffs, diffs_truncated=truncated)
                 if truncated:
-                    # The report is cut short: keep the before-edit copy and the
-                    # complete diff, so every omitted change stays reviewable.
-                    full = root / 'artifacts' / ('edit-diff-' + uuid.uuid4().hex + '.diff')
-                    full.parent.mkdir(exist_ok=True)
-                    with full.open('w') as stream:
-                        for name in changed:
-                            left = (snapshot / name).read_text(errors='replace') if name in original else ''
-                            right = (project / name).read_text(errors='replace') if name in current else ''
-                            stream.writelines(difflib.unified_diff(
-                                left.splitlines(True), right.splitlines(True),
-                                fromfile=name + ':before', tofile=name + ':after'))
-                    keep_snapshot = True
-                    report.update(full_diff_path=str(full), before_copy_path=str(snapshot))
+                    # The report is cut short: keep before and after copies and the
+                    # complete diff as evidence that later edits never delete.
+                    evidence = root / 'evidence' / ('edit-' + uuid.uuid4().hex)
+                    evidence.mkdir(parents=True)
+                    try:
+                        shutil.copytree(snapshot, evidence / 'before')
+                        shutil.copytree(project, evidence / 'after')
+                        with (evidence / 'changes.diff').open('w') as stream:
+                            for name in changed:
+                                left = (snapshot / name).read_text(errors='replace') if name in original else ''
+                                right = (project / name).read_text(errors='replace') if name in current else ''
+                                stream.writelines(difflib.unified_diff(
+                                    left.splitlines(True), right.splitlines(True),
+                                    fromfile=name + ':before', tofile=name + ':after'))
+                        if evidence_bytes(root / 'evidence') > MAX_EVIDENCE_BYTES:
+                            raise KiCadError('evidence_full')
+                    except BaseException:
+                        shutil.rmtree(evidence, ignore_errors=True)
+                        raise
+                    report.update(full_diff_path=str(evidence / 'changes.diff'),
+                                  before_copy_path=str(evidence / 'before'),
+                                  after_copy_path=str(evidence / 'after'))
                 # The pending taint is cleared only after all verification succeeds.
                 revision = self._revision(root, meta)
                 self._save_metadata(root, meta)
@@ -389,7 +421,7 @@ class KiCadProvider:
             finally:
                 script_path.unlink(missing_ok=True)
                 # Retain snapshot evidence when recovery cannot be verified.
-                if not keep_snapshot and not json.loads((root / 'metadata.json').read_text()).get('taint'):
+                if not json.loads((root / 'metadata.json').read_text()).get('taint'):
                     shutil.rmtree(snapshot)
 
     def export(self, arguments):
@@ -544,7 +576,9 @@ class KiCadProvider:
                 c not in '0123456789abcdef' for c in work_copy_id):
             raise KiCadError('path_denied')
         root = bounded(self.work_root / work_copy_id, (self.work_root,), protected=False)
-        inventory(root)
+        # Retained evidence is checked on its own, so it never blocks later work.
+        inventory(root, exclude={root / 'evidence'})
+        evidence_bytes(root / 'evidence')
         meta = json.loads((root / 'metadata.json').read_text())
         return root, meta
 

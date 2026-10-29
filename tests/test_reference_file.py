@@ -36,6 +36,19 @@ class ReferenceFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ReferenceError, 'path_denied'):
             self.read(alias)
 
+    def test_long_text_continues_from_an_offset(self):
+        text = self.home / 'long.txt'
+        text.write_text('x' * 24000 + 'tail')
+        first = self.read(text)
+        self.assertTrue(first['truncated'])
+        rest = self.read(text, offset=len(first['text']))
+        self.assertEqual((rest['text'], rest['truncated']), ('tail', False))
+        for offset in (-1, True, '5'):
+            with self.subTest(offset=offset), self.assertRaisesRegex(ReferenceError, 'arguments_unusable'):
+                self.read(text, offset=offset)
+        with self.assertRaisesRegex(ReferenceError, 'arguments_unusable'):
+            self.read(self.home, offset=1)
+
     def test_icloud_placeholder_and_text_folder_facts(self):
         cloud = self.home / 'Library/Mobile Documents/com~apple~CloudDocs'
         cloud.mkdir(parents=True)
