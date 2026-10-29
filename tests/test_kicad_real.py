@@ -53,10 +53,11 @@ class CapturedKiCadTests(unittest.TestCase):
 
 @unittest.skipUnless(CLI, 'kicad-cli 9 or later is required')
 class RealKiCadTests(unittest.TestCase):
-    def test_real_script_and_child_cannot_write_outside_copy(self):
+    def test_real_script_is_confined_and_cannot_start_processes(self):
         from alx.providers.coding_process import run_kicad_python
         from alx.config.settings import KiCadSettings
-        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
+        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory, \
+                tempfile.TemporaryDirectory(dir=Path.home()) as private:
             root = Path(directory).resolve()
             project = root / 'project'
             project.mkdir()
@@ -64,9 +65,12 @@ class RealKiCadTests(unittest.TestCase):
             board.write_text('copy')
             original = root / 'original.kicad_pcb'
             original.write_text('original')
+            # Stands in for keys and documents elsewhere in the home folder.
+            secret = Path(private).resolve() / 'id_rsa'
+            secret.write_text('secret')
             script = root / 'edit.py'
             script.write_text(f'''
-import os, sys, subprocess
+import sys, subprocess
 from pathlib import Path
 board = Path(sys.argv[1])
 board.write_text('edited')
@@ -76,8 +80,18 @@ except PermissionError:
     pass
 else:
     raise RuntimeError('write escaped')
-child = subprocess.run([sys.executable, '-c', {('from pathlib import Path; Path(' + repr(str(original)) + ').write_text("escaped")')!r}], capture_output=True)
-assert child.returncode != 0
+try:
+    Path({str(secret)!r}).read_text()
+except PermissionError:
+    pass
+else:
+    raise RuntimeError('read escaped')
+try:
+    subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)
+except PermissionError:
+    pass
+else:
+    raise RuntimeError('process started')
 print('confined')
 ''')
             settings = KiCadSettings.from_environment({}, root / 'storage')

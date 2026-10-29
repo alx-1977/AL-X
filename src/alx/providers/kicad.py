@@ -302,6 +302,7 @@ class KiCadProvider:
             self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
             script_path = root / ('edit-' + uuid.uuid4().hex + '.py')
             stage = 'before_drc'
+            keep_snapshot = False
             try:
                 before = self._drc(root, meta)['totals']
                 facts_before = board_facts(board.read_text())
@@ -339,7 +340,22 @@ class KiCadProvider:
                     budget -= used
                     if budget <= 0:
                         break
-                report.update(file_diffs=diffs, diffs_truncated=len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
+                truncated = len(diffs) < len(changed) or any(d['truncated'] for d in diffs)
+                report.update(file_diffs=diffs, diffs_truncated=truncated)
+                if truncated:
+                    # The report is cut short: keep the before-edit copy and the
+                    # complete diff, so every omitted change stays reviewable.
+                    full = root / 'artifacts' / ('edit-diff-' + uuid.uuid4().hex + '.diff')
+                    full.parent.mkdir(exist_ok=True)
+                    with full.open('w') as stream:
+                        for name in changed:
+                            left = (snapshot / name).read_text(errors='replace') if name in original else ''
+                            right = (project / name).read_text(errors='replace') if name in current else ''
+                            stream.writelines(difflib.unified_diff(
+                                left.splitlines(True), right.splitlines(True),
+                                fromfile=name + ':before', tofile=name + ':after'))
+                    keep_snapshot = True
+                    report.update(full_diff_path=str(full), before_copy_path=str(snapshot))
                 # The pending taint is cleared only after all verification succeeds.
                 revision = self._revision(root, meta)
                 self._save_metadata(root, meta)
@@ -373,7 +389,7 @@ class KiCadProvider:
             finally:
                 script_path.unlink(missing_ok=True)
                 # Retain snapshot evidence when recovery cannot be verified.
-                if not json.loads((root / 'metadata.json').read_text()).get('taint'):
+                if not keep_snapshot and not json.loads((root / 'metadata.json').read_text()).get('taint'):
                     shutil.rmtree(snapshot)
 
     def export(self, arguments):
@@ -424,20 +440,22 @@ class KiCadProvider:
                 mapping[candidates[0]] = value
             files = {}
             filename_keys = set()
+            jobs = set()
             for name in generated:
                 final = exact_filename(mapping.get(name, name))
+                if name.endswith('.gbrjob'):
+                    jobs.add(final)
                 key = unicodedata.normalize('NFC', final).casefold()
                 if key in filename_keys:
                     raise KiCadError('rename_ambiguous')
                 filename_keys.add(key)
                 files[final] = read_bytes(staging / name)
-            for name in list(files):
-                if name.endswith('.gbrjob'):
-                    job = json.loads(files[name])
-                    for entry in job.get('FilesAttributes', []):
-                        if 'Path' in entry:
-                            entry['Path'] = mapping.get(entry['Path'], entry['Path'])
-                    files[name] = (json.dumps(job, indent=2) + '\n').encode()
+            for name in jobs:
+                job = json.loads(files[name])
+                for entry in job.get('FilesAttributes', []):
+                    if 'Path' in entry:
+                        entry['Path'] = mapping.get(entry['Path'], entry['Path'])
+                files[name] = (json.dumps(job, indent=2) + '\n').encode()
             comparison = compare_manufacturing(files, arguments['compare_with']) if arguments.get('compare_with') else {'files': [], 'truncated': False}
             # Keep final names in staging as well as in the publication.
             final_dir = staging / 'publish'
@@ -456,6 +474,12 @@ class KiCadProvider:
             # and publication. O_EXCL excludes replacement even after preflight.
             descriptor = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             written = []
+            completed = {}
+
+            def record(exports):
+                published = dict(meta.get('exports', {}))
+                published.update(exports)
+                self._save_metadata(root, dict(meta, exports=published))
             try:
                 for part in relative.parts:
                     try:
@@ -481,15 +505,20 @@ class KiCadProvider:
                         stream.write(data)
                         stream.flush()
                         os.fsync(stream.fileno())
+                    completed[(relative / name).as_posix()] = hashlib.sha256(data).hexdigest()
                 # These exact add-only artifacts are known changes made by AL/X,
                 # not changes to the original board/project snapshot. Keep their
                 # digests separate so subsequent write-back still detects edits
                 # to them or any other change in the original project.
-                published = dict(meta.get('exports', {}))
-                published.update({(relative / name).as_posix(): hashlib.sha256(data).hexdigest()
-                                  for name, data in files.items()})
-                self._save_metadata(root, dict(meta, exports=published))
+                record(completed)
             except Exception as error:
+                # Fully written files stay known, so write-back and a retried
+                # export recognise them; a partial file is never recorded.
+                if completed:
+                    try:
+                        record(completed)
+                    except OSError:
+                        pass
                 raise KiCadError(str(error) if isinstance(error, KiCadError) else 'unavailable',
                                  {'files_written': written, 'staging_path': str(staging)}) from error
             finally:

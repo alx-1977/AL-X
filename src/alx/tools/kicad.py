@@ -44,7 +44,8 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'items_added': array(BOARD_ITEM), 'items_removed': array(BOARD_ITEM),
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
-    'per_layer_before': MAP, 'per_layer_after': MAP})})
+    'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S},
+    ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
 REFERENCE = obj({'kind': S, 'path': S, 'text': S, 'truncated': B, 'entry': S,
@@ -68,7 +69,9 @@ DEFINITIONS = (
         'copy. argv[1] is the board. Kernel confines writes to its project folder, including '
         'child processes. May edit board, project and rules freely. Returns a bounded plain '
         'change report, structural board diff and DRC totals before/after. Failed edits '
-        'restore the copy; uncertain restoration taints it durably. Review the report before '
+        'restore the copy; uncertain restoration taints it durably. When diffs_truncated, '
+        'full_diff_path holds the complete diff and before_copy_path the copy from before the '
+        'edit, both readable with read_reference_file. Review the report before '
         'requesting write-back approval; a new revision invalidates previous approval.',
         obj({'work_copy_id': S, 'script': S}),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,

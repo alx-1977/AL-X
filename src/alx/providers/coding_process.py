@@ -16,6 +16,7 @@ import io
 import json
 import platform
 import pty
+import pwd
 import select
 import signal
 import struct
@@ -470,6 +471,11 @@ def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     )
 
 
+def kicad_containment_available():
+    """KiCad scripts run only under the macOS kernel sandbox; nowhere else."""
+    return platform.system() == 'Darwin' and Path('/usr/bin/sandbox-exec').is_file()
+
+
 def run_kicad_python(executable, script, board, *, runner=None, timeout_seconds=120):
     """Kernel-confined KiCad script, through the managed process execution site.
 
@@ -477,20 +483,29 @@ def run_kicad_python(executable, script, board, *, runner=None, timeout_seconds=
     fallback to unsandboxed Python is permitted on another operating system.
     Script/output files live outside the only writable directory.
     """
-    if platform.system() != 'Darwin' or not Path('/usr/bin/sandbox-exec').is_file():
+    if not kicad_containment_available():
         raise OSError('KiCad script containment unavailable')
     board = Path(board).resolve()
     project = board.parent
     script = Path(script).resolve()
     quote = lambda path: json.dumps(str(path))
-    # Constrain writes, not the reads and IPC needed by dyld/CPython startup.
-    # Sandbox restrictions are inherited by every child process.
+    # The user's own home, not $HOME, which callers may change.
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    # dyld and CPython need system reads and IPC, so reading is allowed by
+    # default, except anywhere in the home folder (keys, mail, documents)
+    # outside the work copy and the script. Writes are confined to the copy.
+    # No forking: a script cannot leave a process behind that keeps changing
+    # the copy after the edit is reported or restored.
     profile = '\n'.join((
         '(version 1)', '(allow default)',
+        '(deny file-read* (subpath ' + quote(home) + '))',
+        '(allow file-read-metadata)',
+        '(allow file-read* (subpath ' + quote(project) + ') (literal ' + quote(script) + '))',
         '(deny file-write*)',
         '(allow file-write* (subpath ' + quote(project)
         + ') (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))',
         '(deny network*)',
+        '(deny process-fork)',
     ))
     stdout, stderr = script.with_suffix('.stdout'), script.with_suffix('.stderr')
     result = run_coding_subprocess(

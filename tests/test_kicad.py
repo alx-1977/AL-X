@@ -1,5 +1,7 @@
 """D-058: isolated board mechanics, bounded files and exact write authority."""
 import json
+import os
+import pwd
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
@@ -17,7 +19,7 @@ from alx.config.settings import KiCadSettings, ConfigurationError
 from alx.contracts import (Approval, ApprovalScope, ApprovalLifecycle, CapabilityCall,
                            CapabilityResultState, SideEffect)
 from alx.core.model_reasoner import _catalogue_payload
-from alx.providers.coding_process import run_kicad_cli
+from alx.providers.coding_process import kicad_containment_available as REAL_CONTAINMENT, run_kicad_cli
 from alx.providers.kicad import KiCadProvider, KiCadError, inventory, board_facts, structural_diff
 from alx.safety import AuthorityContext, SafetyGate
 from alx.tools.kicad import DEFINITIONS
@@ -81,6 +83,11 @@ class BoardFactsTests(unittest.TestCase):
 
 class KiCadTests(unittest.TestCase):
     def setUp(self):
+        # Unit tests replace the sandboxed runner, so they run on any OS;
+        # the fail-closed check itself is tested against the real function.
+        containment = patch('alx.providers.coding_process.kicad_containment_available', return_value=True)
+        containment.start()
+        self.addCleanup(containment.stop)
         self.temp = tempfile.TemporaryDirectory(dir=tempfile.gettempdir())
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
@@ -803,9 +810,7 @@ class KiCadTests(unittest.TestCase):
         script = self.root / 'edit.py'
         script.write_text('pass')
         result = SimpleNamespace(returncode=0, stdout='x' * 20000, stderr='')
-        with patch('alx.providers.coding_process.platform.system', return_value='Darwin'), \
-                patch('alx.providers.coding_process.Path.is_file', return_value=True), \
-                patch('alx.providers.coding_process.run_coding_subprocess', return_value=result) as run:
+        with patch('alx.providers.coding_process.run_coding_subprocess', return_value=result) as run:
             outcome = run_kicad_python('python', script, self.project / 'test.kicad_pcb', timeout_seconds=999)
         self.assertEqual(len(outcome.stdout), 16000)
         argv = run.call_args.args[1]
@@ -815,13 +820,18 @@ class KiCadTests(unittest.TestCase):
         self.assertIn('(deny network*)', argv[2])
         self.assertIn('(allow file-write* (subpath ' + json.dumps(str(self.project))
                       + ') (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))', argv[2])
-        self.assertNotIn('(allow file-read*', argv[2])
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        self.assertIn('(deny file-read* (subpath ' + json.dumps(str(home)) + '))', argv[2])
+        self.assertIn('(allow file-read* (subpath ' + json.dumps(str(self.project)) + ') (literal '
+                      + json.dumps(str(script.resolve())) + '))', argv[2])
+        self.assertIn('(deny process-fork)', argv[2])
         self.assertEqual(run.call_args.kwargs['env']['HOME'], str(self.project))
         self.assertEqual(run.call_args.kwargs['env']['TMPDIR'], str(self.project))
         self.assertEqual(argv[-1], str(self.project / 'test.kicad_pcb'))
         self.assertEqual(run.call_args.kwargs['timeout'], 600)
         self.assertTrue(run.call_args.kwargs['stop_descendants'])
-        with patch('alx.providers.coding_process.platform.system', return_value='Linux'):
+        with patch('alx.providers.coding_process.kicad_containment_available', REAL_CONTAINMENT), \
+                patch('alx.providers.coding_process.platform.system', return_value='Linux'):
             with self.assertRaises(OSError):
                 run_kicad_python('python', script, self.project / 'test.kicad_pcb')
 
@@ -1005,6 +1015,63 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn('(layer "User.1")', (self.project / 'test.kicad_pcb').read_text())
+
+    def test_cut_short_edit_report_keeps_full_diff_and_before_copy(self):
+        checked = self.check()
+        script = ("import sys\nfrom pathlib import Path\n"
+                  "(Path(sys.argv[1]).parent / 'notes.txt').write_text(''.join('line %d\\n' % i for i in range(5000)))\n")
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=script)
+        report = edited['change_report']
+        self.assertTrue(report['diffs_truncated'])
+        full = Path(report['full_diff_path']).read_text()
+        self.assertIn('+line 4999', full)
+        before = Path(report['before_copy_path'])
+        self.assertEqual((before / 'test.kicad_pcb').read_text(), BOARD)
+        self.assertFalse((before / 'notes.txt').exists())
+
+    def test_job_file_is_found_before_renames(self):
+        checked = self.check()
+        def runner(argv, **kwargs):
+            if argv[2] == 'drc':
+                return self.run_cli(argv, **kwargs)
+            target = Path(argv[argv.index('--output') + 1])
+            if argv[3] == 'gerbers':
+                (target / 'test-F_Cu.gbr').write_text('X1Y2D01*\n')
+                (target / 'test-B_Cu.gbr').write_text('X3Y4D01*\n')
+                (target / 'test-job.gbrjob').write_text(json.dumps({'FilesAttributes': [
+                    {'Path': 'test-F_Cu.gbr'}, {'Path': 'test-B_Cu.gbr'}]}))
+            else:
+                (target / 'test.drl').write_text('M48\n')
+            return SimpleNamespace(returncode=0)
+        runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
+        result = runtime.executors['export_kicad_manufacturing']({
+            'work_copy_id': checked['work_copy_id'], 'output_dir': 'production',
+            'renames': {'test-job.gbrjob': 'maker.json', 'test-F_Cu.gbr': 'top.gbr',
+                        'test-B_Cu.gbr': 'bottom.gbrjob'}})
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        dest = self.project / 'production'
+        job = json.loads((dest / 'maker.json').read_text())
+        self.assertEqual([e['Path'] for e in job['FilesAttributes']], ['top.gbr', 'bottom.gbrjob'])
+        self.assertEqual((dest / 'bottom.gbrjob').read_text(), 'X3Y4D01*\n')
+
+    def test_failed_export_keeps_digests_of_completed_files(self):
+        checked = self.check()
+        runtime = self.manufacturing_runtime()
+        real_fsync, calls = os.fsync, []
+        def fsync(fd):
+            calls.append(fd)
+            if len(calls) == 2:
+                raise OSError('disk full')
+            return real_fsync(fd)
+        with patch('alx.providers.kicad.os.fsync', fsync):
+            result = runtime.executors['export_kicad_manufacturing']({
+                'work_copy_id': checked['work_copy_id'], 'output_dir': 'production'})
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        metadata = json.loads((self.storage / 'kicad' / checked['work_copy_id'] / 'metadata.json').read_text())
+        self.assertEqual(len(metadata['exports']), 1)
+        (name, digest), = metadata['exports'].items()
+        import hashlib
+        self.assertEqual(hashlib.sha256((self.project / name).read_bytes()).hexdigest(), digest)
 
     def test_edit_timeout_restores_before_return_and_unstoppable_writer_taints(self):
         from alx.contracts.coding import CodingError
