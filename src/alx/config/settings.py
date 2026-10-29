@@ -17,11 +17,12 @@ class ConfigurationError(ValueError):
 class KiCadSettings:
     kicad_cli: Path
     design_roots: tuple[Path, ...]
-    template_root: Path
     work_root: Path
     library_root: Path
     noise_checks: tuple[str, ...] = ('lib_footprint_mismatch', 'malformed_courtyard')
     cli_timeout_seconds: int = 600
+    kicad_python: Path = Path('/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3')
+    script_timeout_seconds: int = 120
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str], storage_root: Path) -> 'KiCadSettings':
@@ -39,11 +40,13 @@ class KiCadSettings:
             raise ConfigurationError('ALX_KICAD_DESIGN_ROOTS must contain directories')
         return cls(
             path('ALX_KICAD_CLI', '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli'),
-            roots, path('ALX_KICAD_TEMPLATE_ROOT', '~/Documents/KiCad/10.0/template'), work,
+            roots, work,
             path('ALX_KICAD_LIBRARY_ROOT', '/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints'),
             tuple(p.strip() for p in environment.get('ALX_KICAD_NOISE_CHECKS',
                   'lib_footprint_mismatch,malformed_courtyard').split(',') if p.strip()),
             _positive_integer(environment, 'ALX_KICAD_CLI_TIMEOUT_SECONDS', 600),
+            path('ALX_KICAD_PYTHON', cls.__dataclass_fields__['kicad_python'].default),
+            min(600, _positive_integer(environment, 'ALX_KICAD_SCRIPT_TIMEOUT_SECONDS', 120)),
         )
 
 

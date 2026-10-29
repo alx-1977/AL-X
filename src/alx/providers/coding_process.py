@@ -470,6 +470,45 @@ def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     )
 
 
+def run_kicad_python(executable, script, board, *, runner=None, timeout_seconds=120):
+    """Kernel-confined KiCad script, through the managed process execution site.
+
+    The profile is inherited by children, including detached processes. No
+    fallback to unsandboxed Python is permitted on another operating system.
+    Script/output files live outside the only writable directory.
+    """
+    if platform.system() != 'Darwin' or not Path('/usr/bin/sandbox-exec').is_file():
+        raise OSError('KiCad script containment unavailable')
+    board = Path(board).resolve()
+    project = board.parent
+    script = Path(script).resolve()
+    quote = lambda path: json.dumps(str(path))
+    # Constrain writes, not the reads and IPC needed by dyld/CPython startup.
+    # Sandbox restrictions are inherited by every child process.
+    profile = '\n'.join((
+        '(version 1)', '(allow default)',
+        '(deny file-write*)',
+        '(allow file-write* (subpath ' + quote(project)
+        + ') (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))',
+        '(deny network*)',
+    ))
+    stdout, stderr = script.with_suffix('.stdout'), script.with_suffix('.stderr')
+    result = run_coding_subprocess(
+        subprocess.run if runner is None else runner,
+        ['/usr/bin/sandbox-exec', '-p', profile, str(executable), '-B', str(script), str(board)],
+        cwd=project, env={'PATH': '/usr/bin:/bin', 'HOME': str(project),
+                          'TMPDIR': str(project), 'PYTHONDONTWRITEBYTECODE': '1'},
+        shell=False, check=False, timeout=min(600, max(1, timeout_seconds)),
+        capture_output=True, text=False, stop_descendants=True,
+        spool_to=(stdout, stderr), output_limit_bytes=128000,
+    )
+    # Injected runners return captured strings; the real managed runner spools.
+    return subprocess.CompletedProcess(result.args if hasattr(result, 'args') else [],
+        result.returncode,
+        stdout.read_text(errors='replace')[:16000] if stdout.exists() else (result.stdout or '')[:16000],
+        stderr.read_text(errors='replace')[:16000] if stderr.exists() else (result.stderr or '')[:16000])
+
+
 def _stop_remaining(process: subprocess.Popen[Any]) -> None:
     """Stop what is left of a finished session's process group.
 

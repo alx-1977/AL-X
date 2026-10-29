@@ -53,100 +53,60 @@ class CapturedKiCadTests(unittest.TestCase):
 
 @unittest.skipUnless(CLI, 'kicad-cli 9 or later is required')
 class RealKiCadTests(unittest.TestCase):
-    def test_cached_silkscreen_edit_and_real_svg_export(self):
-        from alx.providers.kicad import descendants, sexpr, silk_text
+    def test_real_script_and_child_cannot_write_outside_copy(self):
+        from alx.providers.coding_process import run_kicad_python
+        from alx.config.settings import KiCadSettings
         with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
             root = Path(directory).resolve()
-            project = root / 'designs/cached'
+            project = root / 'project'
+            project.mkdir()
+            board = project / 'test.kicad_pcb'
+            board.write_text('copy')
+            original = root / 'original.kicad_pcb'
+            original.write_text('original')
+            script = root / 'edit.py'
+            script.write_text(f'''
+import os, sys, subprocess
+from pathlib import Path
+board = Path(sys.argv[1])
+board.write_text('edited')
+try:
+    Path({str(original)!r}).write_text('escaped')
+except PermissionError:
+    pass
+else:
+    raise RuntimeError('write escaped')
+child = subprocess.run([sys.executable, '-c', {('from pathlib import Path; Path(' + repr(str(original)) + ').write_text("escaped")')!r}], capture_output=True)
+assert child.returncode != 0
+print('confined')
+''')
+            settings = KiCadSettings.from_environment({}, root / 'storage')
+            result = run_kicad_python(settings.kicad_python, script, board)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('confined', result.stdout)
+            self.assertEqual(original.read_text(), 'original')
+            self.assertEqual(board.read_text(), 'edited')
+
+    def test_real_manufacturing_without_editing(self):
+        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
+            root = Path(directory).resolve()
+            project = root / 'designs/minimal'
             project.mkdir(parents=True)
-            source = (FIXTURE / 'cached_silkscreen.kicad_pcb').read_text()
-            self.assertIn('(render_cache ', source)
-            (project / 'cached.kicad_pcb').write_text(source)
-            settings = json.loads((FIXTURE / 'minimal.kicad_pro').read_text())
-            settings['board']['design_settings']['rules'].update(
-                silk_text_height=1, silk_text_thickness=0.15)
-            (project / 'cached.kicad_pro').write_text(json.dumps(settings))
-            runtime = build_kicad_runtime(lambda: 'cached-silk', {
+            for suffix in ('.kicad_pcb', '.kicad_pro'):
+                shutil.copy2(FIXTURE / ('minimal' + suffix), project)
+            runtime = build_kicad_runtime(lambda: 'manufacturing', {
                 'ALX_KICAD_CLI': CLI, 'ALX_KICAD_DESIGN_ROOTS': str(root / 'designs'),
             }, root / 'storage')
             checked = runtime.executors['check_kicad_board']({'project_dir': str(project)})
             self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
-            work_id = checked.values['work_copy_id']
-            work_board = root / 'storage/kicad' / work_id / 'project/cached.kicad_pcb'
-            self.assertIn('(render_cache ', work_board.read_text())
-            fixed = runtime.executors['apply_kicad_mechanical_fixes']({
-                'work_copy_id': work_id, 'silkscreen_min_text': True})
-            self.assertEqual(fixed.state, CapabilityResultState.SUCCEEDED, fixed.failure)
-            texts = [n for n in descendants(sexpr(work_board.read_text())) if silk_text(n)]
-            self.assertEqual(len(texts), 1)
-            font = texts[0].one('effects').one('font')
-            self.assertEqual(font.one('size').children[1:], ['1', '1'])
-            self.assertEqual(font.one('thickness').children[1:], ['0.15'])
-            self.assertFalse(texts[0].named('render_cache'))
-            self.assertTrue(fixed.values['after_images'])
-            for value in (*fixed.values['before_images'], *fixed.values['after_images']):
-                exported = Path(value)
-                self.assertGreater(exported.stat().st_size, 0)
-                self.assertIn('<svg', exported.read_text())
-            self.assertEqual((project / 'cached.kicad_pcb').read_text(), source)
+            exported = runtime.executors['export_kicad_manufacturing']({
+                'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production',
+                'renames': {'F.Cu': 'top.gbr', 'F.Silkscreen': 'silk.gbr'}, 'zip_name': 'maker.zip'})
+            self.assertEqual(exported.state, CapabilityResultState.SUCCEEDED, exported.failure)
+            self.assertIn('X', (project / 'production/top.gbr').read_text())
+            self.assertTrue(any(Path(f).suffix == '.drl' for f in exported.values['files_written']))
 
-    def test_same_footprint_clearance_is_honoured(self):
-        with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
-            root = Path(directory).resolve()
-            project = root / 'designs/pads'
-            project.mkdir(parents=True)
-            board = (FIXTURE / 'minimal.kicad_pcb').read_text()
-            footprints = []
-            # U1: 0.15 mm gap; U2: overlap; U3/U4: different parents; U5: 0.05 mm gap.
-            for reference, x, y, positions in (('U1', 102, 102, (0, 1.15)),
-                                               ('U2', 106, 102, (0, 0.9)),
-                                               ('U3', 102, 106, (0,)),
-                                               ('U4', 103.15, 106, (0,)),
-                                               ('U5', 106, 106, (0, 1.05))):
-                pads = ''.join(f'(pad "{i}" smd rect (at {offset} 0) (size 1 1) '
-                               f'(layers "F.Cu") (net {i} "N{i}"))'
-                               for i, offset in enumerate(positions, 1))
-                if reference == 'U4':
-                    pads = pads.replace('(net 1 "N1")', '(net 2 "N2")')
-                footprints.append(f'(footprint "Test:Pads" (layer "F.Cu") (at {x} {y}) '
-                                  f'(property "Reference" "{reference}" (at 0 -1) (layer "F.SilkS")) {pads})')
-            board = board.rstrip()[:-1] + '(net 1 "N1")(net 2 "N2")' + ''.join(footprints) + ')'
-            (project / 'pads.kicad_pcb').write_text(board)
-            pro = json.loads((FIXTURE / 'minimal.kicad_pro').read_text())
-            pro['board']['design_settings']['rules']['min_clearance'] = 0.2
-            (project / 'pads.kicad_pro').write_text(json.dumps(pro))
-            timings = []
-            def measured(executable, arguments, **kwargs):
-                started = time.monotonic()
-                result = run_kicad_cli(executable, arguments, **kwargs)
-                timings.append((arguments[:3], time.monotonic() - started))
-                return result
-            with patch('alx.bootstrap.kicad.run_kicad_cli', measured):
-                runtime = build_kicad_runtime(lambda: 'pads', {
-                    'ALX_KICAD_CLI': CLI, 'ALX_KICAD_DESIGN_ROOTS': str(root / 'designs')}, root / 'storage')
-                checked = runtime.executors['check_kicad_board']({'project_dir': str(project)})
-                self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
-                before = next(g for g in checked.values['violations'] if g['check_type'] == 'clearance')
-                self.assertEqual(before['count'], 3, checked.values['violations'])
-                fixed = runtime.executors['apply_kicad_mechanical_fixes']({
-                    'work_copy_id': checked.values['work_copy_id'], 'same_footprint_pad_clearance_mm': 0.1})
-                self.assertEqual(fixed.state, CapabilityResultState.SUCCEEDED, fixed.failure)
-                # U1 is resolved; overlap, different parents and the real U5 fault remain.
-                reports = list((root / 'storage/kicad' / checked.values['work_copy_id'] / 'artifacts').glob('*.json'))
-                latest = max(reports, key=lambda p: p.stat().st_mtime_ns)
-                violations = json.loads(latest.read_text())['violations']
-                clearance = [v for v in violations if v['type'] == 'clearance']
-                self.assertEqual(len(clearance), 2, violations)
-                self.assertEqual([dict(c) for c in fixed.values['after']['custom_rule_citations']],
-                                 [{'name': 'ALX same-footprint pad clearance', 'count': 1}])
-                self.assertTrue(any(v['type'] == 'shorting_items' and 'U2' in str(v) for v in violations))
-                self.assertFalse(any('U1' in str(v) for v in clearance))
-                self.assertFalse(any(v['type'] == 'dsl_parse_error' for v in violations), violations)
-                self.assertTrue(fixed.values['before_images'])
-                self.assertTrue(fixed.values['after_images'])
-            print('KiCad fixture subcommand seconds:', timings)
-
-    def test_saved_project_drc_and_svg(self):
+    def test_saved_project_drc_edit_and_manufacturing(self):
         cli = CLI
         fixture = FIXTURE
         with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as directory:
@@ -165,13 +125,31 @@ class RealKiCadTests(unittest.TestCase):
             self.assertEqual(checked.values['totals']['total'], sum(
                 group['count'] for key in ('violations', 'unconnected_items', 'schematic_parity')
                 for group in checked.values[key]))
-            # No optional edit: exercise real DRC and both SVG exports through production code.
-            rendered = runtime.executors['apply_kicad_mechanical_fixes']({
-                'work_copy_id': checked.values['work_copy_id']})
-            self.assertEqual(rendered.state, CapabilityResultState.SUCCEEDED, rendered.failure)
-            for value in (*rendered.values['before_images'], *rendered.values['after_images']):
-                self.assertIn('<svg', Path(value).read_text())
-            self.assertEqual({p.name: p.read_bytes() for p in project.iterdir()}, before)
+            edited = runtime.executors['edit_kicad_work_copy']({
+                'work_copy_id': checked.values['work_copy_id'],
+                'script': '''
+import sys
+import pcbnew
+board = pcbnew.LoadBoard(sys.argv[1])
+enabled = board.GetEnabledLayers()
+enabled.AddLayer(pcbnew.User_1)
+board.SetEnabledLayers(enabled)
+for item in board.GetDrawings():
+    # GetLayerName() returns the display name (F.Silkscreen in this fixture).
+    if item.GetLayer() == pcbnew.F_SilkS:
+        item.SetLayer(pcbnew.User_1)
+pcbnew.SaveBoard(sys.argv[1], board)
+'''})
+            self.assertEqual(edited.state, CapabilityResultState.SUCCEEDED, edited.failure)
+            self.assertEqual(edited.values['change_report']['board']['layer_moves'], ({
+                'id': 'd8478024-7b53-4e3c-b624-b00426b46aed', 'kind': 'gr_text',
+                'before': ('F.SilkS',), 'after': ('User.1',)},))
+            exported = runtime.executors['export_kicad_manufacturing']({
+                'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production',
+                'renames': {'User.1': 'pib_0.15.gbr'}, 'zip_name': 'production.zip'})
+            self.assertEqual(exported.state, CapabilityResultState.SUCCEEDED, exported.failure)
+            self.assertTrue((project / 'production/pib_0.15.gbr').is_file())
+            self.assertEqual({p.name: p.read_bytes() for p in project.iterdir() if p.is_file()}, before)
 
 
 if __name__ == '__main__':

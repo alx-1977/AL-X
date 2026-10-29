@@ -59,7 +59,7 @@ These are the "beyond what he has approved" in exceptions 1, 2 and 5.
 
 | What | Approved | Decision |
 | --- | --- | --- |
-| KiCad boards | read his design folders and libraries; work on copies freely; write back to his board only with his approval of that exact write, never while KiCad has it open | D-058 |
+| KiCad boards and references | read files/folders Friedl points to under home, including iCloud Drive, and configured design folders/libraries; edit her own copies freely using bundled pcbnew and CLI; review the full plain change report before write-back; export renamed Gerbers/drill files add-only into the project's production folder; replace originals only after his yes in that conversation ("please make the adjustments" counts), with backups, board-closed and unchanged-original checks | D-061 amends D-058 |
 
 ## Working agreements
 

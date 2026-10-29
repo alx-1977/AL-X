@@ -1187,8 +1187,9 @@ async def run(repository_root: Path) -> None:
                  "src/alx/providers/dhl.py", xero_composed),
                 ("Ship24", "tracking shipments across supported couriers",
                  "src/alx/providers/ship24.py", True),
-                ("KiCad", "board DRC, mechanical cleanup on copies, library footprint "
-                 "inspection and approved write-back", "src/alx/providers/kicad.py", True),
+                ("KiCad", "board DRC, confined pcbnew editing on copies, add-only manufacturing "
+                 "exports, home/iCloud reference reading, library footprint inspection and "
+                 "approved write-back", "src/alx/providers/kicad.py", True),
                 ("LlamaParse", "reading invoices and other documents",
                  "src/alx/providers/llamaparse.py", documents_composed),
                 ("Particle", "the BHL readers: Cloud API, event streams and "
