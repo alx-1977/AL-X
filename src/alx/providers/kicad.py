@@ -1,18 +1,24 @@
-"""Bounded KiCad mechanics (D-058); never interprets user language."""
+"""Bounded KiCad mechanics (D-061, amending D-058); never interprets user language."""
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import re
 import shutil
 import tempfile
 import uuid
+import zipfile
+import difflib
+import unicodedata
+from collections import Counter
+from contextlib import contextmanager, suppress
+import fcntl
 
 from alx.providers.own_source import denied
+from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 
 logger = logging.getLogger(__name__)
@@ -27,6 +33,8 @@ ITEMS_PER_FINDING = 4
 MAX_PROJECT_ENTRIES = 20000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
+# Retained edit evidence has its own limit, outside the project limits.
+MAX_EVIDENCE_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class KiCadError(Exception):
@@ -44,19 +52,20 @@ def bounded(path, roots, *, protected=True):
     return resolved
 
 
-def inventory(root, *, exclude=()):
+def inventory(root, *, exclude=frozenset()):
+    exclude = frozenset(exclude)
     result = {}
     total = 0
     entries = 0
     for path in root.rglob('*'):
-        # Only exact transaction-owned paths, never a filename pattern.
-        if path in exclude:
+        # Only exact transaction-owned paths and their contents, never a filename pattern.
+        if path in exclude or not exclude.isdisjoint(path.parents):
             continue
         entries += 1
         if entries > MAX_PROJECT_ENTRIES:
             raise KiCadError('project_too_large')
         bounded(path, (root,), protected=False)
-        if denied(path.relative_to(root).as_posix()):
+        if credential_path(path.relative_to(root).as_posix()):
             raise KiCadError('path_denied')
         if path.is_symlink() or not (path.is_file() or path.is_dir()):
             raise KiCadError('path_denied')
@@ -66,6 +75,19 @@ def inventory(root, *, exclude=()):
                 raise KiCadError('project_too_large')
             result[path.relative_to(root).as_posix()] = sha(path)
     return result
+
+
+def evidence_bytes(folder):
+    """Size of retained edit evidence; refuses anything but plain files and folders."""
+    total = 0
+    if folder.is_symlink():
+        raise KiCadError('path_denied')
+    for path in folder.rglob('*') if folder.exists() else ():
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise KiCadError('path_denied')
+        if path.is_file():
+            total += path.stat().st_size
+    return total
 
 
 def sha(path):
@@ -152,121 +174,404 @@ def references(footprint):
             + [p.children[2] for p in footprint.named('fp_text') if p.children[1] == 'reference'])
 
 
-def silk_text(node):
-    """Shared text identification, including layers with knockout flags."""
-    if node.name not in ('fp_text', 'gr_text', 'property'):
-        return False
-    layers = node.named('layer')
-    return bool(layers and len(layers[0].children) > 1
-                and layers[0].children[1] in ('F.SilkS', 'B.SilkS'))
+def board_facts(source):
+    tree = sexpr(source)
+    items, counts = {}, Counter()
+    for index, node in enumerate(descendants(tree)):
+        layers = node.named('layer') + node.named('layers')
+        if not layers or node.name in ('setup', 'stackup', 'kicad_pcb'):
+            continue
+        layer = [str(v) for v in layers[0].children[1:] if isinstance(v, str)]
+        uid = node.named('uuid') + node.named('tstamp')
+        identity = str(uid[0].children[1]) if uid else f'{node.name}:{index}'
+        items[identity] = {'id': identity, 'kind': node.name, 'layers': layer}
+        counts.update(layer)
+    def section(name):
+        return '\n'.join(source[n.start:n.end] for n in tree.named(name))
+    return {'items': items, 'counts': dict(counts), 'layers': section('layers'),
+            'setup': section('setup'),
+            'stackup': '\n'.join(source[n.start:n.end] for n in descendants(tree) if n.name == 'stackup')}
 
 
-BOARD_INVARIANT_VERSION = 2
+def structural_diff(before, after):
+    left, right = before['items'], after['items']
+    added = [right[k] for k in right.keys() - left.keys()]
+    removed = [left[k] for k in left.keys() - right.keys()]
+    moved = [{'id': k, 'kind': right[k]['kind'], 'before': left[k]['layers'],
+              'after': right[k]['layers']} for k in sorted(left.keys() & right.keys())
+             if left[k]['layers'] != right[k]['layers']]
+    sections = {key: {'before': before[key][:6000], 'after': after[key][:6000],
+                      'changed': before[key] != after[key],
+                      'truncated': max(len(before[key]), len(after[key])) > 6000}
+                for key in ('layers', 'setup', 'stackup')}
+    return dict(sections, items_added=sorted(added, key=lambda x: x['id'])[:100],
+                items_removed=sorted(removed, key=lambda x: x['id'])[:100], layer_moves=moved[:100],
+                added_count=len(added), removed_count=len(removed), moved_count=len(moved),
+                truncated=max(len(added), len(removed), len(moved)) > 100,
+                per_layer_before=before['counts'], per_layer_after=after['counts'])
 
 
-def board_canonical(board_source, *, version=BOARD_INVARIANT_VERSION):
-    """Everything except permitted dimensions and derived caches is invariant."""
-    if type(version) is not int or version not in (1, BOARD_INVARIANT_VERSION):
-        raise KiCadError('unsupported_project')
-    def canonical(node, context='', zone=False):
-        if not isinstance(node, Node):
-            return node
-        zone = zone or node.name == 'zone'
-        silk = silk_text(node)
-        children = []
-        for child in node.children:
-            if isinstance(child, Node) and (
-                    (context == 'font' and child.name in ('size', 'thickness'))
-                    or (version != 1 and silk and child.name == 'render_cache')
-                    or (zone and child.name in ('filled_polygon', 'fill_segments'))):
-                continue
-            child_context = ''
-            if isinstance(child, Node):
-                if silk and child.name == 'effects':
-                    child_context = 'effects'
-                elif context == 'effects' and child.name == 'font':
-                    child_context = 'font'
-            value = canonical(child, child_context, zone)
-            # Dimension-only wrappers may be inserted when effects/font are absent.
-            if child_context and value == [child.name]:
-                continue
-            children.append(value)
-        return children
-    return canonical(sexpr(board_source))
+def exact_filename(value):
+    if (not value or Path(value).name != value or value in ('.', '..') or '\\' in value
+            or len(value) > 240 or any(ord(c) < 32 for c in value) or denied(value)):
+        raise KiCadError('path_denied')
+    return value
 
 
-def invariant_digest(tree):
-    return hashlib.sha256(json.dumps(tree).encode()).hexdigest()
+def normalized_manufacturing(data):
+    gerber_source = data.decode('utf-8', errors='replace')
+    if gerber_source.lstrip().startswith('{'):
+        try:
+            value = json.loads(gerber_source)
+            if isinstance(value.get('Header'), dict):
+                for key in ('CreationDate', 'GenerationSoftware'):
+                    value['Header'].pop(key, None)
+            return json.dumps(value, sort_keys=True, indent=2).splitlines()
+        except (ValueError, AttributeError):
+            pass
+    # Remove only complete metadata records, preserving geometry sharing a line.
+    gerber_source = re.sub(r'G04[^*]*\*', '', gerber_source)
+    # SameCoordinates only tags files that share an origin; geometry is compared below.
+    gerber_source = re.sub(r'%TF\.(?:CreationDate|GenerationSoftware|SameCoordinates),[^*]*\*%', '', gerber_source)
+    lines = gerber_source.splitlines()
+    return [line.rstrip() for line in lines if not (
+        not line.strip()
+        or line.lstrip().startswith(('; #@! TF.CreationDate,', '; #@! TF.GenerationSoftware,',
+                                     '; Creation date:', '; GenerationSoftware:', '; DRILL file')))]
 
 
-def board_invariant(board_source):
-    return invariant_digest(board_canonical(board_source))
-
-
-# Fixed diagnostic vocabulary: arbitrary node names are board content too.
-DIAGNOSTIC_NODE_NAMES = frozenset({
-    'kicad_pcb', 'footprint', 'property', 'fp_text', 'gr_text', 'dimension',
-    'effects', 'font', 'size', 'thickness', 'face', 'justify', 'layer', 'hide',
-    'at', 'uuid', 'tstamp', 'pad', 'segment', 'zone', 'polygon', 'pts', 'xy',
-    'start', 'end', 'width', 'net', 'layers', 'setup', 'general', 'version',
-    'generator', 'render_cache',
-})
-
-
-def first_board_difference(expected, current):
-    """Return canonical child indices and allowlisted names, never atom values."""
-    def name(tree):
-        value = tree[0] if isinstance(tree, list) and tree else None
-        return value if isinstance(value, str) and value in DIAGNOSTIC_NODE_NAMES else 'unknown'
-
-    def compare(left, right, path):
-        if isinstance(left, list) and isinstance(right, list):
-            for index in range(max(len(left), len(right))):
-                if index >= len(left) or index >= len(right):
-                    child = left[index] if index < len(left) else right[index]
-                    return path + [index] + ([name(child)] if isinstance(child, list) else [])
-                if left[index] != right[index]:
-                    child_path = path + [index]
-                    if isinstance(left[index], list) or isinstance(right[index], list):
-                        child_path.append(name(left[index] if isinstance(left[index], list) else right[index]))
-                    return compare(left[index], right[index], child_path)
-        return path
-    return None if expected == current else compare(expected, current, [name(expected)])
-
-
-def verify_board_invariant(board_source, meta, expected=None):
-    # Absence means the historical format, never permission to rebaseline.
-    version = meta.get('board_invariant_version', 1)
-    current = board_canonical(board_source, version=version)
-    if invariant_digest(current) != meta['board_invariant']:
-        expected = meta.get('board_canonical', expected)
-        path = first_board_difference(expected, current) if expected is not None else ['kicad_pcb']
-        logger.warning('KiCad board_structure_changed path=%s', json.dumps(path))
-        raise KiCadError('board_structure_changed', {'first_difference_path': path})
-    if version == 1:
-        current = board_canonical(board_source)
-        meta.update(board_invariant_version=BOARD_INVARIANT_VERSION,
-                    board_invariant=invariant_digest(current), board_canonical=current)
-        return True
-    return False
-
-
-SAME_PART_CONDITION = "A.Type == 'Pad' && B.Type == 'Pad' && A.Parent == B.Parent"
-
-
-def condition_tokens(expression):
-    """Ignore expression whitespace, preserving literal contents and token boundaries."""
-    return tuple(re.findall(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|[A-Za-z_][A-Za-z_0-9]*|[0-9.]+|==|!=|&&|\|\||\S", expression))
+def compare_manufacturing(files, previous):
+    path = reference_path(previous)
+    if path.is_dir():
+        names = inventory(path)
+        old = {name: read_bytes(path / name) for name in names}
+    else:
+        import io
+        with zipfile.ZipFile(io.BytesIO(read_bytes(path))) as bundle:
+            entries = archive_entries(bundle)
+            old = {e.filename: bundle.read(e) for e in entries if not e.is_dir()}
+    result = []
+    for name in sorted(files.keys() | old.keys()):
+        count = 0
+        if name not in old:
+            status = 'only_in_new'
+        elif name not in files:
+            status = 'only_in_previous'
+        else:
+            left, right = normalized_manufacturing(old[name]), normalized_manufacturing(files[name])
+            status = 'identical' if left == right else 'differs'
+            if status == 'differs':
+                # Linear multiset difference is bounded and counts repeated geometry.
+                count = sum((Counter(left) - Counter(right)).values()) + sum((Counter(right) - Counter(left)).values())
+                if count == 0:  # Ordering changes can matter to Gerber modal state.
+                    count = sum(a != b for a, b in zip(left, right))
+        result.append({'name': name, 'status': status, 'differing_lines': min(count, 10000),
+                       'line_count_truncated': count > 10000})
+    return {'files': result[:200], 'truncated': len(result) > 200}
 
 
 class KiCadProvider:
-    def __init__(self, settings, execute_cli):
+    def __init__(self, settings, execute_cli, execute_python=None):
         self.settings, self.execute_cli = settings, execute_cli
+        self.execute_python = execute_python
         self.design_roots = tuple(p.expanduser().resolve() for p in settings.design_roots)
         self.work_root = settings.work_root.expanduser().resolve()
 
+    def _source(self, path):
+        raw = Path(path).expanduser().absolute()
+        if any(raw.resolve().is_relative_to(r) for r in self.design_roots):
+            reference_path(raw, roots=self.design_roots)
+            return bounded(raw, self.design_roots)
+        return reference_path(raw)
+
+    def read_reference(self, arguments):
+        raw = Path(arguments['path']).expanduser().absolute()
+        if not raw.resolve().is_relative_to(self.work_root):
+            return read_reference(arguments)
+        # Inside AL/X storage only retained edit evidence is readable.
+        parts = raw.resolve().relative_to(self.work_root).parts
+        if len(parts) < 2 or parts[1] != 'evidence':
+            raise KiCadError('path_denied')
+        root, _ = self._load(parts[0])
+        return read_reference(arguments, roots=(root / 'evidence',), protected=False)
+
+    @contextmanager
+    def _locked(self, work_copy_id):
+        root, _ = self._load(work_copy_id)
+        fd = os.open(root / 'operation.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise KiCadError('work_copy_busy') from error
+            yield
+        finally:
+            os.close(fd)
+
+    def edit(self, arguments):
+        with self._locked(arguments['work_copy_id']):
+            script = arguments['script']
+            if not script or len(script) > 128000 or self.execute_python is None:
+                raise KiCadError('arguments_unusable')
+            root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            project = root / 'project'
+            board = project / meta['board']
+            original = inventory(project)
+            snapshot = root / ('snapshot-' + uuid.uuid4().hex)
+            shutil.copytree(project, snapshot)
+            if inventory(snapshot) != original:
+                raise KiCadError('verification_failed')
+            self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
+            script_path = root / ('edit-' + uuid.uuid4().hex + '.py')
+            stage = 'before_drc'
+            evidence, kept = None, False
+            try:
+                before = self._drc(root, meta)['totals']
+                facts_before = board_facts(board.read_text())
+                script_path.write_text(script)
+                stage = 'script'
+                executed = self.execute_python(str(self.settings.kicad_python), script_path, board)
+                stdout, stderr = (getattr(executed, key, '') or '' for key in ('stdout', 'stderr'))
+                if executed.returncode:
+                    raise KiCadError('script_failed', {'stdout': stdout[:16000], 'stderr': stderr[:16000]})
+                inventory(project)
+                stage = 'after_drc'
+                after = self._drc(root, meta)['totals']
+                current = inventory(project)
+                facts_after = board_facts(board.read_text())
+                changed = sorted(name for name in original.keys() | current.keys()
+                                 if original.get(name) != current.get(name))
+                report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
+                          'board': structural_diff(facts_before, facts_after)}
+                diffs, budget = [], 24000
+                for name in changed[:200]:
+                    left = (snapshot / name).read_text(errors='replace') if name in original else ''
+                    right = (project / name).read_text(errors='replace') if name in current else ''
+                    # Stream the diff into a bounded report; retain the snapshot
+                    # and edited files as the full evidence behind a truncation.
+                    pieces, used, truncated = [], 0, False
+                    for line in difflib.unified_diff(left.splitlines(True), right.splitlines(True),
+                                                      fromfile=name + ':before', tofile=name + ':after'):
+                        take = min(len(line), max(0, budget - used))
+                        pieces.append(line[:take])
+                        used += take
+                        if take < len(line):
+                            truncated = True
+                            break
+                    diffs.append({'name': name, 'diff': ''.join(pieces), 'truncated': truncated})
+                    budget -= used
+                    if budget <= 0:
+                        break
+                truncated = len(diffs) < len(changed) or any(d['truncated'] for d in diffs)
+                report.update(file_diffs=diffs, diffs_truncated=truncated)
+                if truncated:
+                    # The report is cut short: keep before and after copies and the
+                    # complete diff as evidence that later edits never delete.
+                    # The snapshot itself becomes the before copy, still under the taint.
+                    evidence = root / 'evidence' / ('edit-' + uuid.uuid4().hex)
+                    evidence.mkdir(parents=True)
+                    try:
+                        shutil.copytree(project, evidence / 'after')
+                        with (evidence / 'changes.diff').open('w') as stream:
+                            for name in changed:
+                                left = (snapshot / name).read_text(errors='replace') if name in original else ''
+                                right = (project / name).read_text(errors='replace') if name in current else ''
+                                stream.writelines(difflib.unified_diff(
+                                    left.splitlines(True), right.splitlines(True),
+                                    fromfile=name + ':before', tofile=name + ':after'))
+                        if evidence_bytes(root / 'evidence') + evidence_bytes(snapshot) > MAX_EVIDENCE_BYTES:
+                            raise KiCadError('evidence_full')
+                    except BaseException:
+                        shutil.rmtree(evidence, ignore_errors=True)
+                        raise
+                    report.update(full_diff_path=str(evidence / 'changes.diff'),
+                                  before_copy_path=str(evidence / 'before'),
+                                  after_copy_path=str(evidence / 'after'))
+                script_path.unlink(missing_ok=True)
+                revision = self._revision(root, meta)
+                if evidence:
+                    # Restoring after this point uses the moved snapshot.
+                    snapshot.rename(evidence / 'before')
+                    snapshot = evidence / 'before'
+                # The pending taint is cleared last; nothing after it can fail the edit.
+                self._save_metadata(root, meta)
+                kept = bool(evidence)
+                return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision,
+                        'stdout': stdout[:16000], 'stderr': stderr[:16000],
+                        'change_report': report, 'before': before, 'after': after}
+            except BaseException as error:
+                restored = False
+                try:
+                    # Never follow a script-created symlink while restoring.
+                    if project.is_symlink():
+                        project.unlink()
+                    elif project.exists():
+                        shutil.rmtree(project)
+                    shutil.copytree(snapshot, project)
+                    restored = inventory(project) == original
+                    if getattr(error, 'details', {}).get('reason_code') == 'session_unstoppable':
+                        restored = False
+                    if restored:
+                        self._save_metadata(root, meta)
+                except (OSError, KiCadError):
+                    restored = False
+                if restored and evidence:
+                    # The undone edit leaves no evidence; unverified recovery keeps it.
+                    shutil.rmtree(evidence, ignore_errors=True)
+                recovery = dict(getattr(error, 'recovery', None) or {},
+                    work_copy_id=arguments['work_copy_id'], rollback_status='restored' if restored else 'failed',
+                    work_copy_tainted=not restored, baseline_eligible=restored, stage=stage)
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    raise
+                code = str(error) if isinstance(error, KiCadError) else (
+                    'cli_timeout' if isinstance(error, KICAD_CLI_TIMEOUT) else 'verification_failed')
+                raise KiCadError(code, recovery) from error
+            finally:
+                # Best-effort cleanup only: the outcome is already decided.
+                with suppress(OSError):
+                    script_path.unlink(missing_ok=True)
+                # Retained evidence and unverified recovery keep their snapshot.
+                with suppress(OSError, ValueError):
+                    if not kept and not json.loads((root / 'metadata.json').read_text()).get('taint'):
+                        shutil.rmtree(snapshot, ignore_errors=True)
+
+    def export(self, arguments):
+        with self._locked(arguments['work_copy_id']):
+            root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            relative = Path(arguments['output_dir'])
+            if relative.is_absolute() or not relative.parts or any(p in ('.', '..') for p in relative.parts):
+                raise KiCadError('path_denied')
+            source = self._source(meta['source'])
+            output = source / relative
+            if not output.resolve().is_relative_to(source):
+                raise KiCadError('path_denied')
+            self._source(output)
+            staging = root / 'artifacts' / ('manufacturing-' + uuid.uuid4().hex)
+            staging.mkdir(parents=True)
+            board = root / 'project' / meta['board']
+            layers = sexpr(board.read_text()).one('layers')
+            self._run('pcb', 'export', 'gerbers', '--board-plot-params',
+                      '--output', str(staging) + '/', board)
+            drill_options = ['--excellon-separate-th'] if arguments.get('separate_drills', False) else []
+            drill_origin = arguments.get('drill_origin', 'absolute')
+            if drill_origin not in ('absolute', 'plot'):
+                raise KiCadError('arguments_unusable')
+            drill_options += ['--drill-origin', drill_origin]
+            self._run('pcb', 'export', 'drill', *drill_options, '--output', str(staging) + '/', board)
+            generated = inventory(staging)
+            if not generated:
+                raise KiCadError('invalid_report')
+            renames = arguments.get('renames', {})
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in renames.items()):
+                raise KiCadError('arguments_unusable')
+            mapping = {}
+            for key, value in renames.items():
+                exact_filename(value)
+                candidates = [key] if key in generated else []
+                if not candidates:
+                    matching = [n for n in layers.children if isinstance(n, Node)
+                                and key in n.children[1:]]
+                    if len(matching) == 1:
+                        aliases = [str(n).replace('.', '_') for n in matching[0].children[1:]
+                                   if n != 'user' and n != 'signal']
+                        candidates = [name for name in generated if Path(name).stem in {
+                            board.stem + '-' + layer for layer in aliases}]
+                if len(candidates) != 1 or candidates[0] in mapping:
+                    raise KiCadError('rename_ambiguous')
+                mapping[candidates[0]] = value
+            files = {}
+            filename_keys = set()
+            jobs = set()
+            for name in generated:
+                final = exact_filename(mapping.get(name, name))
+                if name.endswith('.gbrjob'):
+                    jobs.add(final)
+                key = unicodedata.normalize('NFC', final).casefold()
+                if key in filename_keys:
+                    raise KiCadError('rename_ambiguous')
+                filename_keys.add(key)
+                files[final] = read_bytes(staging / name)
+            for name in jobs:
+                job = json.loads(files[name])
+                for entry in job.get('FilesAttributes', []):
+                    if 'Path' in entry:
+                        entry['Path'] = mapping.get(entry['Path'], entry['Path'])
+                files[name] = (json.dumps(job, indent=2) + '\n').encode()
+            comparison = compare_manufacturing(files, arguments['compare_with']) if arguments.get('compare_with') else {'files': [], 'truncated': False}
+            # Keep final names in staging as well as in the publication.
+            final_dir = staging / 'publish'
+            final_dir.mkdir()
+            for name, data in files.items():
+                (final_dir / name).write_bytes(data)
+            if 'zip_name' in arguments:
+                name = exact_filename(arguments['zip_name'])
+                if unicodedata.normalize('NFC', name).casefold() in filename_keys:
+                    raise KiCadError('rename_ambiguous')
+                with zipfile.ZipFile(final_dir / name, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:
+                    for entry in files:
+                        bundle.write(final_dir / entry, entry)
+                files[name] = read_bytes(final_dir / name)
+            # Directory descriptors exclude symlink substitution between validation
+            # and publication. O_EXCL excludes replacement even after preflight.
+            descriptor = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            written = []
+            completed = {}
+
+            def record(exports):
+                published = dict(meta.get('exports', {}))
+                published.update(exports)
+                self._save_metadata(root, dict(meta, exports=published))
+            try:
+                for part in relative.parts:
+                    try:
+                        os.mkdir(part, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                    os.close(descriptor)
+                    descriptor = child
+                for name in files:
+                    try:
+                        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    raise KiCadError('export_would_overwrite')
+                for name, data in files.items():
+                    try:
+                        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=descriptor)
+                    except FileExistsError as error:
+                        raise KiCadError('export_would_overwrite') from error
+                    written.append(str(output / name))
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(data)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    completed[(relative / name).as_posix()] = hashlib.sha256(data).hexdigest()
+                # These exact add-only artifacts are known changes made by AL/X,
+                # not changes to the original board/project snapshot. Keep their
+                # digests separate so subsequent write-back still detects edits
+                # to them or any other change in the original project.
+                record(completed)
+            except Exception as error:
+                # Fully written files stay known, so write-back and a retried
+                # export recognise them; a partial file is never recorded.
+                if completed:
+                    try:
+                        record(completed)
+                    except OSError:
+                        pass
+                raise KiCadError(str(error) if isinstance(error, KiCadError) else 'unavailable',
+                                 {'files_written': written, 'staging_path': str(staging)}) from error
+            finally:
+                os.close(descriptor)
+            return {'files_written': written, 'comparison': comparison, 'staging_path': str(staging)}
+
     def _run(self, *args):
-        subcommand = 'pcb export svg' if args[:3] == ('pcb', 'export', 'svg') else 'pcb drc'
+        subcommand = ' '.join(args[:3]) if args[:2] == ('pcb', 'export') else 'pcb drc'
         try:
             result = self.execute_cli(str(self.settings.kicad_cli), list(map(str, args)))
         except KICAD_CLI_TIMEOUT as error:
@@ -284,10 +589,10 @@ class KiCadProvider:
                 c not in '0123456789abcdef' for c in work_copy_id):
             raise KiCadError('path_denied')
         root = bounded(self.work_root / work_copy_id, (self.work_root,), protected=False)
-        inventory(root)
+        # Retained evidence is checked on its own, so it never blocks later work.
+        inventory(root, exclude={root / 'evidence'})
+        evidence_bytes(root / 'evidence')
         meta = json.loads((root / 'metadata.json').read_text())
-        if meta.get('board_invariant_version') != BOARD_INVARIANT_VERSION:
-            self._verify_board(root, meta, (root / 'project' / meta['board']).read_text())
         return root, meta
 
     def _revision(self, root, meta=None):
@@ -309,9 +614,6 @@ class KiCadProvider:
     def _drc(self, root, meta):
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
         output.parent.mkdir(exist_ok=True)
-        before_source = (root / 'project' / meta['board']).read_text()
-        expected = board_canonical(before_source)
-        self._verify_board(root, meta, before_source)
         self._run('pcb', 'drc', '--format', 'json', '--severity-all', '--refill-zones',
                   '--output', output, root / 'project' / meta['board'])
         try:
@@ -322,7 +624,6 @@ class KiCadProvider:
                    ('violations', 'unconnected_items', 'schematic_parity')):
             raise KiCadError('invalid_report')
         board_text = (root / 'project' / meta['board']).read_text()
-        verify_board_invariant(board_text, meta, expected)
         board = sexpr(board_text)
         identities = {}
         for footprint in board.named('footprint'):
@@ -428,13 +729,8 @@ class KiCadProvider:
         result['baseline_eligible'] = not bool(meta.get('taint'))
         return result
 
-    def _verify_board(self, root, meta, board_source):
-        if verify_board_invariant(board_source, meta):
-            # Persist the verified upgrade before CLI refill or authorised edits.
-            self._save_metadata(root, meta)
-
     def check(self, arguments):
-        source = bounded(arguments['project_dir'], self.design_roots)
+        source = self._source(arguments['project_dir'])
         if source.is_relative_to(self.work_root) or self.work_root.is_relative_to(source):
             raise KiCadError('path_denied')
         if not source.is_dir():
@@ -449,247 +745,10 @@ class KiCadProvider:
         shutil.copytree(source, root / 'project')
         if inventory(source) != hashes or inventory(root / 'project') != hashes:
             raise KiCadError('original_changed')
-        canonical = board_canonical((root / 'project' / boards[0]).read_text())
-        meta = {'source': str(source), 'hashes': hashes, 'board': boards[0],
-                'board_invariant_version': BOARD_INVARIANT_VERSION,
-                'board_invariant': invariant_digest(canonical), 'board_canonical': canonical}
+        meta = {'source': str(source), 'hashes': hashes, 'board': boards[0]}
         (root / 'metadata.json').write_text(json.dumps(meta))
         result = self._drc(root, meta)
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
-
-    def _render(self, root, meta):
-        target = root / 'artifacts' / uuid.uuid4().hex
-        target.mkdir()
-        self._run('pcb', 'export', 'svg', '--layers', 'F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts',
-                  '--mode-multi', '--output', str(target) + '/',
-                  root / 'project' / meta['board'])
-        paths = [str(p) for p in target.glob('*.svg') if p.is_file()]
-        if not paths:
-            raise KiCadError('render_failed')
-        return paths
-
-    def fix(self, arguments):
-        silk_minima = {'silk_text_height': 'silk_text_min_height_mm',
-                       'silk_text_thickness': 'silk_text_min_thickness_mm'}
-        if any(key in arguments for key in silk_minima.values()) and not arguments.get('silkscreen_min_text', False):
-            raise KiCadError('arguments_unusable')
-        clearance = arguments.get('same_footprint_pad_clearance_mm')
-        for key in ('same_footprint_pad_clearance_mm', *silk_minima.values()):
-            if key not in arguments:
-                continue
-            value = arguments[key]
-            try:
-                valid = (not isinstance(value, bool)
-                         and isinstance(value, (int, float))
-                         and math.isfinite(value) and value > 0)
-            except OverflowError:
-                valid = False
-            if not valid:
-                raise KiCadError('arguments_unusable')
-        root, meta = self._load(arguments['work_copy_id'])
-        board = root / 'project' / meta['board']
-        paths = (board, board.with_suffix('.kicad_pro'), board.with_suffix('.kicad_dru'))
-        snapshot = {path: path.read_bytes() if path.exists() else None for path in paths}
-        # Persist uncertainty BEFORE even the before DRC, which refills zones.
-        pending = dict(meta, taint=uuid.uuid4().hex)
-        self._save_metadata(root, pending)
-        stage = 'before_drc'
-        try:
-            before = self._drc(root, meta)
-            stage = 'render'
-            before_images = self._render(root, meta)
-            stage = 'template'
-            board = root / 'project' / meta['board']
-            pro = board.with_suffix('.kicad_pro')
-            if not pro.is_file():
-                raise KiCadError('unsupported_project')
-            settings = json.loads(pro.read_text())
-            original_settings = json.dumps(settings, sort_keys=True)
-            changes = []
-            template = arguments.get('apply_template')
-            if template:
-                template_root = self.settings.template_root.expanduser().resolve()
-                if Path(template).name != template or template in ('.', '..'):
-                    raise KiCadError('path_denied')
-                folder = bounded(template_root / template, (template_root,))
-                files = inventory(folder)
-                projects = [name for name in files if name.endswith('.kicad_pro')]
-                if len(projects) != 1:
-                    raise KiCadError('unsupported_project')
-                template_project = folder / projects[0]
-                template_settings = json.loads(template_project.read_text())['board']['design_settings']
-                if 'rules' not in template_settings:
-                    raise KiCadError('unsupported_project')
-                current = settings['board']['design_settings']
-                for key in ('rules', 'rule_severities'):
-                    if key in template_settings:
-                        if current.get(key) != template_settings[key]:
-                            current[key] = template_settings[key]
-                            changes.append({'kind': 'template_' + key, 'value': template})
-                dru = template_project.with_suffix('.kicad_dru')
-                if dru.is_file():
-                    target = board.with_suffix('.kicad_dru')
-                    if not target.exists() or target.read_bytes() != dru.read_bytes():
-                        target.write_bytes(dru.read_bytes())
-                        changes.append({'kind': 'template_custom_rules', 'value': template})
-            stage = 'clearance'
-            if clearance is not None:
-                target = board.with_suffix('.kicad_dru')
-                original_rules = target.read_text() if target.exists() else '(version 1)\n'
-                # Synthetic root permits span edits across top-level rules and comments.
-                parsed = sexpr('(' + original_rules + '\n)')
-                managed_name = 'ALX same-footprint pad clearance'
-                managed = [node for node in parsed.named('rule') if node.children[1] == managed_name]
-                existing = [node for node in parsed.named('rule')
-                            if node.children[1] != managed_name
-                            and any(len(condition.children) == 2 and
-                                    condition_tokens(condition.children[1]) == condition_tokens(SAME_PART_CONDITION)
-                                    for condition in node.named('condition'))]
-                if existing:
-                    for node in existing:
-                        changes.append({'kind': 'same_footprint_pad_clearance',
-                                        'value': node.children[1], 'status': 'already_present',
-                                        'rule_name': node.children[1]})
-                else:
-                    rule = (f'(rule "{managed_name}"\n'
-                            f'  (condition {json.dumps(SAME_PART_CONDITION)})\n'
-                            f'  (constraint clearance (min {clearance!r}mm)))\n')
-                    updated_rules = original_rules
-                    for node in reversed(managed):
-                        updated_rules = updated_rules[:node.start - 1] + updated_rules[node.end - 1:]
-                    updated_rules = updated_rules.rstrip() + '\n' + rule
-                    if updated_rules != original_rules:
-                        target.write_text(updated_rules)
-                        changes.append({'kind': 'same_footprint_pad_clearance',
-                                        'value': str(clearance), 'clearance_mm': clearance})
-            stage = 'noise'
-            if arguments.get('ignore_noise_checks', False):
-                severities = settings['board']['design_settings'].setdefault('rule_severities', {})
-                for kind in self.settings.noise_checks:
-                    if severities.get(kind) != 'ignore':
-                        severities[kind] = 'ignore'
-                        changes.append({'kind': 'rule_severity', 'value': kind})
-            stage = 'silkscreen'
-            if arguments.get('silkscreen_min_text', False):
-                rules = settings.get('board', {}).get('design_settings', {}).get('rules', {})
-                missing = [key for key, argument in silk_minima.items()
-                           if argument not in arguments and key not in rules]
-                if missing:
-                    raise KiCadError('unsupported_project', {'missing_settings': missing})
-                height, thickness = (float(arguments[argument] if argument in arguments else rules[key])
-                                     for key, argument in silk_minima.items())
-                if not all(math.isfinite(v) and v > 0 for v in (height, thickness)):
-                    raise KiCadError('unsupported_project')
-                board_source = board.read_text()
-                board_tree = sexpr(board_source)
-                edits = []
-                for node in descendants(board_tree):
-                    if not silk_text(node):
-                        continue
-                    effects = node.one('effects') if node.named('effects') else None
-                    # Skip the owner name and text fields: the parser represents
-                    # quoted "hide" text and bare visibility tokens identically.
-                    visibility_start = 2 if node.name == 'gr_text' else 3
-                    if any('hide' in owner.children[start:] or any(
-                            hidden.children[1:] == ['yes'] for hidden in owner.named('hide'))
-                           for owner, start in ((node, visibility_start), (effects, 1))
-                           if owner is not None):
-                        continue
-                    dimensions = f'(size {height:g} {height:g}) (thickness {thickness:g})'
-                    if effects is None:
-                        edits.append((node.end - 1, node.end - 1,
-                                      f' (effects (font {dimensions}))'))
-                        continue
-                    if not effects.named('font'):
-                        edits.append((effects.end - 1, effects.end - 1, f' (font {dimensions})'))
-                        continue
-                    font = effects.one('font')
-                    if not font.named('size'):
-                        edits.append((font.end - 1, font.end - 1, f' (size {height:g} {height:g})'))
-                    else:
-                        size = font.one('size')
-                        x, y = map(float, size.children[1:])
-                        if not all(math.isfinite(v) and v > 0 for v in (x, y)):
-                            raise KiCadError('unsupported_project')
-                        if x < height or y < height:
-                            edits.append((size.start, size.end, f'(size {max(x, height):g} {max(y, height):g})'))
-                    if not font.named('thickness'):
-                        edits.append((font.end - 1, font.end - 1, f' (thickness {thickness:g})'))
-                        continue
-                    width = font.one('thickness')
-                    if float(width.children[1]) < thickness:
-                        edits.append((width.start, width.end, f'(thickness {thickness:g})'))
-                # Glyph polygons are derived from the old dimensions. Force KiCad
-                # to regenerate them, just as it refills the zone cache.
-                for node in descendants(board_tree):
-                    if silk_text(node) and any(node.start < start < node.end
-                                               for start, _, _ in edits):
-                        edits.extend((cache.start, cache.end, '')
-                                     for cache in node.named('render_cache'))
-                for start, end, value in sorted(edits, reverse=True):
-                    board_source = board_source[:start] + value + board_source[end:]
-                if edits:
-                    board.write_text(board_source)
-                    changes.append({'kind': 'silkscreen_dimensions', 'value': str(len(edits)),
-                                    'silk_text_min_height_mm': height,
-                                    'silk_text_min_thickness_mm': thickness})
-            if json.dumps(settings, sort_keys=True) != original_settings:
-                pro.write_text(json.dumps(settings, indent=2) + '\n')
-            stage = 'after_drc'
-            after = self._drc(root, meta)
-            stage = 'render'
-            after_images = self._render(root, meta)
-            result = {'work_copy_id': arguments['work_copy_id'],
-                    'before': dict(before['totals'], custom_rule_citations=before['custom_rule_citations'],
-                                   work_copy_tainted=before['work_copy_tainted'], baseline_eligible=before['baseline_eligible']),
-                    'after': dict(after['totals'], custom_rule_citations=after['custom_rule_citations'],
-                                  work_copy_tainted=after['work_copy_tainted'], baseline_eligible=after['baseline_eligible']),
-                    'work_copy_tainted': bool(meta.get('taint')), 'baseline_eligible': not bool(meta.get('taint')),
-                    'changes': changes,
-                    'before_images': before_images, 'after_images': after_images}
-            stage = 'revision'
-            result['work_copy_revision'] = self._revision(root, meta)
-            stage = 'metadata'
-            self._save_metadata(root, meta)
-        except BaseException as error:
-            if not isinstance(error, (KiCadError, KeyboardInterrupt, SystemExit)):
-                logger.warning('KiCad apply failed during %s: %s', stage, type(error).__name__)
-            restored = True
-            for path, original in snapshot.items():
-                try:
-                    if original is None:
-                        path.unlink(missing_ok=True)
-                    else:
-                        path.write_bytes(original)
-                except OSError:
-                    restored = False
-            # Verify the entire snapshot after all restorations, including absence.
-            for path, original in snapshot.items():
-                try:
-                    if (path.exists() if original is None else path.read_bytes() != original):
-                        restored = False
-                except OSError:
-                    restored = False
-            if getattr(error, 'details', {}).get('reason_code') == 'session_unstoppable':
-                restored = False
-            if restored:
-                try:
-                    self._save_metadata(root, meta)
-                except OSError:
-                    restored = False
-            recovery = {'work_copy_id': arguments['work_copy_id'],
-                        'rollback_status': 'restored' if restored else 'failed',
-                        'work_copy_tainted': bool(meta.get('taint')) or not restored,
-                        'baseline_eligible': not bool(meta.get('taint')) and restored}
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                raise
-            if isinstance(error, KiCadError):
-                error.recovery = dict(error.recovery or {}, **recovery)
-                raise
-            recovery['error'] = {'code': 'verification_failed', 'type': type(error).__name__,
-                                 'stage': stage}
-            raise KiCadError('verification_failed', recovery) from error
-        return result
 
     def find(self, arguments):
         library_id = arguments.get('library_id')
@@ -719,33 +778,36 @@ class KiCadProvider:
         return {'candidates': candidates}
 
     def write_back(self, arguments):
-        recovery = {'backed_up': [], 'written': [], 'rollback_status': 'not_needed',
-                    'restorations': [], 'remaining_changed': [], 'cleanup_errors': [],
-                    'write_digests': {}, 'conflicts': [],
-                    'error': {'code': '', 'type': ''}}
-        try:
-            return self._write_back(arguments, recovery)
-        except Exception as error:
-            code = str(error) if isinstance(error, KiCadError) else 'unavailable'
-            if isinstance(error, KiCadError) and error.recovery:
-                recovery.update(error.recovery)
-            recovery['error'] = {'code': code, 'type': type(error).__name__}
-            raise KiCadError(code, recovery) from error
+        with self._locked(arguments['work_copy_id']):
+            recovery = {'backed_up': [], 'written': [], 'rollback_status': 'not_needed',
+                        'restorations': [], 'remaining_changed': [], 'cleanup_errors': [],
+                        'write_digests': {}, 'conflicts': [],
+                        'error': {'code': '', 'type': ''}}
+            try:
+                return self._write_back(arguments, recovery)
+            except Exception as error:
+                code = str(error) if isinstance(error, KiCadError) else 'unavailable'
+                if isinstance(error, KiCadError) and error.recovery:
+                    recovery.update(error.recovery)
+                recovery['error'] = {'code': code, 'type': type(error).__name__}
+                raise KiCadError(code, recovery) from error
 
     def _write_back(self, arguments, recovery):
         root, meta = self._load(arguments['work_copy_id'])
-        source = bounded(arguments['project_dir'], self.design_roots)
+        source = self._source(arguments['project_dir'])
         if str(source) != meta['source']:
             raise KiCadError('path_denied')
         if self._revision(root) != arguments['work_copy_revision']:
             raise KiCadError('work_copy_changed')
-        self._verify_board(root, meta, (root / 'project' / meta['board']).read_text())
+        if meta.get('taint'):
+            raise KiCadError('work_copy_tainted')
 
         temporary = set()
         expected = dict(meta['hashes'])
+        expected.update(meta.get('exports', {}))
 
         def validate():
-            bounded(source, self.design_roots)
+            self._source(source)
             if list(source.rglob('~*.lck')):
                 raise KiCadError('board_open')
             current = inventory(source, exclude=temporary)
@@ -755,8 +817,8 @@ class KiCadProvider:
         copied = inventory(root / 'project')
         changed = sorted((name for name, value in copied.items() if meta['hashes'].get(name) != value),
                          key=lambda name: (name not in meta['hashes'], name))
-        allowed = {str(Path(meta['board']).with_suffix(s)) for s in ('.kicad_pcb', '.kicad_pro', '.kicad_dru')}
-        if set(changed) - allowed or set(meta['hashes']) - set(copied):
+        if (any(Path(name).suffix not in ('.kicad_pcb', '.kicad_pro', '.kicad_dru') for name in changed)
+                or set(meta['hashes']) - set(copied)):
             raise KiCadError('unsupported_project')
         backup = root / 'backups' / uuid.uuid4().hex
         backup.mkdir(parents=True)
@@ -767,7 +829,10 @@ class KiCadProvider:
                 raise KiCadError('verification_failed')
 
         def beside(name, kind):
-            fd, value = tempfile.mkstemp(prefix='.' + name + '.' + kind + '-', dir=source)
+            target = source / name
+            if not target.parent.is_dir():
+                raise KiCadError('unsupported_project')
+            fd, value = tempfile.mkstemp(prefix='.' + target.name + '.' + kind + '-', dir=target.parent)
             os.close(fd)
             path = Path(value)
             temporary.add(path)
@@ -778,6 +843,7 @@ class KiCadProvider:
             for name in changed:
                 if name in meta['hashes']:
                     target = backup / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
                     recovery['backed_up'].append(str(target))
                     verified_copy(source / name, target, meta['hashes'][name])
             for name in changed:
@@ -787,7 +853,7 @@ class KiCadProvider:
             if self._revision(root) != arguments['work_copy_revision']:
                 raise KiCadError('work_copy_changed')
             for name in changed:
-                target = bounded(source / name, self.design_roots)
+                target = self._source(source / name)
                 if sha(staged[name]) != copied[name]:
                     raise KiCadError('verification_failed')
                 validate()
@@ -809,10 +875,10 @@ class KiCadProvider:
             # recovery to AL/X with the retained backups; never destroy evidence.
             for value in reversed(recovery['written']):
                 target = Path(value)
-                name = target.name
+                name = target.relative_to(source).as_posix()
                 digest = None
                 try:
-                    bounded(target, self.design_roots)
+                    self._source(target)
                     if target.is_symlink() or not target.is_file():
                         raise KiCadError('path_denied')
                     digest = sha(target)
@@ -831,7 +897,7 @@ class KiCadProvider:
             for name in sorted(set(meta['hashes']) | set(changed)):
                 target = source / name
                 try:
-                    bounded(target, self.design_roots)
+                    self._source(target)
                     if target.is_symlink():
                         different = True
                     else:

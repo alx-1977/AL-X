@@ -356,9 +356,21 @@ entry = "providers/kicad.py::KiCadProvider.check"
 forbidden = []
 
 [[outcomes]]
-id = "kicad.copy_is_cleaned"
-description = "Requested mechanical rules and silkscreen changes are applied to a work copy."
-entry = "providers/kicad.py::KiCadProvider.fix"
+id = "kicad.copy_is_edited"
+description = "Confined pcbnew source edits a registered untainted project copy and returns change facts."
+entry = "providers/kicad.py::KiCadProvider.edit"
+forbidden = ["apply_kicad_mechanical_fixes"]
+
+[[outcomes]]
+id = "kicad.manufacturing_is_exported"
+description = "KiCad manufacturing files are exported add-only into the original project's production folder."
+entry = "providers/kicad.py::KiCadProvider.export"
+forbidden = []
+
+[[outcomes]]
+id = "reference.file_is_read"
+description = "Bounded non-credential reference facts are read from user home files."
+entry = "providers/kicad.py::KiCadProvider.read_reference"
 forbidden = []
 
 [[outcomes]]
