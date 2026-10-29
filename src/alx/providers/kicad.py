@@ -326,6 +326,7 @@ class KiCadProvider:
             self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
             script_path = root / ('edit-' + uuid.uuid4().hex + '.py')
             stage = 'before_drc'
+            evidence = retained = None
             try:
                 before = self._drc(root, meta)['totals']
                 facts_before = board_facts(board.read_text())
@@ -368,10 +369,10 @@ class KiCadProvider:
                 if truncated:
                     # The report is cut short: keep before and after copies and the
                     # complete diff as evidence that later edits never delete.
+                    # The snapshot itself becomes the before copy once the edit succeeds.
                     evidence = root / 'evidence' / ('edit-' + uuid.uuid4().hex)
                     evidence.mkdir(parents=True)
                     try:
-                        shutil.copytree(snapshot, evidence / 'before')
                         shutil.copytree(project, evidence / 'after')
                         with (evidence / 'changes.diff').open('w') as stream:
                             for name in changed:
@@ -380,7 +381,7 @@ class KiCadProvider:
                                 stream.writelines(difflib.unified_diff(
                                     left.splitlines(True), right.splitlines(True),
                                     fromfile=name + ':before', tofile=name + ':after'))
-                        if evidence_bytes(root / 'evidence') > MAX_EVIDENCE_BYTES:
+                        if evidence_bytes(root / 'evidence') + evidence_bytes(snapshot) > MAX_EVIDENCE_BYTES:
                             raise KiCadError('evidence_full')
                     except BaseException:
                         shutil.rmtree(evidence, ignore_errors=True)
@@ -391,11 +392,14 @@ class KiCadProvider:
                 # The pending taint is cleared only after all verification succeeds.
                 revision = self._revision(root, meta)
                 self._save_metadata(root, meta)
+                retained = evidence and evidence / 'before'
                 return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision,
                         'stdout': stdout[:16000], 'stderr': stderr[:16000],
                         'change_report': report, 'before': before, 'after': after}
             except BaseException as error:
                 restored = False
+                if evidence:
+                    shutil.rmtree(evidence, ignore_errors=True)
                 try:
                     # Never follow a script-created symlink while restoring.
                     if project.is_symlink():
@@ -420,8 +424,11 @@ class KiCadProvider:
                 raise KiCadError(code, recovery) from error
             finally:
                 script_path.unlink(missing_ok=True)
-                # Retain snapshot evidence when recovery cannot be verified.
-                if not json.loads((root / 'metadata.json').read_text()).get('taint'):
+                # A cut-short report keeps its snapshot as retained evidence; so does
+                # a recovery that cannot be verified. Only other snapshots are removed.
+                if retained:
+                    snapshot.rename(retained)
+                elif not json.loads((root / 'metadata.json').read_text()).get('taint'):
                     shutil.rmtree(snapshot)
 
     def export(self, arguments):

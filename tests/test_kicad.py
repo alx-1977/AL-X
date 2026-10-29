@@ -1034,6 +1034,8 @@ class KiCadTests(unittest.TestCase):
                      script="import sys\nfrom pathlib import Path\n(Path(sys.argv[1]).parent / 'notes.txt').write_text('short')\n")
         self.assertIn('line 4999', (after / 'notes.txt').read_text())
         self.assertTrue((before / 'test.kicad_pcb').is_file())
+        # The before copy is the edit's own snapshot, moved rather than duplicated.
+        self.assertEqual(list((self.settings.work_root / checked['work_copy_id']).glob('snapshot-*')), [])
 
     def test_full_diff_reads_to_the_end_through_reference_reading(self):
         checked = self.check()
