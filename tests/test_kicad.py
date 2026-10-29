@@ -1037,6 +1037,41 @@ class KiCadTests(unittest.TestCase):
         # The before copy is the edit's own snapshot, moved rather than duplicated.
         self.assertEqual(list((self.settings.work_root / checked['work_copy_id']).glob('snapshot-*')), [])
 
+    def test_failing_to_keep_evidence_or_mark_clean_undoes_the_edit(self):
+        from alx.providers.kicad import KiCadProvider
+        real_rename, real_save = Path.rename, KiCadProvider._save_metadata
+        def rename(path, target):
+            if path.name.startswith('snapshot-'):
+                raise OSError('disk full')
+            return real_rename(path, target)
+        def save(provider, root, meta):
+            if not meta.get('taint') and any(root.glob('evidence/*/before')):
+                raise OSError('disk full')
+            return real_save(provider, root, meta)
+        for name, patched in (('rename', patch.object(Path, 'rename', rename)),
+                              ('mark clean', patch.object(KiCadProvider, '_save_metadata', save))):
+            with self.subTest(failing=name):
+                checked = self.check()
+                root = self.settings.work_root / checked['work_copy_id']
+                with patched:
+                    result = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                                       script=self.LONG_EDIT)
+                self.assertEqual(result.state, CapabilityResultState.FAILED)
+                if name == 'rename':
+                    self.assertEqual(result.failure['recovery']['rollback_status'], 'restored')
+                    self.assertFalse((root / 'project' / 'notes.txt').exists())
+                    self.assertEqual(list((root / 'evidence').iterdir()), [])
+                    self.assertEqual(list(root.glob('snapshot-*')), [])
+                    self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                                 script="print('ok')\n")
+                else:
+                    # Restoring also needs metadata, so the copy stays tainted with its evidence.
+                    self.assertTrue(result.failure['recovery']['work_copy_tainted'])
+                    self.assertFalse((root / 'project' / 'notes.txt').exists())
+                    self.assertEqual(len(list(root.glob('evidence/*/before/test.kicad_pcb'))), 1)
+                    self.failure('work_copy_tainted', 'edit_kicad_work_copy',
+                                 work_copy_id=checked['work_copy_id'], script="print('ok')\n")
+
     def test_full_diff_reads_to_the_end_through_reference_reading(self):
         checked = self.check()
         report = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],

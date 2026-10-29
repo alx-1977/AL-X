@@ -14,7 +14,7 @@ import zipfile
 import difflib
 import unicodedata
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import fcntl
 
 from alx.providers.own_source import denied
@@ -326,7 +326,7 @@ class KiCadProvider:
             self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
             script_path = root / ('edit-' + uuid.uuid4().hex + '.py')
             stage = 'before_drc'
-            evidence = retained = None
+            evidence, kept = None, False
             try:
                 before = self._drc(root, meta)['totals']
                 facts_before = board_facts(board.read_text())
@@ -369,7 +369,7 @@ class KiCadProvider:
                 if truncated:
                     # The report is cut short: keep before and after copies and the
                     # complete diff as evidence that later edits never delete.
-                    # The snapshot itself becomes the before copy once the edit succeeds.
+                    # The snapshot itself becomes the before copy, still under the taint.
                     evidence = root / 'evidence' / ('edit-' + uuid.uuid4().hex)
                     evidence.mkdir(parents=True)
                     try:
@@ -389,17 +389,20 @@ class KiCadProvider:
                     report.update(full_diff_path=str(evidence / 'changes.diff'),
                                   before_copy_path=str(evidence / 'before'),
                                   after_copy_path=str(evidence / 'after'))
-                # The pending taint is cleared only after all verification succeeds.
+                script_path.unlink(missing_ok=True)
                 revision = self._revision(root, meta)
+                if evidence:
+                    # Restoring after this point uses the moved snapshot.
+                    snapshot.rename(evidence / 'before')
+                    snapshot = evidence / 'before'
+                # The pending taint is cleared last; nothing after it can fail the edit.
                 self._save_metadata(root, meta)
-                retained = evidence and evidence / 'before'
+                kept = bool(evidence)
                 return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision,
                         'stdout': stdout[:16000], 'stderr': stderr[:16000],
                         'change_report': report, 'before': before, 'after': after}
             except BaseException as error:
                 restored = False
-                if evidence:
-                    shutil.rmtree(evidence, ignore_errors=True)
                 try:
                     # Never follow a script-created symlink while restoring.
                     if project.is_symlink():
@@ -414,6 +417,9 @@ class KiCadProvider:
                         self._save_metadata(root, meta)
                 except (OSError, KiCadError):
                     restored = False
+                if restored and evidence:
+                    # The undone edit leaves no evidence; unverified recovery keeps it.
+                    shutil.rmtree(evidence, ignore_errors=True)
                 recovery = dict(getattr(error, 'recovery', None) or {},
                     work_copy_id=arguments['work_copy_id'], rollback_status='restored' if restored else 'failed',
                     work_copy_tainted=not restored, baseline_eligible=restored, stage=stage)
@@ -423,13 +429,13 @@ class KiCadProvider:
                     'cli_timeout' if isinstance(error, KICAD_CLI_TIMEOUT) else 'verification_failed')
                 raise KiCadError(code, recovery) from error
             finally:
-                script_path.unlink(missing_ok=True)
-                # A cut-short report keeps its snapshot as retained evidence; so does
-                # a recovery that cannot be verified. Only other snapshots are removed.
-                if retained:
-                    snapshot.rename(retained)
-                elif not json.loads((root / 'metadata.json').read_text()).get('taint'):
-                    shutil.rmtree(snapshot)
+                # Best-effort cleanup only: the outcome is already decided.
+                with suppress(OSError):
+                    script_path.unlink(missing_ok=True)
+                # Retained evidence and unverified recovery keep their snapshot.
+                with suppress(OSError, ValueError):
+                    if not kept and not json.loads((root / 'metadata.json').read_text()).get('taint'):
+                        shutil.rmtree(snapshot, ignore_errors=True)
 
     def export(self, arguments):
         with self._locked(arguments['work_copy_id']):
