@@ -355,6 +355,8 @@ class VoiceSession:
         progress: Callable[[VoiceEvent], Any] | None = None,
     ) -> str | None:
         """One fresh Core turn when unheard occasions exist at connection time."""
+        if not self._undelivered():
+            return None
         async with self._core_turn_lock:
             if not self._undelivered():
                 return None

@@ -394,6 +394,7 @@ class LiveVoiceServer:
         # Everything after registration is inside the cleanup scope, so a
         # connection lost during setup cannot leave a dead listener that
         # later replies would be "delivered" to.
+        session_open_task: asyncio.Task[None] | None = None
         try:
             await asyncio.to_thread(self._retry_relays)
             await connection.send(
@@ -415,25 +416,34 @@ class LiveVoiceServer:
                         "type": "phase", "value": event.kind.value,
                     }))
 
-            session_open_failed = False
-            try:
-                fresh_response = await self._session.session_open_response(
-                    conversation_id, progress=forward_progress
-                )
-            except Exception as error:  # noqa: BLE001 - one turn failed; keep listening
-                session_open_failed = True
-                LOGGER.error("Session-open Core turn failed: %s", type(error).__name__)
-                await connection.send(json.dumps({
-                    "type": "phase", "value": VoiceEventKind.ERROR.value,
-                    "reason": "session_open_reasoning_error",
-                }))
-                fresh_response = None
-            if fresh_response is not None:
-                deliveries.put_nowait(fresh_response)
-            elif not session_open_failed:
-                await connection.send(json.dumps({
-                    "type": "phase", "value": VoiceEventKind.LISTENING.value,
-                }))
+            async def open_session() -> None:
+                try:
+                    fresh_response = await self._session.session_open_response(
+                        conversation_id, progress=forward_progress
+                    )
+                except Exception as error:  # noqa: BLE001 - one turn failed; keep listening
+                    LOGGER.error("Session-open Core turn failed: %s", type(error).__name__)
+                    await connection.send(json.dumps({
+                        "type": "phase", "value": VoiceEventKind.ERROR.value,
+                        "reason": "session_open_reasoning_error",
+                    }))
+                    return
+                if fresh_response is not None:
+                    # A person may have arrived while session-open held Core.
+                    # As in deliver(), that pending turn owns the voice; leave
+                    # the unheard occasion for Core rather than queue old words
+                    # behind the person's answer. Check and enqueue on the loop
+                    # without yielding between them.
+                    if self._session.admits_unprompted_speech(conversation_id):
+                        deliveries.put_nowait(fresh_response)
+                else:
+                    await connection.send(json.dumps({
+                        "type": "phase", "value": VoiceEventKind.LISTENING.value,
+                    }))
+
+            # Core may be busy with another turn. Keep draining microphone
+            # frames while session-open waits; its words use the same queue.
+            session_open_task = asyncio.create_task(open_session())
             # A transcription transport can drop while the person is simply silent.
             # That ends one exchange but not the conversation, so it is re-entered on
             # the same durable conversation while the browser socket stays open.
@@ -441,6 +451,8 @@ class LiveVoiceServer:
                 LOGGER.info("Resuming voice session on the same conversation")
 
         finally:
+            if session_open_task is not None:
+                session_open_task.cancel()
             for delivery in self._queued_occasions.pop(deliveries, []):
                 if not delivery.started and self._mark_undelivered is not None:
                     try:
@@ -460,6 +472,18 @@ class LiveVoiceServer:
                 typed_waiting.remove(typed)
             if not typed_waiting:
                 self._typed_queues.pop(conversation_id, None)
+            # Unregister before waiting: a disconnected listener cannot accept
+            # new deliveries while a running Core worker finishes under its lock.
+            cancelled_during_cleanup = False
+            while session_open_task is not None and not session_open_task.done():
+                try:
+                    await asyncio.wait({session_open_task})
+                except asyncio.CancelledError:
+                    cancelled_during_cleanup = True
+            if session_open_task is not None:
+                await asyncio.gather(session_open_task, return_exceptions=True)
+            if cancelled_during_cleanup:
+                raise asyncio.CancelledError
 
     async def _exchange_once(
         self, connection: ServerConnection, conversation_id: str
