@@ -334,6 +334,7 @@ class CodingRequest:
     # job reads that review for the exact revision it starts from and hands
     # the reviewer's own words to the session, so nothing is lost in retelling.
     review_pull_request: int | None = None
+    firmware_repository: str | None = None
 
     def __post_init__(self) -> None:
         _required(self.task, "task")
@@ -563,6 +564,7 @@ class CodingOutcome:
     duration_seconds: float = 0.0
     # The session's account, distinct from AL/X's verification evidence.
     session_report: str = ""
+    firmware_repository: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in ("succeeded", "no_change_required", "failed", "blocked", "cancelled", "interrupted"):
@@ -616,6 +618,8 @@ class CodingOutcome:
             "plan_summary": self.plan_summary,
             "commands": [item.durable_values() for item in self.commands],
         }
+        if self.firmware_repository is not None:
+            values['firmware_repository'] = self.firmware_repository
         if self.tests_passed is not None:
             values["tests_passed"] = self.tests_passed
         if self.verification is not None:

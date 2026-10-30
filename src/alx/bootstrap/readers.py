@@ -79,6 +79,11 @@ def build_reader_runtime(
         for definition in DEFINITIONS
     }
     policies.update({definition.capability_id: full for definition in PARTICLE_DEFINITIONS})
+    # D-062 supersedes blanket cloud-write authority: field devices require
+    # Friedl's approval. Exact calls use the existing approval scope machinery.
+    policies['particle_api_request'] = AuthorityPolicy(
+        frozenset({PARTICLE_FULL_PERMISSION}), approval_required=True,
+        approval_exempt_arguments=(('method', 'GET'),))
     executors = dict(build_reader_executors(
         particle,
         BehaviorLiveConfig(settings.config_url, settings.timeout_seconds),

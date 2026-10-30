@@ -358,6 +358,8 @@ def check_repository(root: Path) -> list[str]:
             "D-001 — Foundation architecture accepted",
             "D-002 — Runtime model evaluation order",
             "D-003 — Reuse the original video background",
+            "D-062 — Particle firmware work, starting with RoomReader V2",
+            "**Status: APPROVED by Friedl, 2026-10-30.**",
         ),
         violations,
     )

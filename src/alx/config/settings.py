@@ -38,6 +38,9 @@ class KiCadSettings:
         ).split(os.pathsep) if p.strip())
         if not roots:
             raise ConfigurationError('ALX_KICAD_DESIGN_ROOTS must contain directories')
+        roots = tuple(dict.fromkeys((*roots, Path(
+            '~/Library/Mobile Documents/com~apple~CloudDocs/ALX_Storage/Projects'
+        ).expanduser().resolve())))
         return cls(
             path('ALX_KICAD_CLI', '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli'),
             roots, work,
@@ -1571,3 +1574,24 @@ def phone_settings(environment: Mapping[str, str]) -> PhoneSettings:
         poll_seconds=_positive_integer(environment, "ALX_IMESSAGE_POLL_SECONDS", 10),
     )
 
+
+
+@dataclass(frozen=True, slots=True)
+class ParticleFirmwareSettings:
+    cli: str
+    toolchains: Path
+    root: Path
+    repositories: tuple[str, ...]
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str], storage_root: Path):
+        repositories = tuple(p.strip() for p in environment.get(
+            "ALX_FIRMWARE_REPOSITORIES", "alx-1977/RoomReader_V2").split(",") if p.strip())
+        allowed = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+        if any(len(p.split("/")) != 2 or any(not part or part in {".", ".."} or
+                   not set(part) <= allowed for part in p.split("/")) for p in repositories):
+            raise ConfigurationError("invalid firmware repository allowlist")
+        return cls(environment.get("ALX_PARTICLE_CLI", "particle"),
+                   Path(environment.get("ALX_PARTICLE_TOOLCHAIN_ROOT", "~/.particle/toolchains")).expanduser().resolve(),
+                   Path(environment.get("ALX_DATA_DIRECTORY", "~/Library/Application Support/ALX")).expanduser().resolve() / "firmware",
+                   repositories)

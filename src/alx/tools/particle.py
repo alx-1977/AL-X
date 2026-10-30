@@ -1,10 +1,11 @@
-"""D-045: AL/X's full access to Friedl's Particle account.
+"""D-045 Particle account access, narrowed for firmware authority by D-062.
 
 `particle_api_request` is any Particle Cloud API call: devices, products,
 firmware and over-the-air updates, webhooks, SIMs, usage and the rest. Which
 call to make, and whether it is wise, is AL/X's judgement; Friedl granted
-the whole account ("FULL access … She will be managing it anyway"). The
-token only ever goes to Particle's API address.
+the whole account ("FULL access … She will be managing it anyway"). D-062
+requires exact-call approval for cloud mutations and refuses fleet firmware
+publication. The token only ever goes to Particle's API address.
 
 `read_particle_usage` reads data operations per device per day from
 Particle's usage report, which needs a request, a wait and a download from
@@ -50,11 +51,12 @@ _FAILURES = (
     "usage_unavailable",
     "usage_not_ready",
     "usage_unreadable",
+    "firmware_scope_denied",
 )
 
 API_DEFINITION = CapabilityDefinition(
     PARTICLE_API_REQUEST,
-    "Make any Particle Cloud API call on Friedl's account, with full authority (D-045): method GET, POST, PUT, PATCH or DELETE; path a /v1/ path on api.particle.io (for example /v1/products/45984/devices, /v1/products/45984/devices/<id>/<function> to call a function, /v1/products/45984/firmware, /v1/user/sims, /v1/products/45984/integrations); optional query parameters and JSON body. Returns Particle's HTTP status and reply; a refusal is returned, not hidden. Event streams are not available here. Changes (anything but GET) are recorded in the reader log.",
+    "Make a Particle Cloud API call: method GET, POST, PUT, PATCH or DELETE; path a /v1/ path on api.particle.io; optional query parameters and JSON body. GET is read-only; other calls require Friedl's approval of the exact call under D-062 because field readers are never touched without approval. OTA requires his yes for each device each time; fleet firmware publication is unavailable. Product function calls and variable reads use this capability. Returns HTTP status and reply. Event streams are unavailable. Changes are recorded in the reader log.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"method": _STRING, "path": _STRING, "query": _OBJECT, "body": _ANY},

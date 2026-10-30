@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.bootstrap.readers import PARTICLE_FULL_PERMISSION, build_reader_runtime  # noqa: E402
 from alx.config import ReaderSettings  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
+from alx.contracts import CapabilityCall  # noqa: E402
+from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.contracts.readers import ReaderAccessError  # noqa: E402
 from alx.providers.particle import ParticleCloud, parse_usage_csv  # noqa: E402
 from alx.tools.particle import (  # noqa: E402
@@ -239,8 +241,30 @@ class AuthorityTests(unittest.TestCase):
         for capability in (PARTICLE_API_REQUEST, READ_PARTICLE_USAGE):
             policy = runtime.policies[capability]
             self.assertEqual(policy.permission_references, frozenset({PARTICLE_FULL_PERMISSION}))
-            self.assertFalse(policy.approval_required)
+            self.assertEqual(policy.approval_required, capability == PARTICLE_API_REQUEST)
         self.assertIn(PARTICLE_FULL_PERMISSION, runtime.permissions)
+
+    def test_cloud_writes_require_exact_approval_but_reads_remain_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_reader_runtime(ReaderSettings.from_environment({
+                'PARTICLE_ACCESS_TOKEN': 't', 'ALX_READER_PRODUCT_IDS': '45984'}),
+                Path(directory), lambda: 'c')
+            runtime.calendar.close()
+        gate = SafetyGate(runtime.policies)
+        authority = AuthorityContext('friedl', runtime.permissions, NOW)
+        for method, expected in [('GET', SafetyState.ALLOWED), ('PUT', SafetyState.APPROVAL_REQUIRED)]:
+            call = CapabilityCall('c', PARTICLE_API_REQUEST,
+                {'method': method, 'path': '/v1/devices/0123456789abcdef01234567'})
+            self.assertEqual(gate.evaluate(call, authority).state, expected)
+
+    def test_fleet_firmware_writes_are_refused_before_network(self) -> None:
+        for path in ('/v1/products/1/firmware', '/v1/products/1/devices', '/v1/devices',
+                     '/v1/products/1/%66irmware'):
+            with self.subTest(path=path), patch('httpx.stream') as network:
+                with self.assertRaises(ReaderAccessError) as error:
+                    ParticleCloud('t').api('PUT', path, body={'firmware': 'x'})
+                self.assertEqual(error.exception.code, 'firmware_scope_denied')
+                network.assert_not_called()
 
 
 if __name__ == "__main__":

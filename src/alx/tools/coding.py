@@ -2,10 +2,12 @@
 
 Reached the way every capability is: AL/X proposes a structured call, the
 broker validates it, the safety gate authorises it under `coding.execute`, and
-the executor runs the bounded job. The capability edits only the prepared
+the executor runs the bounded job. The default path edits only the prepared
 feature branch in the configured canonical checkout, runs only permitted
 development commands, and returns evidence.
-It does not merge, push, deploy, or request a review.
+It does not merge, push, deploy, or request a review. D-062 firmware jobs use
+the same agent in isolated allowlisted clones, compile locally, commit and push
+only their new feature branch; they never change firmware main.
 """
 
 from __future__ import annotations
@@ -158,6 +160,13 @@ DEFINITION = CapabilityDefinition(
     # out, so a stated bound cannot drift from the one the executor applies.
     "Execute one bounded software-engineering job in the configured canonical "
     "checkout. "
+    "With firmware_repository, select a configured allowlisted firmware GitHub repository "
+    "(initially alx-1977/RoomReader_V2). D-062: use an isolated job clone outside AL/X, "
+    "fresh origin main, new feature branch, local Particle compilation as required "
+    "verification, then commit and push only that feature branch. Never firmware main. "
+    "A failed firmware job may resume its durable clone with resume_job_id; "
+    "continue_goal_branch is unavailable for firmware. The following canonical "
+    "checkout behaviour applies when firmware_repository is absent. "
     "For a tiny improvement you selected yourself, check current main with the "
     "available repository evidence before dispatch when that cheaply establishes "
     "whether the change is still needed. A completed session that changes no "
@@ -238,6 +247,7 @@ DEFINITION = CapabilityDefinition(
             "resume_job_id": _STRING,
             "corrective_action": _STRING,
             "review_pull_request": _INTEGER,
+            "firmware_repository": _STRING,
         },
         (),
         extra_properties=False,
@@ -276,6 +286,7 @@ DEFINITION = CapabilityDefinition(
             "diff_preserved": _BOOLEAN,
             "uncommitted": _BOOLEAN,
             "checkpoint": _STRING,
+            "firmware_repository": _STRING,
             "interruption_reason": _STRING,
         },
         (
@@ -298,7 +309,7 @@ DEFINITION = CapabilityDefinition(
         "verification_commands",
         "blocked_paths", "repair_branch", "commit_message",
         "continue_goal_branch",
-        "resume_job_id", "corrective_action", "review_pull_request",
+        "resume_job_id", "corrective_action", "review_pull_request", "firmware_repository",
     ),
 )
 
@@ -367,6 +378,10 @@ def goal_coding_branch(
     continuation for the whole goal.
     """
     for attempt in (() if state is None else state.attempts):
+        if (attempt.result is not None and
+                attempt.result.recovery_values().get('firmware_repository') is not None):
+            # A firmware branch never proves ownership of a branch in AL/X.
+            continue
         if repair_branch in _attempt_branches(attempt):
             # Only permitted names reach the set, so this cannot raise.
             return BranchContinuation(repair_branch)
@@ -710,6 +725,11 @@ def parse_coding_arguments(
     )
     if error is not None:
         return None, error
+    firmware_repository = arguments.get("firmware_repository")
+    if firmware_repository is not None and (
+        not isinstance(firmware_repository, str) or not firmware_repository.strip()
+    ):
+        return None, _argument_failure("firmware_repository", "invalid", "invalid repository selector")
     review_pull_request = arguments.get("review_pull_request")
     if review_pull_request is not None and (
         not isinstance(review_pull_request, int)
@@ -765,6 +785,7 @@ def parse_coding_arguments(
             commit_message=message,
             corrective_action=corrective_action,
             review_pull_request=review_pull_request,
+            firmware_repository=firmware_repository,
         ),
         None,
     )

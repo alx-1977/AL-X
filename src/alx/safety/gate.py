@@ -21,6 +21,9 @@ class AuthorityPolicy:
     approval_required: bool = False
     enabled: bool = True
     standing_scope_allowed: bool = False
+    # Exact structured argument values that do not need approval under an
+    # otherwise approval-required policy. No language or domain interpretation.
+    approval_exempt_arguments: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         references = frozenset(self.permission_references)
@@ -81,7 +84,10 @@ class SafetyGate:
             return SafetyOutcome(SafetyState.DENIED, "policy_denied")
         if not policy.permission_references <= authority.granted_permission_references:
             return SafetyOutcome(SafetyState.DENIED, "permission_missing")
-        if not policy.approval_required:
+        if not policy.approval_required or (
+            policy.approval_exempt_arguments and all(
+                call.arguments.get(key) == value for key, value in policy.approval_exempt_arguments)
+        ):
             return SafetyOutcome(SafetyState.ALLOWED, "permitted")
         if call.approval_id is None and policy.standing_scope_allowed and any(
             item.matches(call) for item in authority.standing_scopes
