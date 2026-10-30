@@ -125,6 +125,102 @@ class RoutingTests(unittest.TestCase):
 
 
 class SessionOpenTests(unittest.TestCase):
+    def test_person_turn_during_session_open_does_not_hear_older_reply_last(self) -> None:
+        from types import SimpleNamespace
+        from alx.contracts import TranscriptionEvent, TranscriptionState
+        from alx.continuity.ledger import SQLiteOpportunityLedger
+
+        async def scenario():
+            opening_started = threading.Event()
+            release_opening = threading.Event()
+            person_waiting = asyncio.Event()
+            close = asyncio.Event()
+            lock = asyncio.Lock()
+            frames = []
+            calls = []
+            evidence = []
+
+            with tempfile.TemporaryDirectory() as directory:
+                ledger = SQLiteOpportunityLedger(Path(directory) / "occasions.sqlite3")
+                store = SQLiteConversationStore(Path(directory) / "conversation.sqlite3")
+                ledger.record_created(SimpleNamespace(
+                    opportunity_id="unheard", origin=SimpleNamespace(value="external_event"),
+                    arose_at=NOW, references=("mail:1",),
+                ))
+                ledger.mark_response_undelivered("unheard")
+
+                class Core:
+                    def process(self, conversation, *_args, **_kwargs):
+                        self_outer.assertTrue(lock.locked())
+                        if not calls:
+                            self_outer.assertEqual(conversation.events[-1].kind, "session.opened")
+                            calls.append("open")
+                            opening_started.set()
+                            if not release_opening.wait(timeout=5):
+                                raise AssertionError("opening was never released")
+                            response = "older opening"
+                        else:
+                            calls.append("person")
+                            evidence.extend(ledger.undelivered())
+                            self_outer.assertEqual(conversation.turns[-1].content, "What now?")
+                            self_outer.assertIn("older opening", [t.content for t in conversation.turns])
+                            response = "person answer"
+                        return CoreOutcome(CoreState.RESPONDED, None, response=response)
+
+                class Connection:
+                    request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+                    async def send(self, frame):
+                        message = json.loads(frame)
+                        frames.append(message)
+                        if message.get("input_origin") == "speech_transcript":
+                            person_waiting.set()
+                        if message.get("content") == "person answer":
+                            close.set()
+
+                    async def __aiter__(self):
+                        yield b"microphone"
+                        await close.wait()
+
+                class Transcriber:
+                    async def transcribe(self, audio):
+                        async for _chunk in audio:
+                            if not await asyncio.to_thread(opening_started.wait, 2):
+                                raise AssertionError("opening never held Core")
+                            yield TranscriptionEvent(
+                                "stt", "final", TranscriptionState.FINAL, "What now?", NOW,
+                            )
+
+                self_outer = self
+                gateway = ConversationGateway(Core(), store, clock=lambda: NOW)
+                session = VoiceSession(gateway, Transcriber(), None, "friedl", 3, 30,
+                                       clock=lambda: NOW, core_turn_lock=lock,
+                                       undelivered=ledger.undelivered)
+                server = _server(session=session)
+                handling = asyncio.create_task(server._handle_voice(Connection()))
+                try:
+                    await asyncio.wait_for(person_waiting.wait(), 2)
+                    self.assertFalse(session.admits_unprompted_speech(FRIEDL))
+                    self.assertEqual(calls, ["open"])
+                    self.assertTrue(lock.locked())
+                    release_opening.set()
+                    await asyncio.wait_for(handling, 2)
+                    self.assertEqual(calls, ["open", "person"])
+                    self.assertEqual([item["opportunity_id"] for item in evidence], ["unheard"])
+                    self.assertEqual([item["opportunity_id"] for item in ledger.undelivered()],
+                                     ["unheard"])
+                    self.assertEqual([frame["content"] for frame in frames
+                                      if frame.get("type") == "alx.text"], ["person answer"])
+                finally:
+                    release_opening.set()
+                    close.set()
+                    handling.cancel()
+                    await asyncio.gather(handling, return_exceptions=True)
+                    store.close()
+                    ledger.close()
+
+        asyncio.run(scenario())
+
     def test_reconnect_drains_audio_while_core_is_locked_and_delivers_once(self) -> None:
         from types import SimpleNamespace
 
@@ -501,7 +597,7 @@ class SessionOpenTests(unittest.TestCase):
     def test_server_hands_one_fresh_core_response_to_the_existing_voice_path(self) -> None:
         from types import SimpleNamespace
 
-        class Session:
+        class Session(_Session):
             calls = 0
 
             async def session_open_response(self, conversation_id, progress=None):

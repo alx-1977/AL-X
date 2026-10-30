@@ -429,7 +429,13 @@ class LiveVoiceServer:
                     }))
                     return
                 if fresh_response is not None:
-                    deliveries.put_nowait(fresh_response)
+                    # A person may have arrived while session-open held Core.
+                    # As in deliver(), that pending turn owns the voice; leave
+                    # the unheard occasion for Core rather than queue old words
+                    # behind the person's answer. Check and enqueue on the loop
+                    # without yielding between them.
+                    if self._session.admits_unprompted_speech(conversation_id):
+                        deliveries.put_nowait(fresh_response)
                 else:
                     await connection.send(json.dumps({
                         "type": "phase", "value": VoiceEventKind.LISTENING.value,
