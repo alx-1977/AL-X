@@ -125,6 +125,137 @@ class RoutingTests(unittest.TestCase):
 
 
 class SessionOpenTests(unittest.TestCase):
+    def test_reconnect_drains_audio_while_core_is_locked_and_delivers_once(self) -> None:
+        from types import SimpleNamespace
+
+        async def scenario():
+            lock = asyncio.Lock()
+            await lock.acquire()
+            consumed = asyncio.Event()
+            heard = asyncio.Event()
+            close = asyncio.Event()
+            calls = []
+            frames = []
+
+            class Gateway:
+                def receive_session_open(self, *_args):
+                    calls.append("open")
+                    return CoreOutcome(CoreState.RESPONDED, None, response="fresh")
+
+            class Connection:
+                request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+                async def send(self, frame):
+                    message = json.loads(frame)
+                    frames.append(message)
+                    if message.get("type") == "alx.text":
+                        heard.set()
+
+                async def __aiter__(self):
+                    for _ in range(10):
+                        yield b"microphone"
+                    await close.wait()
+
+            class Transcriber:
+                async def transcribe(self, audio):
+                    count = 0
+                    async for chunk in audio:
+                        assert chunk.payload == b"microphone"
+                        count += 1
+                        if count == 10:
+                            consumed.set()
+                    if False:
+                        yield None
+
+            session = VoiceSession(Gateway(), Transcriber(), None, "friedl", 3, 30,
+                                   core_turn_lock=lock, undelivered=lambda: ({"id": "one"},))
+            server = _server(session=session)
+            handling = asyncio.create_task(server._handle_voice(Connection()))
+            try:
+                await asyncio.wait_for(consumed.wait(), 2)
+                self.assertTrue(lock.locked())
+                self.assertEqual(calls, [])
+                self.assertFalse(heard.is_set())
+                lock.release()
+                await asyncio.wait_for(heard.wait(), 2)
+                close.set()
+                await asyncio.wait_for(handling, 2)
+            finally:
+                if lock.locked():
+                    lock.release()
+                close.set()
+                handling.cancel()
+                await asyncio.gather(handling, return_exceptions=True)
+            self.assertEqual(calls, ["open"])
+            self.assertEqual([frame["content"] for frame in frames
+                              if frame.get("type") == "alx.text"], ["fresh"])
+            self.assertEqual(server._delivery_queues, {})
+
+        asyncio.run(scenario())
+
+    def test_close_unregisters_listener_while_session_open_worker_keeps_lock(self) -> None:
+        from types import SimpleNamespace
+
+        working = threading.Event()
+        release = threading.Event()
+
+        class Gateway:
+            def receive_session_open(self, *_args):
+                working.set()
+                release.wait(timeout=5)
+                return CoreOutcome(CoreState.RESPONDED, None, response="fresh")
+
+        async def scenario():
+            close = asyncio.Event()
+            audio_started = asyncio.Event()
+
+            class Connection:
+                request = SimpleNamespace(path=f"/voice?conversation_id={FRIEDL}")
+
+                async def send(self, _frame):
+                    pass
+
+                async def __aiter__(self):
+                    audio_started.set()
+                    await close.wait()
+                    if False:
+                        yield b""
+
+            class Transcriber:
+                async def transcribe(self, audio):
+                    async for _chunk in audio:
+                        pass
+                    if False:
+                        yield None
+
+            lock = asyncio.Lock()
+            session = VoiceSession(Gateway(), Transcriber(), None, "friedl", 3, 30,
+                                   core_turn_lock=lock, undelivered=lambda: ({"id": "one"},))
+            server = _server(session=session)
+            handling = asyncio.create_task(server._handle_voice(Connection()))
+            try:
+                await asyncio.wait_for(audio_started.wait(), 2)
+                self.assertTrue(await asyncio.to_thread(working.wait, 2))
+                close.set()
+                async def unregistered():
+                    while server._delivery_queues:
+                        await asyncio.sleep(0)
+                await asyncio.wait_for(unregistered(), 2)
+                self.assertEqual(server._typed_queues, {})
+                self.assertEqual(server._live_conversations, [])
+                self.assertFalse(handling.done())
+                self.assertTrue(lock.locked())
+                handling.cancel()  # Repeated teardown must still await Core.
+                await asyncio.sleep(0)
+                self.assertTrue(lock.locked())
+            finally:
+                close.set()
+                release.set()
+                await asyncio.wait_for(asyncio.gather(handling, return_exceptions=True), 2)
+            self.assertFalse(lock.locked())
+
+        asyncio.run(scenario())
+
     def test_close_during_speech_start_send_preserves_autonomous_occasion(self) -> None:
         from types import SimpleNamespace
 
@@ -344,7 +475,8 @@ class SessionOpenTests(unittest.TestCase):
                 connection = Connection()
 
                 async def exchange(_connection, _conversation_id):
-                    self.assertEqual(server._delivery_queue(FRIEDL).get_nowait(),
+                    self.assertEqual(await asyncio.wait_for(
+                        server._delivery_queue(FRIEDL).get(), 2),
                                      "fresh words")
                     return False
 
@@ -392,7 +524,8 @@ class SessionOpenTests(unittest.TestCase):
 
         async def observe(_connection, conversation_id):
             self.assertEqual(conversation_id, FRIEDL)
-            self.assertEqual(server._delivery_queue(FRIEDL).get_nowait(),
+            self.assertEqual(await asyncio.wait_for(
+                server._delivery_queue(FRIEDL).get(), 2),
                              "newly composed")
             return False
 
@@ -443,9 +576,37 @@ class SessionOpenTests(unittest.TestCase):
             def receive_session_open(self, *arguments):
                 raise AssertionError("Core must not be called")
 
-        session = VoiceSession(Gateway(), object(), object(), "friedl", 3, 30,
-                               undelivered=lambda: ())
-        self.assertIsNone(asyncio.run(session.session_open_response(FRIEDL)))
+        async def scenario():
+            lock = asyncio.Lock()
+            async with lock:
+                session = VoiceSession(Gateway(), object(), object(), "friedl", 3, 30,
+                                       core_turn_lock=lock, undelivered=lambda: ())
+                self.assertIsNone(await asyncio.wait_for(
+                    session.session_open_response(FRIEDL), 1))
+                self.assertTrue(lock.locked())
+
+        asyncio.run(scenario())
+
+    def test_occasions_are_rechecked_after_waiting_for_core(self) -> None:
+        async def scenario():
+            lock = asyncio.Lock()
+            occasions = [{"id": "one"}]
+            checked = asyncio.Event()
+
+            def undelivered():
+                checked.set()
+                return occasions
+
+            session = VoiceSession(object(), object(), object(), "friedl", 3, 30,
+                                   core_turn_lock=lock, undelivered=undelivered)
+            async with lock:
+                opening = asyncio.create_task(session.session_open_response(FRIEDL))
+                await asyncio.wait_for(checked.wait(), 1)
+                self.assertFalse(opening.done())
+                occasions.clear()
+            self.assertIsNone(await asyncio.wait_for(opening, 1))
+
+        asyncio.run(scenario())
 
 
 class LegacyCleanupTests(unittest.TestCase):
