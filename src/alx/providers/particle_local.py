@@ -14,6 +14,8 @@ import tempfile
 import time
 from uuid import uuid4
 
+from alx.providers.coding_process import check_cancelled
+
 
 class ParticleLocalError(Exception):
     def __init__(self, code):
@@ -23,6 +25,7 @@ class ParticleLocalError(Exception):
 
 def bounded_process(argv, *, seconds, cwd=None, env=None, limit=32768, on_line=None):
     """Drain continuously, retain bounded bytes, reap the entire process group."""
+    check_cancelled()
     started = time.monotonic()
     output = bytearray()
     pending = b''
@@ -37,6 +40,7 @@ def bounded_process(argv, *, seconds, cwd=None, env=None, limit=32768, on_line=N
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             while selector.get_map():
+                check_cancelled()
                 remaining = seconds - (time.monotonic() - started)
                 if remaining <= 0:
                     timed_out = True
@@ -57,14 +61,20 @@ def bounded_process(argv, *, seconds, cwd=None, env=None, limit=32768, on_line=N
                             on_line(line[:4096].decode('utf-8', errors='replace'))
             if pending and on_line:
                 on_line(pending.decode('utf-8', errors='replace'))
-        remaining = seconds - (time.monotonic() - started)
-        if remaining <= 0:
-            timed_out = True
-        else:
-            try:
-                process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
+        # A tool may close its output before exiting. Keep observing the same
+        # job cancellation while waiting, with or without an open pipe.
+        while not timed_out:
+            check_cancelled()
+            remaining = seconds - (time.monotonic() - started)
+            if remaining <= 0:
                 timed_out = True
+                break
+            try:
+                process.wait(timeout=min(remaining, .1))
+                check_cancelled()
+                break
+            except subprocess.TimeoutExpired:
+                continue
     finally:
         # Also stop any descendant keeping a serial port or pipe open.
         try:
@@ -73,6 +83,7 @@ def bounded_process(argv, *, seconds, cwd=None, env=None, limit=32768, on_line=N
             pass
         process.wait()
         process.stdout.close()
+    check_cancelled()
     return process.returncode, output.decode('utf-8', errors='replace'), truncated, timed_out
 
 

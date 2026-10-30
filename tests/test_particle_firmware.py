@@ -5,6 +5,9 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -14,8 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from alx.bootstrap.particle_local import build_particle_local_runtime
 from alx.config.settings import KiCadSettings, ParticleFirmwareSettings
 from alx.contracts import CapabilityResultState, SideEffect, ModelCompletion, CapabilityAttemptDisposition
-from alx.contracts.coding import CodingError, CodingRequest, CodingSessionResult
+from alx.contracts.coding import CodingCommit, CodingError, CodingOutcome, CodingRequest, CodingSessionResult
 from alx.providers.coding_agent import CodingAgent
+from alx.providers.coding_process import CodingCancellation, bind_cancellation, reset_cancellation
 from alx.providers.firmware_git import prepare_firmware_clone, push_firmware_branch
 from alx.providers.particle_local import ParticleLocal, ParticleLocalError, bounded_process
 from alx.tools.coding import DEFINITION, parse_coding_arguments, goal_coding_branch
@@ -375,3 +379,140 @@ def test_failed_push_resumes_exact_commit_after_restart(local, repos):
     assert resumed.status == 'succeeded'
     assert resumed.commit.commit_sha == result.commit.commit_sha
     assert git(remote, 'rev-parse', 'firmware/push') == result.commit.commit_sha
+
+
+@pytest.mark.parametrize('close_output', [False, True])
+def test_stop_firmware_job_during_compile_terminates_compiler(local, repos, tmp_path, close_output):
+    canonical, remote = repos
+    started = tmp_path / 'compiler-started'
+    finished = tmp_path / 'compiler-finished'
+    local.make = executable(tmp_path / 'slow-make', f'''import os, time
+from pathlib import Path
+Path({str(started)!r}).write_text(str(os.getpid()))
+if {close_output!r}:
+    os.close(1)
+    os.close(2)
+time.sleep(5)
+Path({str(finished)!r}).write_text('compiler ran to completion')
+''')
+    agent = CodingAgent(Planner(), Session(), repository=canonical, firmware_root=local.root,
+                        firmware_remotes={REPO: str(remote)}, firmware_compiler=local.compile)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(agent.run, CodingRequest('Edit', 'stop-compile',
+            firmware_repository=REPO, repair_branch='firmware/stop', commit_message='Edit'))
+        deadline = time.monotonic() + 10
+        while not started.exists() and not pending.done() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert started.exists(), pending.result() if pending.done() else 'compile never started'
+        assert agent.cancel('stop-compile')
+        stopped_at = time.monotonic()
+        result = pending.result(timeout=10)
+        assert time.monotonic() - stopped_at < 3
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(started.read_text()), 0)
+    assert not finished.exists()
+    assert result.status == 'cancelled'
+    assert 'coding_cancelled' in result.unresolved_issues
+    assert result.verification is None or 'particle_compile' not in result.verification.failed
+    assert result.commit is None
+    assert git(remote, 'branch', '--list', 'firmware/stop') == ''
+
+
+def test_compile_cancellation_is_not_verification_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr('alx.providers.coding_agent.canonical_repository_root', lambda root: root)
+    from alx.providers.coding_agent import firmware_verification_checks
+    checks = firmware_verification_checks()
+    monkeypatch.setattr('alx.providers.coding_agent.firmware_verification_checks', lambda: checks[-1:])
+    def cancelled():
+        raise CodingError('coding_cancelled')
+    agent = CodingAgent(Planner(), Session(), repository=tmp_path, firmware_verifier=cancelled)
+    with pytest.raises(CodingError, match='^coding_cancelled$'):
+        agent._verify(CodingRequest('Edit', 'cancel-verification', worktree=str(tmp_path)), None, (), [])
+
+
+@pytest.mark.parametrize('close_output', [False, True])
+def test_local_compile_observes_bound_job_cancellation(local, tmp_path, close_output):
+    started = tmp_path / 'started'
+    local.make = executable(tmp_path / 'waiting-make', f'''import os, time
+from pathlib import Path
+Path({str(started)!r}).write_text(str(os.getpid()))
+if {close_output!r}:
+    os.close(1)
+    os.close(2)
+time.sleep(5)
+''')
+    cancellation = CodingCancellation()
+    def compile():
+        token = bind_cancellation(cancellation)
+        try:
+            return local.compile(REPO)
+        finally:
+            reset_cancellation(token)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(compile)
+        deadline = time.monotonic() + 10
+        while not started.exists() and not pending.done() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert started.exists()
+        cancellation.cancel()
+        stopped_at = time.monotonic()
+        with pytest.raises(CodingError, match='^coding_cancelled$'):
+            pending.result(timeout=10)
+        assert time.monotonic() - stopped_at < 3
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(started.read_text()), 0)
+
+
+@pytest.mark.parametrize('push_fails', [False, True])
+def test_publication_lifecycle_with_isolated_git_mechanics(tmp_path, monkeypatch, push_fails):
+    monkeypatch.setattr('alx.providers.coding_agent.canonical_repository_root', lambda root: root)
+    monkeypatch.setattr('alx.providers.coding_agent.coding_job_lock', lambda root: nullcontext())
+    monkeypatch.setattr('alx.providers.firmware_git.prepare_firmware_clone', lambda *args: tmp_path)
+    monkeypatch.setattr(CodingAgent, '_checkpoint', lambda *args: '{}')
+    def run(self, request, state):
+        state.branch = 'firmware/status'
+        return CodingOutcome('succeeded', 'edited', (), (), False, None, '', '', (),
+            datetime.now(timezone.utc), commit=CodingCommit('firmware/status', 'a' * 40, (), True))
+    monkeypatch.setattr(CodingAgent, '_run', run)
+    reports = []
+    observed = []
+    def push(*args):
+        observed.extend(reports)
+        if push_fails:
+            raise CodingError('git_unavailable', reason_code='firmware_push_failed')
+    monkeypatch.setattr('alx.providers.firmware_git.push_firmware_branch', push)
+    agent = CodingAgent(Planner(), Session(), telemetry_sink=reports.append,
+        repository=tmp_path, firmware_root=tmp_path,
+        firmware_remotes={REPO: 'local-remote'}, firmware_compiler=lambda **kwargs: {})
+    result = agent.run(CodingRequest('Edit', 'publish', firmware_repository=REPO))
+    assert observed and not any(report.terminal for report in observed)
+    assert observed[-1].in_flight
+    terminal = [report for report in reports if report.terminal]
+    assert len(terminal) == 1
+    assert terminal[0].outcome == result.status == ('failed' if push_fails else 'succeeded')
+    assert terminal[0].transition == ('FAILED' if push_fails else 'COMPLETE')
+
+
+@pytest.mark.parametrize('push_fails', [False, True])
+def test_firmware_status_stays_active_until_push_finishes(local, repos, push_fails):
+    canonical, remote = repos
+    reports = []
+    observed_during_push = []
+    def push(*args):
+        observed_during_push.extend(reports)
+        if push_fails:
+            raise CodingError('git_unavailable', reason_code='firmware_push_failed')
+        push_firmware_branch(*args)
+    agent = CodingAgent(Planner(), Session(), telemetry_sink=reports.append,
+        repository=canonical, firmware_root=local.root,
+        firmware_remotes={REPO: str(remote)}, firmware_compiler=local.compile)
+    with patch('alx.providers.firmware_git.push_firmware_branch', side_effect=push):
+        result = agent.run(CodingRequest('Edit', 'publish-status', firmware_repository=REPO,
+            repair_branch='firmware/status', commit_message='Edit'))
+    assert observed_during_push
+    assert not any(report.terminal for report in observed_during_push)
+    assert observed_during_push[-1].in_flight
+    terminal = [report for report in reports if report.terminal]
+    assert len(terminal) == 1
+    assert terminal[0].outcome == result.status == ('failed' if push_fails else 'succeeded')
+    assert terminal[0].transition == ('FAILED' if push_fails else 'COMPLETE')

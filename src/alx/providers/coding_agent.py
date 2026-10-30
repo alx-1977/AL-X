@@ -808,31 +808,36 @@ class CodingAgent:
                              firmware_verifier=lambda: self._firmware_compiler(
                                  request.firmware_repository, job_id=resume_id or request.job_id))
         worker._firmware_job_id = resume_id or request.job_id
+        def publish(result: CodingOutcome) -> CodingOutcome:
+            try:
+                push_firmware_branch(source, result.commit.branch, result.commit.commit_sha,
+                                     self._firmware_remotes[request.firmware_repository])
+            except CodingError as error:
+                if error.code == 'coding_cancelled':
+                    raise
+                # The verified commit remains in its durable clone. Resume
+                # verifies that exact commit and retries only its push.
+                return replace(result, status='failed',
+                               unresolved_issues=(*result.unresolved_issues, error.code),
+                               diagnostics={**(result.diagnostics or {}), **error.details,
+                                            'phase': 'commit'})
+            return replace(result, checkpoint='')
+
         with self._active_lock:
             if self._firmware_active is not None or self._active is not None:
                 raise _before_implementation(CodingError('coding_unavailable', reason_code='checkout_busy'))
             self._firmware_active = worker
         try:
-            result = replace(worker.run(replace(request, firmware_repository=None)),
-                             firmware_repository=request.firmware_repository)
-            if result.status == 'succeeded' and result.commit is not None:
-                try:
-                    push_firmware_branch(source, result.commit.branch, result.commit.commit_sha,
-                                         self._firmware_remotes[request.firmware_repository])
-                except CodingError as error:
-                    # The verified commit remains in its durable clone. Resume
-                    # verifies that exact commit and retries only its push.
-                    return replace(result, status='failed',
-                                   unresolved_issues=(*result.unresolved_issues, error.code),
-                                   diagnostics={**(result.diagnostics or {}), **error.details,
-                                                'phase': 'commit'})
-                return replace(result, checkpoint='')
-            return result
+            return replace(worker._run_counted(replace(request, firmware_repository=None), publish=publish),
+                           firmware_repository=request.firmware_repository)
         finally:
             with self._active_lock:
                 self._firmware_active = None
 
-    def _run_counted(self, request: CodingRequest) -> CodingOutcome:
+    def _run_counted(
+        self, request: CodingRequest, *,
+        publish: Callable[[CodingOutcome], CodingOutcome] | None = None,
+    ) -> CodingOutcome:
         outcome: CodingOutcome | None = None
         # One state object per call, so nothing this run touches is reachable
         # from another run on the same agent.
@@ -871,6 +876,13 @@ class CodingAgent:
                     self._active = state
                 try:
                     outcome = self._run(request, state)
+                    if self._firmware_job_id and outcome.commit is not None and outcome.status == 'succeeded':
+                        state.commit_candidate_sha = outcome.commit.commit_sha
+                        outcome = replace(outcome, checkpoint=self._checkpoint(state))
+                    if publish is not None and outcome.commit is not None and outcome.status == 'succeeded':
+                        self._report_telemetry(state, 'commit', in_flight=True,
+                                               transition='PUBLICATION started')
+                        outcome = publish(outcome)
                 except CodingError as error:
                     if error.code != "coding_cancelled":
                         raise
@@ -879,9 +891,6 @@ class CodingAgent:
                     reset_cancellation(cancellation_token)
                     cancellation_token = None
                     outcome = self._cancelled_outcome(state)
-                if self._firmware_job_id and outcome.commit is not None and outcome.status == 'succeeded':
-                    state.commit_candidate_sha = outcome.commit.commit_sha
-                    outcome = replace(outcome, checkpoint=self._checkpoint(state))
                 return replace(outcome, **job_facts())
         except CodingError as error:
             error.details.update({
@@ -1540,6 +1549,8 @@ class CodingAgent:
                     passed = result['succeeded'] is True
                     findings = tuple(json.dumps(e) for e in result.get('errors', ()))
                 except Exception as error:
+                    if isinstance(error, CodingError) and error.code == 'coding_cancelled':
+                        raise
                     passed, findings = False, (getattr(error, 'code', 'compile_failed'),)
                 results.append(replace(check, ran=True, passed=passed, findings=findings))
                 if failure_output is not None and not passed:
