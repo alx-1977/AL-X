@@ -68,6 +68,9 @@ def build_coding_runtime(
     review_reader: Callable[..., Any] | None = None,
     briefing_sink: Callable[[str, str], None] | None = None,
     protected_paths: tuple[Path, ...] = (),
+    firmware_root: Path | None = None,
+    firmware_remotes: dict[str, str] | None = None,
+    firmware_compiler: Callable[..., dict] | None = None,
 ) -> CodingRuntime | None:
     """Compose coding-job authority, or leave it unregistered.
 
@@ -92,6 +95,8 @@ def build_coding_runtime(
             model, session, activity_sink, telemetry_sink,
             repository=repository, review_reader=review_reader,
             briefing_sink=briefing_sink, protected_paths=protected_paths,
+            firmware_root=firmware_root, firmware_remotes=firmware_remotes,
+            firmware_compiler=firmware_compiler,
         )
     except CodingError as error:
         LOGGER.warning(

@@ -3,8 +3,8 @@
 The Coding Agent must be able to hand back a repair as a branch and a commit
 SHA rather than as a dirty checkout AL/X has to interpret. That requires git
 commands that write, and `coding_process.py` deliberately permits only reads.
-This module is the one production site that runs a writing git command, and it
-is reachable only from `CodingAgent`.
+This module is the one production site that runs a writing git command for
+the canonical coding checkout, and it is reachable only from `CodingAgent`.
 
 Authority is granted by enumeration, not by denial. `_WRITE_SHAPES` lists the
 exact argv forms that may run; anything not written there cannot be produced,

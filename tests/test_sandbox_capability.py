@@ -132,6 +132,10 @@ CODING_PROCESS_SITES = {
     CODING_SESSION_SITE,
     CODING_CONTAINMENT_SITE,
     CODING_GIT_SITE,
+    # D-062: fixed local Particle commands and isolated firmware Git transport.
+    # These sites do not extend canonical coding Git authority (D-029/D-033).
+    PRODUCTION_ROOT / "providers" / "particle_local.py",
+    PRODUCTION_ROOT / "providers" / "firmware_git.py",
 }
 
 # D-030 has its own fixed, configured canonical-main transition. It is neither

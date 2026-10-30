@@ -384,3 +384,27 @@ id = "kicad.board_is_written_back"
 description = "An exactly approved copy revision is backed up and written to its original."
 entry = "providers/kicad.py::KiCadProvider.write_back"
 forbidden = []
+
+[[outcomes]]
+id = "particle.local_compiled"
+description = "D-062 local Particle compiled outcome."
+entry = "providers/particle_local.py::ParticleLocal.compile"
+forbidden = []
+
+[[outcomes]]
+id = "particle.local_usb_devices_listed"
+description = "D-062 local Particle usb_devices_listed outcome."
+entry = "providers/particle_local.py::ParticleLocal.usb_devices"
+forbidden = []
+
+[[outcomes]]
+id = "particle.local_bench_flashed"
+description = "D-062 local Particle bench_flashed outcome."
+entry = "providers/particle_local.py::ParticleLocal.flash"
+forbidden = []
+
+[[outcomes]]
+id = "particle.local_serial_read"
+description = "D-062 local Particle serial_read outcome."
+entry = "providers/particle_local.py::ParticleLocal.serial"
+forbidden = []

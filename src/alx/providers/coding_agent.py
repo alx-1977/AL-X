@@ -173,7 +173,7 @@ def _before_implementation(error: CodingError) -> CodingError:
 
 def recorded_verification_proves(
     verification: VerificationEvidence, request: CodingRequest,
-    job_files: tuple[str, ...], repository: Path,
+    job_files: tuple[str, ...], repository: Path, firmware: bool = False,
 ) -> bool:
     """Whether recorded evidence passed exactly the checks this job requires.
 
@@ -181,13 +181,21 @@ def recorded_verification_proves(
     files and AL/X's requested commands. Comparing against the derived checks
     alone rejected a job that had passed a requested command.
     """
-    derived = required_verification(job_files, repository).checks
+    derived = firmware_verification_checks() if firmware else required_verification(job_files, repository).checks
     expected = derived + requested_verification(request, derived)
     return verification.all_required_passed and (
         tuple((check.name, check.argv, check.kind, check.reason)
               for check in verification.checks)
         == tuple((check.name, check.argv, check.kind, check.reason)
                  for check in expected)
+    )
+
+
+def firmware_verification_checks() -> tuple[VerificationCheck, ...]:
+    return (
+        VerificationCheck('diff_check', ('git', 'diff', '--check'), 'Firmware diff integrity'),
+        VerificationCheck('content_check', (), 'Firmware content integrity', kind='content'),
+        VerificationCheck('particle_compile', (), 'D-062 local Particle compilation', kind='content'),
     )
 
 
@@ -368,7 +376,7 @@ def render_review(content: ReviewContent) -> str:
 
 def build_briefing(
     request: CodingRequest, plan: Mapping[str, Any], terminal: bool = False,
-    review: str = "",
+    review: str = "", firmware: bool = False,
 ) -> str:
     """The human-language instruction handed to the native coding session.
 
@@ -440,6 +448,11 @@ def build_briefing(
         "",
         "# Boundaries",
         *((
+            "- You have a terminal contained to this firmware checkout with no network.",
+            "  AL/X verifies the final source with local Particle compilation and content",
+            "  checks. This firmware repository does not use AL/X's required_checks script",
+            "  or AL/X's test suite. Report any other checks the firmware requires.",
+        ) if terminal and firmware else (
             "- You have a terminal, contained to this checkout with no network.",
             "  Before you finish, run `python scripts/required_checks.py` with",
             "  every file you changed, then run each command it prints and fix",
@@ -554,6 +567,15 @@ class _JobState:
 class CodingAgent:
     """One coding job: AL/X plans it, a native session does it, AL/X verifies it."""
 
+    # Defaults cover verification instances created without construction.
+    # Mutable repository configuration remains instance-owned.
+    _firmware_verifier = None
+    _firmware_root = None
+    _firmware_compiler = None
+    _firmware_active = None
+    _firmware_job_id = None
+    _firmware_pending = False
+
     def __init__(
         self, model: ReasoningModel, session: CodingSession | None,
         activity_sink: Callable[[str], None] | None = None,
@@ -563,8 +585,19 @@ class CodingAgent:
         review_reader: Callable[[ReviewContentRequest], ReviewContent] | None = None,
         briefing_sink: Callable[[str, str], None] | None = None,
         protected_paths: tuple[Path, ...] = (),
+        firmware_root: Path | None = None,
+        firmware_remotes: dict[str, str] | None = None,
+        firmware_compiler: Callable[..., dict] | None = None,
+        firmware_verifier: Callable[[], dict] | None = None,
     ) -> None:
         self._model = model
+        self._firmware_root = firmware_root
+        self._firmware_remotes = dict(firmware_remotes or {})
+        self._firmware_compiler = firmware_compiler
+        self._firmware_verifier = firmware_verifier
+        self._firmware_active = None
+        self._firmware_job_id = None
+        self._firmware_pending = False
         self._session = session
         self._review_reader = review_reader
         # Where the exact briefing each session receives is kept, so Friedl
@@ -728,6 +761,9 @@ class CodingAgent:
         """Stop only the active job's child process; preserve its checkout."""
         with self._active_lock:
             active = self._active
+            firmware_active = self._firmware_active
+        if firmware_active is not None:
+            return firmware_active.cancel(job_id)
         if (active is None or active.stage == "commit"
                 or (job_id is not None and active.job_id != job_id)):
             return False
@@ -740,14 +776,68 @@ class CodingAgent:
             if self._restart_pending:
                 raise _before_implementation(CodingError(
                     "coding_unavailable", reason_code="restart_pending"))
+            if self._firmware_pending or (request.firmware_repository is not None and self._running):
+                raise _before_implementation(CodingError(
+                    'coding_unavailable', reason_code='checkout_busy'))
             self._running += 1
+            if request.firmware_repository is not None:
+                self._firmware_pending = True
         try:
+            if request.firmware_repository is not None:
+                return self._run_firmware(request)
             return self._run_counted(request)
         finally:
             with self._active_lock:
                 self._running -= 1
+                if request.firmware_repository is not None:
+                    self._firmware_pending = False
 
-    def _run_counted(self, request: CodingRequest) -> CodingOutcome:
+    def _run_firmware(self, request: CodingRequest) -> CodingOutcome:
+        from alx.providers.firmware_git import prepare_firmware_clone, push_firmware_branch
+        if self._firmware_root is None or self._firmware_compiler is None:
+            raise _before_implementation(CodingError('arguments_unusable', reason_code='firmware_not_configured'))
+        if request.continuation is not None:
+            raise _before_implementation(CodingError('arguments_unusable', reason_code='firmware_requires_new_job_or_resume'))
+        resume_id = str(request.resume_checkpoint.get('firmware_job_id') or
+                        request.resume_checkpoint['job_id']) if request.resume_checkpoint else None
+        source = prepare_firmware_clone(self._firmware_root, self._repository,
+                                        request.firmware_repository, self._firmware_remotes,
+                                        request.job_id, resume_id)
+        worker = CodingAgent(self._model, self._session, self._activity_sink, self._telemetry_sink,
+                             self._clock, source, briefing_sink=self._briefing_sink,
+                             firmware_verifier=lambda: self._firmware_compiler(
+                                 request.firmware_repository, job_id=resume_id or request.job_id))
+        worker._firmware_job_id = resume_id or request.job_id
+        def publish(result: CodingOutcome) -> CodingOutcome:
+            try:
+                push_firmware_branch(source, result.commit.branch, result.commit.commit_sha,
+                                     self._firmware_remotes[request.firmware_repository])
+            except CodingError as error:
+                if error.code == 'coding_cancelled':
+                    raise
+                # The verified commit remains in its durable clone. Resume
+                # verifies that exact commit and retries only its push.
+                return replace(result, status='failed',
+                               unresolved_issues=(*result.unresolved_issues, error.code),
+                               diagnostics={**(result.diagnostics or {}), **error.details,
+                                            'phase': 'commit'})
+            return replace(result, checkpoint='')
+
+        with self._active_lock:
+            if self._firmware_active is not None or self._active is not None:
+                raise _before_implementation(CodingError('coding_unavailable', reason_code='checkout_busy'))
+            self._firmware_active = worker
+        try:
+            return replace(worker._run_counted(replace(request, firmware_repository=None), publish=publish),
+                           firmware_repository=request.firmware_repository)
+        finally:
+            with self._active_lock:
+                self._firmware_active = None
+
+    def _run_counted(
+        self, request: CodingRequest, *,
+        publish: Callable[[CodingOutcome], CodingOutcome] | None = None,
+    ) -> CodingOutcome:
         outcome: CodingOutcome | None = None
         # One state object per call, so nothing this run touches is reachable
         # from another run on the same agent.
@@ -786,6 +876,13 @@ class CodingAgent:
                     self._active = state
                 try:
                     outcome = self._run(request, state)
+                    if self._firmware_job_id and outcome.commit is not None and outcome.status == 'succeeded':
+                        state.commit_candidate_sha = outcome.commit.commit_sha
+                        outcome = replace(outcome, checkpoint=self._checkpoint(state))
+                    if publish is not None and outcome.commit is not None and outcome.status == 'succeeded':
+                        self._report_telemetry(state, 'commit', in_flight=True,
+                                               transition='PUBLICATION started')
+                        outcome = publish(outcome)
                 except CodingError as error:
                     if error.code != "coding_cancelled":
                         raise
@@ -999,6 +1096,7 @@ class CodingAgent:
             try:
                 execution_briefing = build_briefing(
                     request, plan, self._session_has_terminal(), review,
+                    firmware=self._firmware_verifier is not None,
                 )
                 if state.corrective_action:
                     # Reproduce the recorded failure on the exact checkout so
@@ -1159,7 +1257,7 @@ class CodingAgent:
             except (KeyError, TypeError, ValueError):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_invalid"))
             if not recorded_verification_proves(
-                verification, request, job_files, self._repository,
+                verification, request, job_files, self._repository, self._firmware_verifier is not None,
             ):
                 raise _before_implementation(CodingError("git_refused", reason_code="resume_verification_unproven"))
             tests_run = any(check.ran and check.name.startswith("pytest") for check in verification.checks)
@@ -1440,10 +1538,24 @@ class CodingAgent:
         # gates, one targeted pytest, and one unmapped-file report. That is
         # six against a ceiling of eight. Exceeding the ceiling fails closed.
         # AL/X's required commands (at most two) join them.
-        checks = policy.checks + requested_verification(request, policy.checks)
+        derived = firmware_verification_checks() if self._firmware_verifier else policy.checks
+        checks = derived + requested_verification(request, derived)
         if len(checks) > MAX_VERIFICATION_COMMANDS:
             return VerificationEvidence(checks), False, None
         for check in checks:
+            if check.name == 'particle_compile' and self._firmware_verifier:
+                try:
+                    result = self._firmware_verifier()
+                    passed = result['succeeded'] is True
+                    findings = tuple(json.dumps(e) for e in result.get('errors', ()))
+                except Exception as error:
+                    if isinstance(error, CodingError) and error.code == 'coding_cancelled':
+                        raise
+                    passed, findings = False, (getattr(error, 'code', 'compile_failed'),)
+                results.append(replace(check, ran=True, passed=passed, findings=findings))
+                if failure_output is not None and not passed:
+                    failure_output[check.name] = '\n'.join(findings)
+                continue
             if check.kind == "report":
                 # Already recorded by the policy. It names Python files with
                 # no targeted test and does not run a command.
@@ -1822,6 +1934,7 @@ class CodingAgent:
             return ""
         return json.dumps({
             "job_id": state.job_id, "stage": state.stage,
+            **({'firmware_job_id': self._firmware_job_id} if self._firmware_job_id else {}),
             **repository,
             "plan": dict(state.plan or {}), "files": list(state.files),
             "verification": state.verification.as_values() if state.verification else None,

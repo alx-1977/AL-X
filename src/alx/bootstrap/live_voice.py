@@ -58,6 +58,7 @@ from alx.bootstrap.xero import (
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.bootstrap.ship24 import build_ship24_runtime
 from alx.bootstrap.kicad import build_kicad_runtime
+from alx.bootstrap.particle_local import build_particle_local_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config import (
     merge_settings,
@@ -509,6 +510,11 @@ async def run(repository_root: Path) -> None:
     policies.update(kicad_runtime.policies)
     executors.update(kicad_runtime.executors)
     permissions.update(kicad_runtime.permissions)
+    particle_local_runtime = build_particle_local_runtime(current_call_id.get, environment, storage_root)
+    register(particle_local_runtime.definitions, TraceSubsystem.CORE)
+    policies.update(particle_local_runtime.policies)
+    executors.update(particle_local_runtime.executors)
+    permissions.update(particle_local_runtime.permissions)
 
     def notebook_provenance(source_references, _recorded_at):
         """Resolve cited goal artifacts without copying their evidence.
@@ -898,6 +904,10 @@ async def run(repository_root: Path) -> None:
             storage_root / "coding-briefings", job_id, text),
         # Her records, wherever configured, are never a coding job's to touch.
         protected_paths=(storage_root, repository_root / ".alx"),
+        firmware_root=particle_local_runtime.settings.root,
+        firmware_remotes={name: 'https://github.com/' + name + '.git'
+                          for name in particle_local_runtime.settings.repositories},
+        firmware_compiler=particle_local_runtime.provider.compile,
     )
     # D-055: she restarts herself onto code she has merged. Composed only
     # where she can read main and is running from the launcher's snapshot.

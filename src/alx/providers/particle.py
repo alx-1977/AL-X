@@ -10,7 +10,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -214,6 +214,14 @@ class ParticleCloud:
             raise ReaderAccessError("arguments_unusable")
         if _EVENT_STREAM.search(path) and method == "GET":
             raise ReaderAccessError("event_stream_not_supported")
+        # D-062 adds no fleet OTA authority. A cloud update must name one
+        # device and be approved as that exact call by the safety gate.
+        segments = unquote(path).strip('/').split('/')
+        if method != 'GET' and (
+            'firmware' in segments or segments == ['v1', 'devices'] or
+            (len(segments) == 4 and segments[:2] == ['v1', 'products'] and segments[3] == 'devices')
+        ):
+            raise ReaderAccessError('firmware_scope_denied')
         return self._call(method, path, query, body, self._timeout)
 
     def _call(self, method: str, path: str, query: dict[str, Any] | None, body: Any,
