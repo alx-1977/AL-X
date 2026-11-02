@@ -34,6 +34,7 @@ def build_model_reasoner(
     max_output_tokens: int | None = None,
     max_input_tokens: int | None = None,
     spend_authority=None,
+    on_request_dispatched=None,
 ) -> ModelReasoner:
     """Build a reasoner over the approved Laws and identity.
 
@@ -50,6 +51,7 @@ def build_model_reasoner(
     return ModelReasoner(
         model, laws, identity, max_output_tokens, max_input_tokens,
         spend_authority,
+        on_request_dispatched,
     )
 
 

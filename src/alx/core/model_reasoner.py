@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -1629,6 +1629,7 @@ class ModelReasoner:
         max_output_tokens: int | None = None,
         max_input_tokens: int | None = None,
         spend_authority: AutonomousSpendAuthority | None = None,
+        on_request_dispatched: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         """One reasoner over one model.
 
@@ -1665,6 +1666,7 @@ class ModelReasoner:
         # sets none; a spending path sets the same number it reserves for.
         self._max_input_tokens = max_input_tokens
         self._spend_authority = spend_authority
+        self._on_request_dispatched = on_request_dispatched
 
     def _spend_for(self, request: ModelRequest):
         """Bound, price, reserve, dispatch and settle one exact request.
@@ -1725,6 +1727,10 @@ class ModelReasoner:
         and the bound would then be checked against a request that never
         existed.
         """
+        # Snapshot the facts actually carried by this request. A concurrent turn
+        # may read newer facts before this request reaches its transport.
+        runtime = dict(context.runtime)
+        receipt = self._on_request_dispatched
         return ModelRequest(
                 (
                     # Stable prefix first, volatile task material last, so a
@@ -1742,6 +1748,7 @@ class ModelReasoner:
                 CACHE_KEY,
                 self._max_output_tokens,
                 purpose="" if context.purpose is None else context.purpose.value,
+                on_dispatched=None if receipt is None else lambda: receipt(runtime),
         )
 
     def _decide(self, context: ReasoningContext) -> AgentDecision:

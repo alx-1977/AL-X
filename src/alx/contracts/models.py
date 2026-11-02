@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from alx.contracts.records import StructuredData, freeze_data
@@ -63,6 +63,10 @@ class ModelRequest:
     # into telemetry so a console can say what each call was for; never sent
     # to the model and never part of what it reasons over.
     purpose: str = ""
+    # Local delivery receipt, never serialized into prompts or telemetry.
+    # A transport calls this only once the request has been handed off,
+    # including a sent request whose response fails.
+    on_dispatched: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))

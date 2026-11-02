@@ -1106,7 +1106,8 @@ async def run(repository_root: Path) -> None:
     # fallback would spend on a Core nobody selected and record the result as
     # if the experiment had run.
     conversational_reasoner = build_model_reasoner(
-        providers.reasoning, CODE_ROOT
+        providers.reasoning, CODE_ROOT,
+        on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
     )
     reasoner = OriginSelectedReasoner(
         conversational_reasoner,
@@ -1130,6 +1131,7 @@ async def run(repository_root: Path) -> None:
                 # it replay a call that may already have been billed.
                 occasion_spend.current_opportunity_id,
             ),
+            on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
         ),
     )
 
@@ -1251,9 +1253,7 @@ async def run(repository_root: Path) -> None:
                 else presence_since.isoformat(timespec="minutes"),
             },
         }
-        token_notice = ClaudeSubscriptionReasoningModel.take_setup_token_notice()
-        if token_notice:
-            facts["authentication_notice"] = token_notice
+        facts.update(ClaudeSubscriptionReasoningModel.setup_token_notice_facts())
         return facts
 
     core = CoreAgent(

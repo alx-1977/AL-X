@@ -45,6 +45,8 @@ else is a terminal refusal; there is no fallback identity.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import json
 import http.client
 import logging
@@ -107,11 +109,21 @@ class _SetupTokenProfile:
     token: str = field(repr=False)
     subscription: str | None = None
     refusal: str | None = None
+    notice_id: str = field(default_factory=lambda: uuid4().hex)
+
+    @property
+    def notice(self) -> str | None:
+        if self.refusal is None:
+            return None
+        return (
+            "The Claude setup token was refused because " + self.refusal
+            + "; the normal dedicated Claude login is being used."
+        )
 
 
 _setup_token_profile: _SetupTokenProfile | None = None
 _setup_token_lock = Lock()
-_setup_token_notice_taken = False
+_setup_token_notice_acknowledged: str | None = None
 
 
 def _unique_profile_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -440,19 +452,28 @@ class ClaudeSubscriptionReasoningModel:
         return environment
 
     @staticmethod
-    def take_setup_token_notice() -> str | None:
-        """A diagnostic for the Core, consumed once across all transports."""
-        global _setup_token_notice_taken
+    def setup_token_notice_facts() -> dict[str, str]:
+        """Read the pending diagnostic without consuming its delivery receipt."""
         with _setup_token_lock:
-            if (_setup_token_notice_taken or _setup_token_profile is None
+            if (_setup_token_profile is None
+                    or _setup_token_notice_acknowledged == _setup_token_profile.notice_id
                     or _setup_token_profile.refusal is None):
-                return None
-            _setup_token_notice_taken = True
-            return (
-                "The Claude setup token was refused because "
-                + _setup_token_profile.refusal
-                + "; the normal dedicated Claude login is being used."
-            )
+                return {}
+            return {
+                "authentication_notice": _setup_token_profile.notice,
+                "authentication_notice_id": _setup_token_profile.notice_id,
+            }
+
+    @staticmethod
+    def acknowledge_setup_token_notice(facts: Mapping[str, Any]) -> None:
+        """An old request can acknowledge only the notice it actually carried."""
+        global _setup_token_notice_acknowledged
+        with _setup_token_lock:
+            if (_setup_token_profile is not None
+                    and _setup_token_profile.notice is not None
+                    and facts.get("authentication_notice") == _setup_token_profile.notice
+                    and facts.get("authentication_notice_id") == _setup_token_profile.notice_id):
+                _setup_token_notice_acknowledged = _setup_token_profile.notice_id
 
     @property
     def executable(self) -> str:
@@ -650,7 +671,11 @@ class ClaudeSubscriptionReasoningModel:
                         shell=False,
                         check=False,
                     )
+                    if request.on_dispatched is not None:
+                        request.on_dispatched()
             except subprocess.TimeoutExpired as error:
+                if request.on_dispatched is not None:
+                    request.on_dispatched()
                 # The CLI is killed by `subprocess.run` when the deadline
                 # passes, so the turn cannot outlive its own timeout.
                 raise _ClaudeProtocolError("reasoning_timeout") from error
