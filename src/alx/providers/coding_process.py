@@ -17,6 +17,7 @@ import pty
 import pwd
 import select
 import signal
+import shutil
 import struct
 import tarfile
 import tempfile
@@ -653,6 +654,24 @@ def command_permitted(
     if not argv[0]:
         return False
     if blocked_paths:
+        # Match subprocess' actual executable selection, including cwd-relative
+        # PATH entries and the runtime interpreter substitution below.
+        executable = sys.executable if argv[0].lower() in _PYTHON_NAMES else argv[0]
+        if "/" not in executable:
+            search = os.pathsep.join(
+                str((worktree or Path.cwd()) / entry)
+                for entry in os.environ.get("PATH", os.defpath).split(os.pathsep)
+            )
+            executable = shutil.which(executable, path=search) or executable
+        location = (worktree or Path.cwd()) / executable
+        # Both the selected path and its symlink target must respect blocks.
+        for candidate in (Path(os.path.abspath(location)), location.resolve()):
+            try:
+                relative = candidate.relative_to(worktree.resolve()).as_posix() if worktree else None
+            except ValueError:
+                relative = None  # System executables outside the checkout are allowed.
+            if relative is not None and path_matches_blocked(relative, blocked_paths):
+                return False
         for item in argv[1:]:
             if not item.startswith("-") and not _path_in_worktree(item, worktree, blocked_paths):
                 return False

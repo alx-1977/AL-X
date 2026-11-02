@@ -995,6 +995,8 @@ class ProfileCompletenessTest(unittest.TestCase):
         self.assertNotIn("READ-OK", outcome.stdout)
 
     def test_git_can_be_executed(self) -> None:
+        if not self.runner.available():
+            self.skipTest("no supported confinement mechanism on this platform")
         paths = self.workspace.prepare("exp-git", "ses-git", "run-1")
         outcome = self.runner.run(
             SandboxRequest("exp-git", "ses-git", "run-1",

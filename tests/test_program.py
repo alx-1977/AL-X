@@ -16,7 +16,7 @@ from alx.bootstrap.program import build_program_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config.program import ProgramSettings
 from alx.continuity.program_source import ProgramCompletionSource
-from alx.providers.program import ProgramRunner
+from alx.providers.program import ProgramRunner, reconcile
 from alx.tools.program import DEFINITION
 from alx.contracts import CapabilityCall, CapabilityResultState, ConversationSnapshot, ContentOrigin
 from alx.conversation.gateway import ConversationGateway
@@ -115,7 +115,7 @@ def test_background_deadline_completion_survives_recomposition(tmp_path):
             self.rows.add(opportunity.opportunity_id)
             return True
     ledger = Ledger()
-    source = ProgramCompletionSource(runner.root, ledger, enabled=True)
+    source = ProgramCompletionSource(runner.root, ledger, enabled=True, reconcile=reconcile)
     opportunity, = source.due_opportunities()
     assert opportunity.conversation_id == "thread"
     event, = source.contextual_events("thread")
@@ -129,7 +129,7 @@ def test_background_deadline_completion_survives_recomposition(tmp_path):
     assert ContentOrigin.EXTERNAL in attached.events[0].provenance.origins
     assert source.claim(opportunity)
     source.mark_honoured(opportunity)
-    assert not ProgramCompletionSource(runner.root, ledger, True).due_opportunities()
+    assert not ProgramCompletionSource(runner.root, ledger, True, reconcile=reconcile).due_opportunities()
 
 
 def test_missing_program_reports_failure_evidence(tmp_path):

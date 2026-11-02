@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 from alx.bootstrap.program import build_program_runtime
 from alx.continuity.program_source import ProgramCompletionSource
+from alx.providers.program import reconcile as reconcile_program
 from alx.config.program import ProgramSettings
 from alx.bootstrap.providers import build_runtime_providers, verify_core_claude_identity
 from alx.bootstrap.mail import (
@@ -717,6 +718,7 @@ async def run(repository_root: Path) -> None:
     permissions.add("program.execute")
     program_source = ProgramCompletionSource(
         program_root, opportunity_ledger, enabled=providers.autonomous is not None,
+        reconcile=reconcile_program,
     )
 
     sandbox_runtime = build_sandbox_runtime(

@@ -10,10 +10,13 @@ from alx.contracts.continuity import CognitionOpportunity
 
 
 class ProgramCompletionSource:
-    def __init__(self, root: Path, ledger, enabled: bool = False):
+    def __init__(self, root: Path, ledger, enabled: bool = False, *, reconcile):
         self.root, self.ledger, self.enabled = root, ledger, enabled
+        self.reconcile_run = reconcile
 
     def _ready(self):
+        for path in self.root.glob("*/request.json"):
+            self.reconcile_run(path.parent)
         return tuple(path.parent for path in self.root.glob("*/result.json")
                      if (path.parent / "background").exists()
                      and not (path.parent / "handled").exists())
@@ -41,7 +44,7 @@ class ProgramCompletionSource:
                 continue
             at = datetime.fromtimestamp((root / "result.json").stat().st_mtime, UTC)
             events.append(BackgroundEvent(
-                "program:" + root.name, "program.completed", at,
+                "program-result:" + root.name, "program.completed", at,
                 {"run_id": root.name}, json.loads((root / "result.json").read_text()),
                 provenance=RetentionPolicy().non_mail(ContentOrigin.EXTERNAL, at),
             ))
@@ -63,6 +66,8 @@ class ProgramCompletionSource:
         (self.root / opportunity.opportunity_id.removeprefix("program:") / "handled").touch()
 
     def recover(self, spend=None):
+        if self.enabled:
+            self._ready()
         for row in self.ledger.unfinished():
             identity = row["opportunity_id"]
             if not identity.startswith("program:"):

@@ -1,8 +1,10 @@
 """Structured general program execution; meaning and permission stay with Core."""
 
+from datetime import UTC, datetime
+
 from alx.contracts import (
     CapabilityDefinition, CapabilityResult, CapabilityResultState, SideEffect,
-    StructuredSchema, ValueKind,
+    StructuredSchema, ValueKind, ContentOrigin, RetentionPolicy,
 )
 
 RUN_PROGRAM = "run_program"
@@ -49,5 +51,6 @@ def build_program_executors(run, call_id_source):
         return CapabilityResult(
             call_id, RUN_PROGRAM, CapabilityResultState.SUCCEEDED, values,
             durable_values={k: v for k, v in values.items() if k not in ("stdout", "stderr")},
+            provenance=RetentionPolicy().non_mail(ContentOrigin.EXTERNAL, datetime.now(UTC)),
         )
     return {RUN_PROGRAM: execute}
