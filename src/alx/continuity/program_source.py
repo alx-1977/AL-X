@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 
 from alx.contracts import BackgroundEvent, ContentOrigin, RetentionPolicy
 from alx.contracts.cognition import CognitionOrigin
@@ -13,10 +14,19 @@ class ProgramCompletionSource:
     def __init__(self, root: Path, ledger, enabled: bool = False, *, reconcile):
         self.root, self.ledger, self.enabled = root, ledger, enabled
         self.reconcile_run = reconcile
+        self._recovery_lock = Lock()
+
+    def reconcile_pending(self):
+        """Background tick only; concurrent ticks never duplicate cleanup."""
+        if not self._recovery_lock.acquire(blocking=False):
+            return
+        try:
+            for path in self.root.glob("*/request.json"):
+                self.reconcile_run(path.parent)
+        finally:
+            self._recovery_lock.release()
 
     def _ready(self):
-        for path in self.root.glob("*/request.json"):
-            self.reconcile_run(path.parent)
         return tuple(path.parent for path in self.root.glob("*/result.json")
                      if (path.parent / "background").exists()
                      and not (path.parent / "handled").exists())
@@ -66,8 +76,6 @@ class ProgramCompletionSource:
         (self.root / opportunity.opportunity_id.removeprefix("program:") / "handled").touch()
 
     def recover(self, spend=None):
-        if self.enabled:
-            self._ready()
         for row in self.ledger.unfinished():
             identity = row["opportunity_id"]
             if not identity.startswith("program:"):

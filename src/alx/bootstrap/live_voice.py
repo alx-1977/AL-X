@@ -1527,6 +1527,7 @@ async def run(repository_root: Path) -> None:
         autonomous_due_check_seconds(environment),
         reopen=None if autonomous_holds is None else autonomous_holds.reopen,
         advance_plans=plan_workers.advance,
+        recover_programs=program_source.reconcile_pending,
     )
     # A plan a turn has just made runnable starts on the next tick; wake it,
     # so the first step follows the turn instead of up to a tick later.

@@ -111,6 +111,7 @@ def test_interrupted_run_reports_once_after_restart(tmp_path, discovery):
     (run / "worker.json").write_text(json.dumps({"pid": 99999999, "started_at": [0, 0]}))
     source = ProgramCompletionSource(tmp_path, Ledger(), True, reconcile=reconcile)
     if discovery == "restart": source.recover()
+    source.reconcile_pending()
     opportunity, = source.due_opportunities()
     event, = source.contextual_events("thread")
     assert event.transient_data["status"] in ("failed", "interrupted")
@@ -195,10 +196,12 @@ def test_live_worker_is_not_interrupted_and_dead_worker_is_recovered(tmp_path):
         assert time.monotonic() < deadline
         time.sleep(.01)
     source.recover()
+    source.reconcile_pending()
     events = source.contextual_events("thread")
     while not events:
         assert time.monotonic() < deadline
         time.sleep(.01)
+        source.reconcile_pending()
         events = source.contextual_events("thread")
     event, = events
     assert event.transient_data["status"] == "interrupted"
@@ -214,6 +217,7 @@ def test_launch_lease_prevents_recovery_before_worker_identity_is_written(tmp_pa
         source.recover()
         assert not source.due_opportunities()
         assert not (run / "result.json").exists()
+    source.reconcile_pending()
     assert len(source.due_opportunities()) == 1
 
 
@@ -225,7 +229,7 @@ def test_recovery_preserves_result_published_during_identity_check(tmp_path, mon
         program.publish(run / "result.json", expected)
         return None
     monkeypatch.setattr(program, "process_identity", exited)
-    monkeypatch.setattr(program, "tagged_processes", lambda token, known=None: {})
+    monkeypatch.setattr(program, "tagged_processes", lambda token, known=None, **kw: {})
     reconcile(run)
     reconcile(run)
     assert json.loads((run / "result.json").read_text()) == expected
@@ -242,7 +246,7 @@ def test_simultaneous_recovery_publishes_one_result(tmp_path):
 
 
 def test_reused_pid_generation_is_never_signalled(monkeypatch):
-    monkeypatch.setattr(program, "tagged_processes", lambda token, known=None: {})
+    monkeypatch.setattr(program, "tagged_processes", lambda token, known=None, **kw: {})
     monkeypatch.setattr(program, "process_identity", lambda pid: [2, 3])
     kill = Mock()
     monkeypatch.setattr(program.os, "kill", kill)
@@ -251,7 +255,8 @@ def test_reused_pid_generation_is_never_signalled(monkeypatch):
 
 
 @pytest.mark.parametrize("same_generation", [True, False])
-def test_recovery_distinguishes_live_worker_from_reused_pid(tmp_path, same_generation):
+def test_recovery_distinguishes_live_worker_from_reused_pid(tmp_path, same_generation, monkeypatch):
+    monkeypatch.setattr(program, "tagged_processes", lambda *args, **kw: {})
     run = unfinished(tmp_path)
     generation = program.process_identity(os.getpid()) if same_generation else [-1, -1]
     (run / "worker.json").write_text(json.dumps({"pid": os.getpid(), "started_at": generation}))

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import ctypes
+import errno
 import fcntl
 import math
 import os
@@ -20,6 +21,9 @@ import time
 from pathlib import Path
 from threading import Thread
 from uuid import uuid4
+
+DISCOVERY_SECONDS = .1
+RECOVERY_SECONDS = .5
 
 
 def publish(path: Path, values: dict) -> None:
@@ -45,7 +49,14 @@ def process_info(pid: int):
         info = DarwinBSDInfo()
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         size = library.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
-        if size != ctypes.sizeof(info) or info.pbi_pid != pid or info.pbi_status == 5:
+        if size != ctypes.sizeof(info):
+            error = ctypes.get_errno()
+            if error in (errno.ESRCH, errno.ENOENT):
+                return None, 0
+            raise OSError(error, "process identity unavailable")
+        if info.pbi_pid != pid:
+            raise OSError("process identity changed during inspection")
+        if info.pbi_status == 5:
             return None, 0
         return [int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)], int(info.pbi_ppid)
     try:
@@ -55,7 +66,7 @@ def process_info(pid: int):
         if fields[0] == "Z":
             return None, 0
         return [Path("/proc/sys/kernel/random/boot_id").read_text().strip(), fields[19]], int(fields[1])
-    except (OSError, IndexError, ValueError):
+    except (FileNotFoundError, ProcessLookupError):
         return None, 0
 
 
@@ -63,7 +74,8 @@ def process_identity(pid: int):
     return process_info(pid)[0]
 
 
-def tagged_processes(token: str, known: dict | None = None) -> dict:
+def tagged_processes(token: str, known: dict | None = None, *, deadline=None,
+                     inspect_tags=True) -> dict:
     """Find inherited run membership even after setsid, double fork or reparenting.
 
     Census parent links also capture children with a cleared environment, and
@@ -83,13 +95,18 @@ def tagged_processes(token: str, known: dict | None = None) -> dict:
             raise OSError(ctypes.get_errno(), "process census unavailable")
         candidates = list(pids[:count])
         libc = ctypes.CDLL(None, use_errno=True)
+        # Reuse one bounded buffer for the census, rather than allocating a
+        # megabyte for every live process. Ancestry itself uses BSD metadata.
+        data = None
         def environment(pid):
+            nonlocal data
+            if data is None:
+                data = ctypes.create_string_buffer(1024 * 1024)
             mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
-            size = ctypes.c_size_t(1024 * 1024)
-            data = ctypes.create_string_buffer(size.value)
+            size = ctypes.c_size_t(ctypes.sizeof(data))
             if libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0):
                 return ()
-            raw = data.raw[:size.value]
+            raw = ctypes.string_at(data, size.value)
             argc = int.from_bytes(raw[:4], sys.byteorder)
             strings = raw[4:].split(b"\0")
             # Executable path, padding, argv, then environment.
@@ -106,40 +123,104 @@ def tagged_processes(token: str, known: dict | None = None) -> dict:
                 return ()
     found = {}
     snapshot = {}
+    def remember(values):
+        found.update(values)
+        if known is not None:
+            known.update(values)
     for pid in candidates:
-        identity, parent = process_info(pid)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("program census budget exhausted")
+        try:
+            identity, parent = process_info(pid)
+        except PermissionError:
+            # Other users' processes may be inaccessible, but known children
+            # must never be mistaken for terminated processes.
+            if known and pid in known:
+                raise
+            continue
         if identity is not None:
             snapshot[pid] = (identity, parent)
             if known and known.get(pid) == identity:
                 found[pid] = identity
-        if identity is not None and marker in environment(pid) and process_identity(pid) == identity:
-            found[pid] = identity
-    while True:
-        children = {pid: identity for pid, (identity, parent) in snapshot.items()
-                    if pid not in found and parent in found
-                    and process_identity(parent) == found[parent]
-                    and process_identity(pid) == identity}
-        if not children:
-            break
-        found.update(children)
+    def descendants():
+        while True:
+            children = {}
+            for pid, (identity, parent) in snapshot.items():
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("program census budget exhausted")
+                if (pid not in found and parent in found
+                        and process_identity(parent) == found[parent]
+                        and process_identity(pid) == identity):
+                    children[pid] = identity
+            if not children:
+                return
+            remember(children)
+    descendants()
+    if not inspect_tags:
+        return found
+    for pid, (identity, _) in snapshot.items():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("program census budget exhausted")
+        if pid not in found and marker in environment(pid) and process_identity(pid) == identity:
+            remember({pid: identity})
+    descendants()
     return found
 
 
-def stop_program(token: str, known: dict) -> None:
-    """Stop and await all run members before any terminal record is visible."""
+def stop_program(token: str, known: dict, *, checkpoint=None) -> bool:
+    """Bound one attempt; false means the durable run must remain pending."""
+    deadline = time.monotonic() + RECOVERY_SECONDS
     while True:
-        known.update(tagged_processes(token, known))
-        live = {pid: identity for pid, identity in known.items()
-                if process_identity(pid) == identity}
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            # Enforce the program deadline before doing a potentially slower
+            # census. A stuck child is signalled, never waited on here.
+            for pid, identity in known.items():
+                if time.monotonic() >= deadline:
+                    return False
+                if process_identity(pid) == identity:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            known.update(tagged_processes(token, known, deadline=deadline))
+            if checkpoint is not None:
+                checkpoint(known)
+            live = {}
+            for pid, identity in known.items():
+                if time.monotonic() >= deadline:
+                    return False
+                if process_identity(pid) == identity:
+                    live[pid] = identity
+        except (OSError, TimeoutError):
+            # A census may have observed children before exhausting its budget.
+            # Preserve those generations even though it cannot prove absence.
+            if checkpoint is not None:
+                checkpoint(known)
+            return False
         if not live:
-            return
-        for pid, identity in live.items():
-            if process_identity(pid) == identity:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        time.sleep(.01)
+            return time.monotonic() < deadline
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(DISCOVERY_SECONDS, remaining))
+
+
+def save_children(root: Path, known: dict) -> None:
+    """Keep observed generations across worker death and recovery retries."""
+    path = root / "children.json"
+    temporary = root / "children.tmp"
+    with temporary.open("w") as stream:
+        json.dump(known, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
+def load_children(root: Path) -> dict:
+    path = root / "children.json"
+    return {int(pid): identity for pid, identity in json.loads(path.read_text()).items()} if path.exists() else {}
 
 
 def result_values(root: Path, status: str, exit_code: int = -1,
@@ -174,7 +255,9 @@ def reconcile(root: Path) -> None:
             worker = json.loads(worker_path.read_text())
             if worker["started_at"] is not None and process_identity(worker["pid"]) == worker["started_at"]:
                 return
-        stop_program(root.name, {})
+        known = load_children(root)
+        if not stop_program(root.name, known, checkpoint=lambda values: save_children(root, values)):
+            return
         publish(root / "result.json", result_values(root, "interrupted", error="program_worker_interrupted"))
 
 
@@ -277,20 +360,38 @@ def work(root: Path) -> None:
             identity = process_identity(process.pid)
             if identity is not None:
                 known[process.pid] = identity
+                save_children(root, known)
+            deadline = started + request["time_limit_seconds"]
+            next_discovery = started
             while process.poll() is None:
-                known.update(tagged_processes(root.name, known))
-                if time.monotonic() - started >= request["time_limit_seconds"]:
+                now = time.monotonic()
+                if now >= deadline:
                     timed_out = True
                     break
-                time.sleep(.01)
+                if now >= next_discovery:
+                    try:
+                        known.update(tagged_processes(root.name, known, deadline=deadline,
+                                                      inspect_tags=False))
+                    except TimeoutError:
+                        timed_out = True
+                        break
+                    save_children(root, known)
+                    next_discovery = time.monotonic() + DISCOVERY_SECONDS
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(.01, remaining))
         except OSError as failure:
             error = str(failure)
         finally:
             if process is not None:
                 # Cleanup failures must not be turned into a finished run.
                 # The lease is released on worker exit; discovery retries here.
-                stop_program(root.name, known)
-                process.wait()
+                if not stop_program(root.name, known, checkpoint=lambda values: save_children(root, values)):
+                    return
+                try:
+                    process.wait(timeout=0)
+                except subprocess.TimeoutExpired:
+                    return
                 exit_code = process.returncode
     publish(root / "result.json", result_values(
         root, "completed", exit_code, time.monotonic() - started, timed_out, error,
