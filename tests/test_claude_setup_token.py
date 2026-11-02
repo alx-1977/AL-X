@@ -68,6 +68,113 @@ def notice_request(model):
         conversation_id='notice-delivery', runtime=model.setup_token_notice_facts()))
 
 
+@pytest.mark.parametrize('provider', ['openai', 'xai', 'kimi'])
+@pytest.mark.parametrize('streaming', [False, True])
+@pytest.mark.parametrize('failure', ['success', 'status', 'bad_output', 'connect',
+                                   'connect_timeout', 'pool', 'write', 'write_timeout',
+                                   'read_timeout', 'read_error', 'protocol', 'preparation'])
+def test_http_core_delivers_research_refusal_once(tmp_path, profile_http, provider,
+                                                streaming, failure):
+    import httpx
+    from alx.contracts import ReasoningContext
+    from alx.core.model_reasoner import ModelReasoner
+    from alx.providers.errors import ProviderError
+    from alx.providers.openai import OpenAIReasoningModel
+    from alx.providers.xai import XAIReasoningModel
+
+    profile_http[1].status = 403
+    research, _ = model_at(tmp_path, sentinel(), ClaudeSubscriptionResearchModel)
+    research.verify_identity()
+    facts = research.setup_token_notice_facts()
+    sent = []
+
+    def respond(incoming):
+        if failure == 'connect':
+            raise httpx.ConnectError('offline')
+        if failure == 'connect_timeout':
+            raise httpx.ConnectTimeout('offline')
+        if failure == 'pool':
+            raise httpx.PoolTimeout('busy')
+        if failure == 'write':
+            raise httpx.WriteError('incomplete request')
+        if failure == 'write_timeout':
+            raise httpx.WriteTimeout('incomplete request')
+        payload = json.loads(incoming.content)
+        messages = payload['input' if provider == 'openai' else 'messages']
+        sent.append(json.loads(messages[-1]['content'])['runtime'])
+        if failure == 'read_timeout':
+            raise httpx.ReadTimeout('no response')
+        if failure == 'read_error':
+            raise httpx.ReadError('response interrupted')
+        if failure == 'protocol':
+            raise httpx.RemoteProtocolError('invalid response')
+        if failure == 'status':
+            return httpx.Response(500)
+        content = '{}' if failure == 'success' else 'invalid'
+        if streaming:
+            event = ({'type': 'response.completed', 'response': {'output': [
+                {'type': 'message', 'content': [{'type': 'output_text', 'text': content}]}]}}
+                if provider == 'openai' else
+                {'choices': [{'delta': {'content': content}}]})
+            return httpx.Response(200, text='data: ' + json.dumps(event) + '\n\n')
+        body = ({'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': content}]}]}
+                if provider == 'openai' else
+                {'choices': [{'message': {'content': content}}]})
+        return httpx.Response(200, json=body)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        adapter = OpenAIReasoningModel if provider == 'openai' else XAIReasoningModel
+        core = adapter('model', 'synthetic-key', 'https://' + provider + '.test', 30,
+                       client=client, streaming=streaming)
+        receipts = []
+
+        def acknowledge(runtime):
+            receipts.append(runtime)
+            research.acknowledge_setup_token_notice(runtime)
+
+        reasoner = ModelReasoner(core, 'laws', 'identity',
+            on_request_dispatched=acknowledge)
+
+        def outgoing(runtime):
+            return reasoner.build_request(ReasoningContext(None, (), (),
+                conversation_id='research-refusal', runtime=runtime))
+
+        first = outgoing(facts)
+        assert research.setup_token_notice_facts() == facts
+        if failure == 'preparation':
+            from dataclasses import replace
+            first = replace(first, messages=(object(),))
+        if failure == 'success':
+            core.complete(first)
+        else:
+            with pytest.raises((ProviderError, AttributeError)):
+                core.complete(first)
+        pending = failure in {'connect', 'connect_timeout', 'pool', 'write',
+                              'write_timeout', 'preparation'}
+        assert receipts == ([] if pending else [facts])
+        assert research.setup_token_notice_facts() == (facts if pending else {})
+        if pending:
+            assert not sent
+            return
+        assert sent == [facts]
+        # A later request carries no warning, even after a failed delivered turn.
+        later = outgoing(research.setup_token_notice_facts())
+        assert json.loads(later.messages[-1].content)['runtime'] == {}
+        # A request assembled without the warning cannot consume a newer one.
+        profile = subscription._setup_token_profile
+        subscription._setup_token_profile = subscription._SetupTokenProfile(
+            profile.token, refusal=profile.refusal)
+        newer = research.setup_token_notice_facts()
+        if failure == 'success':
+            core.complete(later)
+        else:
+            with pytest.raises(ProviderError):
+                core.complete(later)
+        assert sent[-1] == {}
+        assert receipts == [facts, {}]
+        assert research.setup_token_notice_facts() == newer
+
+
 @pytest.mark.parametrize('failure', ['identity', 'unavailable', 'preparation', 'missing_cli',
                                    'budget', 'timeout', 'bad_output', 'nonzero', 'success'])
 def test_refusal_acknowledgement_tracks_provider_send(tmp_path, profile_http, failure):
@@ -367,11 +474,17 @@ def test_named_oauth_setting_is_masked_even_for_short_noncredential_sentinels():
     assert shaped not in mask_credentials(shaped), 'unlabelled OAuth shape leaked'
 
 
-@pytest.mark.parametrize('redraw', [False, True])
+@pytest.mark.parametrize('redraw', ['plain', 'escape', 'overwrite', 'partial'])
 def test_usage_masks_unlabelled_token_before_evidence_is_returned(redraw):
     token = sentinel()
     reader = ClaudeUsageReader('unused', {'CLAUDE_CODE_OAUTH_TOKEN': token})
-    echoed = token[:16] + '\x1b[m' + token[16:] if redraw else token
+    fragments = (token[:16], token[16:])
+    echoed = {
+        'plain': token,
+        'escape': fragments[0] + '\x1b[m' + fragments[1],
+        'overwrite': fragments[1] + '\r' + fragments[0],
+        'partial': fragments[0],
+    }[redraw]
     # A CLI can echo arbitrary text even before it draws its usage screen.
     @contextmanager
     def terminal(*args, **kwargs):
@@ -384,7 +497,7 @@ def test_usage_masks_unlabelled_token_before_evidence_is_returned(redraw):
         'alx.providers.claude_usage.os.read', side_effect=[echoed.encode(), b'']
     ):
         result = reader.read()
-    assert token not in json.dumps(result), 'usage failure leaked credential'
+    for fragment in (token, *fragments):
+        assert fragment not in json.dumps(result), 'usage failure leaked credential fragment'
     assert '[masked]' in result['screen_capture']
-    if not redraw:
-        assert '[masked]' in result['raw_output_tail']
+    assert 'raw_output_tail' not in result

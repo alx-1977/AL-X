@@ -368,7 +368,13 @@ class ClaudeUsageReader:
             evidence = evidence.replace(token, '[masked]')
         values['screen_capture'] = mask_credentials(evidence)
         if code:
-            # Escaped so control sequences stay visible as text.
-            values.update(limits=[], failure_code=code,
-                          raw_output_tail=received[-_MAX_RAW_EVIDENCE:].encode('unicode_escape').decode('ascii'))
+            values.update(limits=[], failure_code=code)
+            if token:
+                # Arbitrary failure output can contain partial credentials,
+                # including fragments separated or overwritten by controls.
+                # Neither the raw stream nor its rendered screen is safe.
+                values['screen_capture'] = '[masked]'
+            else:
+                # Escaped so control sequences stay visible as text.
+                values['raw_output_tail'] = received[-_MAX_RAW_EVIDENCE:].encode('unicode_escape').decode('ascii')
         return values

@@ -6,9 +6,11 @@ import json
 import logging
 from time import monotonic
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from typing import Any
 
 import httpx
+from alx.providers.http_dispatch import dispatch_with_receipt
 
 from alx.contracts import ModelCompletion, ModelRequest, normalise_usage, usage_telemetry
 from alx.providers.errors import (
@@ -100,14 +102,14 @@ class XAIReasoningModel:
                 headers["x-grok-conv-id"] = request.affinity_key
             if self._streaming:
                 content, model, usage, service_tier, timings = self._stream(
-                    headers, payload, started_at
+                    headers, payload, started_at, request
                 )
             else:
-                response = self._client.post(
+                response = dispatch_with_receipt(request, lambda: self._client.post(
                     f"{self._base_url}/v1/chat/completions",
                     headers=headers,
                     json=payload,
-                )
+                ))
                 response.raise_for_status()
                 body: dict[str, Any] = response.json()
                 content = body["choices"][0]["message"]["content"]
@@ -179,6 +181,7 @@ class XAIReasoningModel:
         headers: Mapping[str, str],
         payload: Mapping[str, Any],
         started_at: float,
+        request: ModelRequest,
     ) -> tuple[str, str, dict[str, Any], str, dict[str, float]]:
         parts: list[str] = []
         model = self._model
@@ -186,12 +189,13 @@ class XAIReasoningModel:
         usage: dict[str, Any] = {}
         first_event_at: float | None = None
         first_content_at: float | None = None
-        with self._client.stream(
-            "POST",
-            f"{self._base_url}/v1/chat/completions",
-            headers=headers,
-            json=payload,
-        ) as response:
+        with ExitStack() as stack:
+            response = dispatch_with_receipt(request, lambda: stack.enter_context(
+                self._client.stream(
+                    "POST", f"{self._base_url}/v1/chat/completions",
+                    headers=headers, json=payload,
+                )
+            ))
             response.raise_for_status()
             for line in response.iter_lines():
                 if not line.startswith("data:"):
