@@ -162,49 +162,63 @@ class ResearchSpecialist:
         overrun = self._ledger.overrun_usd()
         if overrun > 0:
             raise ResearchCeilingFailed(overrun)
-        reservation = self._ledger.reserve(
-            question.cognition.value,
-            provider,
-            model,
-            kind="research",
-            worst_case_usd=worst_case,
-        )
-        request = replace(
-            request,
-            reservation_id=reservation.reservation_id,
-            reserved_usd=reservation.reserved_usd,
-        )
         telemetry_task = task_id or question.question_id
-        self._emit(
-            telemetry_task,
-            {
-                "code": "research.reserved",
-                "kind": "research",
-                "tier": question.cognition.value,
-                "provider": provider,
-                "model": model,
-                "reservation_id": reservation.reservation_id,
-                "reserved_usd": reservation.reserved_usd,
-                "cost_usd": 0.0,
-                "usage_measured": False,
-                "cost_measured": False,
-                "outcome": "reserved",
-            },
-        )
+        reservation = None
+
+        def abandon_attempt(error: Exception) -> None:
+            nonlocal reservation
+            if reservation is None:
+                return
+            failure_code = type(error).__name__
+            settled = self._ledger.abandon(reservation, failure_code=failure_code)
+            self._emit(telemetry_task, self._event(
+                question, configured, reservation, settled, "failed", failure_code, {},
+            ))
+            reservation = None
+
+        def retry_request(error: Exception) -> ModelRequest:
+            abandon_attempt(error)
+            return reserve_request()
+
+        def reserve_request() -> ModelRequest:
+            nonlocal reservation, request
+            reservation = self._ledger.reserve(
+                question.cognition.value,
+                provider,
+                model,
+                kind="research",
+                worst_case_usd=worst_case,
+            )
+            request = replace(
+                request,
+                reservation_id=reservation.reservation_id,
+                reserved_usd=reservation.reserved_usd,
+                on_retry=retry_request,
+            )
+            self._emit(
+                telemetry_task,
+                {
+                    "code": "research.reserved",
+                    "kind": "research",
+                    "tier": question.cognition.value,
+                    "provider": provider,
+                    "model": model,
+                    "reservation_id": reservation.reservation_id,
+                    "reserved_usd": reservation.reserved_usd,
+                    "cost_usd": 0.0,
+                    "usage_measured": False,
+                    "cost_measured": False,
+                    "outcome": "reserved",
+                },
+            )
+            return request
+
+        request = reserve_request()
         try:
             completion = configured.transport.complete(request)
         except Exception as error:
             failure_code = type(error).__name__
-            settled = self._ledger.abandon(
-                reservation, failure_code=failure_code
-            )
-            self._emit(
-                telemetry_task,
-                self._event(
-                    question, configured, reservation, settled,
-                    "failed", failure_code, {},
-                ),
-            )
+            abandon_attempt(error)
             raise SpecialistError(failure_code,
                                   failure_details(error).get("service_message", ""),
                                   preserve_service_message=getattr(error, "preserve_service_message", False)) from None

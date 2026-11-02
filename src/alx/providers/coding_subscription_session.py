@@ -25,6 +25,8 @@ allowing more than one CLI behind it.
 from __future__ import annotations
 
 import logging
+import io
+import json
 import os
 import shutil
 import subprocess  # noqa: S404 - the coding-session launch site
@@ -32,7 +34,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from alx.providers.subscription_retry import SubscriptionRetryPolicy, retry_subscription
+from alx.providers.subscription_retry import SubscriptionRetryPolicy, retry_subscription, error_event_message
 
 from alx.contracts.coding import (
     CodingError,
@@ -133,6 +135,7 @@ class SubscriptionCodingSession:
     login_file_name: str = ""
     #: Whether the session can run commands, inside its containment.
     has_terminal: bool = False
+    failure_event_types: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -222,14 +225,31 @@ class SubscriptionCodingSession:
         """
         return False
 
-    def failure_output(self, stdout: str) -> str:
-        """The part of stdout that may explain a failed exit.
-
-        The whole of it by default. An adapter whose stdout streams what the
-        agent read returns only the CLI's own error reports: file contents
-        must not become failure diagnostics.
-        """
-        return stdout
+    def failure_output(self, lines: Iterable[str]) -> str:
+        """Retain bounded diagnostics, selecting stream errors by event fields."""
+        kept: list[str] = []
+        size = 0
+        for line in lines:
+            if isinstance(line, OversizedLine):
+                continue
+            if self.failure_event_types:
+                try:
+                    event = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(event, Mapping) or event.get('type') not in self.failure_event_types:
+                    continue
+                text = error_event_message(event)
+                if kept:
+                    text = '\n' + text
+            else:
+                text = line
+            remaining = MAX_RETAINED_OUTPUT_CHARACTERS - size
+            kept.append(text[:remaining])
+            size += min(len(text), remaining)
+            if size >= MAX_RETAINED_OUTPUT_CHARACTERS:
+                break
+        return ''.join(kept)
 
     # --- neutral orchestration ---------------------------------------------
 
@@ -335,18 +355,22 @@ class SubscriptionCodingSession:
                 raise CodingError(
                     "coding_unavailable", reason_code="cli_unavailable", service_message=str(error)
                 ) from error
-            # A failed exit carries the complete diagnostic, without tailing or
-            # normalising whitespace. Successful streams retain their size bounds.
+            # Read records incrementally, including on failure. A session can
+            # spool hundreds of MB; only bounded diagnostics belong in memory.
             if completed.returncode != 0:
                 if isinstance(completed.stdout, str):
-                    raw_stdout = completed.stdout
-                    stderr = completed.stderr or ""
+                    message = self.failure_output(bounded_lines(io.StringIO(completed.stdout)))
+                    stderr = (completed.stderr or "")[:MAX_RETAINED_OUTPUT_CHARACTERS]
                 else:
-                    raw_stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
-                    stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+                    with open(stdout_path, encoding="utf-8", errors="replace") as spooled:
+                        message = self.failure_output(bounded_lines(spooled))
+                    stderr = ""
+                    if not message:
+                        with open(stderr_path, encoding="utf-8", errors="replace") as spooled:
+                            stderr = spooled.read(MAX_RETAINED_OUTPUT_CHARACTERS)
                 raise CodingError(
                     "session_failed", reason_code="cli_failed",
-                    service_message=self.failure_output(raw_stdout) or stderr,
+                    service_message=message or stderr,
                     exit_status=completed.returncode,
                 )
             if isinstance(completed.stdout, str):

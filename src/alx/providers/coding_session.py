@@ -217,13 +217,7 @@ class GrokCodingSession(SubscriptionCodingSession):
                     kept.append(line.rstrip("\n"))
         return "\n".join(kept)
 
-    def failure_output(self, stdout: str) -> str:
-        """Only the CLI's own error events, never what the agent read."""
-        try:
-            events = self._events(stdout)
-        except CodingError:
-            return ""
-        return self._error_text([e for e in events if e.get("type") == "error"])
+    failure_event_types = ("error",)
 
     @staticmethod
     def _events(stdout: str) -> list[Mapping[str, object]]:

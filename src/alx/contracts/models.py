@@ -67,6 +67,9 @@ class ModelRequest:
     # A transport calls this only once the request has been handed off,
     # including a sent request whose response fails.
     on_dispatched: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    # Local accounting hook: approve and identify a fresh request before a
+    # transport retries. Never sent to the model or serialized into telemetry.
+    on_retry: Callable[[Exception], ModelRequest] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))

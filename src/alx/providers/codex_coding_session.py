@@ -269,15 +269,7 @@ class CodexCodingSession(SubscriptionCodingSession):
             kept.append(line.rstrip("\n"))
         return "\n".join(kept)
 
-    def failure_output(self, stdout: str) -> str:
-        """Only the CLI's own error reports, never what the agent read."""
-        try:
-            events = self._events(stdout)
-        except CodingError:
-            return ""
-        return self._error_text([
-            event for event in events if event.get("type") in ("error", "turn.failed")
-        ])
+    failure_event_types = ("error", "turn.failed")
 
     @staticmethod
     def _events(stdout: str) -> list[Mapping[str, object]]:

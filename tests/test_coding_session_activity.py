@@ -346,7 +346,7 @@ class StreamedResultTests(unittest.TestCase):
         stdout = self._stream(
             {"type": "tool_call_update", "content": "unrelated source file contents"},
         )
-        self.assertEqual(self.session.failure_output(stdout), "")
+        self.assertEqual(self.session.failure_output(stdout.splitlines(keepends=True)), "")
 
 
 class StopReasonSurvivesTests(unittest.TestCase):

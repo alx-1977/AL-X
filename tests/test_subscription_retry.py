@@ -223,6 +223,51 @@ def test_cancellation_does_not_start_another_session(tmp_path):
     assert waits == []
 
 
+def test_cancel_interrupts_a_distant_reset_wait(tmp_path, monkeypatch):
+    import threading
+    from alx.providers.coding_process import CodingCancellation, bind_cancellation, reset_cancellation
+
+    waiting, release = threading.Event(), threading.Event()
+    cancellation = CodingCancellation()
+    errors, calls = [], []
+
+    class ObservedPolicy(SubscriptionRetryPolicy):
+        def pause(self, *args, **kwargs):
+            waiting.set()
+            return super().pause(*args, **kwargs)
+
+    monkeypatch.setattr('alx.providers.subscription_retry.sleep', lambda delay: release.wait(3))
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, '', RESET_MESSAGE)
+
+    session = FakeSession('model', executable='fake', stall_seconds=30,
+                          runner=runner, retry_policy=ObservedPolicy())
+
+    def work():
+        token = bind_cancellation(cancellation)
+        try:
+            session.run_session(CodingRequest('task', 'job', str(tmp_path)), 'briefing')
+        except CodingError as error:
+            errors.append(error)
+        finally:
+            reset_cancellation(token)
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    try:
+        assert waiting.wait(3)
+        cancellation.cancel()
+        worker.join(0.5)
+        assert not worker.is_alive(), 'reset wait ignored cancellation'
+        assert [error.code for error in errors] == ['coding_cancelled']
+        assert len(calls) == 1
+    finally:
+        release.set()
+        worker.join(4)
+
+
 @pytest.mark.parametrize("research", [False, True])
 def test_specialist_consumers_preserve_terminal_message_without_retrying_again(tmp_path, research):
     from alx.contracts import Cognition, ResearchQuestion, SpecialistError, SpecialistQuestion
@@ -269,3 +314,147 @@ def test_removed_classifiers_and_latches_have_no_callable_path():
     for model_type in MODELS:
         assert not hasattr(model_type, "_failure_code")
     assert not hasattr(claude_subscription, "_COOLDOWN_CODES")
+
+
+@pytest.mark.parametrize('provider', ['codex', 'grok'])
+@pytest.mark.parametrize('has_error', [True, False])
+def test_failed_session_streams_bounded_records_and_retains_errors(tmp_path, monkeypatch, provider, has_error):
+    import builtins
+    from alx.providers.codex_coding_session import CodexCodingSession
+    from alx.providers.coding_session import GrokCodingSession
+    from alx.providers import coding_subscription_session as shared
+
+    monkeypatch.setattr(shared, 'MAX_EVENT_LINE_CHARACTERS', 1024)
+    monkeypatch.setattr(shared, 'MAX_RETAINED_OUTPUT_CHARACTERS', 4096)
+    monkeypatch.setattr(SubscriptionCodingSession, 'install_subscription_auth', lambda *args: None)
+    monkeypatch.setattr(SubscriptionCodingSession, 'prepare_home', lambda *args: None)
+    session_type = CodexCodingSession if provider == 'codex' else GrokCodingSession
+    monkeypatch.setattr(session_type, 'prepare_home', lambda *args: None)
+    monkeypatch.setattr(session_type, 'command', lambda *args: ['fake'])
+    reads = []
+    real_open = builtins.open
+
+    class BoundedReader:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def readline(self, size=-1):
+            assert 0 < size <= 1025
+            reads.append(size)
+            return self.handle.readline(size)
+        def read(self, size=-1):
+            assert 0 < size <= 4096
+            reads.append(size)
+            return self.handle.read(size)
+
+    def guarded_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if Path(path).name in ('session.stdout', 'session.stderr'):
+            return BoundedReader(handle)
+        return handle
+
+    def run(runner, command, **kwargs):
+        stdout, stderr = kwargs['spool_to']
+        with real_open(stdout, 'w') as handle:
+            # Oversized valid and malformed records, then small structured errors.
+            handle.write('{"type":"item.completed","text":"' + 'x' * 20000 + '"}\n')
+            handle.write('x' * 20000 + '\n')
+            for _ in range(200):
+                handle.write(json.dumps({'type': 'tool_result', 'content': 'x' * 800}) + '\n')
+            if has_error:
+                handle.write(json.dumps({'type': 'error', 'message': '  exact failure\n  '}) + '\n')
+            handle.write('x' * 20000)  # No trailing newline must also stay bounded.
+        stderr.write_text(' warning\n' * 20000)
+        return subprocess.CompletedProcess(command, 1, None, None)
+
+    monkeypatch.setattr('alx.providers.coding_process.run_coding_subprocess', run)
+    monkeypatch.setattr(builtins, 'open', guarded_open)
+    original_read_text = Path.read_text
+
+    def no_whole_spool(path, *args, **kwargs):
+        assert path.name not in ('session.stdout', 'session.stderr'), 'whole spool read'
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', no_whole_spool)
+    session = session_type('model', stall_seconds=30,
+                           retry_policy=SubscriptionRetryPolicy(wait=lambda delay: None))
+    with pytest.raises(CodingError) as raised:
+        session.run_session(CodingRequest('task', 'job', str(tmp_path)), 'briefing')
+    assert raised.value.details['service_message'] == (
+        '  exact failure\n  ' if has_error else (' warning\n' * 20000)[:4096])
+    assert reads
+
+
+def test_failure_diagnostics_have_a_total_bound():
+    import io
+    from alx.providers.codex_coding_session import CodexCodingSession
+    from alx.providers.coding_subscription_session import MAX_RETAINED_OUTPUT_CHARACTERS, bounded_lines
+
+    text = json.dumps({'type': 'error', 'message': 'x' * 10000}) + '\n'
+    session = CodexCodingSession('model', stall_seconds=30)
+    result = session.failure_output(bounded_lines(io.StringIO(text * 200)))
+    assert len(result) == MAX_RETAINED_OUTPUT_CHARACTERS
+
+
+def test_malformed_nested_record_does_not_hide_later_error():
+    import io
+    from alx.providers.codex_coding_session import CodexCodingSession
+    from alx.providers.coding_subscription_session import bounded_lines
+
+    stream = '[' * 10000 + ']' * 10000 + '\n'
+    stream += json.dumps({'type': 'error', 'message': 'exact failure'}) + '\n'
+    session = CodexCodingSession('model', stall_seconds=30)
+    assert session.failure_output(bounded_lines(io.StringIO(stream))) == 'exact failure'
+
+
+@pytest.mark.parametrize('cap,expected_calls', [(1, 1), (2, 2), (3, 3)])
+@pytest.mark.parametrize('succeed_on', [None, 1, 2, 3])
+def test_each_research_attempt_is_reserved_before_dispatch(tmp_path, cap, expected_calls, succeed_on):
+    from alx.contracts import Cognition, ResearchQuestion, SpecialistQuestion, SpecialistError
+    from alx.observability.pricing import ConfiguredPricingWorstCase
+    from alx.observability.research_budget import ResearchBudget, SQLiteResearchLedger
+    from alx.providers.claude_subscription import ClaudeSubscriptionResearchModel
+    from alx.specialists.research import ResearchSpecialist, ResearchTierModel
+
+    ledger = SQLiteResearchLedger(tmp_path / 'ledger.sqlite3', ResearchBudget(1, 0.1, cap))
+    dispatched, events = [], []
+    expected_calls = min(expected_calls, succeed_on or 3)
+    succeeds = succeed_on is not None and succeed_on <= cap
+
+    def runner(command, **kwargs):
+        rows = ledger.day()['calls']
+        # Reservation approval must precede the dispatch, including retries.
+        assert len(rows) == len(dispatched) + 1
+        assert rows[-1]['outcome'] == 'reserved'
+        dispatched.append(rows[-1]['reservation_id'])
+        if len(dispatched) == succeed_on:
+            return subprocess.CompletedProcess(command, 0, json.dumps({'structured_output': {'value': 1}}), '')
+        return subprocess.CompletedProcess(command, 1, '', 'arbitrary failure')
+
+    model = ClaudeSubscriptionResearchModel('claude-haiku-5-5', 30, environment={},
+        runner=runner, retry_policy=SubscriptionRetryPolicy(wait=lambda delay: None))
+    specialist = ResearchSpecialist({Cognition.SURVEY: ResearchTierModel(
+        'claude_subscription', 'claude-haiku-5-5', model)}, ledger,
+        ConfiguredPricingWorstCase(), 8000, 1000, 0.1,
+        telemetry_sink=lambda task, event: events.append(event))
+    question = ResearchQuestion(SpecialistQuestion('q', 'instruction', 'material', {'type': 'object'}))
+    if succeeds:
+        assert specialist.answer(question) == {'value': 1}
+    else:
+        with pytest.raises(SpecialistError) as raised:
+            specialist.answer(question)
+        assert 'AssertionError' not in str(raised.value)
+    assert len(dispatched) == expected_calls
+    rows = ledger.day()['calls']
+    assert len(rows) == expected_calls
+    assert len(set(dispatched)) == expected_calls
+    assert [row['outcome'] for row in rows] == ['failed'] * (expected_calls - 1) + [
+        'succeeded' if succeeds else 'failed']
+    assert [event['reservation_id'] for event in events if event['code'] == 'research.reserved'] == dispatched
+    assert [event['reservation_id'] for event in events if event['code'] == 'research.completed'] == dispatched
+    assert ledger.day()['open_reservations'] == 0
+    if cap < 3 and not succeeds:
+        assert 'ResearchCallsExhausted' in str(raised.value)

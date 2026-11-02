@@ -11,6 +11,7 @@ from time import sleep
 from typing import Callable
 
 from alx.contracts.coding import CodingError, CodingSessionResult
+from alx.contracts.models import ModelRequest
 from alx.contracts.diagnostics import mask_credentials
 from alx.providers.errors import ProviderError
 
@@ -94,8 +95,10 @@ class SubscriptionRetryPolicy:
             raise ValueError("subscription retry requires at least two attempts")
 
     def pause(self, message: str, attempt: int) -> None:
+        from alx.providers.coding_process import wait_with_cancellation
+
         delay = retry_delay(message, attempt, now=self.now() if self.now else None)
-        (self.wait or sleep)(delay)
+        wait_with_cancellation(delay, self.wait or sleep)
 
 
 def retry_subscription(operation):
@@ -139,4 +142,13 @@ def retry_subscription(operation):
                     return result
                 raise failure
             policy.pause(message, attempt)
+            request = args[0] if args else kwargs.get('request')
+            if isinstance(request, ModelRequest) and request.on_retry is not None:
+                # Outside the failure handler: a refused reservation is final
+                # control flow and must never be retried or dispatched.
+                renewed = request.on_retry(failure)
+                if args:
+                    args = (renewed, *args[1:])
+                else:
+                    kwargs['request'] = renewed
     return run
