@@ -48,7 +48,8 @@ RESEARCH_SPEND_PERMISSION = "research.spend"
 
 
 def _transport(
-    settings: Any, telemetry_sink: Any, claude_identity: tuple[str, str] | None = None
+    settings: Any, telemetry_sink: Any, claude_identity: tuple[str, str] | None = None,
+    claude_oauth_token: str | None = None,
 ) -> Any:
     if settings.provider == "openai":
         return OpenAIReasoningModel(
@@ -73,6 +74,7 @@ def _transport(
             telemetry_sink=telemetry_sink,
             config_dir=claude_identity[0],
             expected_account=claude_identity[1],
+            oauth_token=claude_oauth_token,
         )
     if settings.provider in ("xai", "kimi"):
         return XAIReasoningModel(
@@ -118,7 +120,8 @@ def build_research_specialist(
         tiers[tier] = ResearchTierModel(
             tier_settings.provider,
             tier_settings.model,
-            _transport(tier_settings, telemetry_sink, settings.claude_identity),
+            _transport(tier_settings, telemetry_sink, settings.claude_identity,
+                       settings.claude_oauth_token),
         )
         LOGGER.info(
             "Research tier %s enabled: %s %s",

@@ -6,7 +6,7 @@ import re
 # ordinary text, paths included, is left alone.
 _BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[^\s\"',]+")
 _ASSIGNED = re.compile(
-    r"(?i)\b(token|api[_-]?key|access[_-]?key|secret[_-]?key|secret|password|signature|"
+    r"(?i)\b(CLAUDE_CODE_OAUTH_TOKEN|token|api[_-]?key|access[_-]?key|secret[_-]?key|secret|password|signature|"
     r"authorization)([\"']?\s*[=:]\s*[\"']?)(?!\[masked\])([^\s\"',&]+)")
 _PREFIXED = re.compile(r"\b(sk|xi|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_\-]{8,}")
 # A long unbroken run of letters and digits (no slash, so never a path).

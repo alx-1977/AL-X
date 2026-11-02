@@ -38,6 +38,14 @@ The launcher runs committed local main and passes this checkout as --checkout.
 
 Then open `http://127.0.0.1:8765`, the default interface address. Runtime policy, provider selection, models, voice, turn-detection profile, and the runtime's isolated storage location all come from `.env`; none are selected by frontend code.
 
+For optional Claude subscription authentication, run `claude setup-token` and paste the token into `CLAUDE_CODE_OAUTH_TOKEN` in `.env`.
+
+At startup AL/X checks the token directly with Anthropic for her dedicated
+account and a Pro, Max or Team subscription; a refused token uses the normal
+`~/.claude-alx` login and supplies one diagnostic notice to the Core.
+Without a token the existing login is unchanged; API keys and provider-routing
+environment overrides remain excluded from the Claude subprocess.
+
 ## Source of authority
 
 Friedl is the product owner and final authority for what AL/X is, how she behaves, and how she may be built. Models and implementers may propose changes, but may not weaken, reinterpret, or silently create exceptions to an approved law.

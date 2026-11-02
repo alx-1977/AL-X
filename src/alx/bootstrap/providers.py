@@ -230,6 +230,7 @@ def build_runtime_providers(
             # AL/X's own Claude login, never the person's.
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
+            oauth_token=settings.claude_oauth_token,
         )
     elif settings.reasoning.provider == "openai":
         reasoning = OpenAIReasoningModel(
@@ -270,6 +271,7 @@ def build_runtime_providers(
             telemetry_sink=telemetry_sink,
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
+            oauth_token=settings.claude_oauth_token,
         )
     )
     coding = _build_coding_model(settings, telemetry_sink)

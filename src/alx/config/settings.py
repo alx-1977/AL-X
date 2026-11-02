@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlparse
@@ -927,6 +927,7 @@ class ResearchSettings:
     # AL/X's own Claude configuration directory and account, when a tier runs
     # on her subscription: research reasons as her, never as Friedl's login.
     claude_identity: tuple[str, str] | None = None
+    claude_oauth_token: str | None = field(default=None, repr=False)
 
 
 def _enabled_tiers(environment: Mapping[str, str]) -> frozenset[str]:
@@ -995,6 +996,7 @@ def _research_settings(
         limits=limits,
         enabled_tiers=enabled,
         claude_identity=core_claude_identity(environment) if on_subscription else None,
+        claude_oauth_token=environment.get("CLAUDE_CODE_OAUTH_TOKEN") or None,
     )
 
 
@@ -1189,6 +1191,7 @@ class RuntimeSettings:
     # AL/X Core's dedicated Claude login, for the subscription Core only.
     core_claude_config_dir: str | None = None
     core_claude_account: str | None = None
+    claude_oauth_token: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> RuntimeSettings:
@@ -1239,6 +1242,7 @@ class RuntimeSettings:
         return cls(
             core_claude_config_dir=core_claude[0],
             core_claude_account=core_claude[1],
+            claude_oauth_token=environment.get("CLAUDE_CODE_OAUTH_TOKEN") or None,
             reasoning=reasoning,
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),

@@ -14,6 +14,7 @@ from time import monotonic
 from typing import Any
 
 from alx.providers.coding_process import interactive_terminal
+from alx.contracts.diagnostics import mask_credentials
 
 _ROWS, _COLUMNS = 80, 240
 _MAX_CAPTURE = 256_000
@@ -257,10 +258,15 @@ class ClaudeUsageReader:
                                 code = 'usage_unreadable'
                                 break
                             text = decoder.decode(chunk)
-                            received = (received + text)[-_MAX_RAW_EVIDENCE:]
+                            received += text
                             capture += text
                             if len(capture) > _MAX_CAPTURE:
-                                capture = capture[:_MAX_CAPTURE]
+                                if self.environment.get('CLAUDE_CODE_OAUTH_TOKEN'):
+                                    # Cutting through an echoed secret would
+                                    # leave a fragment that exact masking misses.
+                                    capture = received = ''
+                                else:
+                                    capture = capture[:_MAX_CAPTURE]
                                 code = 'usage_unreadable'
                                 break
                             dirty = True
@@ -346,9 +352,29 @@ class ClaudeUsageReader:
                     # paths. No cleanup keys may confirm an interstitial screen.
         except OSError:
             code = 'cli_unavailable' if child is None else 'usage_unreadable'
+        # Mask before parsing/escaping/bounding: even an unlabelled credential
+        # echoed by the CLI must never become persisted screen evidence.
+        token = self.environment.get('CLAUDE_CODE_OAUTH_TOKEN')
+        if token:
+            capture = capture.replace(token, '[masked]')
+            received = received.replace(token, '[masked]')
+        capture = mask_credentials(capture)
+        received = mask_credentials(received)
         values = parse_usage(capture)
+        # Cursor controls can assemble a credential that was not contiguous
+        # in the byte stream, so protect the rendered evidence as well.
+        evidence = values['screen_capture']
+        if token:
+            evidence = evidence.replace(token, '[masked]')
+        values['screen_capture'] = mask_credentials(evidence)
         if code:
-            # Escaped so control sequences stay visible as text.
-            values.update(limits=[], failure_code=code,
-                          raw_output_tail=received.encode('unicode_escape').decode('ascii'))
+            values.update(limits=[], failure_code=code)
+            if token:
+                # Arbitrary failure output can contain partial credentials,
+                # including fragments separated or overwritten by controls.
+                # Neither the raw stream nor its rendered screen is safe.
+                values['screen_capture'] = '[masked]'
+            else:
+                # Escaped so control sequences stay visible as text.
+                values['raw_output_tail'] = received[-_MAX_RAW_EVIDENCE:].encode('unicode_escape').decode('ascii')
         return values
