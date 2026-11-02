@@ -72,6 +72,8 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         (package / "startup.py").write_text("READY = True\n", encoding="utf-8")
         (self.root / "LAWS_OF_ALX.md").write_text("main laws\n", encoding="utf-8")
         (self.root / "IDENTITY_AND_MEMORY.md").write_text("main identity\n", encoding="utf-8")
+        (self.root / "config").mkdir()
+        (self.root / "config/banking-targets.json").write_text('["test bank"]\n')
         git(self.root, "add", ".")
         git(self.root, "commit", "-qm", "base")
         self.main = git(self.root, "rev-parse", "main")
@@ -166,6 +168,53 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         marker.write_text("a running AL/X\n", encoding="utf-8")
         self.assertEqual(self.runtime_code(), code)
         self.assertTrue(marker.is_file())
+
+
+class LauncherSnapshotLoadsRuntimeConfiguration(unittest.TestCase):
+    def test_real_runtime_imports_and_loads_banking_targets_from_snapshot_alone(self) -> None:
+        # Clone tracked content, then install the candidate launcher so this
+        # exercises an uncommitted fix rather than the old committed launcher.
+        git(ROOT, "ls-files", "--error-unmatch", "config/banking-targets.json")
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory).resolve() / "checkout"
+            git(ROOT, "clone", "--no-hardlinks", str(ROOT), str(checkout))
+            git(checkout, "config", "user.email", "test@example.test")
+            git(checkout, "config", "user.name", "test")
+            shutil.copy(ROOT / "scripts/alx", checkout / "scripts/alx")
+            git(checkout, "add", "scripts/alx")
+            git(checkout, "commit", "--allow-empty", "-qm", "candidate launcher")
+            git(checkout, "update-ref", "refs/heads/main", "HEAD")
+            built = subprocess.run(
+                ["bash", "-c", "source scripts/alx && runtime_code"],
+                cwd=checkout, env=isolated_environment(),
+                capture_output=True, text=True, check=True, timeout=60,
+            )
+            snapshot = Path(built.stdout.strip())
+            self.assertTrue((snapshot / "config/banking-targets.json").is_file())
+            # The checkout cannot supply either imports or configuration.
+            shutil.rmtree(checkout / "src")
+            shutil.rmtree(checkout / "config")
+            imported = subprocess.run(
+                [sys.executable, "-I", "-c", """
+import json
+import sys
+from pathlib import Path
+snapshot = Path.cwd().resolve()
+sys.path.insert(0, str(snapshot / "src"))
+from alx.bootstrap import live_voice
+from alx.config.program import ProgramSettings
+assert live_voice.CODE_ROOT == snapshot
+expected = json.loads((snapshot / "config/banking-targets.json").read_text())
+assert ProgramSettings.from_environment({}).banking_targets == tuple(expected)
+assert expected
+for name, module in tuple(sys.modules.items()):
+    if name == "alx" or name.startswith("alx."):
+        assert Path(module.__file__).resolve().is_relative_to(snapshot / "src"), name
+"""],
+                cwd=snapshot, env=isolated_environment(),
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stdout + imported.stderr)
 
 
 class TheLauncherFindsTheRuntimeThatStartedIt(unittest.TestCase):
