@@ -22,13 +22,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def subscription_waits_are_virtual(monkeypatch):
+    monkeypatch.setattr("alx.providers.subscription_retry.sleep", lambda seconds: None)
+
+
 from alx.providers import coding_session, coding_subscription_session  # noqa: E402
 from alx.providers.coding_session import GrokCodingSession  # noqa: E402
 from alx.contracts.coding import CodingError  # noqa: E402
 from alx.providers.coding_subscription_session import (  # noqa: E402
     METERED_ENVIRONMENT_KEYS,
     SubscriptionCodingSession,
-    classify_failure,
 )
 
 
@@ -115,33 +123,6 @@ class ContainmentStaysWithTheAdapter(unittest.TestCase):
         self.assertLess(
             source.index("prepare_home"), source.index("run_coding_subprocess(self._runner"),
             "containment must be installed before the CLI is launched",
-        )
-
-
-class SharedFailureClassification(unittest.TestCase):
-    """Subscription-CLI facts, not Grok facts."""
-
-    def test_containment_refusing_to_start_is_checked_first(self) -> None:
-        # A message carrying both markers must classify as the containment
-        # failure: running without protections is the worse outcome.
-        self.assertEqual(
-            classify_failure("sandbox profile invalid; usage limit reached", ""),
-            ("sandbox_unusable", "sandbox_not_applied"),
-        )
-
-    def test_each_family_keeps_its_declared_code(self) -> None:
-        for text, expected in (
-            ("sandbox could not be applied", ("sandbox_unusable", "sandbox_not_applied")),
-            ("usage limit reached", ("session_failed", "subscription_usage_exhausted")),
-            ("not logged in", ("session_failed", "subscription_unauthenticated")),
-            ("something else", ("session_failed", "cli_failed")),
-        ):
-            self.assertEqual(classify_failure(text, ""), expected)
-
-    def test_the_adapter_delegates_rather_than_reclassifying(self) -> None:
-        self.assertEqual(
-            GrokCodingSession._failure("usage limit", ""),
-            classify_failure("usage limit", ""),
         )
 
 

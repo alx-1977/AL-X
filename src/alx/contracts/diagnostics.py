@@ -33,6 +33,8 @@ def service_message(value: object) -> str:
 def failure_details(error: BaseException) -> dict[str, str]:
     """Only explicitly supplied service diagnostics travel, never arbitrary errors."""
     message = getattr(error, "service_message", "")
+    if getattr(error, "preserve_service_message", False) and isinstance(message, str):
+        return {"service_message": mask_credentials(message)} if message else {}
     return {"service_message": service_message(message)} if message else {}
 
 

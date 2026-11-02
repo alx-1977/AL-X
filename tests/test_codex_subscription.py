@@ -17,6 +17,15 @@ from unittest.mock import patch
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def subscription_waits_are_virtual(monkeypatch):
+    monkeypatch.setattr("alx.providers.subscription_retry.sleep", lambda seconds: None)
+
+
 from alx.bootstrap.providers import build_runtime_providers  # noqa: E402
 from alx.config.settings import RuntimeSettings  # noqa: E402
 from alx.contracts import ModelMessage, ModelRequest, ModelRole  # noqa: E402
@@ -111,18 +120,19 @@ class CodexSubscriptionTransportTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as raised:
             model.complete(_request())
         self.assertEqual(raised.exception.provider, "codex_subscription")
-        self.assertEqual(raised.exception.reason, "subscription_unauthenticated")
+        self.assertEqual(raised.exception.reason, "cli_failed")
 
-    def test_nonzero_exit_retains_only_bounded_process_metadata(self) -> None:
+    def test_nonzero_exit_retains_process_metadata_and_masked_message(self) -> None:
         model = CodexSubscriptionReasoningModel(
             "gpt-5.6-luna", 30,
-            runner=_Runner(stdout="ignored", stderr="credential=must-not-survive", returncode=17),
+            runner=_Runner(stdout="ignored", stderr="password=must-not-survive", returncode=17),
         )
         with self.assertRaises(ProviderError) as raised:
             model.complete(_request())
         self.assertEqual(raised.exception.reason, "cli_failed")
         self.assertEqual(raised.exception.details, {
-            "exit_status": 17, "stdout_characters": 7, "stderr_characters": 27,
+            "exit_status": 17, "stdout_characters": 7, "stderr_characters": 25,
+            "service_message": "password=[masked]", "retry_exhausted": True,
         })
 
     def test_parser_failure_retains_lengths_without_response_content(self) -> None:
@@ -135,6 +145,7 @@ class CodexSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "response_invalid")
         self.assertEqual(raised.exception.details, {
             "stdout_characters": 8, "stderr_characters": 23,
+            "service_message": "response_invalid", "retry_exhausted": True,
         })
 
 
@@ -389,7 +400,7 @@ class CodexCodingSessionTests(unittest.TestCase):
         with self.assertRaises(CodingError) as limited:
             self.session.read_result(json.dumps(
                 {"type": "turn.failed", "error": {"message": "You've hit your usage limit"}}))
-        self.assertEqual(limited.exception.details["reason_code"], "subscription_usage_exhausted")
+        self.assertEqual(limited.exception.details["reason_code"], "cli_failed")
 
     def test_a_missing_login_is_named_at_start_up(self) -> None:
         self.assertEqual(self.session.login_problem(), "subscription_unauthenticated")

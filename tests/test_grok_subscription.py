@@ -15,6 +15,15 @@ from unittest.mock import patch
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def subscription_waits_are_virtual(monkeypatch):
+    monkeypatch.setattr("alx.providers.subscription_retry.sleep", lambda seconds: None)
+
+
 from alx.bootstrap.coding import build_coding_runtime  # noqa: E402
 from alx.bootstrap.providers import build_runtime_providers  # noqa: E402
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
@@ -241,7 +250,7 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         )
         with self.assertRaises(ProviderError) as raised:
             model.complete(_request())
-        self.assertEqual(raised.exception.reason, "subscription_unauthenticated")
+        self.assertEqual(raised.exception.reason, "cli_failed")
 
     def test_nonzero_exit_reports_cli_failed_with_exit_status(self) -> None:
         runner = _Recorder(stderr="command failed", returncode=2)
@@ -253,7 +262,7 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "cli_failed")
         self.assertEqual(raised.exception.details.get("exit_status"), 2)
         self.assertEqual(raised.exception.details.get("stderr_characters"), len("command failed"))
-        self.assertNotIn("command failed", str(raised.exception.details))
+        self.assertEqual(raised.exception.details["service_message"], "command failed")
 
     def test_scripted_cli_json_drives_a_coding_job(self) -> None:
         work = tempfile.TemporaryDirectory()

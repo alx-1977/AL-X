@@ -23,11 +23,11 @@ from pathlib import Path
 
 from alx.contracts.coding import CodingError, CodingRequest, CodingSessionResult
 from alx.providers.coding_containment import PROFILE_NAME, write_profile
+from alx.providers.subscription_retry import error_event_message
 from alx.providers.coding_subscription_session import (
     MAX_RETAINED_OUTPUT_CHARACTERS,
     OversizedLine,
     SubscriptionCodingSession,
-    classify_failure,
     subscription_cli_present,
 )
 
@@ -151,8 +151,10 @@ class GrokCodingSession(SubscriptionCodingSession):
         events = self._events(stdout)
         errors = [event for event in events if event.get("type") == "error"]
         if errors:
-            code, reason = classify_failure(self._error_text(errors), "")
-            raise CodingError(code, reason_code=reason)
+            raise CodingError(
+                "session_failed", reason_code="cli_failed",
+                service_message=self._error_text(errors),
+            )
         ends = [event for event in events if event.get("type") == "end"]
         if not ends:
             raise CodingError("session_failed", reason_code="session_end_missing")
@@ -245,14 +247,8 @@ class GrokCodingSession(SubscriptionCodingSession):
 
     @staticmethod
     def _error_text(errors: list[Mapping[str, object]]) -> str:
-        """Error events as text, read only to choose a declared failure code."""
-        return "\n".join(json.dumps(event, sort_keys=True) for event in errors)
-
-    # Retained because the behaviour probe and existing tests name it. It is
-    # the shared classification, not a Grok-specific second implementation.
-    @staticmethod
-    def _failure(stderr: str, stdout: str) -> tuple[str, str]:
-        return classify_failure(stderr, stdout)
+        """The CLI's error messages, without rewriting their content."""
+        return "\n".join(error_event_message(event) for event in errors)
 
     def _read_result(self, stdout: str) -> CodingSessionResult:
         return self.read_result(stdout)

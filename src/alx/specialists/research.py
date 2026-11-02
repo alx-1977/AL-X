@@ -206,7 +206,8 @@ class ResearchSpecialist:
                 ),
             )
             raise SpecialistError(failure_code,
-                                  failure_details(error).get("service_message", "")) from None
+                                  failure_details(error).get("service_message", ""),
+                                  preserve_service_message=getattr(error, "preserve_service_message", False)) from None
 
         values = completion.output
         if not isinstance(values, Mapping):

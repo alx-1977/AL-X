@@ -42,7 +42,8 @@ from alx.contracts import (
     normalise_usage,
     usage_telemetry,
 )
-from alx.providers.errors import ProviderError, raise_provider_failure
+from alx.providers.subscription_retry import SubscriptionRetryPolicy, cli_failure_message, retry_subscription
+from alx.providers.errors import raise_provider_failure
 
 
 LOGGER = logging.getLogger(__name__)
@@ -72,27 +73,6 @@ _METERED_ENVIRONMENT_KEYS = frozenset(
     }
 )
 
-_USAGE_LIMIT_MARKERS = (
-    "usage limit",
-    "rate limit",
-    "rate_limit",
-    "quota",
-    "too many requests",
-    "resets at",
-    "upgrade to",
-)
-_AUTHENTICATION_MARKERS = (
-    "not logged in",
-    "log in",
-    "login",
-    "unauthenticated",
-    "unauthorized",
-    "authentication",
-    "invalid api key",
-    "oauth",
-    "credentials",
-    "auth.json",
-)
 
 
 def _json_value(value: Any) -> Any:
@@ -141,12 +121,14 @@ class GrokSubscriptionReasoningModel:
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
+        retry_policy: SubscriptionRetryPolicy | None = None,
         effort: str = "",
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if not model.strip():
             raise ValueError("model must not be blank")
+        self._retry_policy = retry_policy or SubscriptionRetryPolicy()
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._executable = executable
@@ -240,6 +222,7 @@ class GrokSubscriptionReasoningModel:
             raise _GrokProtocolError("request_without_turn_content")
         return "\n\n".join(parts)
 
+    @retry_subscription
     def complete(self, request: ModelRequest) -> ModelCompletion:
         started_at = monotonic()
         LOGGER.info("Coding model provider request started")
@@ -270,15 +253,18 @@ class GrokSubscriptionReasoningModel:
                         check=False,
                     )
             except subprocess.TimeoutExpired as error:
-                raise _GrokProtocolError("reasoning_timeout") from error
+                raise _GrokProtocolError(
+                    "reasoning_timeout", service_message=error.stderr or error.stdout or "reasoning_timeout"
+                ) from error
             except FileNotFoundError as error:
-                raise _GrokProtocolError("cli_not_installed") from error
+                raise _GrokProtocolError("cli_not_installed", service_message=str(error)) from error
             except OSError as error:
-                raise _GrokProtocolError("cli_unavailable") from error
+                raise _GrokProtocolError("cli_unavailable", service_message=str(error)) from error
 
             if completed.returncode != 0:
                 raise _GrokProtocolError(
-                    self._failure_code(completed.stderr, completed.stdout),
+                    "cli_failed",
+                    service_message=cli_failure_message(completed.stderr, completed.stdout),
                     exit_status=completed.returncode,
                     stderr_characters=len(completed.stderr or ""),
                     stdout_characters=len(completed.stdout or ""),
@@ -357,7 +343,7 @@ class GrokSubscriptionReasoningModel:
             raise _GrokProtocolError("response_envelope_not_object")
         if envelope.get("is_error"):
             raise _GrokProtocolError(
-                self._failure_code(str(envelope.get("result", "")), "")
+                "cli_failed", service_message=str(envelope.get("result", ""))
             )
         # The installed CLI (1.0.24) emits camelCase `structuredOutput` on
         # `--output-format json --json-schema`. Docs and Claude-compat envelopes
@@ -405,14 +391,6 @@ class GrokSubscriptionReasoningModel:
             return dict(parsed)
         return None
 
-    @staticmethod
-    def _failure_code(stderr: str, stdout: str) -> str:
-        text = f"{stderr}\n{stdout}".lower()
-        if any(marker in text for marker in _USAGE_LIMIT_MARKERS):
-            return "subscription_usage_exhausted"
-        if any(marker in text for marker in _AUTHENTICATION_MARKERS):
-            return "subscription_unauthenticated"
-        return "cli_failed"
 
     @staticmethod
     def _safe_error_code(error: Exception) -> str:

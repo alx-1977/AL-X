@@ -36,6 +36,15 @@ from alx.providers import coding_process  # noqa: E402
 from alx.providers.coding_session import GrokCodingSession  # noqa: E402
 
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def subscription_waits_are_virtual(monkeypatch):
+    monkeypatch.setattr("alx.providers.subscription_retry.sleep", lambda seconds: None)
+
+
 def _fake_cli(directory: Path, body: str) -> Path:
     """An executable that behaves like the CLI for what the watchdog sees."""
     path = directory / "fake-grok"
@@ -323,19 +332,19 @@ class StreamedResultTests(unittest.TestCase):
             self.session.read_result(self._stream({"type": "text", "data": "partial"}))
         self.assertEqual(raised.exception.details["reason_code"], "session_end_missing")
 
-    def test_a_streamed_error_is_classified(self) -> None:
+    def test_a_streamed_error_retains_its_message(self) -> None:
         with self.assertRaises(CodingError) as raised:
             self.session.read_result(self._stream(
                 {"type": "error", "message": "You have reached your usage limit"},
             ))
         self.assertEqual(
-            raised.exception.details["reason_code"], "subscription_usage_exhausted"
+            raised.exception.details["reason_code"], "cli_failed"
         )
 
-    def test_file_contents_in_the_stream_never_classify_a_failed_exit(self) -> None:
+    def test_file_contents_in_the_stream_never_become_failure_diagnostics(self) -> None:
         """The agent read a source file that mentions a usage limit."""
         stdout = self._stream(
-            {"type": "tool_call_update", "content": "USAGE_LIMIT_MARKERS = ('usage limit',)"},
+            {"type": "tool_call_update", "content": "unrelated source file contents"},
         )
         self.assertEqual(self.session.failure_output(stdout), "")
 

@@ -65,7 +65,8 @@ class ModelSpecialist:
             completion = self._model.complete(request)
         except Exception as error:
             raise SpecialistError(_failure_code(error),
-                                  failure_details(error).get("service_message", "")) from None
+                                  failure_details(error).get("service_message", ""),
+                                  preserve_service_message=getattr(error, "preserve_service_message", False)) from None
         usage = completion.usage
         self.last_usage = usage if isinstance(usage, Mapping) else None
         values = completion.output

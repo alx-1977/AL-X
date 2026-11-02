@@ -25,6 +25,8 @@ class ProviderError(RuntimeError):
         self.provider = provider
         self.reason = reason
         self.details = dict(details or {})
+        self.service_message = self.details.get("service_message", "")
+        self.preserve_service_message = self.details.get("retry_exhausted") is True
         super().__init__(f"{provider} provider failure: {reason}")
 
 
