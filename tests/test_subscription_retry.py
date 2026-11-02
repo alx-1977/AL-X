@@ -388,12 +388,47 @@ def test_failed_session_streams_bounded_records_and_retains_errors(tmp_path, mon
     assert reads
 
 
+@pytest.mark.parametrize('source', ['event', 'stdout', 'stderr', 'spooled_stderr'])
+@pytest.mark.parametrize('credential', ['A1b2C3d4' * 10, 'sk-abc', 'sk-x'])
+def test_failure_masks_credentials_before_output_cuts(tmp_path, monkeypatch, source, credential):
+    from alx.providers.codex_coding_session import CodexCodingSession
+    from alx.providers import coding_subscription_session as shared
+
+    limit = 128
+    prefix = 'detail ' * 16  # Only 16 characters of a bare credential survive the old cut.
+    message = prefix + credential + ' trailing'
+    monkeypatch.setattr(shared, 'MAX_RETAINED_OUTPUT_CHARACTERS', limit)
+    monkeypatch.setattr(CodexCodingSession, 'install_subscription_auth', lambda *args: None)
+    monkeypatch.setattr(CodexCodingSession, 'prepare_home', lambda *args: None)
+    monkeypatch.setattr(CodexCodingSession, 'command', lambda *args: ['fake'])
+    if source == 'stdout':
+        monkeypatch.setattr(CodexCodingSession, 'failure_event_types', ())
+
+    def run(runner, command, **kwargs):
+        stdout = json.dumps({'type': 'error', 'message': message}) if source == 'event' else ''
+        if source == 'stdout':
+            stdout = message
+        if source == 'spooled_stderr':
+            kwargs['spool_to'][1].write_text(message)
+            return subprocess.CompletedProcess(command, 1, None, None)
+        return subprocess.CompletedProcess(command, 1, stdout, message)
+
+    monkeypatch.setattr('alx.providers.coding_process.run_coding_subprocess', run)
+    session = CodexCodingSession('model', stall_seconds=30,
+        retry_policy=SubscriptionRetryPolicy(wait=lambda seconds: None))
+    with pytest.raises(CodingError) as raised:
+        session.run_session(CodingRequest('task', 'job', str(tmp_path)), 'briefing')
+    result = raised.value.details['service_message']
+    assert credential[:16] not in result
+    assert result == (prefix + '[masked] trailing')[:limit]
+
+
 def test_failure_diagnostics_have_a_total_bound():
     import io
     from alx.providers.codex_coding_session import CodexCodingSession
     from alx.providers.coding_subscription_session import MAX_RETAINED_OUTPUT_CHARACTERS, bounded_lines
 
-    text = json.dumps({'type': 'error', 'message': 'x' * 10000}) + '\n'
+    text = json.dumps({'type': 'error', 'message': 'detail ' * 1500}) + '\n'
     session = CodexCodingSession('model', stall_seconds=30)
     result = session.failure_output(bounded_lines(io.StringIO(text * 200)))
     assert len(result) == MAX_RETAINED_OUTPUT_CHARACTERS

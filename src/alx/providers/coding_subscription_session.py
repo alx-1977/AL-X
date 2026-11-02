@@ -35,6 +35,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from alx.providers.subscription_retry import SubscriptionRetryPolicy, retry_subscription, error_event_message
+from alx.contracts.diagnostics import mask_credentials
 
 from alx.contracts.coding import (
     CodingError,
@@ -225,14 +226,14 @@ class SubscriptionCodingSession:
         """
         return False
 
-    def failure_output(self, lines: Iterable[str]) -> str:
+    def failure_output(self, lines: Iterable[str], *, structured: bool = True) -> str:
         """Retain bounded diagnostics, selecting stream errors by event fields."""
         kept: list[str] = []
         size = 0
         for line in lines:
             if isinstance(line, OversizedLine):
                 continue
-            if self.failure_event_types:
+            if structured and self.failure_event_types:
                 try:
                     event = json.loads(line)
                 except (ValueError, RecursionError):
@@ -244,6 +245,9 @@ class SubscriptionCodingSession:
                     text = '\n' + text
             else:
                 text = line
+            # Each record is complete here. Mask before the total-output cut;
+            # oversized records are discarded above, never forwarded as prefixes.
+            text = mask_credentials(text)
             remaining = MAX_RETAINED_OUTPUT_CHARACTERS - size
             kept.append(text[:remaining])
             size += min(len(text), remaining)
@@ -360,14 +364,15 @@ class SubscriptionCodingSession:
             if completed.returncode != 0:
                 if isinstance(completed.stdout, str):
                     message = self.failure_output(bounded_lines(io.StringIO(completed.stdout)))
-                    stderr = (completed.stderr or "")[:MAX_RETAINED_OUTPUT_CHARACTERS]
+                    stderr = self.failure_output(
+                        bounded_lines(io.StringIO(completed.stderr or "")), structured=False)
                 else:
                     with open(stdout_path, encoding="utf-8", errors="replace") as spooled:
                         message = self.failure_output(bounded_lines(spooled))
                     stderr = ""
                     if not message:
                         with open(stderr_path, encoding="utf-8", errors="replace") as spooled:
-                            stderr = spooled.read(MAX_RETAINED_OUTPUT_CHARACTERS)
+                            stderr = self.failure_output(bounded_lines(spooled), structured=False)
                 raise CodingError(
                     "session_failed", reason_code="cli_failed",
                     service_message=message or stderr,

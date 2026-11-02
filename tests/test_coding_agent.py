@@ -1352,6 +1352,29 @@ class NativeExecutionTests(unittest.TestCase):
             attempt.result.failure["reason_code"], "sandbox_not_applied"
         )
 
+    def test_clipped_session_credentials_never_reach_capability_failure(self) -> None:
+        from alx.providers.codex_coding_session import CodexCodingSession
+        from alx.providers.subscription_retry import SubscriptionRetryPolicy
+
+        worktree = _worktree(self.root)
+        credential = "A1b2C3d4" * 10
+        prefix = "detail " * 16
+        message = prefix + credential + " sk-abc trailing"
+        session = CodexCodingSession("model", stall_seconds=30,
+            runner=lambda command, **kwargs: subprocess.CompletedProcess(
+                command, 1, json.dumps({"type": "error", "message": message}), ""),
+            retry_policy=SubscriptionRetryPolicy(wait=lambda seconds: None))
+        with patch("alx.providers.coding_subscription_session.MAX_RETAINED_OUTPUT_CHARACTERS", 128), \
+             patch.object(session, "install_subscription_auth"), \
+             patch.object(session, "prepare_home"), \
+             patch.object(session, "command", return_value=["fake"]):
+            attempt = self._run(PlanningModel(), session, task="fix add", worktree=str(worktree))
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        details = attempt.result.failure["service_message"]
+        self.assertNotIn(credential[:16], details)
+        self.assertNotIn("sk-abc", details)
+        self.assertEqual(details, (prefix + "[masked] [masked] trailing")[:128])
+
     def test_outcome_separates_job_changes_from_preexisting_dirt(self) -> None:
         """15. Work already in the tree is not claimed as this job's.
 
