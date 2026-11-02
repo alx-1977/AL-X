@@ -51,8 +51,8 @@ class RepositoryRuntime:
     permissions: frozenset[str]
 
 
-def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
-    """Refuse a merge unless this exact head has a finished, clean review.
+def require_clean_review(review_reader: Any, request: MergeRequest, equivalent=None) -> None:
+    """Require a clean review of this head or its mechanically identical patch.
 
     D-042, Friedl 2026-10-07: AL/X may never merge without a clean external
     review unless he says so. Amended 2026-10-14: "She can merge but only
@@ -61,7 +61,8 @@ def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
     (Greptile's confidence score of 5), never her reading of the findings.
     The tests are GitHub's required `law-gates` check, which the merge
     provider waits on. Resolving a review thread does not make a review
-    clean: only a new head with a new review replaces the verdict.
+    clean. Friedl's 2026-11-02 amendment permits reuse on this same PR when
+    incorporating main leaves the own changes mechanically identical.
     """
     if review_reader is None:
         raise MergeError("review_missing", github_message="No external reviewer is configured")
@@ -70,6 +71,24 @@ def require_clean_review(review_reader: Any, request: MergeRequest) -> None:
                                                           request.head_sha))
     except ReviewReadError:
         raise MergeError("review_missing", github_message="The review could not be read") from None
+    if (not content.available and equivalent is not None
+            and hasattr(review_reader, "reviewed_heads")):
+        try:
+            for head in review_reader.reviewed_heads(request.pull_request_number):
+                if head == request.head_sha:
+                    continue
+                candidate = review_reader.read(ReviewContentRequest(request.pull_request_number, head))
+                if (candidate.available and candidate.head_sha == head
+                        and candidate.pull_request_number == request.pull_request_number
+                        and candidate.reviewer == ReviewProvider.GREPTILE.value
+                        and profile_for(ReviewProvider.GREPTILE).states_no_findings(candidate.summary)
+                        and equivalent(head, request.head_sha)):
+                    return
+        except (ReviewReadError, RepositoryAuthorityError):
+            pass  # Missing evidence is never permission to merge.
+    if (content.head_sha != request.head_sha
+            or content.pull_request_number != request.pull_request_number):
+        raise MergeError("review_missing", github_message="Review binding differs")
     if not content.available:
         raise MergeError("review_missing", github_message=content.unavailable_reason
                          or "No finished review of this head")
@@ -181,17 +200,27 @@ def build_repository_runtime(
             raise MergeError("branch_behind", github_message="Canonical checkout unavailable") from None
 
     try:
+        def check_review(request):
+            def equivalent(reviewed, current):
+                with coding_job_lock(repository_runtime.root):
+                    perform(Operation.FETCH)
+                    return repository_runtime.authority.own_changes_equal(reviewed, current)
+
+            require_clean_review(review_reader, request,
+                                 equivalent if repository_runtime is not None else None)
+
         selected = provider or GitHubMergeProvider(
             repository, token,
             synchronize=synchronize if repository_runtime is not None else None,
             bring_current=bring_current if repository_runtime is not None else None,
+            check_review=check_review,
         )
     except ValueError:
         LOGGER.warning("Merge authority is misconfigured: no merge capability")
         return None
 
     def merge(request: MergeRequest) -> Any:
-        require_clean_review(review_reader, request)
+        check_review(request)
         return selected.merge(request)
 
     LOGGER.info("Merge authority enabled: %s", MERGE_PULL_REQUEST)

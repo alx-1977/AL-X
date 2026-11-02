@@ -195,6 +195,7 @@ class RepositoryAuthority:
 
     def _run(
         self, command: tuple[str, ...],
+        *, input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
         environment = _git_environment()
         try:
@@ -211,6 +212,7 @@ class RepositoryAuthority:
                 # Explicit, never inherited: a shell would let a ref name be
                 # read as syntax rather than as an argument.
                 shell=False,
+                **({"input": input_text} if input_text is not None else {}),
             )
         except (OSError, subprocess.SubprocessError) as error:
             LOGGER.warning("Repository command failed: %s", type(error).__name__)
@@ -225,6 +227,37 @@ class RepositoryAuthority:
     def head_commit(self) -> str:
         """The commit the checkout has checked out, or "" if unreadable."""
         return self._sha_of("HEAD")
+
+    def own_changes_equal(self, reviewed: str, current: str) -> bool:
+        """Compare aggregate PR patches against one pinned main, fail closed.
+
+        Full binary patches prevent binary changes from collapsing to the same
+        placeholder. Multiple merge bases and unavailable objects are unknown.
+        No checkout, ref or working file is changed by this comparison.
+        """
+        if not valid_sha(reviewed) or not valid_sha(current):
+            return False
+        main = self._sha_of("origin/main")
+        if not valid_sha(main):
+            return False
+        identities = []
+        for head in (reviewed, current):
+            bases = self._text_of(("git", "merge-base", "--all", main, head)).splitlines()
+            if len(bases) != 1 or not valid_sha(bases[0]):
+                return False
+            patch = self._run(("git", "diff", "--no-ext-diff", "--no-textconv",
+                               "--binary", "--full-index", "--no-renames",
+                               bases[0], head, "--"))
+            if patch.returncode != 0:
+                return False
+            identity = self._run(("git", "patch-id", "--stable"), input_text=patch.stdout)
+            if identity.returncode != 0:
+                return False
+            fields = (identity.stdout or "").split()
+            if not fields or not valid_sha(fields[0]):
+                return False
+            identities.append(fields[0])
+        return identities[0] == identities[1]
 
     def main_commit(self) -> str:
         """The commit local main points at, or "" if unreadable.

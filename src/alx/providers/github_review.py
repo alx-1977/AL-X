@@ -492,6 +492,27 @@ class GitHubReviewProvider:
         """
         return head_sha in body
 
+    def reviewed_heads(self, number: int) -> tuple[str, ...]:
+        """Candidate revisions from this PR's reviewer-authored evidence only.
+
+        Candidates are not approvals: read() still verifies the completed round
+        and its commit-bound summary before the merge gate can use one.
+        """
+        try:
+            reviews = self._pages(f"/repos/{self._repository}/pulls/{number}/reviews")
+            comments = self._pages(f"/repos/{self._repository}/issues/{number}/comments")
+        except (_Refused, _Unavailable) as error:
+            raise ReviewReadError("review_unavailable") from error
+        heads = []
+        for item in reviews + comments:
+            if not self._authored(item):
+                continue
+            commit = item.get("commit_id", "")
+            if isinstance(commit, str) and _SHA.fullmatch(commit):
+                heads.append(commit)
+            heads.extend(_SHA.findall(str(item.get("body") or "")))
+        return tuple(dict.fromkeys(heads))
+
     def read(self, request: ReviewContentRequest) -> ReviewContent:
         """Return what the reviewer published about this exact revision."""
         number = request.pull_request_number

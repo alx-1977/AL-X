@@ -95,9 +95,10 @@ class Reviews:
 class MergeAuthorityTest(unittest.TestCase):
     def test_description_states_the_d046_review_gate(self) -> None:
         purpose = DEFINITION.purpose
-        self.assertIn("Greptile has finished a review of this exact head", purpose)
+        self.assertIn("Greptile has finished a review of this head", purpose)
+        self.assertIn("head of this PR with mechanically identical own changes", purpose)
         self.assertIn("confidence score of 5/5 (D-046)", purpose)
-        self.assertIn("Any new commit needs a new review", purpose)
+        self.assertIn("Changed own code needs a new review", purpose)
         self.assertIn("Remarks beside a 5/5 are AL/X's to weigh and do not refuse the merge", purpose)
         self.assertIn("Waits boundedly for required checks", purpose)
         self.assertNotIn("D-042", purpose)

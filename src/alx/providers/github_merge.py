@@ -11,7 +11,7 @@ executed. That is the whole stale-head protection, and it lives on GitHub's
 side precisely so nothing here has to track branch state.
 
 Branch protection still applies. Known pending checks are observed boundedly;
-unknown refusals return once. A safe rebase requires a new review decision.
+unknown refusals return once. A safe rebase rechecks review equivalence.
 After the exact authorised head merges, the existing repository authority
 synchronizes the canonical checkout. No review is requested by this provider.
 """
@@ -69,7 +69,7 @@ class GitHubMergeProvider:
     """Merges one pull request at one exact head, or reports why it could not."""
 
     def __init__(self, repository: str, token: str, api_root: str = API_ROOT,
-                 *, synchronize=None, bring_current=None, sleep=time.sleep,
+                 *, synchronize=None, bring_current=None, check_review=None, sleep=time.sleep,
                  max_polls: int = 30, interval_seconds: float = 30) -> None:
         # Exactly one owner and one name, each non-empty and free of path
         # characters. A value like "owner/" or "owner/repo/extra" passed the
@@ -87,6 +87,7 @@ class GitHubMergeProvider:
             raise ValueError("merge waiting must be bounded")
         self._synchronize = synchronize
         self._bring_current = bring_current
+        self._check_review = check_review
         self._sleep = sleep
         self._max_polls = max_polls
         self._interval = interval_seconds
@@ -223,21 +224,31 @@ class GitHubMergeProvider:
         return "ready", pull
 
     def merge(self, request: MergeRequest) -> MergeOutcome:
+        updated = False
         for index in range(self._max_polls):
             state, pull = self._readiness(request)
+            if state == "behind":
+                if self._bring_current is None or updated:
+                    raise MergeError("branch_behind")
+                head = self._bring_current(request.head_sha, pull["head"].get("ref", ""))
+                previous = request.head_sha
+                request = replace(request, head_sha=head)
+                if self._check_review is None:
+                    raise MergeError("review_required", previous_head=previous,
+                                     current_head=head, new_review_approval_required=True)
+                try:
+                    self._check_review(request)
+                except MergeError as error:
+                    raise MergeError("review_required", previous_head=previous,
+                                     current_head=head, new_review_approval_required=True,
+                                     blocker=error.code) from None
+                updated = True
+                state = "pending"
             if state != "pending":
                 break
             if index + 1 == self._max_polls:
                 raise MergeError("checks_timed_out")
             self._sleep(self._interval)
-        if state == "behind":
-            if self._bring_current is None:
-                raise MergeError("branch_behind")
-            # Rebase changes the reviewed revision. Never merge or buy another
-            # review under the old authorisation, even if its tree is identical.
-            head = self._bring_current(request.head_sha, pull["head"].get("ref", ""))
-            raise MergeError("review_required", previous_head=request.head_sha,
-                             current_head=head, new_review_approval_required=True)
         if state == "merged":
             outcome = MergeOutcome(request.pull_request_number, request.head_sha,
                                    True, pull.get("merge_commit_sha", ""))

@@ -189,18 +189,21 @@ class PostCodingTests(unittest.TestCase):
             return Response({'created_at': self.now.isoformat()}, 201)
         if method == 'PUT':
             self.merge_count += 1
-            self.assertEqual(kw['json']['sha'], self.head)
+            self.assertEqual(kw['json']['sha'], self.live_head)
             if self.refusal:
                 return Response({'message': self.refusal}, 405)
             # Simulated GitHub squash operates on the bare remote, leaving the
             # canonical checkout untouched until the real sync implementation.
-            tree = self.git('--git-dir', str(self.remote), 'rev-parse', f'{self.head}^{{tree}}')
+            tree = self.git('--git-dir', str(self.remote), 'rev-parse', f'{self.live_head}^{{tree}}')
             self.merge_sha = self.git('--git-dir', str(self.remote), 'commit-tree', tree,
                                       '-p', self.base, '-m', 'squashed by GitHub')
             self.git('--git-dir', str(self.remote), 'update-ref', 'refs/heads/main', self.merge_sha)
             self.merged = True
             return Response({'merged': True, 'sha': self.merge_sha})
         if path == '/pulls/72':
+            if self.behind and self.git('rev-parse', 'HEAD') != self.head:
+                self.live_head = self.git('rev-parse', 'HEAD')
+                self.behind = 0
             return Response({'head': {'sha': self.live_head, 'ref': 'fix/completed', 'repo': {'full_name': 'owner/repo'}},
                              'base': {'sha': self.base, 'ref': 'main'}, 'state': 'open',
                              'merged': self.merged, 'merge_commit_sha': self.merge_sha,
@@ -224,6 +227,8 @@ class PostCodingTests(unittest.TestCase):
                 'conclusion': None if running else 'success',
                 'started_at': self.now.isoformat(),
                 'completed_at': None if running else self.now.isoformat()}]})
+        if '/check-runs?filter=all' in path:
+            return Response({'total_count': 0, 'check_runs': []})
         if path.startswith('/issues/72/comments'):
             prior = self.already_reviewed and not self.request_count
             if self.review_reads <= self.review_pending and not prior:
@@ -343,7 +348,7 @@ class PostCodingTests(unittest.TestCase):
         self.assertEqual(self.attempts[0].result.failure['code'], 'checks_failed')
         self.assertEqual(self.merge_count, 0)
 
-    def test_behind_rebases_once_and_requires_new_review_approval(self):
+    def test_behind_rebases_once_waits_for_checks_and_merges_without_review(self):
         # Advance only remote main through a temporary clone, not a worktree.
         upstream = self.root / 'upstream'
         self.git('clone', '-b', 'main', str(self.remote), str(upstream))
@@ -355,16 +360,15 @@ class PostCodingTests(unittest.TestCase):
         self.git('push', 'origin', 'main', root=upstream)
         self.base = self.git('rev-parse', 'HEAD', root=upstream)
         self.behind = 1
-        outcome, reasoner = self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='Rebased; new review approval is required.')])
-        failure = self.attempts[0].result.failure
-        self.assertEqual(failure['code'], 'review_required', failure)
-        self.assertTrue(failure['new_review_approval_required'])
-        self.assertNotEqual(failure['current_head'], self.head)
-        self.assertEqual(self.merge_count, 0)
+        self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='Merged.')])
+        result = self.attempts[0].result
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertNotEqual(self.live_head, self.head)
+        self.assertEqual(self.merge_count, 1)
         self.assertEqual(self.request_count, 0)
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertGreater(self.check_reads, 1)
         self.assertEqual(sum('rebase' in op for op in self.operations), 1)
-        self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('--git-dir', str(self.remote), 'rev-parse', 'fix/completed'))
+        self.assertEqual(self.git('branch', '--show-current'), 'main')
 
     def test_a_rebase_conflict_is_aborted_and_needs_judgement(self):
         upstream = self.root / 'upstream'
