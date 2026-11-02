@@ -1237,7 +1237,7 @@ async def run(repository_root: Path) -> None:
     def runtime_facts() -> dict[str, Any]:
         own_times, _set_at = continuity_runtime.store.own_time()
         presence, presence_since = continuity_runtime.store.presence()
-        return {
+        facts = {
             "started_at": process_started_at.isoformat(timespec="seconds"),
             "running_commit": running_commit,
             "main_commit": (
@@ -1251,6 +1251,10 @@ async def run(repository_root: Path) -> None:
                 else presence_since.isoformat(timespec="minutes"),
             },
         }
+        token_notice = ClaudeSubscriptionReasoningModel.take_setup_token_notice()
+        if token_notice:
+            facts["authentication_notice"] = token_notice
+        return facts
 
     core = CoreAgent(
         goal_store,
