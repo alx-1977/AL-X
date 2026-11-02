@@ -179,9 +179,10 @@ class VerificationRunsTheRequestTests(unittest.TestCase):
         self.assertFalse(evidence.all_required_passed)
 
     def test_a_refused_requested_command_is_required_and_not_passed(self) -> None:
-        evidence, _tests_run, commands = self._verify(("rm", "-rf", "tests"))
+        evidence, _tests_run, commands = self._verify(("python", "invalid\x00argument"))
         check = next(c for c in evidence.checks if c.name == "requested_1")
         self.assertFalse(check.ran)
+        self.assertFalse(check.passed)
         self.assertFalse(evidence.all_required_passed)
         self.assertTrue((self.root / "tests").exists())
         self.assertEqual(commands[-1].stderr, "command_not_permitted")

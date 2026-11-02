@@ -39,12 +39,14 @@ class ConversationGateway:
     def __init__(self, core: CoreAgent, conversation_store: DurableConversationStore,
                  identifier_factory: Callable[[], str] | None = None,
                  clock: Callable[[], datetime] | None = None,
-                 contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None) -> None:
+                 contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None,
+                 conversation_events: Callable[[str], tuple[BackgroundEvent, ...]] | None = None) -> None:
         self._core = core
         self._conversation_store = conversation_store
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
+        self._conversation_events = conversation_events or (lambda _identity: ())
 
     def _store_response(self, conversation_id: str, outcome: CoreOutcome,
                         retention_until: datetime) -> str:
@@ -185,7 +187,8 @@ class ConversationGateway:
         the Core decides what to say about every item still in context.
         """
         started_at = monotonic()
-        contextual = self._contextual_events()
+        contextual = (*self._contextual_events(),
+                      *self._conversation_events(conversation.conversation_id))
         elapsed = monotonic() - started_at
         if elapsed >= _SLOW_CONTEXT_ASSEMBLY_SECONDS:
             LOGGER.warning(

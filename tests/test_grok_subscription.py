@@ -448,7 +448,7 @@ class GrokCodingCompositionTests(unittest.TestCase):
             ))
         self.assertIsInstance(providers.coding, GrokSubscriptionReasoningModel)
         self.assertIsInstance(providers.coding_session, GrokCodingSession)
-        self.assertFalse(providers.coding_session.has_terminal)
+        self.assertTrue(providers.coding_session.has_terminal)
         self.assertFalse(hasattr(providers, "coding_reviewer"))
 
 

@@ -647,7 +647,7 @@ class TestsFollowTheModulesTheyImport(unittest.TestCase):
         self.assertIn("--rootdir=tests", FULL_SUITE)
         argv = self._targeted(("src/alx/core/model_reasoner.py",), REPOSITORY_ROOT)
         self.assertIn("--rootdir=tests", argv)
-        self.assertFalse(command_permitted(
+        self.assertTrue(command_permitted(
             ["python", "-m", "pytest", "--rootdir=/"], REPOSITORY_ROOT))
 
     def test_the_full_suite_runs_in_parallel(self) -> None:
@@ -667,73 +667,22 @@ class TestsFollowTheModulesTheyImport(unittest.TestCase):
         self.assertNotIn("git diff --check", lines)
 
 
-class TheAllowlistStaysNarrow(unittest.TestCase):
-    """11. The Coding Agent cannot execute commands outside the allowlist."""
+class GeneralProgramsAreAvailable(unittest.TestCase):
+    """D-063 removes general-command restrictions; explicit blocks remain."""
 
-    def test_the_two_gate_scripts_are_permitted_exactly(self) -> None:
-        for argv in (list(GOVERNANCE_GATE), list(ARCHITECTURE_GATE)):
-            with self.subTest(argv=argv):
-                self.assertTrue(command_permitted(argv, REPOSITORY_ROOT))
+    def test_general_argv_are_available(self):
+        for argv in (["sh", "-c", "ls"], ["make", "test"],
+                     ["python", "setup.py"], ["git", "fetch"],
+                     ["/usr/bin/python", "-c", "print(1)"]):
+            self.assertTrue(command_permitted(argv, REPOSITORY_ROOT))
 
-    def test_no_other_python_script_may_run(self) -> None:
-        """A script path is arbitrary code; only the two gates are named."""
-        for argv in (
-            ["python", "scripts/connect_xero.py"],
-            ["python", "setup.py"],
-            ["python", "src/alx/core/loop.py"],
-            ["python", "scripts/../scripts/check_governance.py"],
-            ["python", "scripts/check_governance.py", "--fix"],
-            ["python", "scripts/check_governance.py", "extra"],
-            ["python", "-c", "import os; os.system('sh')"],
-        ):
-            with self.subTest(argv=argv):
-                self.assertFalse(
-                    command_permitted(argv, REPOSITORY_ROOT),
-                    f"the allowlist admitted {argv}",
-                )
+    def test_unusable_argv_are_refused(self):
+        for argv in ([], [""], ["echo", "\x00"], [None]):
+            self.assertFalse(command_permitted(argv, REPOSITORY_ROOT))
 
-    def test_parallel_workers_are_auto_or_a_small_number(self) -> None:
-        base = ["python", "-m", "pytest", "-q"]
-        for value in ("auto", "1", "8", "16"):
-            with self.subTest(value=value):
-                self.assertTrue(command_permitted(base + ["-n", value], REPOSITORY_ROOT))
-        for args in (["-n", "17"], ["-n", "0"], ["-n", "lots"], ["-n"],
-                     ["-n", "-p", "no:cacheprovider"],
-                     # Digits isdigit() accepts and int() rejects (PR #173).
-                     ["-n", "²"], ["-n", "٣"], ["-n", "08"], ["-n", " 4"]):
-            with self.subTest(args=args):
-                self.assertFalse(command_permitted(base + args, REPOSITORY_ROOT))
-
-    def test_a_blocked_gate_path_is_refused(self) -> None:
-        """The gate must be the worktree's own and not a blocked path."""
-        self.assertFalse(
-            command_permitted(
-                list(GOVERNANCE_GATE), REPOSITORY_ROOT, ("scripts",)
-            )
-        )
-
-    def test_git_diff_check_is_permitted_and_stays_read_only(self) -> None:
-        self.assertTrue(command_permitted(list(DIFF_CHECK), REPOSITORY_ROOT))
-        # Widening `git` itself is not what this change did.
-        for argv in (
-            ["git", "commit", "-m", "x"],
-            ["git", "push"],
-            ["git", "checkout", "main"],
-            ["git", "diff", "--check", "--exit-code-please"],
-        ):
-            with self.subTest(argv=argv):
-                self.assertFalse(command_permitted(argv, REPOSITORY_ROOT))
-
-    def test_no_generic_shell_is_reachable(self) -> None:
-        for argv in (
-            ["sh", "-c", "ls"],
-            ["bash", "-c", "ls"],
-            ["make", "test"],
-            ["./scripts/check_governance.py"],
-            ["/usr/bin/python", "scripts/check_governance.py"],
-        ):
-            with self.subTest(argv=argv):
-                self.assertFalse(command_permitted(argv, REPOSITORY_ROOT))
+    def test_explicit_blocked_paths_remain_refused(self):
+        self.assertFalse(command_permitted(
+            list(GOVERNANCE_GATE), REPOSITORY_ROOT, ("scripts",)))
 
 
 class EvidenceAnswersWhatWasRequiredAndWhatHappened(unittest.TestCase):

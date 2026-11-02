@@ -14,8 +14,8 @@ experiment; tests prove that no competing Sandbox execution path exists.
 What is enforced here, and what is not:
 
 Filesystem and network confinement come from the kernel through Seatbelt, and
-were verified by test rather than assumed. CPU time, file size and process
-count come from POSIX rlimits and were verified effective. The launcher
+were verified by test rather than assumed. CPU time and file size
+come from POSIX rlimits. D-063 removes the per-user process-count lock. The launcher
 enforces the wall clock and kills the experiment's process group with SIGKILL.
 
 **There is no memory ceiling.** RLIMIT_AS is ineffective on macOS arm64 — a
@@ -47,7 +47,6 @@ from pathlib import Path
 from alx.contracts.sandbox import (
     MAX_FILE_BYTES,
     MAX_WORKSPACE_BYTES,
-    MAX_PROCESSES,
     MAX_REPORTED_ARTIFACTS,
     MAX_STDERR_CHARACTERS,
     MAX_STDOUT_CHARACTERS,
@@ -56,6 +55,7 @@ from alx.contracts.sandbox import (
     SandboxOutcome,
     SandboxRequest,
 )
+from alx.providers.darwin_process import DarwinBSDInfo
 from alx.providers.sandbox_runner import SandboxRunner
 from alx.providers.sandbox_workspace import SandboxWorkspace, SessionPaths, WalkResult
 
@@ -89,38 +89,11 @@ class ProcessIdentity:
     started_at: tuple[int, int]
 
 
-class _DarwinBSDInfo(ctypes.Structure):
-    _fields_ = [
-        ("pbi_flags", ctypes.c_uint32),
-        ("pbi_status", ctypes.c_uint32),
-        ("pbi_xstatus", ctypes.c_uint32),
-        ("pbi_pid", ctypes.c_uint32),
-        ("pbi_ppid", ctypes.c_uint32),
-        ("pbi_uid", ctypes.c_uint32),
-        ("pbi_gid", ctypes.c_uint32),
-        ("pbi_ruid", ctypes.c_uint32),
-        ("pbi_rgid", ctypes.c_uint32),
-        ("pbi_svuid", ctypes.c_uint32),
-        ("pbi_svgid", ctypes.c_uint32),
-        ("rfu_1", ctypes.c_uint32),
-        ("pbi_comm", ctypes.c_char * 16),
-        ("pbi_name", ctypes.c_char * 32),
-        ("pbi_nfiles", ctypes.c_uint32),
-        ("pbi_pgid", ctypes.c_uint32),
-        ("pbi_pjobc", ctypes.c_uint32),
-        ("e_tdev", ctypes.c_uint32),
-        ("e_tpgid", ctypes.c_uint32),
-        ("pbi_nice", ctypes.c_int32),
-        ("pbi_start_tvsec", ctypes.c_uint64),
-        ("pbi_start_tvusec", ctypes.c_uint64),
-    ]
-
-
 def process_identity(pid: int) -> ProcessIdentity | None:
     """Return the Darwin kernel fingerprint for one live process."""
     if pid <= 0 or sys.platform != "darwin":
         return None
-    info = _DarwinBSDInfo()
+    info = DarwinBSDInfo()
     try:
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         function = library.proc_pidinfo
@@ -256,8 +229,8 @@ class SeatbeltSandboxRunner(SandboxRunner):
 
     System reads stay broad because a restricted read profile cannot start the
     interpreter at all: CPython aborts before it can report why. That is
-    acceptable where the repository, the runtime storage and the home
-    directory are refused, and each denial is tested.
+    compatible with repository reads under D-063; runtime storage and other
+    home data remain refused.
     """
 
     def __init__(
@@ -267,7 +240,9 @@ class SeatbeltSandboxRunner(SandboxRunner):
         interpreter: str | None = None,
         sandbox_exec: str = "/usr/bin/sandbox-exec",
         home_directory: Path | None = None,
+        repository_read_root: Path | None = None,
     ) -> None:
+        self._repository = (repository_read_root or Path(__file__).resolve().parents[4]).resolve()
         self._workspace = workspace
         self._denied = tuple(Path(item).resolve() for item in denied_read_paths)
         self._interpreter = interpreter or sys.executable
@@ -378,12 +353,8 @@ class SeatbeltSandboxRunner(SandboxRunner):
             "(version 1)\n"
             "(deny default)\n"
             "(allow process-fork)\n"
-            # Execution is narrowed to the interpreter this runner launches.
-            # D-027 authorises Python programs using the standard library, and
-            # an unrestricted process-exec authorised every binary on the host:
-            # `os.execv('/bin/echo', ...)` ran, needing no fork, so the
-            # RLIMIT_NPROC exhaustion that refuses subprocess did not mask it.
-            f"{self._interpreter_exec()}"
+            # D-063 permits git and other programs needed by an experiment.
+            "(allow process-exec)\n"
             "(allow sysctl-read)\n"
             "(allow mach-lookup)\n"
             "(allow signal (target self))\n"
@@ -408,8 +379,11 @@ class SeatbeltSandboxRunner(SandboxRunner):
             # every session readable by every other, reachable as
             # ../../<other>/state from the working directory. The re-allow
             # below restores exactly this run's own state.
+            f"(allow file-read* (subpath {_sbpl(self._repository)}))\n"
             f"(deny file-read* (subpath {_sbpl(self._workspace.root)}))\n"
             f"{denials}\n"
+            f'(deny file-read* (literal {_sbpl(self._repository / ".env")}))\n'
+            f'(deny file-read* (subpath {_sbpl(self._repository / ".alx")}))\n'
             # The session workspace is re-allowed after the denials so a
             # workspace living under the home directory still works.
             f"(allow file-read* (subpath {_sbpl(state)}))\n"
@@ -417,65 +391,6 @@ class SeatbeltSandboxRunner(SandboxRunner):
             '(allow file-write-data (literal "/dev/null"))\n'
             "(deny network*)\n"
         )
-
-    def _interpreter_exec(self) -> str:
-        """The exec rules for the interpreter this runner launches.
-
-        Narrower than "any binary on the host" and wider than one literal
-        path, because starting CPython is not one exec. The configured name is
-        usually a symlink, and a framework build then re-execs a further binary
-        inside its own bundle - naming only the first refused the launch, and
-        naming only the resolved one refused it a step later.
-
-        So execution is confined to the interpreter's own installation prefix.
-        An experiment still cannot reach a shell, a compiler or another
-        interpreter, which is what D-027 is protecting; what it can reach is
-        the Python it was already running.
-        """
-        configured = Path(self._interpreter)
-        resolved = configured.resolve()
-        rules = {
-            f"(allow process-exec (literal {_sbpl(configured)}))",
-            f"(allow process-exec (literal {_sbpl(resolved)}))",
-        }
-        prefix = self._interpreter_prefix(resolved)
-        if prefix is not None:
-            rules.add(f"(allow process-exec (subpath {_sbpl(prefix)}))")
-        return "".join(f"{rule}\n" for rule in sorted(rules))
-
-    @staticmethod
-    def _interpreter_prefix(resolved: Path) -> Path | None:
-        """The framework version directory, when the interpreter is in one.
-
-        A prefix grant exists for exactly one reason: a macOS framework build
-        does not run the binary it was given, it re-execs a further binary
-        inside its own bundle, and that target lives under the version
-        directory. No other layout needs one - a MacPorts, Homebrew, conda or
-        system interpreter starts from the literals alone.
-
-        So this recognises the one layout that needs the grant rather than
-        listing the ones that must not have it. Two previous versions were
-        such lists: the first returned the parent of any ancestor named `bin`,
-        which gave `/usr` for `/usr/bin/python3`; the second refused a fixed
-        set of shared prefixes, which still handed out all of `/opt/local` for
-        MacPorts and a whole conda prefix, both of which carry compilers,
-        `curl`, `openssl` and sometimes a shell. A deny-list only ever covers
-        what somebody remembered, and this one had already been wrong twice.
-
-        Returning None is always safe. At worst a framework re-exec is refused
-        and the misconfiguration is immediately visible, which is the failure
-        anyone would rather have than an invisible grant over a toolchain.
-        """
-        for index, part in enumerate(resolved.parts):
-            if part != "Versions":
-                continue
-            parent = Path(*resolved.parts[:index])
-            if parent.suffix != ".framework":
-                continue
-            # `.../Python.framework/Versions/3.13`, and nothing above it.
-            version = Path(*resolved.parts[: index + 2])
-            return version if version in resolved.parents else None
-        return None
 
     def run(
         self,
@@ -564,7 +479,6 @@ class SeatbeltSandboxRunner(SandboxRunner):
             "--parent-start-microseconds", str(parent_identity.started_at[1]),
             "--cpu-seconds", str(request.wall_seconds + CPU_GRACE_SECONDS),
             "--file-bytes", str(MAX_FILE_BYTES),
-            "--processes", str(MAX_PROCESSES),
             "--wall-seconds", str(request.wall_seconds),
         ]
         started = time.monotonic()
@@ -986,7 +900,6 @@ class SeatbeltSandboxRunner(SandboxRunner):
                 "wall_seconds": request.wall_seconds,
                 "cpu_seconds": request.wall_seconds + CPU_GRACE_SECONDS,
                 "max_file_bytes": MAX_FILE_BYTES,
-                "max_processes": MAX_PROCESSES,
                 "max_workspace_bytes": MAX_WORKSPACE_BYTES,
                 # Recorded as absent rather than omitted, so the manifest never
                 # implies a memory ceiling that does not exist.

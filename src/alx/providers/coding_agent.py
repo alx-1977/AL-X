@@ -9,14 +9,11 @@ loop it already implements, statelessly, one round trip per file read.
 So the model now runs as what it is. It plans, then a native coding-agent
 session works inside the assigned worktree with its own tools and its own
 multi-turn context. Containment moved from a per-operation Python check to the
-kernel, where a generated sandbox profile denies git metadata, credentials and
-every blocked path for every process the agent starts.
+kernel, where a generated sandbox profile enforces explicit blocked paths
+and unrelated credential protections. D-063 permits git, terminals and network.
 
-What did not move is authority. Git metadata is denied to the session, so it
-cannot commit, push, merge or deploy whatever tools it has. A session with a
-terminal (D-052) runs it inside that same kernel boundary, with no network, and
-may run tests for its own benefit; a session without one cannot. Either way
-AL/X runs verification afterwards through the allowlisted command executor, and
+Core retains scope and promotion permission. AL/X runs verification afterwards
+through the argv executor, and
 only that verification counts. The agent's own report is treated as an
 account, never as evidence: the repository diff and the verification results
 are what Core is given. There is no second model reviewing the diff (D-052):
@@ -434,7 +431,7 @@ def build_briefing(
         lines += [f"- {' '.join(argv)}" for argv in request.requested_checks]
     if request.repair_branch.strip():
         # Stated so the agent knows its edits are already on the repair branch
-        # and has no reason to try to arrange one. It cannot run git either way.
+        # and has no reason to try to arrange one. Core still owns branch selection.
         lines += [
             "",
             "# Branch",
@@ -448,12 +445,12 @@ def build_briefing(
         "",
         "# Boundaries",
         *((
-            "- You have a terminal contained to this firmware checkout with no network.",
+            "- You have a terminal assigned to this firmware checkout with network access (D-063).",
             "  AL/X verifies the final source with local Particle compilation and content",
             "  checks. This firmware repository does not use AL/X's required_checks script",
             "  or AL/X's test suite. Report any other checks the firmware requires.",
         ) if terminal and firmware else (
-            "- You have a terminal, contained to this checkout with no network.",
+            "- You have a terminal, assigned to this checkout with network access (D-063).",
             "  Before you finish, run `python scripts/required_checks.py` with",
             "  every file you changed, then run each command it prints and fix",
             "  what fails, in this session. These are the checks AL/X runs after",

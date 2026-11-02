@@ -34,7 +34,6 @@ from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.contracts.sandbox import (  # noqa: E402
     MAX_FILE_BYTES,
-    MAX_PROCESSES,
     MAX_WALKED_FILES,
     MAX_WORKSPACE_BYTES,
     SandboxError,
@@ -995,29 +994,17 @@ class ProfileCompletenessTest(unittest.TestCase):
         self.assertIn("BLOCKED", outcome.stdout)
         self.assertNotIn("READ-OK", outcome.stdout)
 
-    def test_a_host_binary_cannot_be_executed(self) -> None:
-        """Q2: process-exec was unrestricted.
-
-        D-027 authorises Python programs using the standard library. An
-        unrestricted exec authorised every binary on the host, and os.execv
-        needs no fork, so the RLIMIT_NPROC exhaustion that refuses subprocess
-        did not mask it: /bin/echo ran inside the sandbox.
-        """
+    def test_git_can_be_executed(self) -> None:
         if not self.runner.available():
             self.skipTest("no supported confinement mechanism on this platform")
-        paths = self.workspace.prepare("exp-x2", "ses-x2", "run-1")
-        source = (
-            "import os\n"
-            "try:\n"
-            "    os.execv('/bin/echo', ['echo', 'HOST-BINARY-RAN'])\n"
-            "except Exception as error:\n"
-            "    print('EXEC-BLOCKED', type(error).__name__)\n"
-        )
+        paths = self.workspace.prepare("exp-git", "ses-git", "run-1")
         outcome = self.runner.run(
-            SandboxRequest("exp-x2", "ses-x2", "run-1", source), paths
+            SandboxRequest("exp-git", "ses-git", "run-1",
+                "import os; os.execv('/usr/bin/git', ['git', '--version'])"),
+            paths,
         )
-        self.assertIn("EXEC-BLOCKED", outcome.stdout)
-        self.assertNotIn("HOST-BINARY-RAN", outcome.stdout)
+        self.assertIn("git version", outcome.stdout)
+
 
     def test_the_interpreter_itself_still_starts(self) -> None:
         """Narrowing exec must not refuse the launch it exists to permit.
@@ -1212,92 +1199,11 @@ class FixesOfFixesTest(unittest.TestCase):
         )
         self.assertIn("OWN mine", outcome.stdout)
 
-    def test_a_shared_prefix_is_never_granted_for_execution(self) -> None:
-        """The exec fix walked up to the first ancestor named `bin`.
+    def test_d063_allows_git_execution_and_repository_reads(self):
+        profile = self.runner.profile(self.root / "state")
+        self.assertIn("(allow process-exec)", profile)
+        self.assertIn(str(REPOSITORY_ROOT), profile)
 
-        Right for a framework build, catastrophic for /usr/bin/python3: it
-        produced (allow process-exec (subpath "/usr")), authorising osascript,
-        ssh, curl and every other tool in /usr. The previous test used
-        /bin/echo, which a /usr grant blocks anyway, so it passed.
-        """
-        for interpreter in (
-            "/usr/bin/python3",
-            "/usr/local/bin/python3",
-            "/opt/homebrew/bin/python3",
-            "/bin/python3",
-        ):
-            with self.subTest(interpreter=interpreter):
-                self.assertIsNone(
-                    SeatbeltSandboxRunner._interpreter_prefix(Path(interpreter)),
-                    f"{interpreter} named a prefix shared with the system",
-                )
-
-    def test_no_shared_prefix_reaches_the_generated_profile(self) -> None:
-        runner = SeatbeltSandboxRunner(
-            self.workspace, interpreter="/usr/bin/python3"
-        )
-        paths = self.workspace.prepare("exp-u", "ses-u", "run-1")
-        profile = runner.profile(paths.session_state)
-
-        self.assertIn('(allow process-exec (literal "/usr/bin/python3"))', profile)
-        for shared in ('subpath "/usr"', 'subpath "/opt"', 'subpath "/"'):
-            self.assertNotIn(
-                f"(allow process-exec ({shared}))",
-                profile,
-                "execution was granted over a shared system prefix",
-            )
-
-    def test_only_a_framework_layout_is_granted_a_prefix(self) -> None:
-        """The one layout that needs a prefix gets one; nothing else does.
-
-        A framework build re-execs a binary inside its own bundle, which is
-        why the grant exists at all. Every other layout starts from the
-        literals, so naming a prefix for them only widens what can be executed.
-        """
-        framework = Path(
-            "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
-        )
-        self.assertEqual(
-            SeatbeltSandboxRunner._interpreter_prefix(framework),
-            Path("/Library/Frameworks/Python.framework/Versions/3.13"),
-        )
-
-        # Each of these once produced a prefix carrying a toolchain: MacPorts
-        # and conda ship compilers, curl and openssl, and Xcode's usr is a
-        # developer tree. A venv needs no grant either - it is listed here so
-        # a later change that starts naming prefixes again is caught.
-        for interpreter in (
-            "/opt/local/bin/python3",
-            "/Users/someone/miniconda3/bin/python",
-            "/Users/someone/miniconda3/envs/ml/bin/python",
-            "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
-            "/nix/store/abc123-python-3.13/bin/python",
-            "/Users/someone/project/.venv/bin/python",
-            "/snap/bin/python3",
-        ):
-            with self.subTest(interpreter=interpreter):
-                self.assertIsNone(
-                    SeatbeltSandboxRunner._interpreter_prefix(Path(interpreter)),
-                    f"{interpreter} was granted an execution prefix",
-                )
-
-    def test_a_framework_prefix_never_climbs_above_its_version(self) -> None:
-        """The grant stops at the version directory, not the framework."""
-        prefix = SeatbeltSandboxRunner._interpreter_prefix(
-            Path(
-                "/Library/Frameworks/Python.framework/Versions/3.13"
-                "/Resources/Python.app/Contents/MacOS/Python"
-            )
-        )
-        self.assertEqual(
-            prefix, Path("/Library/Frameworks/Python.framework/Versions/3.13")
-        )
-        # A bare "Versions" component that is not a framework grants nothing.
-        self.assertIsNone(
-            SeatbeltSandboxRunner._interpreter_prefix(
-                Path("/opt/Versions/3.13/bin/python3")
-            )
-        )
 
 
 if __name__ == "__main__":

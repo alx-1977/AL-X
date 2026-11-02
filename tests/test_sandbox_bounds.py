@@ -38,7 +38,7 @@ class SandboxBoundsTest(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.workspace = SandboxWorkspace(self.root)
         self.runner = SeatbeltSandboxRunner(
-            self.workspace, denied_read_paths=(REPOSITORY_ROOT,)
+            self.workspace, denied_read_paths=()
         )
         if not self.runner.available():
             self.skipTest("no supported confinement mechanism on this platform")
@@ -63,10 +63,7 @@ class SandboxBoundsTest(unittest.TestCase):
     def test_a_timed_out_run_leaves_no_surviving_process(self) -> None:
         """A run that outlived its call would be work nobody accounts for.
 
-        A thread rather than a subprocess: RLIMIT_NPROC refuses the fork on
-        this host, so a subprocess variant would exercise the process limit and
-        finish immediately, proving nothing about the timeout. The thread keeps
-        the run genuinely alive until the wall clock stops it.
+        A non-daemon thread keeps the run alive until its deadline.
         """
         outcome = self._run(
             "import threading, time\n"
@@ -78,27 +75,14 @@ class SandboxBoundsTest(unittest.TestCase):
         self.assertTrue(outcome.signalled)
         self.assertLess(outcome.wall_seconds_used, 15)
 
-    def test_the_process_limit_refuses_a_fork_bomb(self) -> None:
-        """RLIMIT_NPROC, verified by a program that tries to spawn helpers.
-
-        On this host the limit is already exhausted by the confined process
-        itself, so the very first spawn is refused. That is the limit working:
-        what matters is that an experiment cannot multiply itself.
-        """
+    def test_d063_permits_a_git_subprocess(self) -> None:
         outcome = self._run(
-            "import subprocess, sys\n"
-            "spawned = 0\n"
-            "try:\n"
-            "    for _ in range(64):\n"
-            "        subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
-            "        spawned += 1\n"
-            "except Exception as error:\n"
-            "    pass\n"
-            "print('spawned', spawned)\n"
+            "import subprocess\n"
+            "result = subprocess.run(['/usr/bin/git', '--version'], capture_output=True, text=True)\n"
+            "print(result.stdout)\n"
         )
-        self.assertIn("spawned", outcome.stdout)
-        count = int(outcome.stdout.strip().split()[-1])
-        self.assertLess(count, 64)
+        self.assertEqual(outcome.exit_status, 0)
+        self.assertIn("git version", outcome.stdout)
 
     def test_an_oversized_file_is_refused_by_the_file_size_limit(self) -> None:
         outcome = self._run(

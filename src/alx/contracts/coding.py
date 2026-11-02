@@ -429,7 +429,7 @@ class CodingSession(Protocol):
     """
 
     #: Whether the session can run commands. Always inside its containment:
-    #: no network, git metadata and credentials denied (D-052).
+    #: terminal and network enabled; explicit blocked paths remain (D-063).
     has_terminal: bool
 
     def run_session(

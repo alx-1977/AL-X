@@ -22,7 +22,6 @@ containment policy.
 
 from __future__ import annotations
 
-import subprocess  # noqa: S404 - reads git metadata locations, never model input
 from pathlib import Path
 
 from alx.contracts.coding import CodingError, lexical_repository_path
@@ -59,50 +58,6 @@ CREDENTIAL_DENY_GLOBS: tuple[str, ...] = (
 _UNSUPPORTED_GLOB_CHARACTERS = frozenset({"{", "}", "\\"})
 
 
-def git_metadata_paths(worktree: Path) -> tuple[str, ...]:
-    """Absolute git metadata locations that must be denied for this worktree.
-
-    A normal repository keeps `.git` as a directory. A linked worktree keeps a
-    `.git` *file* pointing at the parent repository's git directory, so denying
-    only the worktree's own `.git` leaves the real object store readable
-    through the pointer's target. Both locations are returned, and the caller
-    denies each with the semantics its type requires.
-    """
-    paths: list[str] = []
-    local = worktree / ".git"
-    if local.exists() or local.is_symlink():
-        paths.append(str(local))
-    for option in ("--git-dir", "--git-common-dir"):
-        resolved = _git_path(worktree, option)
-        if resolved is not None and str(resolved) not in paths:
-            paths.append(str(resolved))
-    return tuple(paths)
-
-
-def _git_path(worktree: Path, option: str) -> Path | None:
-    try:
-        completed = subprocess.run(  # noqa: S603 - fixed argv, never model input
-            ["git", "rev-parse", option],
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-            shell=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    value = (completed.stdout or "").strip()
-    if not value:
-        return None
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = (worktree / candidate).resolve()
-    return candidate
-
-
 def _quote(value: str) -> str:
     """A TOML basic string. Refuse rather than emit an escape the CLI rejects."""
     if '"' in value or "\\" in value or "\n" in value:
@@ -122,7 +77,7 @@ def deny_entries(
     on the host is unaffected, and each is denied together with its
     descendants, which the CLI's directory semantics already provide.
     """
-    entries: list[str] = list(git_metadata_paths(worktree))
+    entries: list[str] = []
     # AL/X's own runtime storage lives in the checkout, gitignored: goals,
     # memories, conversations, trace and logs. No coding job has a reason to
     # read or write it, and the job was able to until 2026-10-17.
@@ -161,9 +116,8 @@ def render_profile(worktree: Path, blocked_paths: tuple[str, ...]) -> str:
     lines = [
         f"[profiles.{PROFILE_NAME}]",
         'extends = "strict"',
-        # Ineffective on macOS (Linux-only enforcement). Declared because it is
-        # correct on Linux and because the job must not silently depend on it.
-        "restrict_network = true",
+        # D-063 lifts coding-job network containment.
+        "restrict_network = false",
         f"read_write = [{_quote(str(worktree))}]",
         "deny = [",
     ]
@@ -187,7 +141,6 @@ __all__ = [
     "PROFILE_NAME",
     "RUNTIME_STORAGE_NAME",
     "deny_entries",
-    "git_metadata_paths",
     "render_profile",
     "write_profile",
 ]

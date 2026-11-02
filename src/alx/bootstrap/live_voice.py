@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from alx.bootstrap.program import build_program_runtime
+from alx.continuity.program_source import ProgramCompletionSource
+from alx.providers.program import reconcile as reconcile_program
+from alx.config.program import ProgramSettings
 from alx.bootstrap.providers import build_runtime_providers, verify_core_claude_identity
 from alx.bootstrap.mail import (
     build_mail_runtime,
@@ -703,16 +707,30 @@ async def run(repository_root: Path) -> None:
         sandbox_workspace_root = repository_root / sandbox_workspace_root
     if sandbox_ledger_path is not None and not sandbox_ledger_path.is_absolute():
         sandbox_ledger_path = repository_root / sandbox_ledger_path
+    program_root = storage_root / "program-runs"
+    program_definitions, program_policies, program_executors = build_program_runtime(
+        program_root, ProgramSettings.from_environment(environment).banking_targets,
+        current_call_id.get, current_conversation_id.get,
+    )
+    register(program_definitions, TraceSubsystem.CAPABILITY)
+    policies.update(program_policies)
+    executors.update(program_executors)
+    permissions.add("program.execute")
+    program_source = ProgramCompletionSource(
+        program_root, opportunity_ledger, enabled=providers.autonomous is not None,
+        reconcile=reconcile_program,
+    )
+
     sandbox_runtime = build_sandbox_runtime(
         voice_settings.sandbox.is_usable,
         sandbox_workspace_root,
         sandbox_ledger_path,
         current_call_id.get,
         denied_read_paths=(
-            repository_root,
             storage_root,
             Path.home() / ".ssh",
         ),
+        repository_read_root=repository_root,
         budget=SandboxBudget(
             voice_settings.sandbox.daily_runs,
             voice_settings.sandbox.daily_wall_seconds,
@@ -1332,6 +1350,7 @@ async def run(repository_root: Path) -> None:
         core,
         conversation_store,
         contextual_events=mail_runtime.source.contextual_events,
+        conversation_events=program_source.contextual_events,
     )
     # One Core-turn lock for the whole runtime. Person turns and autonomous
     # turns serialize through this same object: AL/X has one Core, so she has
@@ -1389,7 +1408,8 @@ async def run(repository_root: Path) -> None:
     # runner and one tick. A finished external task joins the matured requests
     # here rather than bringing a second tick, which would be a competing
     # production path to the same outcome.
-    occasion_sources: list[Any] = [cognition_source]
+    program_source.recover(autonomous_budget)
+    occasion_sources: list[Any] = [cognition_source, program_source]
     # A plan that needs her is offered through the same runner. Its
     # attention, offers and cap live on the plan; when automatic offers are
     # exhausted it is announced on the console as a structural notice, which
@@ -1507,6 +1527,7 @@ async def run(repository_root: Path) -> None:
         autonomous_due_check_seconds(environment),
         reopen=None if autonomous_holds is None else autonomous_holds.reopen,
         advance_plans=plan_workers.advance,
+        recover_programs=program_source.reconcile_pending,
     )
     # A plan a turn has just made runnable starts on the next tick; wake it,
     # so the first step follows the turn instead of up to a tick later.

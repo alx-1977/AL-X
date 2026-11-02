@@ -481,8 +481,8 @@ class TheSessionStillHasNoGitAuthority(GitOutcome):
         self.assertIn("Do not commit, push, merge, deploy", briefing)
         self.assertIn("repair/add", briefing)
 
-    def test_the_session_cannot_run_a_git_command_of_its_own(self) -> None:
-        """The sandbox denies .git outright; this states the intent alongside."""
+    def test_d063_allows_general_git_argv(self) -> None:
+        """Access is available; Core still owns permission to publish."""
         from alx.providers.coding_process import command_permitted
 
         for argv in (
@@ -491,7 +491,7 @@ class TheSessionStillHasNoGitAuthority(GitOutcome):
             ["git", "add", "-A"],
             ["git", "push"],
         ):
-            self.assertFalse(
+            self.assertTrue(
                 command_permitted(argv, self.root), " ".join(argv)
             )
 

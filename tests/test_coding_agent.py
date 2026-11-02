@@ -1539,14 +1539,14 @@ class SessionLaunchTests(unittest.TestCase):
             coding_containment.PROFILE_NAME,
         )
         withheld = command[command.index("--disallowed-tools") + 1].split(",")
-        self.assertIn("run_terminal_cmd", withheld)
+        self.assertNotIn("run_terminal_cmd", withheld)
 
-    def test_the_terminal_is_withheld(self) -> None:
-        """4. No native shell in this iteration, by name and by alias."""
+    def test_d063_terminal_is_available(self) -> None:
+        """D-063 makes the native terminal available."""
         command = self._session().command(self.root / "p.txt", self.root)
         withheld = command[command.index("--disallowed-tools") + 1].split(",")
         for tool in ("run_terminal_cmd", "run_terminal_command", "Bash", "bash"):
-            self.assertIn(tool, withheld)
+            self.assertNotIn(tool, withheld)
 
     def test_the_session_is_multi_turn(self) -> None:
         """5. One turn is what broke execution before; it cannot return."""
@@ -1843,13 +1843,14 @@ class SandboxProfileTests(unittest.TestCase):
         self.assertIn('"**/*.pem"', profile)
         self.assertIn('"**/*.key"', profile)
         self.assertIn('extends = "strict"', profile)
+        self.assertIn('restrict_network = false', profile)
         self.assertIn(f'read_write = ["{worktree}"]', profile)
 
-    def test_git_metadata_is_denied_in_a_normal_repository(self) -> None:
+    def test_d063_git_metadata_is_available_in_a_normal_repository(self) -> None:
         """9. A normal repository keeps .git as a directory."""
         worktree = _worktree(self.root)
         entries = coding_containment.deny_entries(worktree, ())
-        self.assertIn(str(worktree / ".git"), entries)
+        self.assertNotIn(str(worktree / ".git"), entries)
 
     def test_alx_runtime_storage_is_denied_to_every_session(self) -> None:
         """2026-10-17: her goals, memories and conversations sit in .alx/ in
@@ -1863,19 +1864,19 @@ class SandboxProfileTests(unittest.TestCase):
             workspace.validate_inspection_target(".alx/runtime/goals.sqlite3")
         self.assertNotIn(".alx", workspace.list_dir("."))
 
-    def test_git_metadata_is_denied_through_a_linked_worktree(self) -> None:
+    def test_d063_git_metadata_is_available_through_a_linked_worktree(self) -> None:
         """9. A linked worktree's .git is a file pointing at the real store."""
         source = _worktree(self.root, "source")
         linked = self.root / "linked"
         _git(source, "worktree", "add", str(linked), "-b", "job")
         self.assertTrue((linked / ".git").is_file())
         entries = coding_containment.deny_entries(linked, ())
-        self.assertIn(str(linked / ".git"), entries)
+        self.assertNotIn(str(linked / ".git"), entries)
         # Denying only the pointer would leave the real object store readable
         # through its target, which the containment experiment demonstrated.
         common = (source / ".git").resolve()
         self.assertTrue(
-            any(entry.startswith(str(common)) for entry in entries),
+            not any(entry.startswith(str(common)) for entry in entries),
             f"the real git directory must be denied too: {entries}",
         )
 

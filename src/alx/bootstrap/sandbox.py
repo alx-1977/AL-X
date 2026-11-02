@@ -71,6 +71,7 @@ def build_sandbox_runtime(
     denied_read_paths: tuple[Path, ...] = (),
     runner: SandboxRunner | None = None,
     budget: SandboxBudget | None = None,
+    repository_read_root: Path | None = None,
 ) -> SandboxRuntime | None:
     """Compose the sandbox, or leave it unregistered."""
     if not enabled:
@@ -87,7 +88,7 @@ def build_sandbox_runtime(
         return None
 
     workspace = SandboxWorkspace(sandbox_root)
-    selected = runner or SeatbeltSandboxRunner(workspace, denied_read_paths)
+    selected = runner or SeatbeltSandboxRunner(workspace, denied_read_paths, repository_read_root=repository_read_root)
     if not selected.available():
         LOGGER.info("No supported confinement on this platform: no sandbox capability")
         return None
