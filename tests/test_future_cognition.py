@@ -8,6 +8,7 @@ is allowed to exists.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -139,6 +140,33 @@ class StoreTests(unittest.TestCase):
         self.store.withdraw("r1")
         self.assertEqual(self.store.due(NOW), ())
 
+    def test_legacy_offsets_are_due_and_ordered_by_instant(self) -> None:
+        # Insert the old representation directly, bypassing create's UTC
+        # normalization. Reopening must not require a data migration.
+        with sqlite3.connect(self.path) as connection:
+            connection.executemany(
+                "INSERT INTO future_cognition "
+                "(request_id, not_before, note, requested_at, status) "
+                "VALUES (?, ?, '', ?, ?)",
+                [
+                    ("local", "2026-11-02T15:30:00+02:00", NOW.isoformat(), "pending"),
+                    ("earlier", "2026-11-02T13:00:00+00:00", NOW.isoformat(), "pending"),
+                    ("future", "2026-11-02T08:31:00-05:00", NOW.isoformat(), "pending"),
+                    ("withdrawn", "2026-11-02T15:30:00+02:00", NOW.isoformat(), "withdrawn"),
+                    ("honoured", "2026-11-02T15:30:00+02:00", NOW.isoformat(), "honoured"),
+                ],
+            )
+        with SQLiteContinuityStore(self.path) as reopened:
+            instant = datetime(2026, 11, 2, 13, 30, tzinfo=UTC)
+            self.assertEqual(
+                [item.request_id for item in reopened.due(instant - timedelta(microseconds=1))],
+                ["earlier"],
+            )
+            due = reopened.due(instant)
+            self.assertEqual([item.request_id for item in due], ["earlier", "local"])
+            self.assertEqual(due[1].not_before.isoformat(), "2026-11-02T15:30:00+02:00")
+            self.assertEqual(reopened.due(instant.replace(tzinfo=None)), due)
+
 
 class CapabilityTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -166,6 +194,26 @@ class CapabilityTests(unittest.TestCase):
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(result.values["request_id"], "r1")
         self.assertEqual(self.store.load("r1").note, "keep thinking about this")
+
+    def test_offset_request_is_stored_in_utc_and_due_at_its_instant(self) -> None:
+        result = self._request(not_before="2026-11-02T15:30:00+02:00")
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        instant = datetime(2026, 11, 2, 13, 30, tzinfo=UTC)
+        self.assertEqual(result.values["not_before"], instant.isoformat())
+        self.assertEqual(self.store.load("r1").not_before, instant)
+        with sqlite3.connect(Path(self._dir.name) / "continuity.sqlite3") as connection:
+            stored_time, = connection.execute(
+                "SELECT not_before FROM future_cognition WHERE request_id = 'r1'"
+            ).fetchone()
+        self.assertEqual(stored_time, instant.isoformat())
+        self.assertEqual(self.store.due(instant - timedelta(microseconds=1)), ())
+        self.assertEqual([item.request_id for item in self.store.due(instant)], ["r1"])
+        self.assertEqual(
+            [item.request_id for item in self.store.due(
+                datetime.fromisoformat("2026-11-02T15:30:00+02:00")
+            )],
+            ["r1"],
+        )
 
     def test_the_minimum_horizon_is_enforced_mechanically(self) -> None:
         """A turn may not spawn a turn without wall-clock time passing."""

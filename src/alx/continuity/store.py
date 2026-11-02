@@ -161,7 +161,7 @@ class SQLiteContinuityStore:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         request.request_id,
-                        request.not_before.isoformat(),
+                        request.not_before.astimezone(UTC).isoformat(),
                         request.note,
                         request.requested_at.isoformat(),
                         request.conversation_id,
@@ -212,12 +212,20 @@ class SQLiteContinuityStore:
 
     def due(self, now: datetime) -> tuple[FutureCognitionRequest, ...]:
         """Pending requests whose time has come. Phase 5 consumes these."""
+        # Historically a naive clock was compared as a UTC wall time.
+        if now.tzinfo is None or now.utcoffset() is None:
+            now = now.replace(tzinfo=UTC)
+        # Legacy rows can carry local offsets. Neither filtering nor ordering
+        # their ISO text compares instants correctly, even with UTC new writes.
         rows = self._connection.execute(
-            "SELECT * FROM future_cognition WHERE status = ? AND not_before <= ? "
-            "ORDER BY not_before",
-            (FutureCognitionStatus.PENDING.value, now.isoformat()),
+            "SELECT * FROM future_cognition WHERE status = ?",
+            (FutureCognitionStatus.PENDING.value,),
         ).fetchall()
-        return tuple(self._row_to_request(row) for row in rows)
+        requests = (self._row_to_request(row) for row in rows)
+        return tuple(sorted(
+            (request for request in requests if request.not_before <= now),
+            key=lambda request: request.not_before,
+        ))
 
     def mark_honoured(self, request_id: str) -> FutureCognitionRequest:
         with self._connection:
