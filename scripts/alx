@@ -161,7 +161,7 @@ runtime_code() {
   if [ ! -e "$target" ]; then
     staging="$base/.staging-$$"
     rm -rf "$staging" && mkdir -p "$staging" || return 1
-    if git -C "$ROOT" archive "$sha" src LAWS_OF_ALX.md IDENTITY_AND_MEMORY.md \
+    if git -C "$ROOT" archive "$sha" src config LAWS_OF_ALX.md IDENTITY_AND_MEMORY.md \
         | tar -x -C "$staging" && touch "$staging/.complete"; then
       # A concurrent start may have installed it first; then keep theirs.
       [ -e "$target" ] || mv "$staging" "$target" 2>/dev/null
