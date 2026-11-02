@@ -1,4 +1,4 @@
-"""D-046: reuse commit-bound review evidence only for identical PR patches."""
+"""D-046: reuse review evidence only for conflict-free, identical merged trees."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,6 +21,34 @@ from alx.tools.repository import MERGE_PULL_REQUEST
 
 class GateReuseTests(unittest.TestCase):
     """Exercise the actual gate and continuation without a git executable."""
+
+    def test_tree_comparison_refuses_conflicts_and_unusable_command_evidence(self):
+        reviewed, current, main, tree = (char * 40 for char in 'abcd')
+        for status, output, equal in (
+            (0, tree + '\n', True),
+            (1, tree + '\n', False),  # A conflicted merge still prints a tree.
+            (128, '', False),
+            (0, '', False),
+            (0, tree + '\nextra evidence\n', False),
+            (0, 'e' * 40 + '\n', False),
+        ):
+            with self.subTest(status=status, output=output):
+                authority = RepositoryAuthority(CanonicalSystem(Path.cwd(), 'owner/repo'))
+                responses = [subprocess.CompletedProcess([], 0, main + '\n', ''),
+                             subprocess.CompletedProcess([], 0, tree + '\n', ''),
+                             subprocess.CompletedProcess([], status, output, '')]
+                with patch.object(authority, '_run', side_effect=responses):
+                    self.assertEqual(authority.own_changes_equal(reviewed, current), equal)
+
+    def test_unavailable_commit_or_command_refuses_tree_comparison(self):
+        authority = RepositoryAuthority(CanonicalSystem(Path.cwd(), 'owner/repo'))
+        with patch.object(authority, '_run', side_effect=[
+            subprocess.CompletedProcess([], 0, 'c' * 40, ''),
+            subprocess.CompletedProcess([], 128, '', 'missing current commit'),
+        ]):
+            self.assertFalse(authority.own_changes_equal('a' * 40, 'b' * 40))
+        with patch.object(authority, '_run', side_effect=RepositoryAuthorityError('repository_unavailable')):
+            self.assertFalse(authority.own_changes_equal('a' * 40, 'b' * 40))
 
     def test_gate_requires_both_review_evidence_and_patch_equivalence(self):
         old, current = 'a' * 40, 'b' * 40
@@ -170,6 +198,44 @@ class ReviewEquivalenceTests(unittest.TestCase):
         self.assertTrue(self.authority.own_changes_equal(self.reviewed, self.current))
         self.gate(self.reader())
 
+    def scenario(self, base, reviewed, upstream):
+        """Build a same-file review and a clean rebase onto newer main."""
+        self.git('switch', 'main')
+        (self.root / 'scenario.py').write_text(base)
+        self.git('add', '.')
+        self.git('commit', '-m', 'scenario base')
+        self.git('switch', '-c', 'scenario')
+        (self.root / 'scenario.py').write_text(reviewed)
+        self.git('commit', '-am', 'reviewed scenario')
+        self.reviewed = self.git('rev-parse', 'HEAD')
+        self.git('switch', 'main')
+        (self.root / 'scenario.py').write_text(upstream)
+        self.git('commit', '-am', 'nearby upstream change')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('switch', 'scenario')
+        self.git('rebase', 'main')
+        self.current = self.git('rev-parse', 'HEAD')
+
+    def test_python_call_moved_outside_permission_check_refuses_review_reuse(self):
+        base = 'VERSION = 1\n\ndef perform(allowed):\n    if allowed:\n        audit()\n'
+        reviewed = base + '        protected_call()\n'
+        self.scenario(base, reviewed, base.replace('VERSION = 1', 'VERSION = 2'))
+        (self.root / 'scenario.py').write_text(
+            reviewed.replace('VERSION = 1', 'VERSION = 2').replace(
+                '        protected_call()', '    protected_call()'))
+        self.git('commit', '-am', 'move call outside permission check')
+        self.current = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(MergeError) as caught:
+            self.gate(self.reader())
+        self.assertEqual(caught.exception.code, 'review_missing')
+
+    def test_clean_rebase_with_nearby_main_edit_reuses_review(self):
+        base = 'UPSTREAM = 1\n\nOWN = 1\n'
+        self.scenario(base, base.replace('OWN = 1', 'OWN = 2'),
+                      base.replace('UPSTREAM = 1', 'UPSTREAM = 2'))
+        self.assertNotEqual(self.current, self.reviewed)
+        self.gate(self.reader())
+
     def test_changed_own_code_still_requires_review(self):
         (self.root / 'code').write_text('different\n')
         self.git('commit', '-am', 'changed own code')
@@ -178,6 +244,27 @@ class ReviewEquivalenceTests(unittest.TestCase):
         with self.assertRaises(MergeError) as caught:
             self.gate(self.reader())
         self.assertEqual(caught.exception.code, 'review_missing')
+
+    def test_extra_own_file_requires_review(self):
+        (self.root / 'extra').write_text('unreviewed\n')
+        self.git('add', '.')
+        self.git('commit', '-m', 'extra own edit')
+        self.current = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(MergeError):
+            self.gate(self.reader())
+
+    def test_conflicting_main_change_requires_review_even_after_resolution(self):
+        self.git('switch', 'main')
+        (self.root / 'code').write_text('conflicting upstream\n')
+        self.git('commit', '-am', 'conflicting main change')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('switch', 'feature')
+        # Record an explicit resolution; the reviewed head still conflicts
+        # with main, so its review cannot cover this choice.
+        self.git('merge', '-s', 'ours', 'main', '-m', 'resolve conflict')
+        self.current = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(MergeError):
+            self.gate(self.reader())
 
     def test_unfinished_low_score_foreign_pr_or_unknown_reviewer_refuse(self):
         for options in ({'available': False}, {'score': 4}, {'number': 99},

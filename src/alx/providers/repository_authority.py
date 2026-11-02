@@ -229,35 +229,31 @@ class RepositoryAuthority:
         return self._sha_of("HEAD")
 
     def own_changes_equal(self, reviewed: str, current: str) -> bool:
-        """Compare aggregate PR patches against one pinned main, fail closed.
+        """Require the exact tree of a conflict-free merge with pinned main.
 
-        Full binary patches prevent binary changes from collapsing to the same
-        placeholder. Multiple merge bases and unavailable objects are unknown.
-        No checkout, ref or working file is changed by this comparison.
+        Tree equality preserves every byte, including meaningful whitespace.
+        Only Git objects are written; no checkout, ref or working file changes.
         """
         if not valid_sha(reviewed) or not valid_sha(current):
             return False
-        main = self._sha_of("origin/main")
-        if not valid_sha(main):
+        try:
+            main = self._sha_of("origin/main")
+            if not valid_sha(main):
+                return False
+            tree = self._run(("git", "rev-parse", "--verify",
+                              f"{current}^{{commit}}^{{tree}}"))
+            current_tree = (tree.stdout or "").strip()
+            if tree.returncode != 0 or not valid_sha(current_tree):
+                return False
+            merged = self._run(("git", "merge-tree", "--write-tree", "--no-messages",
+                                reviewed, main))
+            merged_tree = (merged.stdout or "").strip()
+            # Conflicts can still print a tree ID. Exit success is mandatory,
+            # and anything other than one complete tree ID is unknown evidence.
+            return (merged.returncode == 0 and valid_sha(merged_tree)
+                    and merged_tree == current_tree)
+        except RepositoryAuthorityError:
             return False
-        identities = []
-        for head in (reviewed, current):
-            bases = self._text_of(("git", "merge-base", "--all", main, head)).splitlines()
-            if len(bases) != 1 or not valid_sha(bases[0]):
-                return False
-            patch = self._run(("git", "diff", "--no-ext-diff", "--no-textconv",
-                               "--binary", "--full-index", "--no-renames",
-                               bases[0], head, "--"))
-            if patch.returncode != 0:
-                return False
-            identity = self._run(("git", "patch-id", "--stable"), input_text=patch.stdout)
-            if identity.returncode != 0:
-                return False
-            fields = (identity.stdout or "").split()
-            if not fields or not valid_sha(fields[0]):
-                return False
-            identities.append(fields[0])
-        return identities[0] == identities[1]
 
     def main_commit(self) -> str:
         """The commit local main points at, or "" if unreadable.
