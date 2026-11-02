@@ -28,7 +28,14 @@ from alx.contracts.continuity import (
 from alx.contracts.provenance import provenance_from_storage, provenance_to_storage
 from alx.contracts.storage import serialized_store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def _utc_text(value: datetime) -> str:
+    """Fixed-width UTC text whose lexical order is its instant order."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("not_before must be timezone-aware")
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 @serialized_store
@@ -41,7 +48,11 @@ class SQLiteContinuityStore:
             str(database_path), check_same_thread=False
         )
         self._connection.row_factory = sqlite3.Row
-        self._migrate()
+        try:
+            self._migrate()
+        except BaseException:
+            self._connection.close()
+            raise
 
     def close(self) -> None:
         self._connection.close()
@@ -54,6 +65,10 @@ class SQLiteContinuityStore:
 
     def _migrate(self) -> None:
         with self._connection:
+            # Serialize openers and include schema, data and version changes
+            # in one transaction. Failed conversions leave the old rows intact.
+            self._connection.execute("BEGIN IMMEDIATE")
+            version = self._connection.execute("PRAGMA user_version").fetchone()[0]
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS future_cognition (
@@ -125,7 +140,17 @@ class SQLiteContinuityStore:
                     "ALTER TABLE future_cognition "
                     "ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
                 )
-            self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            if version < 2:
+                rows = self._connection.execute(
+                    "SELECT request_id, not_before FROM future_cognition"
+                ).fetchall()
+                for row in rows:
+                    self._connection.execute(
+                        "UPDATE future_cognition SET not_before = ? WHERE request_id = ?",
+                        (_utc_text(datetime.fromisoformat(row["not_before"])),
+                         row["request_id"]),
+                    )
+                self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
     def _row_to_request(row: sqlite3.Row) -> FutureCognitionRequest:
@@ -161,7 +186,7 @@ class SQLiteContinuityStore:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         request.request_id,
-                        request.not_before.isoformat(),
+                        _utc_text(request.not_before),
                         request.note,
                         request.requested_at.isoformat(),
                         request.conversation_id,
@@ -212,10 +237,13 @@ class SQLiteContinuityStore:
 
     def due(self, now: datetime) -> tuple[FutureCognitionRequest, ...]:
         """Pending requests whose time has come. Phase 5 consumes these."""
+        # Historically a naive due clock was compared as a UTC wall time.
+        if now.tzinfo is None or now.utcoffset() is None:
+            now = now.replace(tzinfo=UTC)
         rows = self._connection.execute(
-            "SELECT * FROM future_cognition WHERE status = ? AND not_before <= ? "
-            "ORDER BY not_before",
-            (FutureCognitionStatus.PENDING.value, now.isoformat()),
+            "SELECT * FROM future_cognition WHERE status = ? "
+            "AND not_before <= ? ORDER BY not_before",
+            (FutureCognitionStatus.PENDING.value, _utc_text(now)),
         ).fetchall()
         return tuple(self._row_to_request(row) for row in rows)
 

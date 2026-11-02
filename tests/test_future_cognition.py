@@ -8,6 +8,7 @@ is allowed to exists.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -134,10 +135,156 @@ class StoreTests(unittest.TestCase):
             [item.request_id for item in self.store.due(NOW)], ["ready"]
         )
 
+    def test_legacy_pending_precedes_new_utc_write(self) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA user_version = 1")
+            connection.execute(
+                "INSERT INTO future_cognition "
+                "(request_id, not_before, note, requested_at, status) "
+                "VALUES ('legacy', '2026-11-02T15:30:00+02:00', '', ?, 'pending')",
+                (NOW.isoformat(),),
+            )
+        with SQLiteContinuityStore(self.path) as reopened:
+            reopened.create(self._request(
+                "new", not_before=datetime.fromisoformat("2026-11-02T16:00:00+02:00")
+            ))
+            self.assertEqual(
+                [item.request_id for item in reopened.pending()], ["legacy", "new"]
+            )
+
+    def test_due_does_not_fetch_future_rows(self) -> None:
+        self.store.create(self._request("future", not_before=LATER))
+        self.store.create(self._request("ready", not_before=NOW))
+        fetched = []
+
+        def record_row(cursor, values):
+            row = sqlite3.Row(cursor, values)
+            fetched.append(row["request_id"])
+            return row
+
+        self.store._connection.row_factory = record_row
+        try:
+            self.assertEqual(
+                [item.request_id for item in self.store.due(NOW)], ["ready"]
+            )
+            self.assertEqual(fetched, ["ready"])
+            fetched.clear()
+            self.assertEqual(self.store.due(NOW - timedelta(microseconds=1)), ())
+            self.assertEqual(fetched, [])
+        finally:
+            self.store._connection.row_factory = sqlite3.Row
+
     def test_a_withdrawn_request_never_becomes_due(self) -> None:
         self.store.create(self._request("r1", not_before=NOW - timedelta(minutes=1)))
         self.store.withdraw("r1")
         self.assertEqual(self.store.due(NOW), ())
+
+    def test_migration_canonicalizes_all_formats_and_statuses_once(self) -> None:
+        legacy = (
+            ("whole", "2026-11-02T15:30:00+02:00", "pending"),
+            ("fraction", "2026-11-02T08:30:00.000001-05:00", "pending"),
+            ("zulu", "2026-11-02T13:30:00.12Z", "withdrawn"),
+            ("space", "2026-11-02 13:30:00.123+00:00", "honoured"),
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA user_version = 1")
+            connection.executemany(
+                "INSERT INTO future_cognition "
+                "(request_id, not_before, note, requested_at, status) "
+                "VALUES (?, ?, '', ?, ?)",
+                [(identity, value, NOW.isoformat(), status)
+                 for identity, value, status in legacy],
+            )
+        with SQLiteContinuityStore(self.path) as reopened:
+            for identity, value, _ in legacy:
+                self.assertEqual(
+                    reopened.load(identity).not_before, datetime.fromisoformat(value)
+                )
+            instant = datetime.fromisoformat("2026-11-02T15:30:00.000001+02:00")
+            reopened.create(self._request("new", not_before=instant))
+            self.assertEqual(
+                {item.request_id for item in reopened.due(instant)},
+                {"whole", "fraction", "new"},
+            )
+            self.assertEqual(
+                [item.request_id for item in reopened.due(
+                    instant - timedelta(microseconds=1)
+                )], ["whole"],
+            )
+            self.assertEqual(reopened.load("new").not_before, instant)
+        with sqlite3.connect(self.path) as connection:
+            values = dict(connection.execute(
+                "SELECT request_id, not_before FROM future_cognition"
+            ))
+            for identity, value, _ in legacy:
+                self.assertEqual(
+                    values[identity],
+                    datetime.fromisoformat(value).astimezone(UTC).isoformat(
+                        timespec="microseconds"
+                    ),
+                )
+            self.assertEqual(values["new"], "2026-11-02T13:30:00.000001+00:00")
+            # Any repeated conversion would fire this trigger on reopening.
+            connection.execute(
+                "CREATE TRIGGER reject_repeat_migration "
+                "BEFORE UPDATE OF not_before ON future_cognition "
+                "BEGIN SELECT RAISE(ABORT, 'timestamps already migrated'); END"
+            )
+        with SQLiteContinuityStore(self.path) as reopened:
+            self.assertEqual(len(reopened.pending()), 3)
+
+    def test_failed_migration_rolls_back_and_can_be_retried(self) -> None:
+        original = "2026-11-02T15:30:00+02:00"
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA user_version = 1")
+            connection.executemany(
+                "INSERT INTO future_cognition "
+                "(request_id, not_before, note, requested_at, status) "
+                "VALUES (?, ?, '', ?, 'pending')",
+                [("valid", original, NOW.isoformat()),
+                 ("invalid", "invalid timestamp", NOW.isoformat())],
+            )
+        with self.assertRaises(ValueError):
+            SQLiteContinuityStore(self.path)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT not_before FROM future_cognition WHERE request_id = 'valid'"
+            ).fetchone()[0], original)
+            connection.execute(
+                "UPDATE future_cognition SET not_before = ? WHERE request_id = 'invalid'",
+                (original,),
+            )
+        with SQLiteContinuityStore(self.path) as reopened:
+            self.assertEqual(len(reopened.due(datetime(2026, 11, 2, 13, 30, tzinfo=UTC))), 2)
+
+    def test_legacy_offsets_are_due_and_ordered_by_instant(self) -> None:
+        # Insert the old representation directly, bypassing create's UTC
+        # normalization. Reopening migrates the legacy database.
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA user_version = 1")
+            connection.executemany(
+                "INSERT INTO future_cognition "
+                "(request_id, not_before, note, requested_at, status) "
+                "VALUES (?, ?, '', ?, ?)",
+                [
+                    ("local", "2026-11-02T15:30:00+02:00", NOW.isoformat(), "pending"),
+                    ("earlier", "2026-11-02T13:00:00+00:00", NOW.isoformat(), "pending"),
+                    ("future", "2026-11-02T08:31:00-05:00", NOW.isoformat(), "pending"),
+                    ("withdrawn", "2026-11-02T15:30:00+02:00", NOW.isoformat(), "withdrawn"),
+                    ("honoured", "2026-11-02T15:30:00+02:00", NOW.isoformat(), "honoured"),
+                ],
+            )
+        with SQLiteContinuityStore(self.path) as reopened:
+            instant = datetime(2026, 11, 2, 13, 30, tzinfo=UTC)
+            self.assertEqual(
+                [item.request_id for item in reopened.due(instant - timedelta(microseconds=1))],
+                ["earlier"],
+            )
+            due = reopened.due(instant)
+            self.assertEqual([item.request_id for item in due], ["earlier", "local"])
+            self.assertEqual(due[1].not_before, instant)
+            self.assertEqual(reopened.due(instant.replace(tzinfo=None)), due)
 
 
 class CapabilityTests(unittest.TestCase):
@@ -166,6 +313,26 @@ class CapabilityTests(unittest.TestCase):
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(result.values["request_id"], "r1")
         self.assertEqual(self.store.load("r1").note, "keep thinking about this")
+
+    def test_offset_request_is_stored_in_utc_and_due_at_its_instant(self) -> None:
+        result = self._request(not_before="2026-11-02T15:30:00+02:00")
+        self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
+        instant = datetime(2026, 11, 2, 13, 30, tzinfo=UTC)
+        self.assertEqual(result.values["not_before"], instant.isoformat())
+        self.assertEqual(self.store.load("r1").not_before, instant)
+        with sqlite3.connect(Path(self._dir.name) / "continuity.sqlite3") as connection:
+            stored_time, = connection.execute(
+                "SELECT not_before FROM future_cognition WHERE request_id = 'r1'"
+            ).fetchone()
+        self.assertEqual(stored_time, instant.isoformat(timespec="microseconds"))
+        self.assertEqual(self.store.due(instant - timedelta(microseconds=1)), ())
+        self.assertEqual([item.request_id for item in self.store.due(instant)], ["r1"])
+        self.assertEqual(
+            [item.request_id for item in self.store.due(
+                datetime.fromisoformat("2026-11-02T15:30:00+02:00")
+            )],
+            ["r1"],
+        )
 
     def test_the_minimum_horizon_is_enforced_mechanically(self) -> None:
         """A turn may not spawn a turn without wall-clock time passing."""
