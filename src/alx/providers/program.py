@@ -186,11 +186,30 @@ def tagged_processes(token: str, known: dict | None = None, *, deadline=None,
 
 def stop_program(token: str, known: dict, *, checkpoint=None) -> bool:
     """Bound one attempt; false means the durable run must remain pending."""
+    storage_error = None
+
+    def persist():
+        nonlocal storage_error
+        if checkpoint is not None:
+            try:
+                checkpoint(known)
+            except OSError as failure:
+                # Restart evidence must never be a prerequisite for termination.
+                if storage_error is None:
+                    storage_error = failure
+
+    def finish(stopped):
+        if storage_error is not None:
+            if not stopped:
+                storage_error.add_note("program cleanup remains unconfirmed; recovery must retry")
+            raise storage_error
+        return stopped
+
     deadline = time.monotonic() + RECOVERY_SECONDS
     frozen = {}
     while True:
         if time.monotonic() >= deadline:
-            return False
+            return finish(False)
         try:
             # Preserve ancestry until every discovered generation is frozen.
             # SIGSTOP delivery is asynchronous: confirm it before the census
@@ -198,7 +217,7 @@ def stop_program(token: str, known: dict, *, checkpoint=None) -> bool:
             stable = True
             for pid, identity in known.items():
                 if time.monotonic() >= deadline:
-                    return False
+                    return finish(False)
                 if process_identity(pid) == identity:
                     try:
                         os.kill(pid, signal.SIGSTOP)
@@ -209,19 +228,18 @@ def stop_program(token: str, known: dict, *, checkpoint=None) -> bool:
                     elif process_identity(pid) == identity:
                         stable = False
             known.update(tagged_processes(token, known, deadline=deadline))
-            if checkpoint is not None:
-                checkpoint(known)
+            persist()
             # A newly found descendant must itself be frozen and rescanned
             # before any parent is killed. Incomplete attempts retain ancestry.
             for pid, identity in known.items():
                 if time.monotonic() >= deadline:
-                    return False
+                    return finish(False)
                 if process_identity(pid) == identity and frozen.get(pid) != identity:
                     stable = False
             if stable:
                 for pid, identity in known.items():
                     if time.monotonic() >= deadline:
-                        return False
+                        return finish(False)
                     if process_identity(pid) == identity:
                         try:
                             os.kill(pid, signal.SIGKILL)
@@ -230,20 +248,25 @@ def stop_program(token: str, known: dict, *, checkpoint=None) -> bool:
             live = {}
             for pid, identity in known.items():
                 if time.monotonic() >= deadline:
-                    return False
+                    return finish(False)
                 if process_identity(pid) == identity:
                     live[pid] = identity
-        except (OSError, TimeoutError):
+        except (OSError, TimeoutError) as failure:
             # A census may have observed children before exhausting its budget.
             # Preserve those generations even though it cannot prove absence.
-            if checkpoint is not None:
-                checkpoint(known)
+            persist()
+            if storage_error is not None:
+                if failure is storage_error:
+                    raise
+                # Keep the cleanup failure primary, with the write failure as
+                # its cause. Neither is evidence that cleanup completed.
+                raise failure from storage_error
             return False
         if not live:
-            return time.monotonic() < deadline
+            return finish(time.monotonic() < deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return False
+            return finish(False)
         time.sleep(min(DISCOVERY_SECONDS, remaining))
 
 
@@ -439,19 +462,30 @@ def work(root: Path) -> None:
             duration = time.monotonic() - started
             # These are facts, not completion: result.json remains absent until
             # cleanup is confirmed, including after worker death.
-            publish(root / "pending_result.json", result_values(
-                root, "completed", exit_code, duration, timed_out, error,
-            ))
-            if process is not None:
-                # Cleanup failures must not be turned into a finished run.
-                # The lease is released on worker exit; discovery retries here.
-                if not stop_program(root.name, known, checkpoint=lambda values: save_children(root, values)):
-                    return
-                try:
-                    process.wait(timeout=0)
-                except subprocess.TimeoutExpired:
-                    return
-                exit_code = process.returncode
+            pending_failed = True
+            try:
+                publish(root / "pending_result.json", result_values(
+                    root, "completed", exit_code, duration, timed_out, error,
+                ))
+                pending_failed = False
+            finally:
+                # Even result construction or persistence failure cannot skip
+                # termination. Propagate it only after attempting cleanup.
+                if process is not None:
+                    while True:
+                        cleanup_complete = stop_program(
+                            root.name, known, checkpoint=lambda values: save_children(root, values),
+                        )
+                        try:
+                            process.wait(timeout=0)
+                        except subprocess.TimeoutExpired:
+                            cleanup_complete = False
+                        exit_code = process.returncode
+                        if cleanup_complete or pending_failed:
+                            break
+                        # The independent worker keeps ownership across bounded
+                        # attempts; completion must not need a recovery tick.
+                        time.sleep(.01)
     publish(root / "result.json", result_values(
         root, "completed", exit_code, duration, timed_out, error,
     ))

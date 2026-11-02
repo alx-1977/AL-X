@@ -85,10 +85,19 @@ def test_detached_descendant_stopped_before_result(tmp_path, timeout, clean_envi
     pid_file = tmp_path / "helper.pid"
     heartbeat = tmp_path / "heartbeat"
     helper = f"import time; from pathlib import Path; p=Path({str(heartbeat)!r});\nwhile True: p.write_text(str(time.time_ns())); time.sleep(.01)"
-    script = ("import subprocess,sys,time; from pathlib import Path; "
+    checkpoint = f"Path({str(tmp_path / 'runs')!r}) / os.environ['ALX_PROGRAM_RUN'] / 'children.json'"
+    # Keep the parent alive until the worker has durably observed the helper.
+    # Otherwise an env={} child can be reparented before the first census.
+    wait_for_observation = (
+        f"checkpoint={checkpoint}\n"
+        f"while not Path({str(heartbeat)!r}).exists() or str(p.pid) not in "
+        "json.loads(checkpoint.read_text() if checkpoint.exists() else '{}'):\n"
+        " time.sleep(.01)\n"
+    )
+    script = ("import subprocess,sys,time,os,json; from pathlib import Path; "
               f"p=subprocess.Popen([sys.executable,'-c',{helper!r}],start_new_session=True,env={ '{}' if clean_environment else 'None' }); "
               f"Path({str(pid_file)!r}).write_text(str(p.pid)); "
-              + ("time.sleep(10)" if timeout else "time.sleep(.1)"))
+              + ("time.sleep(10)" if timeout else "\n" + wait_for_observation))
     try:
         pending = ProgramRunner(tmp_path / "runs", (), .001).run({
             "argv": [sys.executable, "-c", script], "working_directory": str(tmp_path),

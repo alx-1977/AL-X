@@ -18,6 +18,92 @@ from alx.continuity.program_source import ProgramCompletionSource
 from test_program_review_findings import Ledger, unfinished
 
 
+@pytest.mark.parametrize("failure_path", ["worker_pending", "worker_checkpoint", "recovery_checkpoint"])
+def test_storage_failure_cannot_prevent_deadline_cleanup(tmp_path, monkeypatch, failure_path):
+    run = unfinished(tmp_path)
+    (run / "request.json").write_text(json.dumps({
+        "argv": ["program"], "working_directory": str(tmp_path),
+        "time_limit_seconds": .03,
+    }))
+    clock, frozen, signals = [0.0], set(), []
+    live = {123: [1, 3], 124: [1, 4]}
+    program.save_children(run, {123: live[123]})
+    monkeypatch.setattr(program.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(program.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(program, "process_identity", lambda pid: live.get(pid))
+    monkeypatch.setattr(program, "process_stopped", lambda pid: pid in frozen)
+    def kill(pid, sig):
+        signals.append((pid, sig, clock[0]))
+        if sig == signal.SIGSTOP:
+            frozen.add(pid)
+        elif sig == signal.SIGKILL:
+            live.pop(pid, None)
+    monkeypatch.setattr(program.os, "kill", kill)
+    # A late descendant must be discovered, frozen, and killed even when every
+    # cleanup checkpoint fails. The running census has not observed it yet.
+    monkeypatch.setattr(program, "tagged_processes", lambda token, known, **kw:
+                        dict(live) if kw.get("inspect_tags", True) else {})
+    process = SimpleNamespace(pid=123, poll=lambda: None, wait=lambda **kw: None, returncode=-9)
+    monkeypatch.setattr(program.subprocess, "Popen", lambda *a, **kw: process)
+    failure = OSError("output volume full")
+    publish, save = program.publish, program.save_children
+    def failing_publish(path, values):
+        if path.name == "pending_result.json":
+            raise failure
+        publish(path, values)
+    def failing_checkpoint(root, known):
+        if frozen:
+            raise failure
+        save(root, known)
+    if failure_path == "worker_pending":
+        monkeypatch.setattr(program, "publish", failing_publish)
+    else:
+        monkeypatch.setattr(program, "save_children", failing_checkpoint)
+    if failure_path.startswith("recovery"):
+        clock[0] = .03  # Recover the abandoned run at its deadline.
+    try:
+        with pytest.raises(OSError) as caught:
+            (program.reconcile if failure_path.startswith("recovery") else program.work)(run)
+        assert caught.value is failure
+    finally:
+        assert not live, "storage failure left the program or its descendant alive"
+        assert {pid for pid, sig, _ in signals if sig == signal.SIGKILL} == {123, 124}
+        assert all(.03 <= when <= .03 + program.RECOVERY_SECONDS for _, _, when in signals)
+        assert not (run / "result.json").exists(), "storage failure was published as completion"
+
+
+@pytest.mark.parametrize("census_fails", [False, True])
+def test_storage_failure_does_not_hide_unconfirmed_cleanup(tmp_path, monkeypatch, census_fails):
+    run = unfinished(tmp_path)
+    program.save_children(run, {123: [1, 3]})
+    clock = [0.0]
+    monkeypatch.setattr(program.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(program.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(program, "process_identity", lambda pid: [1, 3])
+    monkeypatch.setattr(program, "process_stopped", lambda pid: False)
+    monkeypatch.setattr(program.os, "kill", lambda *a: None)
+    cleanup_failure = PermissionError("census unavailable")
+    storage_failure = OSError("output volume full")
+    def census(*a, **kw):
+        if census_fails:
+            raise cleanup_failure
+        return {}
+    def checkpoint(*a):
+        raise storage_failure
+    monkeypatch.setattr(program, "tagged_processes", census)
+    monkeypatch.setattr(program, "save_children", checkpoint)
+    with pytest.raises(OSError) as caught:
+        program.reconcile(run)
+    if census_fails:
+        assert caught.value is cleanup_failure
+        assert caught.value.__cause__ is storage_failure
+    else:
+        assert caught.value is storage_failure
+        assert "cleanup remains unconfirmed" in " ".join(caught.value.__notes__)
+        assert clock[0] == pytest.approx(program.RECOVERY_SECONDS)
+    assert not (run / "result.json").exists()
+
+
 def test_untagged_late_helper_is_found_before_parent_is_killed(monkeypatch):
     live = {123: [1, 3], 124: [1, 4]}
     frozen, signals = set(), []
@@ -102,6 +188,47 @@ def test_recovery_without_saved_facts_uses_interrupted_defaults(tmp_path, monkey
     assert result["error"] == "program_worker_interrupted"
 
 
+@pytest.mark.parametrize("first_attempt", ["budget_exhausted", "reap_pending"])
+def test_worker_retries_cleanup_before_publishing(tmp_path, monkeypatch, first_attempt):
+    run = unfinished(tmp_path)
+    (run / "request.json").write_text(json.dumps({
+        "argv": ["program"], "working_directory": str(tmp_path),
+        "time_limit_seconds": .03,
+    }))
+    clock, attempts, waits = [0.0], [], []
+    monkeypatch.setattr(program.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(program.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    process = SimpleNamespace(pid=123, poll=lambda: None, returncode=None)
+    def wait(*, timeout):
+        assert timeout == 0
+        waits.append(timeout)
+        if first_attempt == "reap_pending" and len(waits) == 1:
+            raise subprocess.TimeoutExpired("program", timeout)
+        process.returncode = -9
+    process.wait = wait
+    monkeypatch.setattr(program.subprocess, "Popen", lambda *a, **kw: process)
+    monkeypatch.setattr(program, "process_identity", lambda pid: [1, 3])
+    monkeypatch.setattr(program, "tagged_processes", lambda *a, **kw: {})
+    def stop(token, known, *, checkpoint):
+        assert token == run.name
+        assert known == {123: [1, 3]}
+        assert not (run / "result.json").exists()
+        assert (run / "pending_result.json").exists()
+        attempts.append(clock[0])
+        assert len(attempts) <= 2, "worker failed to finish confirmed cleanup"
+        checkpoint(known)
+        if first_attempt == "budget_exhausted" and len(attempts) == 1:
+            clock[0] += program.RECOVERY_SECONDS
+            return False
+        return True
+    monkeypatch.setattr(program, "stop_program", stop)
+    program.work(run)
+    assert len(attempts) == 2, "worker abandoned cleanup until a later recovery tick"
+    result = json.loads((run / "result.json").read_text())
+    assert result["timed_out"] is True
+    assert result["exit_code"] == -9
+
+
 @pytest.mark.parametrize("timed_out", [False, True])
 def test_delayed_cleanup_recovers_known_program_facts(tmp_path, monkeypatch, timed_out):
     run = unfinished(tmp_path)
@@ -126,11 +253,14 @@ def test_delayed_cleanup_recovers_known_program_facts(tmp_path, monkeypatch, tim
         saved = json.loads((run / "pending_result.json").read_text())
         assert saved["exit_code"] == (-1 if timed_out else 7)
         assert saved["timed_out"] is timed_out
-        return False
+        # A storage failure releases the worker lease for later recovery.
+        raise OSError("output volume full")
     monkeypatch.setattr(program, "stop_program", pending)
-    program.work(run)
+    with pytest.raises(OSError, match="output volume full"):
+        program.work(run)
     assert not (run / "result.json").exists()
     monkeypatch.setattr(program, "process_identity", lambda pid: None)
+    monkeypatch.setattr(program, "stop_program", lambda *a, **kw: False)
     source = ProgramCompletionSource(tmp_path, Ledger(), True, reconcile=program.reconcile)
     source.reconcile_pending()
     assert not source.contextual_events("thread")
