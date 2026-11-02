@@ -50,9 +50,10 @@ DEFINITION = CapabilityDefinition(
     "Merge one pull request at one exact reviewed revision. Requires the head "
     "commit that was reviewed, and the merge does not happen if the branch has "
     "moved since. Waits boundedly for required checks, then merges and syncs "
-    "the canonical checkout to main. A safe rebase stops for new review approval. "
-    "Refused unless Greptile has finished a review of this exact head with a "
-    "confidence score of 5/5 (D-046). Any new commit needs a new review. "
+    "the canonical checkout to main. A clean rebase continues if own changes are identical. "
+    "Refused unless Greptile has finished a review of this head, or an earlier "
+    "head of this PR with mechanically identical own changes, with a "
+    "confidence score of 5/5 (D-046). Changed own code needs a new review. "
     "Remarks beside a 5/5 are AL/X's to weigh and do not refuse the merge. "
     "Review judgement is made before this is called.",
     StructuredSchema(

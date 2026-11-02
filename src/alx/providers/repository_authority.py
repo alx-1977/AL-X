@@ -195,6 +195,7 @@ class RepositoryAuthority:
 
     def _run(
         self, command: tuple[str, ...],
+        *, input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
         environment = _git_environment()
         try:
@@ -211,6 +212,7 @@ class RepositoryAuthority:
                 # Explicit, never inherited: a shell would let a ref name be
                 # read as syntax rather than as an argument.
                 shell=False,
+                **({"input": input_text} if input_text is not None else {}),
             )
         except (OSError, subprocess.SubprocessError) as error:
             LOGGER.warning("Repository command failed: %s", type(error).__name__)
@@ -225,6 +227,33 @@ class RepositoryAuthority:
     def head_commit(self) -> str:
         """The commit the checkout has checked out, or "" if unreadable."""
         return self._sha_of("HEAD")
+
+    def own_changes_equal(self, reviewed: str, current: str) -> bool:
+        """Require the exact tree of a conflict-free merge with pinned main.
+
+        Tree equality preserves every byte, including meaningful whitespace.
+        Only Git objects are written; no checkout, ref or working file changes.
+        """
+        if not valid_sha(reviewed) or not valid_sha(current):
+            return False
+        try:
+            main = self._sha_of("origin/main")
+            if not valid_sha(main):
+                return False
+            tree = self._run(("git", "rev-parse", "--verify",
+                              f"{current}^{{commit}}^{{tree}}"))
+            current_tree = (tree.stdout or "").strip()
+            if tree.returncode != 0 or not valid_sha(current_tree):
+                return False
+            merged = self._run(("git", "merge-tree", "--write-tree", "--no-messages",
+                                reviewed, main))
+            merged_tree = (merged.stdout or "").strip()
+            # Conflicts can still print a tree ID. Exit success is mandatory,
+            # and anything other than one complete tree ID is unknown evidence.
+            return (merged.returncode == 0 and valid_sha(merged_tree)
+                    and merged_tree == current_tree)
+        except RepositoryAuthorityError:
+            return False
 
     def main_commit(self) -> str:
         """The commit local main points at, or "" if unreadable.
