@@ -68,7 +68,7 @@ if not os.environ.get('NO_BINARY'):
     (app / 'target').mkdir(exist_ok=True)
     (app / 'target/app.bin').write_bytes(b'firmware')
 ''')
-    particle = executable(tmp_path / 'particle', '''import os, sys, time
+    particle = executable(tmp_path / 'particle', '''import os, sys
 from pathlib import Path
 args = sys.argv[1:]
 if args == ['usb', 'list']:
@@ -77,9 +77,6 @@ if args == ['usb', 'list']:
 if args[:2] == ['flash', '--local'] and len(args) == 3:
     Path(os.environ['FLASH_RECORD']).write_text(repr(args))
     sys.exit(int(os.environ.get('FLASH_EXIT', '0')))
-if args == ['serial', 'monitor', '--follow']:
-    print('serial-data' * 5000, flush=True)
-    time.sleep(30)
 else:
     sys.exit(90)
 ''')
@@ -201,17 +198,6 @@ def test_flash_refuses_unproven_changed_or_wrong_device(local):
     assert not Path(os.environ['FLASH_RECORD']).exists()
 
 
-def test_serial_is_bounded_and_terminated(local):
-    started = time.monotonic()
-    result = local.serial(seconds=1)
-    assert time.monotonic() - started < 3
-    assert result['truncated'] and len(result['text']) <= 32768
-    assert result['text'].startswith('serial-data')
-    for value in (0, 61, True, '10'):
-        with pytest.raises(ParticleLocalError, match='arguments_unusable'):
-            local.serial(value)
-
-
 def test_process_timeout_and_large_output(tmp_path):
     cli = executable(tmp_path / 'long', 'import time\nprint("x" * 100000, flush=True)\ntime.sleep(30)\n')
     code, output, clipped, timeout = bounded_process([cli], seconds=2, limit=100)
@@ -221,9 +207,9 @@ def test_process_timeout_and_large_output(tmp_path):
 def test_catalogue_and_settings(tmp_path):
     runtime = build_particle_local_runtime(lambda: 'c', {}, tmp_path)
     ids = {d.capability_id for d in runtime.definitions}
-    assert ids == {'compile_particle_firmware', 'list_particle_usb_devices', 'flash_bench_reader_usb', 'read_particle_serial_log'}
+    assert ids == {'compile_particle_firmware', 'flash_bench_reader_usb'}
     assert ids == set(runtime.executors) == set(runtime.policies)
-    assert [d.side_effect for d in DEFINITIONS] == [SideEffect.NONE, SideEffect.NONE, SideEffect.EFFECTFUL, SideEffect.NONE]
+    assert [d.side_effect for d in DEFINITIONS] == [SideEffect.NONE, SideEffect.EFFECTFUL]
     assert not runtime.policies['flash_bench_reader_usb'].approval_required
     assert runtime.settings.cli == 'particle'
     assert runtime.settings.repositories == (REPO,)

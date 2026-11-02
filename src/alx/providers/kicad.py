@@ -17,7 +17,7 @@ from collections import Counter
 from contextlib import contextmanager, suppress
 import fcntl
 
-from alx.providers.own_source import denied
+from alx.providers.credential_paths import denied
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 
@@ -92,12 +92,6 @@ def evidence_bytes(folder):
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def read_library(path):
-    if path.stat().st_size > 32 * 1024 * 1024:
-        raise KiCadError('project_too_large')
-    return path.read_text()
 
 
 class Node:
@@ -749,33 +743,6 @@ class KiCadProvider:
         (root / 'metadata.json').write_text(json.dumps(meta))
         result = self._drc(root, meta)
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
-
-    def find(self, arguments):
-        library_id = arguments.get('library_id')
-        if bool(library_id) == bool(arguments.get('designator')):
-            raise KiCadError('arguments_unusable')
-        if not library_id:
-            root, meta = self._load(arguments.get('work_copy_id'))
-            board = sexpr((root / 'project' / meta['board']).read_text())
-            matches = [fp.children[1] for fp in board.named('footprint')
-                       if arguments['designator'] in references(fp)]
-            if len(matches) != 1:
-                raise KiCadError('footprint_ambiguous')
-            library_id = matches[0]
-        parts = library_id.split(':')
-        if len(parts) not in (1, 2) or any(not p or '/' in p or '\\' in p or p in ('.', '..') for p in parts):
-            raise KiCadError('path_denied')
-        library_root = self.settings.library_root.expanduser().resolve()
-        candidates = []
-        folders = ([library_root / (parts[0] + '.pretty')] if len(parts) == 2
-                   else list(library_root.glob('*.pretty')))
-        for folder in folders:
-            path = bounded(folder / (parts[-1] + '.kicad_mod'), (library_root,))
-            if path.is_file():
-                parsed = sexpr(read_library(path))
-                candidates.append({'library_id': folder.stem + ':' + path.stem,
-                                   'path': str(path), 'pad_count': len(parsed.named('pad'))})
-        return {'candidates': candidates}
 
     def write_back(self, arguments):
         with self._locked(arguments['work_copy_id']):

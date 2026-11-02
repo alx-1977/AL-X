@@ -98,7 +98,6 @@ class KiCadTests(unittest.TestCase):
         (self.project / 'test.kicad_pro').write_text(json.dumps(PROJECT))
         self.environment = {
             'ALX_KICAD_DESIGN_ROOTS': str(self.design),
-            'ALX_KICAD_LIBRARY_ROOT': str(self.root / 'libraries'),
         }
         self.storage = self.root / 'storage'
         self.calls = []
@@ -154,14 +153,14 @@ class KiCadTests(unittest.TestCase):
     def check(self):
         return self.success('check_kicad_board', project_dir=str(self.project))
 
-    def test_six_unique_catalogue_entries_and_one_runtime_registration(self):
+    def test_five_unique_catalogue_entries_and_one_runtime_registration(self):
         registry = CapabilityRegistry(self.runtime.definitions)
-        self.assertEqual(len(registry.list_definitions()), 6)
+        self.assertEqual(len(registry.list_definitions()), 5)
         self.assertEqual(set(self.runtime.executors), {d.capability_id for d in DEFINITIONS})
         payload = json.loads(_catalogue_payload(self.runtime.definitions))
         self.assertEqual({d['id'] for d in payload['capabilities']}, set(self.runtime.executors))
         self.assertEqual([d.side_effect for d in DEFINITIONS],
-                         [SideEffect.NONE, SideEffect.NONE, SideEffect.EFFECTFUL, SideEffect.NONE, SideEffect.NONE, SideEffect.EFFECTFUL])
+                         [SideEffect.NONE, SideEffect.NONE, SideEffect.EFFECTFUL, SideEffect.NONE, SideEffect.EFFECTFUL])
         live = (Path(__file__).parents[1] / 'src/alx/bootstrap/live_voice.py').read_text()
         self.assertEqual(live.count('kicad_runtime = build_kicad_runtime('), 1)
 
