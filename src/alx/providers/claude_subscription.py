@@ -20,11 +20,8 @@ this transport must run under an unmanaged subscription account, or under
 managed policy that sets `disableAllHooks: true`; the process command cannot
 enforce that administrative boundary itself.
 
-Why a subprocess rather than an HTTP client: the subscription credential is
-held by the Claude Code installation - in its OAuth login or the system
-keychain - and the supported way to reason on it is the CLI's own headless
-mode. There is no endpoint AL/X could call with a token of her own without
-reintroducing exactly the metered path this replaces.
+The supported subscription transport is the CLI's own headless mode, using
+its saved OAuth login or an explicitly configured setup-token credential.
 
 **No metered fallback exists here.** `ANTHROPIC_API_KEY` is stripped from the
 child environment rather than merely omitted, so a key present in AL/X's own
@@ -37,8 +34,8 @@ spending Friedl's money on a decision he did not make.
 **AL/X's own identity.** The Core reasons as a dedicated Claude account, held
 in its own Claude Code configuration directory (`ALX_CLAUDE_CONFIG_DIR`). The
 child is given exactly that directory, and any inherited `CLAUDE_CONFIG_DIR`
-or `CLAUDE_CODE_OAUTH_TOKEN` is dropped, so neither Friedl's personal login
-nor a token issued for another account can answer in its place. Before the
+is dropped. Only the explicit token setting may override the saved login.
+Before the
 first turn the directory's login is verified through the CLI's machine-readable
 `auth status --json`: signed in, through a claude.ai subscription login, at
 that directory, and as the expected account when one is configured. Anything
@@ -96,6 +93,7 @@ _IDENTITY_CODES = frozenset(
         "subscription_account_mismatch",
         "subscription_identity_unverifiable",
         "subscription_config_personal",
+        "subscription_token_identity_unverifiable",
     }
 )
 
@@ -259,6 +257,7 @@ class ClaudeSubscriptionReasoningModel:
         environment: Mapping[str, str] | None = None,
         config_dir: str | None = None,
         expected_account: str | None = None,
+        oauth_token: str | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -274,6 +273,7 @@ class ClaudeSubscriptionReasoningModel:
         # HTTP adapters inject a client. Production passes nothing.
         self._runner = runner or subprocess.run
         self._environment = os.environ if environment is None else environment
+        self._oauth_token = oauth_token or None
         # The dedicated Claude configuration this Core reasons through. None
         # only for callers outside the Core, which keep the CLI's own default.
         if config_dir is not None and not os.path.isabs(config_dir):
@@ -338,16 +338,15 @@ class ClaudeSubscriptionReasoningModel:
             "CLAUDE_CODE_OAUTH_TOKEN",
         }
         if self._config_dir is not None:
-            # The dedicated identity, and nothing inherited that could stand in
-            # for it: a host CLAUDE_CONFIG_DIR would point at another login,
-            # and an OAuth token would authenticate as whoever issued it,
-            # overriding the directory's login altogether.
+            # Ambient overrides cannot replace the explicitly configured identity.
             allowed -= {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
         environment = {
             key: value for key, value in self._environment.items() if key in allowed
         }
         if self._config_dir is not None:
             environment["CLAUDE_CONFIG_DIR"] = self._config_dir
+        if self._oauth_token is not None:
+            environment["CLAUDE_CODE_OAUTH_TOKEN"] = self._oauth_token
         return environment
 
     @property
@@ -378,6 +377,7 @@ class ClaudeSubscriptionReasoningModel:
         if home and os.path.realpath(self._config_dir) in personal:
             # However it is named, it must not resolve to the person's login.
             raise SubscriptionIdentityError("subscription_config_personal")
+        failed = False
         try:
             with TemporaryDirectory(prefix="alx-claude-") as working_directory:
                 from alx.providers.coding_process import run_coding_subprocess
@@ -389,18 +389,32 @@ class ClaudeSubscriptionReasoningModel:
                     env=self.child_environment(), cwd=working_directory,
                     shell=False, check=False,
                 )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise SubscriptionIdentityError(
-                "subscription_identity_unverifiable") from error
+        except (OSError, subprocess.SubprocessError):
+            failed = True
+        if failed:
+            # Outside the handler: no exception context can retain CLI output.
+            raise SubscriptionIdentityError("subscription_identity_unverifiable")
         try:
             status = json.loads(completed.stdout)
-        except (TypeError, json.JSONDecodeError) as error:
-            raise SubscriptionIdentityError(
-                "subscription_identity_unverifiable") from error
+        except (TypeError, json.JSONDecodeError):
+            failed = True
+        if failed:
+            raise SubscriptionIdentityError("subscription_identity_unverifiable")
         if not isinstance(status, Mapping):
             raise SubscriptionIdentityError("subscription_identity_unverifiable")
+        if self._oauth_token is not None and completed.returncode != 0:
+            raise SubscriptionIdentityError("subscription_unauthenticated")
         if status.get("loggedIn") is not True:
             raise SubscriptionIdentityError("subscription_unauthenticated")
+        if self._oauth_token is not None:
+            # Claude Code 2.1.316's auth-status implementation reports setup
+            # tokens as oauth_token/firstParty and omits email and subscription.
+            # Even fields from a saved login cannot attest to the token owner.
+            # Do not accept a fabricated claude.ai status or stale login here.
+            if (status.get("authMethod") != "oauth_token"
+                    or status.get("apiProvider") != "firstParty"):
+                raise SubscriptionIdentityError("subscription_login_not_claude_ai")
+            raise SubscriptionIdentityError("subscription_token_identity_unverifiable")
         if status.get("authMethod") != "claude.ai" or status.get("apiProvider") != "firstParty":
             # An API key or a third-party route would bill, which is the one
             # thing this transport exists not to do.
@@ -440,7 +454,7 @@ class ClaudeSubscriptionReasoningModel:
         A login can change while the runtime runs, so a check at startup
         alone would not hold. One local status read per turn.
         """
-        if self._config_dir is None:
+        if self._config_dir is None and self._oauth_token is None:
             return
         try:
             self.verify_identity()

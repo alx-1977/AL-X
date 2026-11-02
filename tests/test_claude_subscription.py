@@ -361,8 +361,10 @@ class NoMeteredBillingTest(unittest.TestCase):
     def test_the_adapter_holds_no_api_key_field(self) -> None:
         model = ClaudeSubscriptionReasoningModel("opus", 60)
         self.assertFalse(
-            [name for name in vars(model) if "api_key" in name or "token" in name]
+            [name for name in vars(model)
+             if "api_key" in name or ("token" in name and name != "_oauth_token")]
         )
+        self.assertIsNone(model._oauth_token)
 
     def test_a_failure_never_reaches_another_provider(self) -> None:
         """No fallback: a failed turn raises and stops."""
