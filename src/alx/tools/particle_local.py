@@ -34,27 +34,17 @@ DEFINITIONS = (
         'compiler/linker errors, warning count and a proven binary artifact, never the build log.',
         obj({'repository': S, 'job_id': S, 'revision': S, 'platform': S, 'device_os': S,
              'buildscripts': S}, ('repository',)), COMPILE_RESULT, SideEffect.NONE, FAILURES),
-    CapabilityDefinition('list_particle_usb_devices',
-        'List connected Particle USB devices with their IDs, names, platforms and modes.',
-        obj({}), obj({'devices': array(obj({'device_id': S, 'name': S, 'platform': S, 'mode': S}))}),
-        SideEffect.NONE, FAILURES),
     CapabilityDefinition('flash_bench_reader_usb',
         'Flash an unchanged binary returned by compile_particle_firmware to the single USB '
         'bench reader. Standing authority D-062; no per-call approval. Refuses zero/multiple '
         'devices or expected_device_id mismatch. Uses only local USB, never OTA.',
         obj({'binary': S, 'expected_device_id': S}, ('binary',)),
         obj({'device_id': S, 'binary': S, 'outcome': S, 'error': S}), SideEffect.EFFECTFUL, FAILURES),
-    CapabilityDefinition('read_particle_serial_log',
-        'Capture USB Particle serial output for seconds (integer 1–60, default 10). '
-        'Requires one USB device and optional expected_device_id match. Returns at most '
-        '32768 bytes of decoded text and a truncated flag.',
-        obj({'seconds': I, 'expected_device_id': S}, ()), obj({'text': S, 'truncated': B}),
-        SideEffect.NONE, FAILURES),
 )
 
 
 def build_particle_local_executors(provider, call_id_source):
-    methods = (provider.compile, provider.usb_devices, provider.flash, provider.serial)
+    methods = (provider.compile, provider.flash)
 
     def executor(definition, method):
         def execute(arguments):

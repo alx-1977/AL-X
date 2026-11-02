@@ -248,13 +248,3 @@ class ParticleLocal:
         code, output, _, timeout = bounded_process([self.cli, 'flash', '--local', str(path)], seconds=120, limit=2000)
         return {'device_id': device, 'binary': str(path), 'outcome': 'unknown' if timeout else
                 'succeeded' if code == 0 else 'failed', 'error': output if code or timeout else ''}
-
-    def serial(self, seconds=10, expected_device_id=None):
-        if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 60:
-            raise ParticleLocalError('arguments_unusable')
-        self.single_device(expected_device_id)
-        code, output, clipped, timeout = bounded_process(
-            [self.cli, 'serial', 'monitor', '--follow'], seconds=seconds, limit=32768)
-        if code and not timeout:
-            raise ParticleLocalError('serial_failed')
-        return {'text': output, 'truncated': clipped}

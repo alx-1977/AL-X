@@ -107,13 +107,6 @@ DEFINITIONS = (
         'KiCad edit evidence paths. Zip lists entries or reads '
         'one named entry. iCloud placeholders return not_downloaded. Does not interpret content.',
         obj({'path': S, 'entry': S, 'offset': I}, ('path',)), REFERENCE, SideEffect.NONE, FAILURES),
-    CapabilityDefinition('find_kicad_library_footprint',
-        'Read installed library footprint candidates and pad counts. Supply library_id '
-        '(Library:Footprint or exact footprint name), or designator and work_copy_id. '
-        'Never replaces footprints or selects a candidate.',
-        obj({'library_id': S, 'designator': S, 'work_copy_id': S}, ()),
-        obj({'candidates': array(obj({'library_id': S, 'path': S, 'pad_count': I}))}),
-        SideEffect.NONE, FAILURES),
     CapabilityDefinition('write_back_kicad_board',
         'Write changed board/project/custom-rule files from the exact approved work-copy '
         'revision to its recorded original project. Requires approval of this exact call. '
@@ -149,4 +142,4 @@ def build_kicad_executors(provider, call_id_source):
                                     CapabilityResultState.FAILED, failure=dict(failure, code=code))
         return invoke
     return {definition.capability_id: bind(definition, method) for definition, method in zip(
-        DEFINITIONS, (provider.check, provider.edit, provider.export, provider.read_reference, provider.find, provider.write_back))}
+        DEFINITIONS, (provider.check, provider.edit, provider.export, provider.read_reference, provider.write_back))}

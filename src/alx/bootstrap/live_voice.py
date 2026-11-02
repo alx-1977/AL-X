@@ -136,15 +136,10 @@ from alx.tools.goal_history import (
     DEFINITION as GOAL_HISTORY_DEFINITION,
     build_goal_history_executors,
 )
-from alx.providers.own_source import OwnSource
 from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
 from alx.providers.claude_usage import ClaudeUsageReader
 from alx.tools.claude_usage import (
     DEFINITION as CLAUDE_USAGE_DEFINITION, build_claude_usage_executors,
-)
-from alx.tools.own_source import (
-    DEFINITION as OWN_SOURCE_DEFINITION,
-    build_own_source_executors,
 )
 
 
@@ -840,21 +835,10 @@ async def run(repository_root: Path) -> None:
         executors.update(repository_runtime.executors)
         permissions.update(repository_runtime.permissions)
 
-    # Capture once, shared by source inspection and the runtime facts below.
-    # A later branch switch must never change which code this process reads.
+    # Capture once for the runtime facts below.
     running_commit = running_commit_of(
         CODE_ROOT, None if repository_runtime is None else repository_runtime.authority,
     )
-    if repository_runtime is not None:
-        register((OWN_SOURCE_DEFINITION,), TraceSubsystem.CORE)
-        policies[OWN_SOURCE_DEFINITION.capability_id] = AuthorityPolicy(
-            frozenset({"self.read"}), approval_required=False,
-        )
-        permissions.add("self.read")
-        executors.update(build_own_source_executors(
-            OwnSource(repository_runtime.authority, running_commit).inspect, current_call_id.get,
-        ))
-
     # Friedl delegated routine merge authorisation to AL/X. She reads an
     # external review of the current head and decides; this executes that
     # decision against the exact revision she judged.
@@ -1218,7 +1202,7 @@ async def run(repository_root: Path) -> None:
                 ("Ship24", "tracking shipments across supported couriers",
                  "src/alx/providers/ship24.py", True),
                 ("KiCad", "board DRC, confined pcbnew editing on copies, add-only manufacturing "
-                 "exports, home/iCloud reference reading, library footprint inspection and "
+                 "exports, home/iCloud reference reading and "
                  "approved write-back", "src/alx/providers/kicad.py", True),
                 ("LlamaParse", "reading invoices and other documents",
                  "src/alx/providers/llamaparse.py", documents_composed),

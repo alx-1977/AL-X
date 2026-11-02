@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 import struct
 import zipfile
 
-from alx.providers.own_source import denied
+from alx.providers.credential_paths import denied
 
 MAX_BYTES = 32 * 1024 * 1024
 MAX_TEXT = 24000

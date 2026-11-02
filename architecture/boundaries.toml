@@ -343,13 +343,6 @@ entry = "providers/coding_agent.py::CodingAgent.run"
 forbidden = ["_local_review_loop", "alx_coding_local_review", "LocalReviewFinding", "ReviewInfrastructureAttempt", "coding_reviewer"]
 
 [[outcomes]]
-id = "self.running_source_is_inspected"
-description = "Eligible tracked source is searched or read at the process's running commit."
-# D-057 change 2. No earlier source inspection capability was superseded.
-entry = "tools/own_source.py::build_own_source_executors.<locals>.read_own_source"
-forbidden = []
-
-[[outcomes]]
 id = "kicad.board_is_checked"
 description = "DRC facts are read from an isolated board copy."
 entry = "providers/kicad.py::KiCadProvider.check"
@@ -374,12 +367,6 @@ entry = "providers/kicad.py::KiCadProvider.read_reference"
 forbidden = []
 
 [[outcomes]]
-id = "kicad.library_footprint_is_found"
-description = "Installed library footprint candidates and pad counts are read."
-entry = "providers/kicad.py::KiCadProvider.find"
-forbidden = []
-
-[[outcomes]]
 id = "kicad.board_is_written_back"
 description = "An exactly approved copy revision is backed up and written to its original."
 entry = "providers/kicad.py::KiCadProvider.write_back"
@@ -392,21 +379,9 @@ entry = "providers/particle_local.py::ParticleLocal.compile"
 forbidden = []
 
 [[outcomes]]
-id = "particle.local_usb_devices_listed"
-description = "D-062 local Particle usb_devices_listed outcome."
-entry = "providers/particle_local.py::ParticleLocal.usb_devices"
-forbidden = []
-
-[[outcomes]]
 id = "particle.local_bench_flashed"
 description = "D-062 local Particle bench_flashed outcome."
 entry = "providers/particle_local.py::ParticleLocal.flash"
-forbidden = []
-
-[[outcomes]]
-id = "particle.local_serial_read"
-description = "D-062 local Particle serial_read outcome."
-entry = "providers/particle_local.py::ParticleLocal.serial"
 forbidden = []
 
 [[outcomes]]
