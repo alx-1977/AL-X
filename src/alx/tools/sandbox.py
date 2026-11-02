@@ -71,7 +71,7 @@ _ARTIFACT = StructuredSchema(
 DEFINITION = CapabilityDefinition(
     RUN_SANDBOX_EXPERIMENT,
     "Run one small Python program in an isolated workspace with no network, "
-    "no production secrets and no access to the AL/X repository, and return "
+    "no production secrets, read access to the AL/X repository and git execution, and return "
     "its exit status, bounded output and a description of the files it "
     "produced. Files written to the workspace persist for later runs in the "
     "same session. Proves nothing about whether the code is correct or fit "

@@ -48,11 +48,10 @@ MAX_REPORTED_ARTIFACTS = 50
 MAX_WALKED_FILES = 5_000
 MAX_WORKSPACE_BYTES = 64 * 1024 * 1024
 
-# Backend-enforced V1 file and process ceilings. Memory containment is a
+# Backend-enforced file ceiling. Memory containment is a
 # production-backend requirement recorded by D-027, not a shared numeric limit
 # that every platform is assumed to enforce through the same mechanism.
 MAX_FILE_BYTES = 16 * 1024 * 1024
-MAX_PROCESSES = 32
 
 # The source AL/X writes. Bounded because it is transported and hashed, not
 # because length says anything about quality.
@@ -320,7 +319,6 @@ __all__ = [
     "DEFAULT_WALL_SECONDS",
     "FileChange",
     "MAX_FILE_BYTES",
-    "MAX_PROCESSES",
     "MAX_REPORTED_ARTIFACTS",
     "MAX_SOURCE_CHARACTERS",
     "MAX_STDERR_CHARACTERS",

@@ -17,7 +17,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import CapabilityResultState  # noqa: E402
-from alx.contracts.sandbox import MAX_FILE_BYTES, MAX_PROCESSES, SandboxRequest  # noqa: E402
+from alx.contracts.sandbox import MAX_FILE_BYTES, SandboxRequest  # noqa: E402
 from alx.providers.sandbox_macos import (  # noqa: E402
     LIVE_RUN_NAME,
     SeatbeltSandboxRunner,
@@ -78,13 +78,13 @@ class TrustedLauncherTest(unittest.TestCase):
         original = resource.setrlimit
         resource.setrlimit = lambda which, limits: applied.append(which)
         try:
-            sandbox_launcher._apply_limits(35, MAX_FILE_BYTES, MAX_PROCESSES)
+            sandbox_launcher._apply_limits(35, MAX_FILE_BYTES)
         finally:
             resource.setrlimit = original
 
         self.assertIn(resource.RLIMIT_CPU, applied)
         self.assertIn(resource.RLIMIT_FSIZE, applied)
-        self.assertIn(resource.RLIMIT_NPROC, applied)
+        self.assertNotIn(resource.RLIMIT_NPROC, applied)
         # And never an address-space limit, which is ineffective on this host
         # and would record a ceiling the kernel ignores.
         self.assertNotIn(resource.RLIMIT_AS, applied)

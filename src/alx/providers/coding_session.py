@@ -9,25 +9,9 @@ It starts the Grok CLI as a real agent: its own tools, its own multi-turn
 loop, its own context, with the assigned worktree as its actual working
 directory. That is what V1 did and what made it work.
 
-What is different from V1 is containment. The session runs under a generated
-custom sandbox profile, so git metadata, credential files and every blocked
-path are refused by the kernel rather than by the agent's cooperation, and a
-profile that cannot be applied stops the job instead of running unenforced.
-That profile is Grok-specific and so is installed here rather than in the
-shared base: another CLI contains its sessions its own way, and pretending
-otherwise would put a containment decision behind an abstraction.
-
-Two things are deliberately withheld in this iteration:
-
-- **the terminal.** `run_terminal_cmd` and its aliases are removed, so the
-  agent cannot run commands or tests. The CLI's deny-by-default permission mode
-  proved not to be one on the installed build, and its hooks fail open, so the
-  only reliable way to withhold shell today is not to hand it over. AL/X runs
-  the tests afterwards through its own allowlisted executor;
-- **metered credit.** The child receives the subscription login and nothing
-  else. `XAI_API_KEY` and every other metered key are removed rather than left
-  absent, so an exhausted subscription fails the job instead of quietly
-  becoming billed API usage.
+D-063 permits terminal and network access. The generated profile retains
+explicit blocked paths and unrelated file protections. Metered API keys remain
+stripped from the subscription transport; access does not approve spending.
 """
 
 from __future__ import annotations
@@ -54,21 +38,8 @@ PROVIDER_NAME = "grok_subscription"
 
 EXECUTABLE = "grok"
 
-# Every tool that can start a process, reach the network, or spawn a second
-# agent. The terminal is withheld for this iteration; web access and subagents
-# are withheld because neither is part of editing an assigned worktree.
-WITHHELD_TOOLS: tuple[str, ...] = (
-    "run_terminal_cmd",
-    "run_terminal_command",
-    "Bash",
-    "bash",
-    "shell",
-    "web_search",
-    "web_fetch",
-    "Agent",
-    "task",
-    "spawn_subagent",
-)
+# Subagent delegation is outside this single coding-session outcome.
+WITHHELD_TOOLS: tuple[str, ...] = ("Agent", "task", "spawn_subagent")
 
 # The native file tools the agent works with. Named so a CLI change that
 # renames or drops one is visible here rather than silently disabling editing.
@@ -113,6 +84,7 @@ class GrokCodingSession(SubscriptionCodingSession):
     session_label = "grok"
     home_environment_key = "GROK_HOME"
     auth_file_name = "auth.json"
+    has_terminal = True
 
     def __init__(
         self,
@@ -145,8 +117,7 @@ class GrokCodingSession(SubscriptionCodingSession):
         """The exact argument vector for one native coding session.
 
         `--sandbox` names the generated custom profile, which fails closed.
-        `--disallowed-tools` withholds the terminal; it wins over `--tools` on
-        the installed CLI, so the two are consistent rather than contradictory.
+        Terminal and network access are available under D-063.
         """
         command = [
             self._executable,
@@ -161,7 +132,6 @@ class GrokCodingSession(SubscriptionCodingSession):
             "--cwd", str(worktree),
             "--sandbox", PROFILE_NAME,
             "--disallowed-tools", ",".join(WITHHELD_TOOLS),
-            "--disable-web-search",
             "--no-subagents",
             "--max-turns", str(self._max_turns),
             "--verbatim",

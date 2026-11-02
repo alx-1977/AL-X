@@ -331,12 +331,12 @@ class CodexCodingSessionTests(unittest.TestCase):
         filesystem = profile["filesystem"]
         self.assertEqual(profile["extends"], ":workspace")
         self.assertEqual(filesystem[":root"], "deny")
-        self.assertEqual(filesystem[str(self.worktree / ".git")], "deny")
+        self.assertNotIn(str(self.worktree / ".git"), filesystem)
         self.assertEqual(filesystem[str(self.worktree / "secrets/vault.txt")], "deny")
         self.assertEqual(filesystem[":workspace_roots"]["**/.env"], "deny")
         self.assertEqual(filesystem[":workspace_roots"]["**/auth.json"], "deny")
         self.assertEqual(filesystem[str(self.home / "tmp")], "write")
-        self.assertEqual(profile["network"], {"enabled": False})
+        self.assertEqual(profile["network"], {"enabled": True})
         # Nothing outside the job, the runtime and the CLI is granted.
         granted = {key for key, value in filesystem.items()
                    if value in ("read", "write") and key.startswith("/")}

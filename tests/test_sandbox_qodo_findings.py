@@ -47,7 +47,7 @@ class ConfinedRunTest(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.workspace = SandboxWorkspace(self.root)
         self.runner = SeatbeltSandboxRunner(
-            self.workspace, denied_read_paths=(REPOSITORY_ROOT,)
+            self.workspace, denied_read_paths=()
         )
         if not self.runner.available():
             self.skipTest("no supported confinement mechanism on this platform")

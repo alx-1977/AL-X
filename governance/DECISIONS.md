@@ -704,6 +704,8 @@ Revisit if a merge happens that a reviewer's findings should have stopped; if th
 
 ## D-027 — Isolated experimentation authority (Sandbox V1)
 
+**Amended by D-063 (2026-11-02):** the repository-read and git prohibitions below are superseded; the historical grant remains recorded.
+
 - **Date:** 2026-09-06
 - **Decision owner:** Friedl
 - **Status: APPROVED by Friedl, 2026-09-06.** Implementation proceeds in the recorded order; the capability is not granted to a live runtime until the step-4 review.
@@ -1000,6 +1002,8 @@ Revisit when AL/X moves to dedicated hardware, at which point the production-hos
 ---
 
 ## D-028 — Coding Agent MVP (bounded Core-delegated coding jobs)
+
+**Amended by D-063 (2026-11-02):** the general-command allowlist and coding-job no-network containment below and in subsequent amendments are superseded. Other scope and promotion controls remain.
 
 - **Date:** 2026-09-09
 - **Decision owner:** Friedl
@@ -2726,3 +2730,16 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Single outcomes under Law 2.** Authorise `compile_particle_firmware`: validate configured clones or firmware-job clones/revisions and installed toolchains, compile locally with bounded runtime/log processing, return filtered diagnostics and binary facts and persist artifact provenance. Defaults are b5som, Device OS 6.4.1, buildscripts 1.17.2 and gcc-arm 10.2.1 plus installed buildtools. Authorise `list_particle_usb_devices`, `flash_bench_reader_usb` (validate unchanged compiled binary and enumerate USB immediately before local flash), and bounded `read_particle_serial_log`. These deterministic sequences are primitive outcomes; AL/X interprets evidence and chooses next steps. Product functions and variable reads retain `particle_api_request`.
 - **Design and retention.** Add iCloud Drive `ALX_Storage/Projects` to KiCad roots for P0009 and P0012, preserving work-copy and write-back checks. Managed clones, branches and binary provenance survive restarts under AL/X storage until explicitly deleted. No iCloud firmware copy or SkyView work is authorised.
 - **Boundary.** No Law exception; laws and identity remain unchanged.
+
+## D-063 — General access for AL/X
+
+- **Date:** 2026-11-02
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-02.** Given in conversation: “Read ALX_Storage/ALX_BRIEF_GENERAL_ACCESS.md and implement it now. It's my decision: record it and build it.” Friedl: “Just give ALX all the access she needs. I do not care, as long as she does not have access to my bank account.”
+- **Decision.** AL/X gets all the access she needs, in place of narrow tools. The only thing withheld is Friedl's bank account. Keep running as Friedl's user.
+- **Access is not permission.** D-060's other exceptions are unchanged: spending beyond what he approved; sending, deleting, posting or paying on his behalf; changing her laws, identity or governance; changing his own files without asking. Backups and existing specific approvals remain binding.
+- **Standing prohibition.** No banking site, app, browser session or Keychain item, ever. Mechanically refuse the macOS `security` tool and argv referencing configured banking hostnames or apps. These checks cannot establish arbitrary scripts' behaviour; AL/X must respect the prohibition when choosing programs and inputs.
+- **Direct sources.** Where a service has an API and a key exists, AL/X gets answers from the service directly rather than from email; where no key exists she asks Friedl for that one thing.
+- **Supersession.** This lifts D-028's command allowlist (“a generic shell is not authorised”), the coding job's no-network containment, and D-027's ban on the sandbox reading the repository or running git. Superseded enforcement is deleted under Law 0. Other coding scope, review, promotion and unrelated controls remain. D-060's credential-access restriction is superseded to the extent necessary for this access, with Keychain and banking always prohibited. `docs/proposals/SELF_REPAIR.md` is closed as superseded, not pending authority.
+- **Single primitive outcome.** Authorise `run_program`: execute structured argv directly, with working directory and time limit, as Friedl's user with network access. It has standing effectful authority under D-063 without per-call approval. Persist full stdout and stderr under the runtime data directory; return exit code, duration, bounded head/tail output and output paths. A short foreground bound returns a run reference while longer work continues independently; completion, timeout or failure returns as an event through the existing Core occasion mechanism. Run records and completion reporting survive runtime restart. AL/X chooses what to do and interprets output as untrusted evidence.
+- **First change of two.** Existing narrow capabilities remain in this change; replacement is subsequent work. Laws and checksum are unchanged; no Law exception is created.

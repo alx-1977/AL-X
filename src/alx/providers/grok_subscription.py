@@ -43,12 +43,18 @@ from alx.contracts import (
     usage_telemetry,
 )
 from alx.providers.errors import ProviderError, raise_provider_failure
-from alx.providers.coding_session import WITHHELD_TOOLS
 
 
 LOGGER = logging.getLogger(__name__)
 
 PROVIDER_NAME = "grok_subscription"
+
+# This structured planning turn does not execute the coding job. Its tool
+# restrictions are independent of the coding session's D-063 access.
+WITHHELD_TOOLS: tuple[str, ...] = (
+    "run_terminal_cmd", "run_terminal_command", "Bash", "bash",
+    "web_search", "web_fetch", "Agent", "task", "spawn_subagent",
+)
 
 _METERED_ENVIRONMENT_KEYS = frozenset(
     {

@@ -28,7 +28,7 @@ def _runner(root: Path) -> SeatbeltSandboxRunner:
     workspace = SandboxWorkspace(root)
     return SeatbeltSandboxRunner(
         workspace,
-        denied_read_paths=(REPOSITORY_ROOT, Path.home() / ".ssh"),
+        denied_read_paths=(Path.home() / ".ssh",),
     )
 
 
@@ -75,16 +75,12 @@ class SandboxConfinementTest(unittest.TestCase):
         )
         self.assertNotIn("LEAK", outcome.stdout)
 
-    def test_repository_source_cannot_be_read(self) -> None:
+    def test_repository_source_can_be_read(self) -> None:
         outcome = self._run(
-            "try:\n"
-            f"    open({str(REPOSITORY_ROOT / 'LAWS_OF_ALX.md')!r}).read()\n"
-            "    print('LEAK')\n"
-            "except Exception as error:\n"
-            "    print('blocked', type(error).__name__)\n"
+            f"print(open({str(REPOSITORY_ROOT / 'LAWS_OF_ALX.md')!r}).read()[:15])"
         )
-        self.assertNotIn("LEAK", outcome.stdout)
-        self.assertIn("blocked", outcome.stdout)
+        self.assertIn("Laws of AL/X", outcome.stdout)
+
 
     def test_environment_file_cannot_be_read(self) -> None:
         outcome = self._run(

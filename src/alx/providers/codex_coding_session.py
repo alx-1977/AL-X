@@ -11,15 +11,14 @@ permission profile passed on the command line, never read from Friedl's
 - reads are denied across the disk except the system paths tools need, the
   Python installation that runs AL/X's tests, and the worktree itself;
 - writes are allowed in the worktree and a temporary directory this job owns;
-- the worktree's git metadata, every credential shape, and every path AL/X
+- every credential shape, and every path AL/X
   blocked for the job are denied for read and write;
-- network is off for every command the agent runs.
+- network is available under D-063.
 
-Measured against codex-cli 0.157.1 before this was written: outside files,
-`.env`, nested `.env.*`, `.git` and `~/.ssh` were all refused, the network was
-unreachable, and AL/X's own tests ran inside the profile.
+D-063 lifts the prior git and network locks. Blocked paths, credentials
+and unrelated workspace protections remain in this coding transport.
 
-Unlike the Grok session, this one has a terminal. Codex reads and searches
+Both native coding sessions have terminals under D-063. Codex reads and searches
 files with shell commands, so withholding the shell would leave it unable to
 work; the terminal runs inside the profile above, and only AL/X's own
 verification afterwards counts.
@@ -78,8 +77,7 @@ def permission_profile(
 ) -> dict[str, object]:
     """The exact permission profile one coding job runs under.
 
-    `deny_entries` is the same list the Grok profile denies: the worktree's
-    git metadata, every credential glob, and each blocked path anchored to
+    `deny_entries` is the same list the Grok profile denies: every credential glob and each blocked path anchored to
     this worktree. Absolute entries are denied as paths; the credential globs
     are denied inside the workspace root. `cli` is the Codex executable
     itself, which Codex runs inside the sandbox as its own file helper.
@@ -102,7 +100,7 @@ def permission_profile(
     return {
         "extends": ":workspace",
         "filesystem": filesystem,
-        "network": {"enabled": False},
+        "network": {"enabled": True},
     }
 
 

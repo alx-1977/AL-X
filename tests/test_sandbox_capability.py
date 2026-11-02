@@ -130,8 +130,9 @@ CODING_GIT_SITE = PRODUCTION_ROOT / "providers" / "coding_git.py"
 CODING_PROCESS_SITES = {
     CODING_EXECUTION_SITE,
     CODING_SESSION_SITE,
-    CODING_CONTAINMENT_SITE,
     CODING_GIT_SITE,
+    # D-063: one general argv executor plus its independent deadline worker.
+    PRODUCTION_ROOT / "providers" / "program.py",
     # D-062: fixed local Particle commands and isolated firmware Git transport.
     # These sites do not extend canonical coding Git authority (D-029/D-033).
     PRODUCTION_ROOT / "providers" / "particle_local.py",
@@ -182,7 +183,7 @@ class SandboxCapabilityTest(unittest.TestCase):
             self.root / "workspaces",
             self.root / "runs.sqlite3",
             lambda: "call-1",
-            denied_read_paths=(REPOSITORY_ROOT,),
+            denied_read_paths=(),
             budget=SandboxBudget(20, 300),
         )
         if self.runtime is None:

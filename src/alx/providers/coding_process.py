@@ -1,9 +1,7 @@
-"""Allowlisted development commands inside one assigned coding worktree.
+"""Program execution and verification inside one assigned coding worktree.
 
-This is the one production site that starts a process for a coding job. It is
-not the Sandbox, not the Claude subscription transport, and not a generic
-shell. Commands are argv lists, never a shell string. Push, merge, deploy and
-review invocation are refused here even if a coding model asks for them.
+Coding verification executes structured argv as Friedl's user. D-063 removes
+the general-command allowlist; Core still owns scope and promotion permission.
 """
 
 from __future__ import annotations
@@ -641,48 +639,7 @@ def reset_cancellation(token: Any) -> None:
     _CURRENT.reset(token)
 
 
-_GIT_INSPECT = frozenset({"status", "diff", "log"})
-_GIT_FLAGS = {
-    # `-uall` names every untracked file rather than collapsing a new
-    # directory to one `dir/` entry. The coding job's changed-file set is
-    # derived from this status and is what D-029 stages, and D-029 takes
-    # concrete files only, so a collapsed directory entry would name something
-    # it must refuse.
-    "status": frozenset({"--porcelain", "--porcelain=v1", "-z", "-uall"}),
-    # `--check` makes `git diff` report whitespace errors and conflict markers
-    # instead of printing a patch. It writes nothing, so it belongs with the
-    # other read-only diff forms, and it is the one check every coding job runs
-    # whatever it changed.
-    "diff": frozenset({"--stat", "--name-only", "--cached", "--no-color", "--check"}),
-    "log": frozenset({"--oneline", "--no-color"}),
-}
 _PYTHON_NAMES = frozenset({"python", "python3"})
-# The repository's own law gates, named exactly. `python <path>` is otherwise
-# refused outright, because a script path is arbitrary code chosen by whoever
-# supplied the path; these two are permitted as literal argv forms with no
-# arguments at all, so the permission cannot be widened by appending a flag or
-# pointed at a different file by changing the spelling. They are read-only
-# checks that already run in CI.
-_GATE_SCRIPTS = frozenset({
-    "scripts/check_governance.py",
-    "scripts/check_architecture.py",
-})
-_PYTEST_FLAGS = frozenset({
-    "-q", "-v", "-x", "--tb=short", "--tb=line", "--tb=no",
-    # The one rootdir: tests/, so collection never touches the checkout root.
-    "--rootdir=tests",
-})
-_PYTEST_VALUE_FLAGS = frozenset({"-k"})
-_PYTEST_PLUGIN = "no:cacheprovider"
-# pytest-xdist's worker count: "auto" or a small number. It runs the same
-# tests in parallel processes (requirements.txt); it selects nothing.
-_PYTEST_WORKERS_FLAG = "-n"
-_PYTEST_MAX_WORKERS = 16
-# Matched as exact strings: str.isdigit() accepts characters such as "²" that
-# int() rejects, which raised instead of refusing (Greptile, PR #173).
-_PYTEST_WORKER_VALUES = frozenset(
-    {"auto", *(str(count) for count in range(1, _PYTEST_MAX_WORKERS + 1))}
-)
 
 
 def command_permitted(
@@ -690,91 +647,16 @@ def command_permitted(
     worktree: Path | None = None,
     blocked_paths: tuple[str, ...] = (),
 ) -> bool:
-    """Whether this exact argv is a permitted development command.
-
-    The check is the authority. A coding model cannot widen it, and a missing
-    check would let push, merge or a generic shell through.
-    """
-    if not argv or any(not isinstance(item, str) or not item for item in argv):
+    """Validate argv and explicit blocked targets; D-063 removes the allowlist."""
+    if not argv or any(not isinstance(item, str) or "\x00" in item for item in argv):
         return False
-    if any("\x00" in item for item in argv):
+    if not argv[0]:
         return False
-    # A path in argv[0] would run a worktree binary under a permitted name.
-    if argv[0] != Path(argv[0]).name:
-        return False
-    executable = argv[0].lower()
-    rest = tuple(argv[1:])
-    if executable == "git":
-        if not rest or rest[0] not in _GIT_INSPECT:
-            return False
-        allowed = _GIT_FLAGS[rest[0]]
-        # A pathspec after `--` narrows the diff to the files a job is about.
-        # Everything after it is a path and is held to the same worktree and
-        # blocked-path rules as a test target, so narrowing can never reach
-        # outside the assigned worktree or read a blocked file.
-        if rest[0] == "diff" and "--" in rest:
-            flags = rest[1:rest.index("--")]
-            paths = rest[rest.index("--") + 1:]
-            if not paths:
+    if blocked_paths:
+        for item in argv[1:]:
+            if not item.startswith("-") and not _path_in_worktree(item, worktree, blocked_paths):
                 return False
-            return all(item in allowed for item in flags) and all(
-                _path_in_worktree(item, worktree, blocked_paths) for item in paths
-            )
-        return all(item in allowed for item in rest[1:])
-    if executable in _PYTHON_NAMES:
-        if len(rest) >= 2 and rest[0] == "-m" and rest[1] in {"pytest", "unittest"}:
-            return _pytest_args_permitted(rest[2:], worktree, blocked_paths)
-        # Exactly `python scripts/check_governance.py`, with nothing after it.
-        # The gate must also be the worktree's own, not a path climbing out of
-        # it or one the job's blocked paths cover.
-        if len(rest) == 1 and rest[0] in _GATE_SCRIPTS:
-            return _path_in_worktree(rest[0], worktree, blocked_paths)
-        return False
-    if executable == "pytest":
-        return _pytest_args_permitted(rest, worktree, blocked_paths)
-    return False
-
-
-def _pytest_args_permitted(
-    args: tuple[str, ...],
-    worktree: Path | None,
-    blocked_paths: tuple[str, ...] = (),
-) -> bool:
-    expecting_value = False
-    expecting_plugin = False
-    expecting_workers = False
-    for item in args:
-        if expecting_workers:
-            if item not in _PYTEST_WORKER_VALUES:
-                return False
-            expecting_workers = False
-            continue
-        if expecting_plugin:
-            if item != _PYTEST_PLUGIN:
-                return False
-            expecting_plugin = False
-            continue
-        if expecting_value:
-            expecting_value = False
-            continue
-        if item == "-p":
-            # Only the cacheprovider disablement used by tests. Any other
-            # plugin would load executable code chosen by the coding model.
-            expecting_plugin = True
-            continue
-        if item in _PYTEST_VALUE_FLAGS:
-            expecting_value = True
-            continue
-        if item == _PYTEST_WORKERS_FLAG:
-            expecting_workers = True
-            continue
-        if item in _PYTEST_FLAGS:
-            continue
-        if item.startswith("-"):
-            return False
-        if not _path_in_worktree(item, worktree, blocked_paths):
-            return False
-    return not expecting_value and not expecting_plugin and not expecting_workers
+    return True
 
 
 def _path_in_worktree(
@@ -836,7 +718,7 @@ def run_permitted_command(
     blocked_paths: tuple[str, ...] = (),
     output_characters: int = MAX_COMMAND_OUTPUT_CHARACTERS,
 ) -> CodingCommandRecord:
-    """Run one allowlisted command with cwd bound to the worktree.
+    """Run one argv with cwd bound to the worktree (D-063).
 
     `output_characters` of 0 returns stdout unbounded, for the one caller that
     applies its own larger bound and needs the length before it is applied.
@@ -850,9 +732,7 @@ def run_permitted_command(
         raise CodingError("arguments_unusable")
     bound = list(argv)
     if bound[0].lower() in _PYTHON_NAMES:
-        # The allowlist names a Python interpreter, not a particular binary
-        # path. Use this runtime's interpreter so a host without `python` on
-        # PATH still runs the assigned tests.
+        # Use this runtime's interpreter when Python is named without a path.
         bound[0] = sys.executable
     try:
         completed = run_coding_subprocess(subprocess.run,  # noqa: S603 - argv, never shell
@@ -1050,7 +930,7 @@ def failed_tests_pass_alone(
         if (not _path_in_worktree(test_file, worktree, blocked_paths)
                 or not (worktree / test_file).is_file()):
             return False, "rerun_not_permitted", ()
-    argv = ["python", "-m", "pytest", "-q", "-p", _PYTEST_PLUGIN, *failed]
+    argv = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *failed]
     if not command_permitted(argv, worktree, blocked_paths):
         return False, "rerun_not_permitted", ()
     try:

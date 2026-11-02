@@ -1,16 +1,10 @@
+**Status: CLOSED — superseded by approved D-063, 2026-11-02.**
+
+Retained as history only. All pending phases and questions are closed; they grant no implementation authority. General access follows D-063.
+
 # Proposal — Self-repair: AL/X diagnoses and fixes herself against real services
 
-**Status:** The governing principle is approved as D-060 (§13b). The design here
-(broker, one work room, review gate) is still a PROPOSAL: not approved, not implemented,
-and needs Friedl's approval before any of it is built. AL/X's unpushed draft of a
-D-060 "trial run" on `feature/trial-run-capability` is superseded by this proposal and is
-to be dropped.
-**Authority:** Subordinate to the Laws of AL/X, `IDENTITY_AND_MEMORY.md` and
-`docs/LAW_ENFORCEMENT.md`.
-**Sources:** Friedl's requirements of 2026-10-21; independent design reviews of the same
-brief by Grok and by Codex; the usage-reader incident (#168, #169, #170). Vendor
-capabilities cited in §4 come from those reviews and are **not yet verified** against
-installed versions (see §15).
+**Historical status (superseded):** The following design was a proposal under D-060. D-063 closes it in full.
 
 ---
 

@@ -130,7 +130,7 @@ def _publish_live_run(path: str, values: dict[str, object]) -> bool:
         return False
     return True
 
-def _apply_limits(cpu_seconds: int, file_bytes: int, processes: int) -> None:
+def _apply_limits(cpu_seconds: int, file_bytes: int) -> None:
     """Bound the child, in a process where it is safe to do so.
 
     Applied here rather than through `preexec_fn` for the reason this file
@@ -143,7 +143,8 @@ def _apply_limits(cpu_seconds: int, file_bytes: int, processes: int) -> None:
     """
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
     resource.setrlimit(resource.RLIMIT_FSIZE, (file_bytes, file_bytes))
-    resource.setrlimit(resource.RLIMIT_NPROC, (processes, processes))
+    # D-063 allows git subprocesses. RLIMIT_NPROC counts every process of
+    # Friedl's user, so this old limit prevented git from starting at all.
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
@@ -231,7 +232,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stderr-fd", type=int, required=True)
     parser.add_argument("--cpu-seconds", type=int, required=True)
     parser.add_argument("--file-bytes", type=int, required=True)
-    parser.add_argument("--processes", type=int, required=True)
     parser.add_argument("--wall-seconds", type=float, required=True)
     parser.add_argument("--parent-fd", type=int, required=True)
     arguments = parser.parse_args(argv)
@@ -276,7 +276,6 @@ def main(argv: list[str] | None = None) -> int:
             preexec_fn=lambda: _apply_limits(
                 arguments.cpu_seconds,
                 arguments.file_bytes,
-                arguments.processes,
             ),
         )
     except OSError:
