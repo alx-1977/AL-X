@@ -38,11 +38,16 @@ def publish(path: Path, values: dict) -> None:
             os.link(temporary, path)
         except FileExistsError:
             pass
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def process_info(pid: int):
+def process_info(pid: int, *, require_stopped=False):
     """Kernel generation and parent PID; zombies have already stopped."""
     if sys.platform == "darwin":
         from alx.providers.darwin_process import DarwinBSDInfo
@@ -58,6 +63,8 @@ def process_info(pid: int):
             raise OSError("process identity changed during inspection")
         if info.pbi_status == 5:
             return None, 0
+        if require_stopped and info.pbi_status != 4:
+            raise BlockingIOError("process has not stopped")
         return [int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)], int(info.pbi_ppid)
     try:
         # comm can contain spaces and parentheses. Fields after its final ')'
@@ -65,6 +72,8 @@ def process_info(pid: int):
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
         if fields[0] == "Z":
             return None, 0
+        if require_stopped and fields[0] not in ("T", "t"):
+            raise BlockingIOError("process has not stopped")
         return [Path("/proc/sys/kernel/random/boot_id").read_text().strip(), fields[19]], int(fields[1])
     except (FileNotFoundError, ProcessLookupError):
         return None, 0
@@ -72,6 +81,14 @@ def process_info(pid: int):
 
 def process_identity(pid: int):
     return process_info(pid)[0]
+
+
+def process_stopped(pid: int) -> bool:
+    try:
+        process_info(pid, require_stopped=True)
+        return True
+    except BlockingIOError:
+        return False
 
 
 def tagged_processes(token: str, known: dict | None = None, *, deadline=None,
@@ -170,23 +187,46 @@ def tagged_processes(token: str, known: dict | None = None, *, deadline=None,
 def stop_program(token: str, known: dict, *, checkpoint=None) -> bool:
     """Bound one attempt; false means the durable run must remain pending."""
     deadline = time.monotonic() + RECOVERY_SECONDS
+    frozen = {}
     while True:
         if time.monotonic() >= deadline:
             return False
         try:
-            # Enforce the program deadline before doing a potentially slower
-            # census. A stuck child is signalled, never waited on here.
+            # Preserve ancestry until every discovered generation is frozen.
+            # SIGSTOP delivery is asynchronous: confirm it before the census
+            # that proves this tree cannot create any further children.
+            stable = True
             for pid, identity in known.items():
                 if time.monotonic() >= deadline:
                     return False
                 if process_identity(pid) == identity:
                     try:
-                        os.kill(pid, signal.SIGKILL)
+                        os.kill(pid, signal.SIGSTOP)
                     except ProcessLookupError:
                         pass
+                    if process_stopped(pid) and process_identity(pid) == identity:
+                        frozen[pid] = identity
+                    elif process_identity(pid) == identity:
+                        stable = False
             known.update(tagged_processes(token, known, deadline=deadline))
             if checkpoint is not None:
                 checkpoint(known)
+            # A newly found descendant must itself be frozen and rescanned
+            # before any parent is killed. Incomplete attempts retain ancestry.
+            for pid, identity in known.items():
+                if time.monotonic() >= deadline:
+                    return False
+                if process_identity(pid) == identity and frozen.get(pid) != identity:
+                    stable = False
+            if stable:
+                for pid, identity in known.items():
+                    if time.monotonic() >= deadline:
+                        return False
+                    if process_identity(pid) == identity:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
             live = {}
             for pid, identity in known.items():
                 if time.monotonic() >= deadline:
@@ -258,7 +298,14 @@ def reconcile(root: Path) -> None:
         known = load_children(root)
         if not stop_program(root.name, known, checkpoint=lambda values: save_children(root, values)):
             return
-        publish(root / "result.json", result_values(root, "interrupted", error="program_worker_interrupted"))
+        pending = root / "pending_result.json"
+        values = (json.loads(pending.read_text()) if pending.exists() else
+                  result_values(root, "interrupted", error="program_worker_interrupted"))
+        # Descendants may have written output while cleanup was pending.
+        for name in ("stdout", "stderr"):
+            path = root / name
+            values[name] = summary(path) if path.exists() else ""
+        publish(root / "result.json", values)
 
 
 def summary(path: Path, bound: int = 4096) -> str:
@@ -335,6 +382,8 @@ class ProgramRunner:
             return {"run_id": run_id, "status": "running", "full_output_path": str(run_root)}
         result = run_root / "result.json"
         if not result.exists():
+            if (run_root / "pending_result.json").exists():
+                return {"run_id": run_id, "status": "running", "full_output_path": str(run_root)}
             raise OSError("program worker failed: " + summary(run_root / "worker.log"))
         (run_root / "handled").touch()
         return json.loads(result.read_text(encoding="utf-8"))
@@ -384,6 +433,16 @@ def work(root: Path) -> None:
             error = str(failure)
         finally:
             if process is not None:
+                code = process.poll()
+                if code is not None:
+                    exit_code = code
+            duration = time.monotonic() - started
+            # These are facts, not completion: result.json remains absent until
+            # cleanup is confirmed, including after worker death.
+            publish(root / "pending_result.json", result_values(
+                root, "completed", exit_code, duration, timed_out, error,
+            ))
+            if process is not None:
                 # Cleanup failures must not be turned into a finished run.
                 # The lease is released on worker exit; discovery retries here.
                 if not stop_program(root.name, known, checkpoint=lambda values: save_children(root, values)):
@@ -394,7 +453,7 @@ def work(root: Path) -> None:
                     return
                 exit_code = process.returncode
     publish(root / "result.json", result_values(
-        root, "completed", exit_code, time.monotonic() - started, timed_out, error,
+        root, "completed", exit_code, duration, timed_out, error,
     ))
 
 
