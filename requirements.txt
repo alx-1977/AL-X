@@ -5,3 +5,4 @@ pypdf>=6,<7
 webrtcvad-wheels>=2.0.14,<3
 websockets>=16,<17
 pytest-xdist>=3.6,<4
+shapely>=2.1,<3

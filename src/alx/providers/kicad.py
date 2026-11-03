@@ -26,7 +26,8 @@ from alx.providers.kicad_circuit import (
 )
 from alx.providers.kicad_copper import (
     GeometryJudgement, stackup, extract, geometry, fasthenry_input,
-    fastcap_files, parse_impedance, parse_capacitance, wheeler,
+    copper_solids, electrostatic_files, winding_model, winding_capacitance,
+    parse_impedance, parse_capacitance, wheeler,
 )
 
 logger = logging.getLogger(__name__)
@@ -381,11 +382,17 @@ class KiCadProvider:
             raise KiCadError('arguments_unusable')
         result = {'status': 'needs_judgement', 'reasons': [], 'geometry': [], 'stackup': [],
                   'meshes': [], 'ports': [], 'coupling': [], 'convergence': {}, 'formula': [],
+                  'capacitance_nets': [],
                   'conventions': {'units': 'SI', 'frequency_hz': frequency,
                       'current': 'one_ampere_start_to_end_per_port; other_ports_open',
                       'conductivity_s_per_m': 5.8e7,
-                      'fastcap': 'diagnostic_equipotential_conductors_in_vacuum_reference_infinity',
-                      'self_capacitance': 'unresolved_requires_distributed_voltage_and_conformal_dielectric_union',
+                      'fastcap': 'equipotential_per_net; saved_stackup_dielectric_interfaces; reference_infinity',
+                      'copper_layer_gaps': 'air; no_filler_specified_by_stackup',
+                      'barrels': 'zero_thickness_conductor_on_nominal_bore; plating_thickness_not_recorded',
+                      'geometry_grid_m': 1e-12,
+                      'fasthenry': 'track_cross_sections; pad_spreading_impedance_not_modelled',
+                      'self_capacitance': 'surface_patch_energy; linear_arclength_voltage; isolated_floating_winding',
+                      'self_resonance': '1/(2*pi*sqrt(L*C)); quasistatic_single_mode_estimate',
                       'convergence_margin': arguments['convergence_margin'],
                       'formula_margin': arguments['formula_margin']}}
         with self._analysis_copy(arguments['work_copy_id']) as (stage, meta):
@@ -393,18 +400,32 @@ class KiCadProvider:
             try:
                 layers = stackup(tree)
                 result['stackup'] = layers
-                paths = extract(tree, ports, densities[0], layers)
+                try:
+                    paths = extract(tree, ports, densities[0], layers)
+                except GeometryJudgement as error:
+                    if str(error) != 'via_barrel_plating_not_recorded':
+                        raise
+                    paths = []
+                    result['reasons'].append(str(error))
+                    result['ports'] = [{'id': p['id'], 'inductance_h': None, 'resistance_ohm': None,
+                                        'self_capacitance_f': None, 'self_resonant_frequency_hz': None}
+                                       for p in ports]
                 result['geometry'] = [geometry(path, layers) for path in paths]
                 for density in densities:
-                    paths = extract(tree, ports, density, layers)
+                    if paths:
+                        paths = extract(tree, ports, density, layers)
                     run = stage / f'mesh-{density}'
                     run.mkdir()
-                    deck = fasthenry_input(paths, layers, frequency, density)
-                    (run / 'copper.inp').write_text(deck)
-                    henry_log = self._engine('fasthenry', ['copper.inp'], run)
-                    for name, source in fastcap_files(paths, layers, density).items():
+                    deck, henry_log = '', ''
+                    if paths:
+                        deck = fasthenry_input(paths, layers, frequency, density)
+                        (run / 'copper.inp').write_text(deck)
+                        henry_log = self._engine('fasthenry', ['copper.inp'], run)
+                    solids, outline, nets = copper_solids(tree, paths, layers, density)
+                    result['capacitance_nets'] = nets
+                    for name, source in electrostatic_files(solids, outline, nets, layers, density).items():
                         (run / name).write_text(source)
-                    cap_log = self._engine('fastcap', ['-l', 'copper.lst'], run)
+                    cap_log = self._engine('fastcap', ['-lcopper.lst'], run)
                     mesh = {'density': density, 'fasthenry_log': henry_log,
                             'fastcap_log': cap_log, 'fasthenry_input': deck,
                             'geometry': [geometry(p, layers) for p in paths]}
@@ -413,19 +434,44 @@ class KiCadProvider:
                             'not converg', 'failed to converg', 'no convergence', 'iteration limit')):
                         result['reasons'].append('solver_nonconvergence')
                         return result
+                    capacitance = parse_capacitance(cap_log, len(nets))
+                    mesh['capacitance_f'] = capacitance
+                    mesh['self_capacitance_f'] = []
+                    if not paths:
+                        continue
+                    for path in paths:
+                        try:
+                            patched, identities, voltages = winding_model(path, solids, density)
+                            winding_run = run / ('winding-'+str(len(mesh['self_capacitance_f'])))
+                            winding_run.mkdir()
+                            for name, source in electrostatic_files(
+                                    patched, outline, identities, layers, density, surface_patches=True).items():
+                                (winding_run / name).write_text(source)
+                            log = self._engine('fastcap', ['-lcopper.lst'], winding_run)
+                            mesh.setdefault('winding_logs', []).append(log)
+                            if any(marker in log.lower() for marker in (
+                                    'not converg', 'failed to converg', 'no convergence', 'iteration limit')):
+                                raise GeometryJudgement('winding_solver_nonconvergence')
+                            c = winding_capacitance(parse_capacitance(log, len(identities)), voltages)
+                            mesh['self_capacitance_f'].append(c)
+                        except GeometryJudgement as error:
+                            mesh['self_capacitance_f'].append(None)
+                            reason = str(error)+':'+path['id']
+                            if reason not in result['reasons']:
+                                result['reasons'].append(reason)
                     matrix = run / 'Zc.mat'
                     if not matrix.is_file():
                         raise KiCadError('invalid_report', {'engine': 'fasthenry', 'log': henry_log})
                     impedance = parse_impedance(matrix.read_text(), len(ports), frequency)
-                    capacitance = parse_capacitance(cap_log, len(ports))
                     omega = 2*math.pi*frequency
                     mesh.update(resistance_ohm=[[z.real for z in row] for row in impedance],
-                                inductance_h=[[z.imag/omega for z in row] for row in impedance],
-                                vacuum_capacitance_f=capacitance)
+                                inductance_h=[[z.imag/omega for z in row] for row in impedance])
                     if any(impedance[i][i].real <= 0 or impedance[i][i].imag <= 0 for i in range(len(ports))):
                         raise KiCadError('invalid_report', {'reason': 'nonpassive_copper_matrix'})
                 coarse, fine = result['meshes']
-                for quantity in ('resistance_ohm', 'inductance_h', 'vacuum_capacitance_f'):
+                for quantity in ('resistance_ohm', 'inductance_h', 'capacitance_f'):
+                    if quantity not in fine:
+                        continue
                     errors = [[abs(a-b)/max(abs(a), abs(b), 1e-30) for a, b in zip(left, right)]
                               for left, right in zip(coarse[quantity], fine[quantity])]
                     result['convergence'][quantity] = {'relative_difference': errors,
@@ -433,11 +479,21 @@ class KiCadProvider:
                     if max(map(max, errors)) > arguments['convergence_margin']:
                         result['reasons'].append('mesh_difference:' + quantity)
                 for i, port in enumerate(ports):
+                    if not paths:
+                        break
                     inductance, resistance = fine['inductance_h'][i][i], fine['resistance_ohm'][i][i]
+                    c = fine['self_capacitance_f'][i]
+                    coarse_c = coarse['self_capacitance_f'][i]
+                    if c is not None and coarse_c is not None:
+                        error = abs(c-coarse_c)/max(c, coarse_c)
+                        result['convergence'].setdefault('self_capacitance_f', {})[port['id']] = error
+                        if error > arguments['convergence_margin']:
+                            result['reasons'].append('mesh_difference:self_capacitance_f:'+port['id'])
                     result['ports'].append({'id': port['id'], 'inductance_h': inductance,
                         'resistance_ohm': resistance, 'q': 2*math.pi*frequency*inductance/resistance,
-                        'self_capacitance_f': None, 'self_resonant_frequency_hz': None,
-                        'vacuum_capacitance_to_infinity_f': fine['vacuum_capacitance_f'][i][i]})
+                        'self_capacitance_f': c,
+                        'self_resonant_frequency_hz': 1/(2*math.pi*math.sqrt(inductance*c)) if c else None,
+                        'net_capacitance_to_infinity_f': fine['capacitance_f'][nets.index(paths[i]['net'])][nets.index(paths[i]['net'])]})
                     try:
                         formula = wheeler(paths[i])
                         difference = abs(inductance-formula['inductance_h'])/formula['inductance_h']
@@ -452,7 +508,8 @@ class KiCadProvider:
                         if abs(coupling) > 1+1e-6:
                             raise KiCadError('invalid_report', {'reason': 'nonpassive_coupling'})
                         result['coupling'].append({'ports': [ports[j]['id'], port['id']], 'coefficient': coupling})
-                result['reasons'].append('distributed_self_capacitance_and_dielectric_mesh_unresolved')
+                if not result['reasons']:
+                    result['status'] = 'facts'
             except GeometryJudgement as error:
                 result['reasons'].append(str(error))
             return result

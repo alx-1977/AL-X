@@ -92,10 +92,10 @@ def segment_distance(a, b, c, d):
 
 
 def extract(tree, ports, density, layers):
-    """Resolve unique nonbranching paths; retain physical facts for judgement.
+    """Resolve nonbranching track paths for the FastHenry current basis.
 
-    Unmodelled zones, barrel plating and pad unions are explicitly returned to
-    Core. They cannot be replaced with a guessed equivalent wire or thickness.
+    Pad spreading impedance is outside that basis. The independent electrostatic
+    mesh includes pad unions; missing barrel plating prevents a via current basis.
     """
     copper = {entry['name']: entry for entry in layers if entry['copper']}
     edges, graph = [], defaultdict(list)
@@ -106,7 +106,8 @@ def extract(tree, ports, density, layers):
         if a == b or layer not in copper or width <= 0:
             raise GeometryJudgement('invalid_copper_segment')
         index = len(edges)
-        edges.append({'a': a, 'b': b, 'width_mm': width, 'layer': layer, 'kind': kind})
+        edges.append({'a': a, 'b': b, 'width_mm': width, 'layer': layer, 'kind': kind,
+                      'net': net_name(node)})
         graph[a].append(index)
         graph[b].append(index)
 
@@ -131,7 +132,7 @@ def extract(tree, ports, density, layers):
             raise GeometryJudgement('footprint_reference_ambiguous')
         at = values(footprint, 'at')
         origin = tuple(float(v) for v in at[:2])
-        angle = math.radians(float(at[2]) if len(at) > 2 else 0)
+        angle = -math.radians(float(at[2]) if len(at) > 2 else 0)
         for pad in footprint.named('pad'):
             x, y = xy(pad, 'at')
             position = (origin[0]+x*math.cos(angle)-y*math.sin(angle),
@@ -139,7 +140,7 @@ def extract(tree, ports, density, layers):
             pads.append({'reference': next(iter(ref)), 'pad': pad.children[1],
                          'position_mm': position, 'size_mm': xy(pad, 'size'),
                          'layers': values(pad, 'layers'), 'type': pad.children[2],
-                         'shape': pad.children[3]})
+                         'shape': pad.children[3], 'net': net_name(pad)})
 
     def resolve(endpoint):
         if set(endpoint) == {'reference', 'pad'}:
@@ -147,12 +148,11 @@ def extract(tree, ports, density, layers):
             if len(matches) != 1:
                 raise GeometryJudgement('port_pad_ambiguous')
             pad = matches[0]
-            candidates = [p for p in graph if p[:2] == key(pad['position_mm']) and p[2] in pad['layers']]
+            candidates = [p for p in graph if p[:2] == key(pad['position_mm']) and
+                          (p[2] in pad['layers'] or '*.Cu' in pad['layers'])]
             if len(candidates) != 1:
                 raise GeometryJudgement('port_pad_attachment_ambiguous')
-            # Pad area must enter both field models. The conservative supported
-            # case is an inline rectangular pad equal to the track cross-section.
-            raise GeometryJudgement('pad_union_field_mesh_not_supported')
+            return candidates[0]
         if set(endpoint) != {'x_mm', 'y_mm', 'layer'}:
             raise AnalysisError('arguments_unusable')
         point = (*key((endpoint['x_mm'], endpoint['y_mm'])), endpoint['layer'])
@@ -205,13 +205,10 @@ def extract(tree, ports, density, layers):
                     # near their common join. Their union needs the same exact
                     # solid mesh as touching turns; don't model distinct wires.
                     raise GeometryJudgement('copper_self_contact_union_unresolved')
-            for pad in pads:
-                pad_layers = pad['layers']
-                if edge['layer'] in pad_layers or '*.Cu' in pad_layers:
-                    if distance_to_segment(pad['position_mm'], edge['a'], edge['b']) <= (
-                            math.hypot(*pad['size_mm'])+edge['width_mm'])/2:
-                        raise GeometryJudgement('connected_pad_union_field_mesh_not_supported')
-        paths.append({'id': port['id'], 'edges': path})
+        nets = {e['net'] for e in path}
+        if len(nets) != 1:
+            raise GeometryJudgement('port_crosses_nets')
+        paths.append({'id': port['id'], 'net': next(iter(nets)), 'edges': path})
     used = set()
     for path in paths:
         identities = {(e['a'], e['b']) for e in path['edges']}
@@ -285,14 +282,6 @@ def quad_panels(corners, density):
                    point((i+1)/density, (j+1)/density), point(i/density, (j+1)/density)]
 
 
-def panel_source(faces, density):
-    lines = ['0 ALX metre units']
-    for face in faces:
-        for panel in quad_panels(face, density):
-            lines.append('Q 1 ' + ' '.join(format(v, '.15g') for point in panel for v in point))
-    return '\n'.join(lines) + '\n'
-
-
 def ribbon_faces(path, layers):
     """Closed mitered ribbon; joins have no overlapping internal end panels."""
     lookup = {e['name']: e for e in layers}
@@ -330,21 +319,364 @@ def ribbon_faces(path, layers):
     return faces
 
 
-def fastcap_files(paths, layers, density):
-    """Vacuum capacitance of equipotential port conductors.
+def net_name(node):
+    entries = node.named('net')
+    return str(entries[0].children[1]) if entries else '0'
 
-    FastCap 2's dielectric-interface construction needs a conformal surface
-    union with the board outline and pads. Never substitute an averaged er for
-    the saved stack-up. Until that union is available the caller must explicitly
-    mark this result as diagnostic, not board self-capacitance.
+
+def polygons(shape):
+    if shape.is_empty:
+        return []
+    if shape.geom_type == 'Polygon':
+        return [shape]
+    if shape.geom_type not in ('MultiPolygon', 'GeometryCollection'):
+        return []
+    return [p for part in shape.geoms for p in polygons(part)]
+
+
+def copper_solids(tree, paths, layers, density):
+    """Union copper in metre coordinates, including pads and via annuli.
+
+    Electrostatics uses the barrel envelope. FastHenry still refuses vias
+    without recorded plating. Unassigned net 0 is allowed only for a single
+    synthetic port; it is not treated as an electrical connection in a design.
     """
+    from shapely import affinity, set_precision
+    from shapely.geometry import Point, LineString, box
+    from shapely.ops import unary_union, polygonize
+    lookup = {e['name']: e for e in layers if e['copper']}
+    solids = []
+
+    def add(net, shape, names):
+        shape = set_precision(shape, 1e-12)
+        for name in names:
+            if name in lookup:
+                layer = lookup[name]
+                solids.append((net, shape, layer['z_m']-layer['thickness_m']/2,
+                               layer['z_m']+layer['thickness_m']/2))
+
+    for node in tree.named('segment') + tree.named('arc'):
+        points = [xy(node, 'start'), xy(node, 'end')] if node.name == 'segment' else arc_points(node, density)
+        shape = LineString([(x*.001, y*.001) for x, y in points]).buffer(
+            float(values(node, 'width')[0])*.0005, quad_segs=2*density)
+        add(net_name(node), shape, values(node, 'layer'))
+    for footprint in tree.named('footprint'):
+        at = values(footprint, 'at')
+        ox, oy = (float(v)*.001 for v in at[:2])
+        rotation = float(at[2]) if len(at) > 2 else 0.
+        for pad in footprint.named('pad'):
+            if pad.children[2] == 'np_thru_hole':
+                raise GeometryJudgement('nonplated_hole_dielectric_mesh_unresolved')
+            sx, sy = (v*.001 for v in xy(pad, 'size'))
+            kind = pad.children[3]
+            if kind == 'rect':
+                shape = box(-sx/2, -sy/2, sx/2, sy/2)
+            elif kind in ('circle', 'oval', 'roundrect'):
+                radius = min(sx, sy)/2
+                if kind == 'circle' and not math.isclose(sx, sy):
+                    raise GeometryJudgement('noncircular_circle_pad')
+                if kind == 'roundrect':
+                    radius = min(sx, sy)*float(values(pad, 'roundrect_rratio')[0])
+                if radius <= 0:
+                    raise GeometryJudgement('pad_radius_unusable')
+                if kind in ('circle', 'oval'):
+                    shape = (LineString([(-sx/2+radius, -sy/2+radius),
+                                         (sx/2-radius, sy/2-radius)]) if sx != sy else Point(0, 0))
+                else:
+                    shape = box(-sx/2+radius, -sy/2+radius, sx/2-radius, sy/2-radius)
+                shape = shape.buffer(radius, quad_segs=2*density)
+            else:
+                raise GeometryJudgement('pad_shape_mesh_unresolved:'+kind)
+            pat = values(pad, 'at')
+            px, py = (float(v)*.001 for v in pat[:2])
+            # KiCad saves absolute pad orientation, local pad position.
+            angle = float(pat[2]) if len(pat) > 2 else rotation
+            shape = affinity.rotate(shape, -angle, origin=(0, 0))
+            theta = -math.radians(rotation)
+            shape = affinity.translate(shape, ox+px*math.cos(theta)-py*math.sin(theta),
+                                       oy+px*math.sin(theta)+py*math.cos(theta))
+            names = values(pad, 'layers')
+            if '*.Cu' in names:
+                names = list(lookup)
+            if pad.children[2] == 'thru_hole':
+                drill = values(pad, 'drill')
+                if not drill or not isinstance(drill[0], str):
+                    raise GeometryJudgement('pad_barrel_geometry_unresolved')
+                try:
+                    radius = positive(float(drill[0]))*.0005
+                except (ValueError, TypeError):
+                    raise GeometryJudgement('pad_slotted_drill_mesh_unresolved') from None
+                offset = pad.one('drill').named('offset')
+                if offset:
+                    raise GeometryJudgement('pad_offset_drill_mesh_unresolved')
+                centre = (ox+px*math.cos(theta)-py*math.sin(theta),
+                          oy+px*math.sin(theta)+py*math.cos(theta))
+                hole = set_precision(Point(*centre).buffer(radius, quad_segs=2*density), 1e-12)
+                if not shape.covers(hole) or not names or any(n not in lookup for n in names):
+                    raise GeometryJudgement('pad_drill_or_span_unusable')
+                shape = shape.difference(hole)
+                span = (min(lookup[n]['z_m']-lookup[n]['thickness_m']/2 for n in names),
+                        max(lookup[n]['z_m']+lookup[n]['thickness_m']/2 for n in names))
+                solids.append(('@barrel:'+net_name(pad), hole, *span))
+            add(net_name(pad), shape, names)
+    for via in tree.named('via'):
+        names = values(via, 'layers')
+        if len(names) != 2 or any(n not in lookup for n in names):
+            raise GeometryJudgement('via_span_unresolved')
+        top, bottom = sorted((lookup[n] for n in names), key=lambda e: e['z_m'])
+        centre = Point(*(v*.001 for v in xy(via, 'at')))
+        radius = float(values(via, 'size')[0])*.0005
+        drill = float(values(via, 'drill')[0])*.0005
+        if not 0 < drill < radius:
+            raise GeometryJudgement('via_drill_unusable')
+        hole = set_precision(centre.buffer(drill, quad_segs=2*density), 1e-12)
+        shape = centre.buffer(radius, quad_segs=2*density).difference(hole)
+        span = (top['z_m']-top['thickness_m']/2, bottom['z_m']+bottom['thickness_m']/2)
+        names_in_span = [n for n, e in lookup.items() if span[0] < e['z_m'] < span[1]]
+        add(net_name(via), shape, names_in_span)
+        # Zero-thickness barrel on the nominal bore wall: no invented plating
+        # thickness, and no extruded pad-diameter cylinder through the substrate.
+        solids.append(('@barrel:'+net_name(via), hole, *span))
+    if tree.named('zone'):
+        raise GeometryJudgement('zone_geometry_requires_judgement')
+    outlines = []
+    for node in tree.named('gr_rect'):
+        if values(node, 'layer')[0] == 'Edge.Cuts':
+            a, b = xy(node, 'start'), xy(node, 'end')
+            outlines.append(box(min(a[0], b[0])*.001, min(a[1], b[1])*.001,
+                                max(a[0], b[0])*.001, max(a[1], b[1])*.001))
+    lines = []
+    for node in tree.named('gr_line') + tree.named('gr_arc'):
+        if values(node, 'layer')[0] == 'Edge.Cuts':
+            pts = [xy(node, 'start'), xy(node, 'end')] if node.name == 'gr_line' else arc_points(node, density)
+            lines.append(LineString([(x*.001, y*.001) for x, y in pts]))
+    if lines:
+        outlines.extend(polygonize(unary_union(lines)))
+    if len(outlines) != 1 or not outlines[0].is_valid:
+        raise GeometryJudgement('board_outline_unresolved')
+    outline = set_precision(outlines[0], 1e-12)
+    if any(not outline.covers(s) for _, s, _, _ in solids):
+        raise GeometryJudgement('copper_outside_board_outline')
+    nets = list(dict.fromkeys(net for net, _, _, _ in solids if not net.startswith('@barrel:')))
+    if '0' in nets and (len(paths) != 1 or paths[0]['net'] != '0'):
+        raise GeometryJudgement('unassigned_copper_net_ambiguous')
+    return solids, outline, nets
+
+
+def planar_panels(shape, z, density):
+    """Triangulate the exact polygon union, including holes; refine triangles."""
+    from shapely import constrained_delaunay_triangles
+    for polygon in polygons(shape):
+        for triangle in constrained_delaunay_triangles(polygon).geoms:
+            a, b, c = [(x, y, z) for x, y in list(triangle.exterior.coords)[:3]]
+
+            def point(i, j):
+                return tuple(a[k]+(b[k]-a[k])*i/density+(c[k]-a[k])*j/density for k in range(3))
+
+            for i in range(density):
+                for j in range(density-i):
+                    yield [point(i, j), point(i+1, j), point(i, j+1)]
+                    if i+j+1 < density:
+                        yield [point(i+1, j), point(i+1, j+1), point(i, j+1)]
+
+
+def surface_source(panels):
+    return '0 ALX metre units\n' + ''.join(
+        ('T' if len(panel) == 3 else 'Q')+' 1 '+' '.join(format(v, '.15g') for p in panel for v in p)+'\n'
+        for panel in panels)
+
+
+def electrostatic_files(solids, outline, nets, layers, density, surface_patches=False):
+    """Conformal extruded interfaces with one conductor per identity.
+
+    Slabs are partitioned before meshing. Internal copper faces disappear;
+    copper/dielectric faces occur as C panels, never duplicated as D panels.
+    Copper-layer gaps are air (the stack-up specifies no filler there).
+    """
+    from shapely.geometry import Polygon, LineString
+    from shapely import set_precision
+    from shapely.ops import unary_union
+    empty = Polygon()
+    boundaries = sorted(set([e['z_m']+sign*e['thickness_m']/2 for e in layers for sign in (-1, 1)] +
+                            [z for _, _, lo, hi in solids for z in (lo, hi)]))
+    zs = []
+    for z in boundaries:
+        if not zs or z-zs[-1] > 1e-12:
+            zs.append(z)
+    slabs = []
+    for lo, hi in zip(zs, zs[1:]):
+        mid = (lo+hi)/2
+        material = next((e for e in layers if abs(mid-e['z_m']) < e['thickness_m']/2), None)
+        er = material['epsilon_r'] if material else 1.
+        holes = unary_union([s for n, s, a, b in solids if n.startswith('@barrel:') and a < mid < b])
+        # Drilling removes track copper too, including tracks ending at the
+        # centre of a via/pad. Subtract after the per-net union, not before it.
+        copper = {net: unary_union([s for n, s, a, b in solids if n == net and a < mid < b]).difference(holes)
+                  for net in nets}
+        for i, net in enumerate(nets):
+            if any(copper[net].intersection(copper[n]).area > 1e-20 for n in nets[:i]):
+                raise GeometryJudgement('different_nets_copper_overlap')
+        dielectric = outline.difference(unary_union(list(copper.values())))
+        materials = {er: dielectric.difference(holes)}
+        materials[1.] = materials.get(1., empty).union(holes)
+        slabs.append((lo, hi, er, copper, materials, holes))
     files, listing = {}, []
-    for index, path in enumerate(paths):
-        name = f'conductor{index}.qui'
-        files[name] = panel_source(ribbon_faces(path, layers), density)
-        listing.append(f'C {name} 1.0 0 0 0')
-    files['copper.lst'] = '\n'.join(listing) + '\n'
+    conductors = {n: defaultdict(list) for n in nets}
+    barrels = {n: [] for n in nets}
+
+    def interface(shape, z, outside, inside):
+        if shape.is_empty or outside == inside:
+            return
+        name = f'dielectric{len(files)}.qui'
+        files[name] = surface_source(planar_panels(shape, z, density))
+        listing.append(f'D {name} {outside:.15g} {inside:.15g} 0 0 0 0 0 {z+1:.15g}')
+
+    for index, (lo, hi, er, copper, materials, holes) in enumerate(slabs):
+        exterior = unary_union(list(copper.values())).boundary
+        for net, shape in copper.items():
+            for poly in polygons(shape):
+                for ring in [poly.exterior, *poly.interiors]:
+                    for a, b in zip(ring.coords, list(ring.coords)[1:]):
+                        line = set_precision(LineString([a, b]), 1e-12)
+                        if surface_patches:
+                            line = line.intersection(exterior)
+                        parts = [line] if line.geom_type == 'LineString' else list(line.geoms)
+                        for part in parts:
+                            for u, v in zip(part.coords, list(part.coords)[1:]):
+                                face = [(u[0], u[1], lo), (v[0], v[1], lo),
+                                        (v[0], v[1], hi), (u[0], u[1], hi)]
+                                adjacent_er = 1. if not holes.is_empty and holes.boundary.covers(part) else er
+                                conductors[net][adjacent_er].extend(quad_panels(face, density))
+            for side, z in ((-1, lo), (1, hi)):
+                neighbour = index+side
+                other = slabs[neighbour] if 0 <= neighbour < len(slabs) else None
+                other_copper = unary_union(list(other[3].values())) if other else empty
+                exposed = shape.difference(other_copper)
+                if other:
+                    for adjacent_er, material_shape in other[4].items():
+                        contact = exposed.intersection(material_shape)
+                        conductors[net][adjacent_er].extend(planar_panels(contact, z, density))
+                        exposed = exposed.difference(material_shape)
+                conductors[net][1.].extend(planar_panels(exposed, z, density))
+        above = slabs[index+1] if index+1 < len(slabs) else None
+        for inside, region in materials.items():
+            if above:
+                for outside, other_region in above[4].items():
+                    interface(region.intersection(other_region), hi, outside, inside)
+            else:
+                interface(region, hi, 1., inside)
+        if index == 0:
+            for outside, region in materials.items():
+                interface(region, lo, outside, 1.)
+        for marker, hole, a, b in solids:
+            if not marker.startswith('@barrel:') or not a < (lo+hi)/2 < b:
+                continue
+            net = marker.removeprefix('@barrel:')
+            for poly in polygons(hole):
+                for u, v in zip(poly.exterior.coords, list(poly.exterior.coords)[1:]):
+                    if not copper[net].is_empty and copper[net].boundary.covers(LineString([u, v])):
+                        continue  # already an inner C face of the annular pad
+                    face = [(u[0], u[1], lo), (v[0], v[1], lo), (v[0], v[1], hi), (u[0], u[1], hi)]
+                    barrels[net].append((er, list(quad_panels(face, density)), hole.centroid.coords[0], (lo+hi)/2))
+        if er != 1.:
+            for poly in polygons(outline):
+                for a, b in zip(poly.exterior.coords, list(poly.exterior.coords)[1:]):
+                    dx, dy = b[0]-a[0], b[1]-a[1]
+                    middle = ((a[0]+b[0])/2, (a[1]+b[1])/2)
+                    sign = 1 if poly.exterior.is_ccw else -1
+                    ref = (middle[0]+sign*dy, middle[1]-sign*dx)
+                    name = f'dielectric{len(files)}.qui'
+                    face = [(a[0], a[1], lo), (b[0], b[1], lo), (b[0], b[1], hi), (a[0], a[1], hi)]
+                    files[name] = surface_source(quad_panels(face, density))
+                    listing.append(f'D {name} 1 {er:.15g} 0 0 0 {ref[0]:.15g} {ref[1]:.15g} {(lo+hi)/2:.15g}')
+    for index, net in enumerate(nets):
+        groups = [(er, panels) for er, panels in conductors[net].items() if panels]
+        for j, (er, panels) in enumerate(groups):
+            name = f'conductor{index}_{j}.qui'
+            files[name] = surface_source(panels)
+            listing.append(f'C {name} {er:.15g} 0 0 0'+(' +' if j+1 < len(groups) or barrels[net] else ''))
+        for j, (er, panels, ref, z) in enumerate(barrels[net]):
+            name = f'barrel{index}_{j}.qui'
+            files[name] = surface_source(panels)
+            if er == 1.:
+                listing.append(f'C {name} 1 0 0 0'+(' +' if j+1 < len(barrels[net]) else ''))
+            else:
+                listing.append(f'B {name} {er:.15g} 1 0 0 0 {ref[0]:.15g} {ref[1]:.15g} {z:.15g} '+
+                               ('-+' if j+1 < len(barrels[net]) else '-'))
+    files['copper.lst'] = '\n'.join(listing)+'\n'
     return files
+
+
+def fastcap_files(paths, layers, density, tree):
+    solids, outline, nets = copper_solids(tree, paths, layers, density)
+    return electrostatic_files(solids, outline, nets, layers, density), nets
+
+
+def winding_model(path, solids, density):
+    """Piecewise-constant surface approximation to V(s)=s/length.
+
+    This voltage basis represents an isolated winding with a floating common
+    mode. No artificial slit or internal end face is added at patch boundaries.
+    Both the surface mesh and voltage basis are refined in the second solve.
+    Multiple nets need electrical boundary conditions supplied by Core, so are
+    deliberately unavailable rather than silently grounded.
+    """
+    from shapely.geometry import Polygon
+    from shapely import set_precision
+    from shapely.ops import unary_union
+    if any(n.startswith('@barrel:') for n, _, _, _ in solids):
+        raise GeometryJudgement('winding_multilayer_voltage_basis_unresolved')
+    if {n for n, _, _, _ in solids} != {path['net']}:
+        raise GeometryJudgement('winding_other_net_boundary_conditions_unresolved')
+    if len({(lo, hi) for _, _, lo, hi in solids}) != 1:
+        raise GeometryJudgement('winding_multilayer_voltage_basis_unresolved')
+    copper = unary_union([s for _, s, _, _ in solids])
+    remaining = copper
+    edges = path['edges']
+    faces = ribbon_faces(path, [{'name': edges[0]['layer'], 'z_m': 0., 'thickness_m': 1.}])
+    total = sum(math.dist(e['a'][:2], e['b'][:2]) for e in edges)
+    shapes, voltages, traversed = [], [], 0.
+    for i, edge in enumerate(edges):
+        a, b, c, d = [p[:2] for p in faces[2+4*i]]
+        length = math.dist(edge['a'][:2], edge['b'][:2])
+        for j in range(density):
+            def lerp(p, q, t):
+                return tuple(x+(y-x)*t for x, y in zip(p, q))
+            shape = set_precision(Polygon([lerp(a, d, j/density), lerp(b, c, j/density),
+                                           lerp(b, c, (j+1)/density), lerp(a, d, (j+1)/density)]), 1e-12)
+            shape = shape.intersection(remaining)
+            if shape.is_empty:
+                raise GeometryJudgement('winding_voltage_patch_empty')
+            shapes.append(shape)
+            remaining = remaining.difference(shape)
+            voltages.append((traversed+length*(j+.5)/density)/total)
+        traversed += length
+    for extra in polygons(remaining):
+        # Only terminal-pad overhangs have an unambiguous terminal voltage.
+        candidates = [i for i in (0, len(shapes)-1) if extra.distance(shapes[i]) < 1e-12]
+        if len(candidates) != 1:
+            raise GeometryJudgement('winding_pad_voltage_basis_unresolved')
+        i = candidates[0]
+        shapes[i] = shapes[i].union(extra)
+    _, _, lo, hi = solids[0]
+    identities = [f'w{i}' for i in range(len(shapes))]
+    return [(n, s, lo, hi) for n, s in zip(identities, shapes)], identities, voltages
+
+
+def winding_capacitance(matrix, voltages):
+    """2U/Vterminal² with zero total charge on the isolated winding."""
+    if len(matrix) != len(voltages) or any(len(r) != len(voltages) for r in matrix):
+        raise AnalysisError('invalid_report')
+    sums = [sum(row) for row in matrix]
+    total = sum(sums)
+    if total <= 0:
+        raise AnalysisError('invalid_report')
+    common = -sum(c*v for c, v in zip(sums, voltages))/total
+    v = [x+common for x in voltages]
+    c = sum(v[i]*matrix[i][j]*v[j] for i in range(len(v)) for j in range(len(v)))
+    if not math.isfinite(c) or c <= 0:
+        raise GeometryJudgement('winding_capacitance_nonpositive')
+    return c
 
 
 def parse_capacitance(source, size):

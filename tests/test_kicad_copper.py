@@ -17,6 +17,7 @@ from alx.providers.kicad_circuit import AnalysisError
 from alx.providers.kicad_copper import (
     GeometryJudgement, arc_points, stackup, extract, geometry, fasthenry_input,
     fastcap_files, parse_impedance, parse_capacitance, wheeler,
+    copper_solids, electrostatic_files, winding_model, winding_capacitance,
 )
 
 
@@ -27,12 +28,44 @@ STACK = '''(setup (stackup
  (layer "B.Cu" (type "copper") (thickness 0.024))
  (layer "B.Mask" (type "Bottom Solder Mask") (thickness 0.01) (epsilon_r 4))))'''
 SEGMENT = '(segment (start 0 0) (end 10 0) (width 0.2) (layer "F.Cu"))'
-BOARD = '(kicad_pcb '+STACK+SEGMENT+')'
+OUTLINE = '(gr_rect (start -2 -2) (end 22 22) (layer "Edge.Cuts"))'
+BOARD = '(kicad_pcb '+STACK+SEGMENT+OUTLINE+')'
 PORTS = [{'id': 'p', 'start': {'x_mm': 0, 'y_mm': 0, 'layer': 'F.Cu'},
           'end': {'x_mm': 10, 'y_mm': 0, 'layer': 'F.Cu'}}]
 
 
 class CopperFormats(unittest.TestCase):
+    def test_spiral_surface_voltage_basis_refines_without_internal_cut_faces(self):
+        x = y = 0
+        segments = []
+        for i in range(12):
+            dx, dy = [(1, 0), (0, 1), (-1, 0), (0, -1)][i % 4]
+            nx, ny = x+dx*(20-i//2), y+dy*(20-i//2)
+            segments.append(f'(segment (start {x} {y}) (end {nx} {ny}) (width 0.2) (layer "F.Cu"))')
+            x, y = nx, ny
+        tree = sexpr('(kicad_pcb '+STACK+OUTLINE+''.join(segments)+')')
+        layers = stackup(tree)
+        ports = [dict(PORTS[0], end={'x_mm': x, 'y_mm': y, 'layer': 'F.Cu'})]
+        from shapely.ops import unary_union
+        for density in (2, 4):
+            paths = extract(tree, ports, density, layers)
+            solids, outline, nets = copper_solids(tree, paths, layers, density)
+            patched, names, voltages = winding_model(paths[0], solids, density)
+            self.assertEqual(len(names), 12*density)
+            self.assertTrue(all(a < b for a, b in zip(voltages, voltages[1:])))
+            self.assertAlmostEqual(unary_union([s for _, s, _, _ in patched]).area,
+                                   unary_union([s for _, s, _, _ in solids]).area, delta=1e-16)
+            files = electrostatic_files(patched, outline, names, layers, density, surface_patches=True)
+            # Midpoint of the first straight edge is an internal voltage cut.
+            # No vertical copper face may be added there.
+            for name, source in files.items():
+                if not name.startswith('conductor'):
+                    continue
+                for line in source.splitlines()[1:]:
+                    pts = list(map(float, line.split()[2:]))
+                    xs, zs = pts[0::3], pts[2::3]
+                    self.assertFalse(all(abs(v-.01) < 1e-12 for v in xs) and max(zs) > min(zs))
+
     def test_recorded_fasthenry_complex_matrix_and_frequency_validation(self):
         output = '''Impedance matrix for frequency = 1.356e+07 2 x 2
  1.1e-1 +2.0e+1j  1e-3 -3.0e+0j
@@ -69,8 +102,91 @@ class CopperFormats(unittest.TestCase):
         self.assertIn('sigma=5.8e7', deck)
         self.assertIn('w=0.0002 h=2.4e-05', deck)
         self.assertIn('.external N0_0 N0_1', deck)
-        files = fastcap_files(paths, layers, 2)
-        self.assertEqual(files['conductor0.qui'].count('\nQ '), 24)
+        files, nets = fastcap_files(paths, layers, 2, tree)
+        self.assertEqual(nets, ['0'])
+        self.assertIn('D ', files['copper.lst'])
+        self.assertIn(' 4.1 ', files['copper.lst'])
+        self.assertTrue(any(line.startswith('C ') and ' +' in line for line in files['copper.lst'].splitlines()))
+        self.assertTrue(any(line.startswith('C ') and ' 4.1 ' in line for line in files['copper.lst'].splitlines()))
+
+    def test_dielectric_changes_deck_and_missing_outline_is_explicit(self):
+        tree = sexpr(BOARD)
+        layers = stackup(tree)
+        paths = extract(tree, PORTS, 2, layers)
+        files, _ = fastcap_files(paths, layers, 2, tree)
+        changed = sexpr(BOARD.replace('(epsilon_r 4.1)', '(epsilon_r 2.2)').replace('(thickness 0.065)', '(thickness 0.13)'))
+        other, _ = fastcap_files(paths, stackup(changed), 2, changed)
+        self.assertNotEqual(files['copper.lst'], other['copper.lst'])
+        self.assertNotEqual([v for k, v in files.items() if k.startswith('dielectric')],
+                            [v for k, v in other.items() if k.startswith('dielectric')])
+        with self.assertRaisesRegex(GeometryJudgement, 'board_outline_unresolved'):
+            fastcap_files(paths, layers, 2, sexpr(BOARD.replace(OUTLINE, '')))
+
+    def test_pad_and_via_union_one_net_and_nominal_bore_barrel(self):
+        board = BOARD.replace(SEGMENT, SEGMENT[:-1]+' (net 1))')[:-1]+'''
+          (footprint "test" (at 0 0) (property "Reference" "L1")
+            (pad "1" smd oval (at 0 0) (size 1 0.6) (layers "F.Cu") (net 1)))
+          (via (at 10 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)))'''
+        tree = sexpr(board)
+        layers = stackup(tree)
+        solids, outline, nets = copper_solids(tree, [], layers, 2)
+        self.assertEqual(nets, ['1'])
+        files = electrostatic_files(solids, outline, nets, layers, 2)
+        conductor_lines = [l for l in files['copper.lst'].splitlines() if l.startswith(('C ', 'B '))]
+        self.assertTrue(any(l.startswith('B ') and ' 4.1 1 ' in l for l in conductor_lines))
+        self.assertEqual(sum(not l.endswith('+') for l in conductor_lines), 1)
+        from shapely.ops import unary_union
+        front = [s for n, s, lo, hi in solids if n == '1' and lo < layers[1]['z_m'] < hi]
+        union = unary_union(front)
+        self.assertLess(union.area, sum(s.area for s in front))
+        self.assertTrue(union.is_valid)
+        # The drilled bore also removes the track that terminates at its centre.
+        # There must be no horizontal electrode panel over the drill opening.
+        from shapely.geometry import Polygon
+        hole = next(s for n, s, _, _ in solids if n.startswith('@barrel:'))
+        for name, source in files.items():
+            if not name.startswith('conductor'):
+                continue
+            for line in source.splitlines()[1:]:
+                coords = list(map(float, line.split()[2:]))
+                zs = coords[2::3]
+                if max(zs)-min(zs) < 1e-15:
+                    face = Polygon(list(zip(coords[0::3], coords[1::3])))
+                    self.assertLess(face.intersection(hole).area, 1e-16)
+
+    def test_through_hole_pad_uses_annuli_and_barrel_same_conductor(self):
+        tree = sexpr(BOARD[:-1]+'''(footprint "test" (at 0 0) (property "Reference" "L1")
+            (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4) (layers "*.Cu") )) )''')
+        layers = stackup(tree)
+        paths = extract(tree, PORTS, 2, layers)
+        solids, outline, nets = copper_solids(tree, paths, layers, 2)
+        self.assertEqual(nets, ['0'])
+        self.assertEqual(sum(n.startswith('@barrel:') for n, _, _, _ in solids), 1)
+        files = electrostatic_files(solids, outline, nets, layers, 2)
+        lines = [l for l in files['copper.lst'].splitlines() if l.startswith(('C ', 'B '))]
+        self.assertEqual(sum(not l.endswith('+') for l in lines), 1)
+        with self.assertRaisesRegex(GeometryJudgement, 'multilayer'):
+            winding_model(paths[0], solids, 2)
+
+    def test_winding_energy_floating_common_mode_and_nonpositive(self):
+        matrix = [[3e-12, -2e-12], [-2e-12, 3e-12]]
+        c = winding_capacitance(matrix, [0., 1.])
+        self.assertAlmostEqual(c, 2.5e-12, delta=1e-24)
+        self.assertAlmostEqual(winding_capacitance(matrix, [7., 8.]), c, delta=1e-24)
+        with self.assertRaisesRegex(GeometryJudgement, 'nonpositive'):
+            winding_capacitance(matrix, [1., 1.])
+
+    def test_pad_port_and_rotated_pad_position(self):
+        pad = '''(footprint "test" (at 0 1 90) (property "Reference" "L1")
+            (pad "1" smd rect (at 1 0 90) (size 1 0.5) (layers "F.Cu")))'''
+        tree = sexpr(BOARD[:-1]+pad+')')
+        layers = stackup(tree)
+        port = dict(PORTS[0], start={'reference': 'L1', 'pad': '1'})
+        paths = extract(tree, [port], 2, layers)
+        solids, _, _ = copper_solids(tree, paths, layers, 2)
+        self.assertAlmostEqual(solids[-1][1].centroid.x, 0., delta=1e-12)
+        self.assertAlmostEqual(solids[-1][1].centroid.y, 0., delta=1e-12)
+        self.assertAlmostEqual(solids[-1][1].bounds[2]-solids[-1][1].bounds[0], .0005)
 
     def test_arc_discretisation_refines_and_preserves_endpoints(self):
         arc = sexpr('(arc (start 1 0) (mid 0 1) (end -1 0))')
@@ -120,7 +236,7 @@ class CopperProvider(unittest.TestCase):
         engine.chmod(0o700)
         self.provider.engine_paths = {'fasthenry': engine, 'fastcap': engine}
 
-    def test_both_engines_both_meshes_design_unchanged_and_no_false_selfcap(self):
+    def test_both_engines_both_meshes_design_unchanged_and_winding_facts(self):
         initial = inventory(self.folder/'project')
         calls = []
         def runner(engine, arguments, directory):
@@ -128,18 +244,46 @@ class CopperProvider(unittest.TestCase):
             if arguments == ['copper.inp']:
                 (directory/'Zc.mat').write_text('Impedance matrix for frequency = 1.356e7 1 x 1\n .1 +10j\n')
                 return SimpleNamespace(returncode=0, stdout='converged', stderr='')
-            return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n1 2.0\n', stderr='')
+            self.assertEqual(arguments, ['-lcopper.lst'])
+            size = sum(l.startswith(('C ', 'B ')) and not l.endswith(' +')
+                       for l in (directory/'copper.lst').read_text().splitlines())
+            matrix = '\n'.join(str(i+1)+' '+' '.join('2' if i == j else '-0.1' for j in range(size)) for i in range(size))
+            return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n'+matrix, stderr='')
         self.provider.execute_engine = runner
         result = self.provider.analyse_copper(self.arguments)
-        self.assertEqual(len(calls), 4)
-        self.assertEqual(len({directory for _, directory in calls}), 2)
+        from alx.tools.kicad import DEFINITIONS
+        definition = next(d for d in DEFINITIONS if d.capability_id == 'analyse_kicad_copper')
+        self.assertTrue(definition.output_schema.accepts(result))
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(len({directory for _, directory in calls}), 4)
         self.assertTrue(all(not directory.exists() for _, directory in calls))
         self.assertEqual(inventory(self.folder/'project'), initial)
         self.assertEqual(result['status'], 'needs_judgement')
+        port = result['ports'][0]
+        self.assertGreater(port['self_capacitance_f'], 0)
+        self.assertAlmostEqual(port['self_resonant_frequency_hz'],
+                               1/(2*math.pi*math.sqrt(port['inductance_h']*port['self_capacitance_f'])))
+        self.assertNotEqual(port['self_capacitance_f'], port['net_capacitance_to_infinity_f'])
+        self.assertEqual(result['convergence']['inductance_h']['maximum_relative_difference'], 0)
+
+    def test_via_capacitance_remains_available_without_inventing_plating_for_henry(self):
+        board = BOARD.replace(SEGMENT, SEGMENT[:-1]+' (net 1))')[:-1]+'''
+          (via (at 10 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)))'''
+        (self.folder/'project/board.kicad_pcb').write_text(board)
+        calls = []
+        def runner(engine, arguments, directory):
+            calls.append(arguments)
+            self.assertEqual(arguments, ['-lcopper.lst'])
+            return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n1 2.0\n', stderr='')
+        self.provider.execute_engine = runner
+        result = self.provider.analyse_copper(self.arguments)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result['capacitance_nets'], ['1'])
+        self.assertIn('via_barrel_plating_not_recorded', result['reasons'])
+        self.assertIsNone(result['ports'][0]['inductance_h'])
         self.assertIsNone(result['ports'][0]['self_capacitance_f'])
         self.assertIsNone(result['ports'][0]['self_resonant_frequency_hz'])
-        self.assertIn('distributed_self_capacitance_and_dielectric_mesh_unresolved', result['reasons'])
-        self.assertEqual(result['convergence']['inductance_h']['maximum_relative_difference'], 0)
+        self.assertEqual(result['meshes'][1]['capacitance_f'], [[2e-12]])
 
     def test_missing_engine_and_tainted_copy_are_failures(self):
         self.provider.engine_paths = {}
@@ -190,7 +334,8 @@ pcbnew.SaveBoard(sys.argv[1],b)
         self.assertEqual(process.returncode, 0, process.stdout+process.stderr)
         source = board.read_text()
         setup = sexpr(source).one('setup')
-        board.write_text(source[:setup.start]+STACK+source[setup.end:])
+        source = source[:setup.start]+STACK+source[setup.end:]
+        board.write_text(source[:source.rfind(')')]+OUTLINE+source[source.rfind(')'):])
         self.provider.engine_paths = engines
         self.provider.execute_engine = run_kicad_engine
         initial = inventory(self.folder/'project')
@@ -198,5 +343,7 @@ pcbnew.SaveBoard(sys.argv[1],b)
         result = self.provider.analyse_copper(dict(self.arguments, ports=ports))
         self.assertEqual(len(result['meshes']), 2)
         self.assertEqual(len(result['formula']), 1)
+        self.assertGreater(result['ports'][0]['self_capacitance_f'], 0)
+        self.assertGreater(result['ports'][0]['self_resonant_frequency_hz'], 0)
         self.assertLessEqual(result['formula'][0]['percentage_difference'], 10)
         self.assertEqual(inventory(self.folder/'project'), initial)

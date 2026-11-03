@@ -133,13 +133,19 @@ DEFINITIONS = (
         'two x_mm/y_mm/layer endpoints. Run configured FastHenry and FastCap at both supplied '
         'mesh densities at frequency_hz. Report matrices, per-port SI quantities, coupling, '
         'geometry, board stack-up, convergence and Mohan modified Wheeler cross-check. '
+        'Capacitance matrices group tracks, pads and nominal-bore barrels per net with '
+        'saved stack-up dielectric interfaces. Self-capacitance uses a refined linear '
+        'arclength surface-voltage basis on an isolated floating winding; SRF is the '
+        'quasistatic estimate from that capacitance and FastHenry inductance. Unsupported '
+        'voltage boundary conditions return unavailable quantities with reasons. '
         'convergence_margin and formula_margin are fractional error limits. Ambiguous geometry '
         'or numerical/model uncertainty returns needs_judgement. Never edits a design.',
         obj({'work_copy_id': S, 'ports': array(PORT), 'frequency_hz': N,
              'mesh_densities': array(I), 'convergence_margin': N, 'formula_margin': N}),
         obj({'status': S, 'reasons': array(S), 'geometry': array(MAP), 'stackup': array(MAP),
              'meshes': array(MAP), 'ports': array(MAP), 'coupling': array(MAP),
-             'convergence': MAP, 'formula': array(MAP), 'conventions': MAP}),
+             'convergence': MAP, 'formula': array(MAP), 'conventions': MAP,
+             'capacitance_nets': array(S)}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('simulate_kicad_circuit',
         'Run configured ngspice on exactly one of a registered untainted work-copy schematic '
