@@ -70,9 +70,17 @@ class ModelRequest:
     # Local accounting hook: approve and identify a fresh request before a
     # transport retries. Never sent to the model or serialized into telemetry.
     on_retry: Callable[[Exception], ModelRequest] | None = field(default=None, repr=False, compare=False)
+    # D-065: the model may call capabilities natively within one reasoning
+    # session. A transport that cannot pauses nothing and simply ignores it.
+    native_tools: bool = False
+    # D-065: continue the paused session with this result for the native call
+    # it last returned, instead of starting a new one. The Core composes it.
+    tool_result: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
+        if self.tool_result is not None and not self.native_tools:
+            raise ValueError("a tool result continues a native-tool session")
         if self.purpose and self.purpose not in _PURPOSES:
             raise ValueError("purpose must be a ReasoningPurpose value")
         if not self.messages:
@@ -101,16 +109,26 @@ class ModelCompletion:
     model: str
     output: StructuredData
     usage: StructuredData = field(default_factory=dict)
+    # D-065: the model called a capability natively and its session is paused
+    # for the result. The call's input, exactly as the model gave it; `output`
+    # is then empty. Only the Core interprets it.
+    tool_use: StructuredData | None = None
 
     def __post_init__(self) -> None:
         _required(self.provider, "provider")
         _required(self.model, "model")
         object.__setattr__(self, "output", freeze_data(self.output))
         object.__setattr__(self, "usage", freeze_data(self.usage))
+        if self.tool_use is not None:
+            object.__setattr__(self, "tool_use", freeze_data(self.tool_use))
 
 
 class ReasoningModel(Protocol):
-    """Replaceable model transport with no ownership of memory or tools."""
+    """Replaceable model transport with no ownership of memory or tools.
+
+    A transport may relay a native tool call (D-065) and pause for its result,
+    but it never runs a capability: the Core does, on its own path.
+    """
 
     def complete(self, request: ModelRequest) -> ModelCompletion: ...
 

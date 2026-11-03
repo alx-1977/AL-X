@@ -52,9 +52,11 @@ import http.client
 import logging
 import os
 import shutil
+import sys
 import subprocess  # noqa: S404 - the governed reasoning transport, not an execution site
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
@@ -262,6 +264,146 @@ class _ClaudeProtocolError(ValueError):
         super().__init__(code)
 
 
+# The bridge is run by path, with `-I`, so nothing on the CLI's path or in its
+# working directory can stand in for it.
+_BRIDGE_SCRIPT = Path(__file__).resolve().with_name("native_tool_bridge.py")
+
+
+class _NativeSession:
+    """One Claude CLI run that may pause on native tool calls (D-065).
+
+    The CLI is started with the tool bridge as its only MCP server. When the
+    model calls `call_capability`, the bridge connects to this session's socket
+    and waits; the session hands the call to the Core and holds the connection
+    until the Core answers. The CLI keeps its conversation, and its cache, for
+    the whole turn. Nothing here runs a capability.
+    """
+
+    def __init__(self, launcher: Callable[..., Any], argv_for: Callable[[str], list[str]],
+                 prompt: str, environment: Mapping[str, str], idle_seconds: float) -> None:
+        import socket
+        import tempfile
+        import threading
+        # A short path: unix socket paths are limited to about 100 bytes.
+        self._directory = tempfile.mkdtemp(prefix="alx-native-", dir="/tmp")
+        self._socket_path = os.path.join(self._directory, "s")
+        self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._server.bind(self._socket_path)
+        self._server.listen(8)
+        self._server.settimeout(0.2)
+        self._pending: Any = None
+        self._idle_seconds = idle_seconds
+        self._idle_timer: Any = None
+        self._stdout: list[str] = []
+        self._stderr: list[str] = []
+        self._process = launcher(
+            argv_for(self._socket_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, cwd=self._directory, env=dict(environment),
+            start_new_session=True, shell=False,
+        )
+        self._readers = [
+            threading.Thread(target=self._drain, args=(self._process.stdout, self._stdout),
+                             daemon=True),
+            threading.Thread(target=self._drain, args=(self._process.stderr, self._stderr),
+                             daemon=True),
+        ]
+        for reader in self._readers:
+            reader.start()
+        try:
+            self._process.stdin.write(prompt)
+            self._process.stdin.close()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _drain(stream: Any, sink: list[str]) -> None:
+        for chunk in iter(lambda: stream.read(65536), ""):
+            sink.append(chunk)
+
+    @property
+    def alive(self) -> bool:
+        return self._process.poll() is None
+
+    def next_event(self, timeout_seconds: float) -> tuple[str, Any]:
+        """Wait for a native call, ("tool", input), or the end, ("exit", (code, out, err))."""
+        import socket
+        deadline = monotonic() + timeout_seconds
+        while monotonic() < deadline:
+            try:
+                connection, _ = self._server.accept()
+            except socket.timeout:
+                connection = None
+            if connection is not None:
+                connection.settimeout(timeout_seconds)
+                received = b""
+                while not received.endswith(b"\n"):
+                    chunk = connection.recv(65536)
+                    if not chunk:
+                        break
+                    received += chunk
+                try:
+                    call = json.loads(received.decode("utf-8"))["input"]
+                except (ValueError, KeyError):
+                    connection.close()
+                    continue
+                self._pending = connection
+                self._arm_idle_timer()
+                return "tool", call
+            if self._process.poll() is not None:
+                for reader in self._readers:
+                    reader.join(5)
+                return "exit", (self._process.returncode, "".join(self._stdout),
+                                "".join(self._stderr))
+        self.close()
+        raise subprocess.TimeoutExpired("claude", timeout_seconds)
+
+    def answer(self, text: str) -> None:
+        """Return the Core's result to the paused call."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+        connection, self._pending = self._pending, None
+        if connection is None:
+            raise _ClaudeProtocolError("native_call_not_pending")
+        try:
+            connection.sendall((json.dumps({"text": text}) + "\n").encode("utf-8"))
+        finally:
+            connection.close()
+
+    def _arm_idle_timer(self) -> None:
+        # A paused session nobody continues, because the turn ended, must not
+        # outlive its own timeout.
+        import threading
+        self._idle_timer = threading.Timer(self._idle_seconds, self.close)
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+
+    def close(self) -> None:
+        import shutil as _shutil
+        import signal
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+        if self._pending is not None:
+            try:
+                self._pending.close()
+            except OSError:
+                pass
+            self._pending = None
+        if self._process.poll() is None:
+            try:
+                os.killpg(self._process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                self._process.wait(5)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            self._server.close()
+        except OSError:
+            pass
+        _shutil.rmtree(self._directory, ignore_errors=True)
+
+
 class ClaudeSubscriptionReasoningModel:
     """Reason through the Claude Code CLI on Friedl's subscription.
 
@@ -289,10 +431,17 @@ class ClaudeSubscriptionReasoningModel:
         expected_account: str | None = None,
         oauth_token: str | None = None,
         retry_policy: SubscriptionRetryPolicy | None = None,
+        launcher: "Callable[..., subprocess.Popen] | None" = None,
+        native_tools: bool = False,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._retry_policy = retry_policy or SubscriptionRetryPolicy()
+        # D-065: the one other way this transport starts the CLI, for a native
+        # session that pauses. Bound here once; used only by _NativeSession.
+        self._launcher = launcher or subprocess.Popen
+        # Whether the Core may call capabilities natively through this transport.
+        self.native_tools_enabled = native_tools
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._executable = executable
@@ -315,6 +464,8 @@ class ClaudeSubscriptionReasoningModel:
         )
         self._identity: SubscriptionIdentity | None = None
         self._availability_lock = Lock()
+        # D-065: the one session paused on a native call, if any.
+        self._session: _NativeSession | None = None
 
     def child_environment(self) -> dict[str, str]:
         """The environment the CLI is given: the subscription, never a key.
@@ -489,6 +640,21 @@ class ClaudeSubscriptionReasoningModel:
             LOGGER.warning("AL/X Core Claude identity refused: %s", error.code)
             raise_provider_failure(PROVIDER_NAME, error.code)
 
+    def native_command(self, request: ModelRequest, socket_path: str) -> list[str]:
+        """The argument vector for a native-tool session (D-065).
+
+        As `command`, with the tool bridge as the only MCP server and its one
+        tool the only tool allowed. Built-in tools stay removed.
+        """
+        bridge = {"mcpServers": {"alx": {
+            "command": sys.executable,
+            "args": ["-I", str(_BRIDGE_SCRIPT), socket_path],
+        }}}
+        argv = self.command(request)
+        index = argv.index("--mcp-config")
+        argv[index + 1] = json.dumps(bridge)
+        return [*argv, "--allowedTools", "mcp__alx__call_capability"]
+
     def command(self, request: ModelRequest) -> list[str]:
         """The exact argument vector for one turn.
 
@@ -551,71 +717,126 @@ class ClaudeSubscriptionReasoningModel:
             raise _ClaudeProtocolError("request_without_turn_content")
         return "\n\n".join(parts)
 
+    def abandon_session(self) -> None:
+        """End a paused native session the Core will not continue."""
+        session, self._session = self._session, None
+        if session is not None:
+            session.close()
+
+    def _native_event(self, request: ModelRequest) -> tuple[str, Any]:
+        """Start or continue the native session and wait for its next event.
+
+        A result for a session that is gone starts a fresh one from the full
+        request: the Core has already recorded the result there, so nothing is
+        lost, only the cache.
+        """
+        session = self._session
+        if request.tool_result is not None and session is not None and session.alive:
+            session.answer(request.tool_result)
+        else:
+            self.abandon_session()
+            prompt = self._user_prompt(request)
+            session = _NativeSession(
+                self._launcher, lambda path: self.native_command(request, path), prompt,
+                self.child_environment(), self._timeout_seconds,
+            )
+            self._session = session
+        if request.on_dispatched is not None:
+            request.on_dispatched()
+        event = session.next_event(self._timeout_seconds)
+        if event[0] == "exit":
+            self._session = None
+            session.close()
+        return event
+
+    def _completion(self, request: ModelRequest, completed: Any,
+                    started_at: float) -> ModelCompletion:
+        """Read a finished CLI run into the Core's decision, with telemetry."""
+        if completed.returncode != 0:
+            raise _ClaudeProtocolError(
+                "cli_failed", service_message=cli_failure_message(completed.stderr, completed.stdout)
+            )
+        output, model, usage, envelope = self._parse(completed.stdout)
+        self._require_schema(output, request)
+        completion = ModelCompletion(
+            PROVIDER_NAME, model or self._model, output,
+            usage_telemetry(usage, envelope.get("usage")) if request.kind == "research" else usage,
+        )
+        duration = monotonic() - started_at
+        self._emit_telemetry(
+            request.affinity_key,
+            {
+                "code": "reasoning.completed",
+                "provider": PROVIDER_NAME,
+                "model": model or self._model,
+                "duration_ms": round(duration * 1000),
+                **_envelope_metrics(envelope),
+                **usage_telemetry(usage, envelope.get("usage")),
+                **_request_telemetry(request),
+            },
+        )
+        LOGGER.info(
+            "Reasoning provider request completed in %.3f seconds", duration
+        )
+        return completion
+
     @retry_subscription
     def complete(self, request: ModelRequest) -> ModelCompletion:
         self._require_identity()
         started_at = monotonic()
         LOGGER.info("Reasoning provider request started")
         try:
-            prompt = self._user_prompt(request)
-            command = self.command(request)
-            try:
-                with TemporaryDirectory(prefix="alx-claude-") as working_directory:
-                    from alx.providers.coding_process import run_coding_subprocess
-                    completed = run_coding_subprocess(self._runner,
-                        command,
-                        input=prompt,
-                        capture_output=True,
-                        text=True,
-                        timeout=self._timeout_seconds,
-                        env=self.child_environment(),
-                        cwd=working_directory,
-                        # Nothing on stdin beyond the prompt, and no shell.
-                        shell=False,
-                        check=False,
-                    )
+            if request.native_tools:
+                try:
+                    kind, payload = self._native_event(request)
+                except subprocess.TimeoutExpired as error:
+                    raise _ClaudeProtocolError(
+                        "reasoning_timeout", service_message="reasoning_timeout") from error
+                except OSError as error:
+                    raise _ClaudeProtocolError("cli_unavailable", service_message=str(error)) from error
+                if kind == "tool":
+                    LOGGER.info("Reasoning provider paused on a native call after %.3f seconds",
+                                monotonic() - started_at)
+                    # Answered: the model reasoned and chose a call. Its usage
+                    # is reported once, with the session's final answer.
+                    return ModelCompletion(PROVIDER_NAME, self._model, {},
+                                           {"input_tokens": 0, "output_tokens": 0},
+                                           tool_use=payload)
+                returncode, stdout, stderr = payload
+                completed = subprocess.CompletedProcess([], returncode, stdout, stderr)
+            else:
+                prompt = self._user_prompt(request)
+                command = self.command(request)
+                try:
+                    with TemporaryDirectory(prefix="alx-claude-") as working_directory:
+                        from alx.providers.coding_process import run_coding_subprocess
+                        completed = run_coding_subprocess(self._runner,
+                            command,
+                            input=prompt,
+                            capture_output=True,
+                            text=True,
+                            timeout=self._timeout_seconds,
+                            env=self.child_environment(),
+                            cwd=working_directory,
+                            # Nothing on stdin beyond the prompt, and no shell.
+                            shell=False,
+                            check=False,
+                        )
+                        if request.on_dispatched is not None:
+                            request.on_dispatched()
+                except subprocess.TimeoutExpired as error:
                     if request.on_dispatched is not None:
                         request.on_dispatched()
-            except subprocess.TimeoutExpired as error:
-                if request.on_dispatched is not None:
-                    request.on_dispatched()
-                # The CLI is killed by `subprocess.run` when the deadline
-                # passes, so the turn cannot outlive its own timeout.
-                raise _ClaudeProtocolError(
-                    "reasoning_timeout", service_message=error.stderr or error.stdout or "reasoning_timeout"
-                ) from error
-            except FileNotFoundError as error:
-                raise _ClaudeProtocolError("cli_not_installed", service_message=str(error)) from error
-            except OSError as error:
-                raise _ClaudeProtocolError("cli_unavailable", service_message=str(error)) from error
-
-            if completed.returncode != 0:
-                raise _ClaudeProtocolError(
-                    "cli_failed", service_message=cli_failure_message(completed.stderr, completed.stdout)
-                )
-            output, model, usage, envelope = self._parse(completed.stdout)
-            self._require_schema(output, request)
-            completion = ModelCompletion(
-                PROVIDER_NAME, model or self._model, output,
-                usage_telemetry(usage, envelope.get("usage")) if request.kind == "research" else usage,
-            )
-            duration = monotonic() - started_at
-            self._emit_telemetry(
-                request.affinity_key,
-                {
-                    "code": "reasoning.completed",
-                    "provider": PROVIDER_NAME,
-                    "model": model or self._model,
-                    "duration_ms": round(duration * 1000),
-                    **_envelope_metrics(envelope),
-                    **usage_telemetry(usage, envelope.get("usage")),
-                    **_request_telemetry(request),
-                },
-            )
-            LOGGER.info(
-                "Reasoning provider request completed in %.3f seconds", duration
-            )
-            return completion
+                    # The CLI is killed by `subprocess.run` when the deadline
+                    # passes, so the turn cannot outlive its own timeout.
+                    raise _ClaudeProtocolError(
+                        "reasoning_timeout", service_message=error.stderr or error.stdout or "reasoning_timeout"
+                    ) from error
+                except FileNotFoundError as error:
+                    raise _ClaudeProtocolError("cli_not_installed", service_message=str(error)) from error
+                except OSError as error:
+                    raise _ClaudeProtocolError("cli_unavailable", service_message=str(error)) from error
+            return self._completion(request, completed, started_at)
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
             error_code = self._safe_error_code(error)
             details = dict(error.details) if isinstance(error, _ClaudeProtocolError) else {}

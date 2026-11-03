@@ -154,8 +154,13 @@ class OriginSelectedReasoner:
             if self._autonomous is None:
                 raise AutonomousReasonerUnavailable(context.origin.value)
             if self._first_pass is not None:
+                # A session the autonomous Core paused is continued by it (D-065).
+                if self._autonomous.can_continue(context):
+                    return self._autonomous.decide(context)
                 decision = self._first_pass.decide(context)
                 if not changes_anything(decision, context):
                     return decision
+                # Reasoned again from the start; the first pass's session ends.
+                self._first_pass.abandon()
             return self._autonomous.decide(context)
         return self._conversational.decide(context)

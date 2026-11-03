@@ -611,9 +611,14 @@ class SingleExecutionSiteTest(unittest.TestCase):
             ):
                 dynamic_references.append(node)
 
-        self.assertEqual(len(process_references), 1)
-        reference = process_references[0]
-        self.assertEqual((reference.value.id, reference.attr), ("subprocess", "run"))
+        # D-065: the Claude transport binds exactly one more launcher, for a
+        # native session that pauses on tool calls. Nothing else may appear.
+        expected = [("subprocess", "run")]
+        if model_class_name == "ClaudeSubscriptionReasoningModel":
+            expected.append(("subprocess", "Popen"))
+        self.assertEqual(sorted((item.value.id, item.attr) for item in process_references),
+                         sorted(expected))
+        reference = next(item for item in process_references if item.attr == "run")
         self.assertEqual(dynamic_references, [])
         self.assertEqual(direct_runner_calls, [])
 
@@ -626,7 +631,10 @@ class SingleExecutionSiteTest(unittest.TestCase):
             node for node in model_class.body
             if isinstance(node, ast.FunctionDef) and node.name == "__init__"
         )
-        self.assertIn(reference, tuple(ast.walk(constructor)))
+        for item in process_references:
+            self.assertIn(item, tuple(ast.walk(constructor)))
+        if model_class_name == "ClaudeSubscriptionReasoningModel":
+            self._assert_native_launcher_is_confined(tree)
 
         completion = next(
             node for node in model_class.body
@@ -927,6 +935,20 @@ class SingleExecutionSiteTest(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 with self.assertRaises(AssertionError):
                     self._assert_repository_runtime_process_boundary(source + mutation)
+
+    def _assert_native_launcher_is_confined(self, tree: ast.AST) -> None:
+        """The native launcher is called once, by the session, with no shell."""
+        session = next(node for node in ast.walk(tree)
+                       if isinstance(node, ast.ClassDef) and node.name == "_NativeSession")
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == "launcher"]
+        self.assertEqual(len(calls), 1)
+        self.assertIn(calls[0], tuple(ast.walk(session)))
+        keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+        self.assertIs(keywords["shell"].value, False)
+        uses = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                and node.attr == "_launcher" and isinstance(node.ctx, ast.Load)]
+        self.assertEqual(len(uses), 1)
 
     def test_the_reasoning_transport_has_one_approved_runner_site(self) -> None:
         for site, model_class_name in (
