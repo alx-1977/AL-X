@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -183,6 +184,13 @@ question of your own, research something that interests you, write in your diary
 thought, or simply let it pass. runtime.own_time lists the local times it comes round; change
 them whenever you like with set_own_time, more often, less often or never. Work for Friedl is
 not what this time is for, unless you choose it.
+The call_capability tool lets you call any capability from the catalogue directly, with the
+same arguments as the call_capability action, and see its result before you decide anything
+else. Use it for every call, one after another, as many as the work needs: reading, checking
+and acting alike. Each call gets exactly the checks a decision's call gets, works under the goal
+you have selected, and its result is recorded there as usual; a refused call returns the
+reason. Use the call_capability action of a decision only when the call carries an
+approval_proposal. Goal updates, plans, memories and your words still go in the decision.
 An occasion whose references include idle_goal:<goal_id> means that goal is active with
 outstanding work, but no plan, job or revisit is carrying it and it has not changed for a
 while. Nothing else will wake you for it. Carry it forward now: start the next step, or
@@ -1688,6 +1696,13 @@ class ModelReasoner:
         self._max_input_tokens = max_input_tokens
         self._spend_authority = spend_authority
         self._on_request_dispatched = on_request_dispatched
+        # D-065: the native call this reasoner's paused session is waiting on,
+        # as (call_id, goal_id, refusals already in the turn, whether that
+        # call_id had already run), or None. Only a transport that can pause a
+        # session is offered native tools.
+        self._native_pending: tuple[str, str | None, int, bool] | None = None
+        self._native_capable = (getattr(model, "native_tools_enabled", False) is True
+                                and callable(getattr(model, "abandon_session", None)))
 
     def _spend_for(self, request: ModelRequest):
         """Bound, price, reserve, dispatch and settle one exact request.
@@ -1732,6 +1747,40 @@ class ModelReasoner:
         self._spend_authority.settle(reservation, usage)
         return completion
 
+    def _native_call(self, context: ReasoningContext, tool_use: Mapping[str, Any]) -> AgentDecision:
+        """A native call is the call action of a decision with nothing else in it.
+
+        Read through the same parse as a decision's call_capability action, so
+        a capability is called one way whichever route the model used. It
+        works under the goal the context has selected.
+        """
+        for name in ("call_id", "capability_id", "arguments_json"):
+            if not isinstance(tool_use.get(name), str):
+                raise ValueError(f"native call {name} must be a string")
+        approval_id = tool_use.get("approval_id")
+        if approval_id is not None and not isinstance(approval_id, str):
+            raise ValueError("native call approval_id must be a string or null")
+        goal_id = None if context.active_goal is None else context.active_goal.goal_id
+        decision = self._decision_from_output(context, {
+            "goal_id": goal_id,
+            "action": {
+                "type": "call_capability",
+                "call_id": tool_use["call_id"],
+                "capability_id": tool_use["capability_id"],
+                "arguments_json": tool_use["arguments_json"],
+                "approval_id": approval_id,
+                "approval_proposal": None,
+            },
+            "goal_update": None,
+            "plan_update": None,
+            "memory_proposals": [],
+        })
+        self._native_pending = (
+            tool_use["call_id"], goal_id, len(context.refused_calls),
+            self._turn_attempt(context, tool_use["call_id"]) is not None,
+        )
+        return decision
+
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
             return self._decide(context)
@@ -1770,18 +1819,84 @@ class ModelReasoner:
                 self._max_output_tokens,
                 purpose="" if context.purpose is None else context.purpose.value,
                 on_dispatched=None if receipt is None else lambda: receipt(runtime),
+                native_tools=self._native_capable and not context.response_only_reason,
         )
+
+    def can_continue(self, context: ReasoningContext) -> bool:
+        """Whether this context carries the outcome of the native call this reasoner paused on."""
+        return self._native_result(context) is not None
+
+    def abandon(self) -> None:
+        """Give up a paused native session the Core will not continue."""
+        self._native_pending = None
+        if self._native_capable:
+            self._model.abandon_session()
+
+    def _native_result(self, context: ReasoningContext) -> str | None:
+        """The paused call's outcome as the Core recorded it, or None.
+
+        The attempt the Core recorded for that call id, executed or refused
+        before it ran, or the refusal it gave. Taken from the context, so the
+        model is told exactly what the Core decided happened.
+        """
+        if self._native_pending is None:
+            return None
+        call_id, goal_id, refusals_before, ran_before = self._native_pending
+        goal = context.active_goal
+        if goal is not None and goal.goal_id != goal_id:
+            return None
+        # A refusal given since the pause answers the call, ahead of any
+        # attempt: a reused call_id is refused, and its earlier attempt's
+        # result is not the outcome of this call.
+        for item in reversed(context.refused_calls[refusals_before:]):
+            if item.get("call_id") == call_id or item.get("subject") == call_id:
+                return json.dumps({"refused": _plain(item)}, sort_keys=True, default=str)
+        if ran_before:
+            return None
+        attempt = self._turn_attempt(context, call_id)
+        if attempt is None:
+            return None
+        return json.dumps(_attempt_payload(attempt), sort_keys=True, default=str)
+
+    @staticmethod
+    def _turn_attempt(context: ReasoningContext, call_id: str) -> Any:
+        """This turn's recorded attempt for a call id, or None.
+
+        Only a call dispatched in this turn: a goal keeps attempts across
+        turns, and a session paused at the end of an earlier one must start
+        again from the full, current context.
+        """
+        if call_id not in context.turn_call_ids:
+            return None
+        goal = context.active_goal
+        attempts = (*context.transient_attempts, *(() if goal is None else goal.attempts))
+        return next((item for item in reversed(attempts)
+                     if item.call is not None and item.call.call_id == call_id), None)
 
     def _decide(self, context: ReasoningContext) -> AgentDecision:
         # One construction. The object measured, authorised and sent is the
         # same object: measuring one representation and dispatching another
         # would check a ceiling against a request that never existed.
         request = self.build_request(context)
-        if self._spend_authority is None:
-            completion = self._model.complete(request)
+        result = self._native_result(context) if request.native_tools else None
+        if result is not None:
+            # D-065: continue the paused session with the outcome. Nothing new
+            # is reserved: the session's reservation covers the whole run.
+            completion = self._model.complete(replace(request, tool_result=result))
         else:
-            completion = self._spend_for(request)
-        output = completion.output
+            if self._native_pending is not None:
+                self.abandon()
+            if self._spend_authority is None:
+                completion = self._model.complete(request)
+            else:
+                completion = self._spend_for(request)
+        self._native_pending = None
+        if completion.tool_use is not None:
+            return self._native_call(context, completion.tool_use)
+        return self._decision_from_output(context, completion.output)
+
+    def _decision_from_output(self, context: ReasoningContext,
+                              output: Mapping[str, Any]) -> AgentDecision:
         if context.response_only_reason is not None and (
             output["action"]["type"] != "respond"
             or output["goal_id"] is not None

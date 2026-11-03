@@ -231,6 +231,8 @@ def build_runtime_providers(
             settings.reasoning.model,
             settings.reasoning.timeout_seconds,
             telemetry_sink=telemetry_sink,
+            # D-065: the Core calls capabilities natively in one session.
+            native_tools=True,
             # AL/X's own Claude login, never the person's.
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
@@ -273,6 +275,7 @@ def build_runtime_providers(
             settings.autonomous.model,
             settings.autonomous.timeout_seconds,
             telemetry_sink=telemetry_sink,
+            native_tools=True,
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,
@@ -284,6 +287,7 @@ def build_runtime_providers(
             settings.autonomous_first_pass.model,
             settings.autonomous_first_pass.timeout_seconds,
             telemetry_sink=telemetry_sink,
+            native_tools=True,
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,

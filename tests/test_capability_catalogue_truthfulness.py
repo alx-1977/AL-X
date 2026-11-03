@@ -222,7 +222,7 @@ class CatalogueAndDispatchAgree(unittest.TestCase):
 
         self.assertIn(
             "item.capability_id == action[\"capability_id\"]",
-            inspect.getsource(model_reasoner.ModelReasoner._decide),
+            inspect.getsource(model_reasoner.ModelReasoner._decision_from_output),
         )
         self.assertIn(
             "item.capability_id == capability_id",

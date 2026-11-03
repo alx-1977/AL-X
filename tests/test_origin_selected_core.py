@@ -29,6 +29,15 @@ class RecordingReasoner:
         self.contexts.append(context)
         return AgentDecision(response=self.name)
 
+    continuing = False
+    abandoned = 0
+
+    def can_continue(self, context: ReasoningContext) -> bool:
+        return self.continuing
+
+    def abandon(self) -> None:
+        self.abandoned += 1
+
 
 def _context(origin: CognitionOrigin) -> ReasoningContext:
     return ReasoningContext(None, (), (), conversation_id="c1", origin=origin)
@@ -240,6 +249,18 @@ class FirstPassTests(unittest.TestCase):
             "opus-person")
         self.assertEqual(self.first.calls, 0)
 
+    def test_escalating_ends_the_first_pass_session(self) -> None:
+        self.first.next = AgentDecision(call=self.call("merge_pull_request"))
+        self.reasoner.decide(self.context())
+        self.assertEqual(self.first.abandoned, 1)
+
+    def test_a_session_paused_by_opus_is_continued_by_opus(self) -> None:
+        """D-065: the paused session's own Core continues it, not the first pass."""
+        self.deep.continuing = True
+        self.first.next = AgentDecision(response="first")
+        self.assertEqual(self.reasoner.decide(self.context()).response, "opus")
+        self.assertEqual(self.first.calls, 0)
+
     def test_a_first_pass_needs_the_autonomous_core_behind_it(self) -> None:
         with self.assertRaises(ValueError):
             OriginSelectedReasoner(self.person, None, self.first)
@@ -254,6 +275,14 @@ class ScriptedReasoner:
         self.calls += 1
         assert self.next is not None
         return self.next
+
+    abandoned = 0
+
+    def can_continue(self, context: ReasoningContext) -> bool:
+        return False
+
+    def abandon(self) -> None:
+        self.abandoned += 1
 
 
 class FirstPassGateTests(unittest.TestCase):
