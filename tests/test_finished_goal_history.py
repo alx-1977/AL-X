@@ -600,13 +600,32 @@ class FinishedHistoryTests(unittest.TestCase):
         self.assertEqual(finished["older_progress_count"], 3)
 
     def test_an_active_goal_shows_its_latest_history_and_what_is_already_supported(self):
-        from alx.contracts import Evidence
+        from alx.contracts import (
+            CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityResult,
+            CapabilityResultState, Evidence, GoalSummary, SuccessCriterion,
+        )
+
+        def ran(call_id, state):
+            return CapabilityAttempt(
+                CapabilityCall(call_id, "check", {}, None),
+                CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(call_id, "check", state, {},
+                                 None if state is CapabilityResultState.SUCCEEDED
+                                 else {"code": "task_failed"}))
+
         count = VERBATIM_HISTORY + 4
         records = tuple(ProgressRecord(f"d{i}", f"decision {i}") for i in range(count))
-        evidence = tuple(Evidence(f"e{i}", "check", supports=("tracked",) if i < 2 else ())
-                         for i in range(count))
-        state = replace(shipment(), decisions=records, evidence=evidence)
-        from alx.contracts import GoalSummary
+        # The oldest two support criteria; one cites a failed attempt (PR #196 review).
+        evidence = (
+            Evidence("ok", "check", supports=("tracked",), source_references=("attempt:good",)),
+            Evidence("bad", "check", supports=("delivered",), source_references=("attempt:bad",)),
+            *(Evidence(f"e{i}", "check") for i in range(count - 2)),
+        )
+        state = replace(
+            shipment(), decisions=records, evidence=evidence,
+            success_criteria=(SuccessCriterion("tracked", "t"), SuccessCriterion("delivered", "d")),
+            attempts=(ran("good", CapabilityResultState.SUCCEEDED),
+                      ran("bad", CapabilityResultState.FAILED)))
         context = replace(self.follow_up()[0], active_goal=state,
                           unfinished_goals=(GoalSummary.of(state),))
         goal = json.loads(_context_payload(context))["active_goal"]
@@ -615,8 +634,9 @@ class FinishedHistoryTests(unittest.TestCase):
         self.assertEqual(goal["decisions"][-1]["id"], f"d{count - 1}")
         self.assertEqual(len(goal["evidence"]), VERBATIM_HISTORY)
         self.assertEqual(goal["older_evidence_count"], 4)
-        # The two supporting items are among the older ones, and still counted.
-        self.assertEqual(goal["evidence_supporting_criteria"]["tracked"], 2)
+        # Both supporting items are older than the shown ones; only the one
+        # citing a successful attempt counts, as completion would count it.
+        self.assertEqual(goal["criteria_supported_for_completion"], ["tracked"])
 
     def test_searches_all_statuses_conversations_and_nested_stored_content(self):
         for status in (GoalStatus.ACTIVE, GoalStatus.COMPLETED, GoalStatus.CANCELLED):

@@ -162,14 +162,19 @@ class TheStatedRuleMatchesTheEnforcedRule(unittest.TestCase):
         import inspect
         from alx.core.loop import CoreAgent
 
+        from alx.contracts import completion_supported_criteria
+
         source = inspect.getsource(CoreAgent._derive_goal_status)
         # Every criterion must be covered by evidence supports.
         self.assertIn("required = {item.criterion_id for item in state.success_criteria}", source)
+        self.assertIn("supported = completion_supported_criteria(state)", source)
         self.assertIn("if not required.issubset(supported):", source)
-        # And that evidence must cite a succeeded attempt.
-        self.assertIn("CapabilityResultState.SUCCEEDED", source)
-        self.assertIn('reference.startswith("attempt:")', source)
         self.assertIn("completion_lacks_sourced_evidence", source)
+        # And that evidence must cite a succeeded attempt: the shared rule,
+        # which the Core's view of supported criteria also uses (PR #196).
+        rule = inspect.getsource(completion_supported_criteria)
+        self.assertIn("CapabilityResultState.SUCCEEDED", rule)
+        self.assertIn('reference.startswith("attempt:")', rule)
 
     def test_the_refusal_reason_the_protocol_anticipates_still_exists(self) -> None:
         """If this reason is ever renamed, the guidance must follow it."""

@@ -13,6 +13,7 @@ import logging
 from uuid import uuid4
 
 from alx.contracts import (
+    completion_supported_criteria,
     AgentDecision, Approval, ApprovalLifecycle, AutonomousReasoningDisabled, BackgroundEvent,
     DecisionValidationError,
     AutonomousRequestUnbounded,
@@ -2232,25 +2233,8 @@ class CoreAgent:
             if state.blockers or state.outstanding_work or any(
                 item.disposition is CapabilityAttemptDisposition.PENDING for item in state.attempts):
                 raise ValueError("completion_has_unresolved_work")
-            succeeded_attempts = {
-                f"attempt:{item.call.call_id}"
-                for item in state.attempts
-                if CoreAgent._attempt_is_citable_evidence_source(item)
-                and item.result.state is CapabilityResultState.SUCCEEDED
-            }
-            supported: set[str] = set()
-            for item in state.evidence:
-                if not item.source_references:
-                    continue
-                if any(
-                    reference.startswith("attempt:")
-                    and reference not in succeeded_attempts
-                    for reference in item.source_references
-                ):
-                    # A failed attempt remains durable historical evidence,
-                    # but cannot prove any completion criterion.
-                    continue
-                supported.update(item.supports)
+            # The shared rule: evidence citing a failed attempt proves nothing.
+            supported = completion_supported_criteria(state)
             required = {item.criterion_id for item in state.success_criteria}
             if not required.issubset(supported):
                 raise ValueError("completion_lacks_sourced_evidence")

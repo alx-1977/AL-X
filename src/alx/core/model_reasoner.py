@@ -12,6 +12,7 @@ from alx.contracts.cognition import AutonomousRequestUnbounded
 from alx.contracts.models import input_token_upper_bound
 from alx.contracts.mail import MailReference
 from alx.contracts import (
+    completion_supported_criteria,
     MAX_MEMORY_RETRIEVAL_LIMIT,
     AgentDecision,
     ApprovalProposal,
@@ -330,8 +331,9 @@ A live result is seen whole only on the turn it arrives.
 read_own_goals searches retained goals across conversations by text, or reads a
 goal's stored state by exact id or unambiguous id prefix; it includes finished and unfinished work.
 A goal shows its latest decisions, corrections, progress and evidence; older_*_count says how
-many earlier ones exist, and read_own_goals returns them all. evidence_supporting_criteria
-counts the evidence, shown or not, that supports each success criterion.
+many earlier ones exist, and read_own_goals returns them all.
+criteria_supported_for_completion lists the success criteria completion would count as
+supported now, over all evidence: evidence citing a failed or partial attempt does not count.
 available_memory_sources lists citable references as kind:id; memory_source_persons says
 which person a turn reference came from.
 
@@ -693,12 +695,12 @@ def _state_payload(
             for item in _recent(state.evidence, VERBATIM_HISTORY)
         ],
         "older_evidence_count": max(0, len(state.evidence) - VERBATIM_HISTORY),
-        # Which criteria some evidence, shown or older, already supports.
-        "evidence_supporting_criteria": {
-            item.criterion_id: sum(1 for record in state.evidence
-                                   if item.criterion_id in record.supports)
-            for item in state.success_criteria
-        },
+        # Which criteria completion would already count as supported, by the
+        # same rule completion applies, over shown and older evidence alike.
+        "criteria_supported_for_completion": sorted(
+            completion_supported_criteria(state)
+            & {item.criterion_id for item in state.success_criteria}
+        ),
         "approvals": [
             {
                 "id": item.approval_id,
