@@ -214,6 +214,18 @@ class CopperFormats(unittest.TestCase):
         (path,) = extract(tree, [port], 2, stackup(tree))
         self.assertEqual(path['edges'][0]['a'][:2], (0.0, 0.0))
 
+    def test_a_path_that_starts_at_a_net_tie_pad_leaves_on_the_tie_s_other_net(self):
+        """Second review of #199: no preceding track must not pick the wrong side."""
+        tree = sexpr('(kicad_pcb ' + STACK +
+            '(footprint "lib:NetTie" (at 0.2 0) (property "Reference" "NT9")'
+            ' (pad "1" smd rect (at 0.2 0) (size 0.4 0.4) (layers "F.Cu") (net "B"))'
+            ' (pad "2" smd rect (at -0.2 0) (size 0.4 0.4) (layers "F.Cu") (net "A")))'
+            '(segment (start 0.4 0) (end 10 0) (width 0.4) (layer "F.Cu") (net "B")))')
+        port = {'id': 'c', 'start': {'reference': 'NT9', 'pad': '2'},
+                'end': {'x_mm': 10, 'y_mm': 0, 'layer': 'F.Cu'}}
+        (path,) = extract(tree, [port], 2, stackup(tree))
+        self.assertEqual([edge['kind'] for edge in path['edges']], ['net_tie', 'segment'])
+
     def test_formula_refuses_a_nonspiral(self):
         tree = sexpr(BOARD)
         path = extract(tree, PORTS, 2, stackup(tree))[0]
@@ -257,7 +269,7 @@ class CopperProvider(unittest.TestCase):
         def runner(engine, arguments, directory):
             self.assertFalse(directory.resolve().is_relative_to(Path(__file__).resolve().parents[1]))
             self.assertFalse(directory.resolve().is_relative_to(self.folder.resolve()))
-            self.assertEqual(arguments, ['copper.inp'])
+            self.assertEqual(arguments, ['-m', 'direct', 'copper.inp'])
             calls.append(directory)
             (directory/'Zc.mat').write_text('Impedance matrix for frequency = 1.356e7 1 x 1\n .1 +10j\n')
             return SimpleNamespace(returncode=0, stdout='converged', stderr='')

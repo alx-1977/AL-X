@@ -417,7 +417,10 @@ class KiCadProvider:
                     run.mkdir()
                     deck = fasthenry_input(paths, layers, frequency, density)
                     (run / 'copper.inp').write_text(deck)
-                    henry_log = self._engine('fasthenry', ['copper.inp'], run)
+                    # Direct matrix-vector products: FastHenry 3.0wr's multipole
+                    # code crashed (SIGBUS/SIGSEGV) in half of identical runs on
+                    # the Quad Coil, and is the approximate method besides.
+                    henry_log = self._engine('fasthenry', ['-m', 'direct', 'copper.inp'], run)
                     mesh = {'density': density, 'fasthenry_log': henry_log, 'fasthenry_input': deck,
                             'geometry': [geometry(p, layers) for p in paths]}
                     result['meshes'].append(mesh)

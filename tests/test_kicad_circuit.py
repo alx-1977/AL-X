@@ -132,6 +132,14 @@ class CircuitFormats(unittest.TestCase):
             build_deck(lines, {'kind': 'ac', 'start_hz': 1e6, 'stop_hz': 2e6, 'points': 2},
                        [{'id': 'v', 'kind': 'voltage', 'positive': 'a(b)', 'negative': '0'}])
 
+    def test_an_alias_never_reuses_a_name_the_deck_already_has(self):
+        """Second review of #199: an existing alxnode0 must not be driven."""
+        lines = clean_deck('test\nV1 /RF1 0 AC 1\nR1 /RF1 ALXNODE0 50\nR2 alxnode0 0 50\n.end', [])
+        deck = build_deck(lines, {'kind': 'ac', 'start_hz': 1e6, 'stop_hz': 2e6, 'points': 2},
+                          [{'id': 'v', 'kind': 'voltage', 'positive': '/RF1', 'negative': '0'}])
+        self.assertIn('Ealxnode1 alxnode1 0 /RF1 0 1', deck)
+        self.assertNotIn('Ealxnode0', deck)
+
     def test_a_result_too_large_for_the_core_is_refused_before_running(self):
         """Review of #199: every returned row enters the Core's context."""
         lines = clean_deck('test\nV1 a 0 AC 1\nR1 a 0 50\n.end', [])

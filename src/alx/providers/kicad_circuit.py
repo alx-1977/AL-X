@@ -144,13 +144,20 @@ def build_deck(lines, settings, measurements):
     # A node whose name is not a plain identifier is measured through a unity
     # voltage-controlled source to a plain alias node, which draws no current.
     aliases = {}
+    # Every token the deck uses, so an alias can never be an existing node or
+    # reference; SPICE names compare without regard to case.
+    taken = {token.lower() for line in lines for token in line.split()}
 
     def alias(name):
         if name == '0' or re.fullmatch(r'[A-Za-z0-9_]+', name):
             return name
         if name not in aliases:
-            aliases[name] = f'alxnode{len(aliases)}'
-            lines.append(f'Ealxnode{len(aliases)-1} {aliases[name]} 0 {name} 0 1')
+            number = len(aliases)
+            while f'alxnode{number}' in taken or f'ealxnode{number}' in taken:
+                number += 1
+            aliases[name] = f'alxnode{number}'
+            taken.update({f'alxnode{number}', f'ealxnode{number}'})
+            lines.append(f'Ealxnode{number} {aliases[name]} 0 {name} 0 1')
         return aliases[name]
 
     controls = ['.control', 'set noaskquit', 'set numdgt=15', 'set wr_vecnames', 'set wr_singlescale', command]

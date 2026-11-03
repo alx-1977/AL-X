@@ -307,14 +307,18 @@ def extract(tree, ports, density, layers):
         # Each change of net along the path must happen across a net tie that
         # joins exactly those two nets; anything else is a short.
         current = None
-        for index in indices:
+        for position, index in enumerate(indices):
             edge = edges[index]
             if edge['kind'] == 'net_tie':
-                if current is not None and current not in edge['tie_nets']:
+                # The tie was inserted from its first pad to its second: the
+                # node the route enters by says which net it leaves on.
+                entering = nodes[position] == edge['a']
+                enter, leave = edge['tie_nets'] if entering else edge['tie_nets'][::-1]
+                if current is not None and current != enter:
                     raise GeometryJudgement(
                         f"port_crosses_nets:{port['id']}:{edge.get('reference')} joins "
                         f"{'/'.join(edge['tie_nets'])}, reached from {current}")
-                current = next((n for n in edge['tie_nets'] if n != current), current)
+                current = leave
                 continue
             if current is not None and edge['net'] != current:
                 raise GeometryJudgement(
