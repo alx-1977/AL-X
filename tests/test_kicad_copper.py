@@ -148,9 +148,71 @@ class CopperFormats(unittest.TestCase):
         self.assertEqual(ys, {'0'})
 
     def test_a_tight_arc_is_never_cut_shorter_than_its_track_is_wide(self):
-        arc = sexpr('(arc (start 0.15 0) (mid 0 0.15) (end -0.15 0) (width 0.4))')
-        points = arc_points(arc, 4, min_chord_mm=0.4)
-        self.assertEqual(len(points), 3)                  # two chords, not thirteen
+        # Review of #199: by true chord length, 2 r sin(step/2), not arc length.
+        semicircle = sexpr('(arc (start 1 0) (mid 0 1) (end -1 0) (width 0.5))')
+        points = arc_points(semicircle, 4, min_chord_mm=0.5)
+        chords = [math.dist(a, b) for a, b in zip(points, points[1:])]
+        self.assertGreaterEqual(min(chords), 0.5 - 1e-9)
+        self.assertEqual(len(chords), 6)                  # not seven of 0.445 mm
+        # Too tight for two chords of the width: one straight chord.
+        tight = sexpr('(arc (start 0.15 0) (mid 0 0.15) (end -0.15 0) (width 0.4))')
+        self.assertEqual(len(arc_points(tight, 4, min_chord_mm=0.4)), 2)
+
+    def test_another_nets_track_crossing_the_middle_of_a_coil_is_a_short(self):
+        """Review of #199: contact anywhere along a track, not only at its ends."""
+        crossing = ('(segment (start 5 -3) (end 5 3) (width 0.2) (layer "F.Cu") (net "other"))')
+        tree = sexpr(BOARD[:-1] + crossing + ')')
+        with self.assertRaisesRegex(GeometryJudgement, 'off_path_copper_contact'):
+            extract(tree, PORTS, 2, stackup(tree))
+
+    def test_same_net_copper_touching_mid_track_is_an_unseen_route(self):
+        touching = '(segment (start 5 0.05) (end 5 3) (width 0.2) (layer "F.Cu"))'
+        tree = sexpr(BOARD[:-1] + touching + ')')
+        with self.assertRaisesRegex(GeometryJudgement, 'off_path_copper_contact'):
+            extract(tree, PORTS, 2, stackup(tree))
+
+    def test_a_net_may_change_only_across_the_tie_that_joins_it(self):
+        """Review of #199: one tie must not excuse a join to a third net."""
+        def board(last_net):
+            return sexpr('(kicad_pcb ' + STACK +
+                '(segment (start 0 0) (end 4.8 0) (width 0.4) (layer "F.Cu") (net "A"))'
+                '(footprint "lib:NetTie" (at 5 0) (property "Reference" "NT9")'
+                ' (pad "1" smd rect (at -0.2 0) (size 0.4 0.4) (layers "F.Cu") (net "A"))'
+                ' (pad "2" smd rect (at 0.2 0) (size 0.4 0.4) (layers "F.Cu") (net "B")))'
+                '(segment (start 5.2 0) (end 8 0) (width 0.4) (layer "F.Cu") (net "B"))'
+                f'(segment (start 8 0) (end 10 0) (width 0.4) (layer "F.Cu") (net "{last_net}")))')
+        port = {'id': 'c', 'start': {'x_mm': 0, 'y_mm': 0, 'layer': 'F.Cu'},
+                'end': {'x_mm': 10, 'y_mm': 0, 'layer': 'F.Cu'}}
+        tree = board('B')
+        (path,) = extract(tree, [port], 2, stackup(tree))
+        self.assertEqual(path['nets'], ['A', 'B'])
+        tree = board('C')
+        with self.assertRaisesRegex(GeometryJudgement, 'port_crosses_nets:c:B to C'):
+            extract(tree, [port], 2, stackup(tree))
+
+    def test_a_through_via_joins_the_inner_layers_between_its_ends(self):
+        """Review of #199: KiCad lists F.Cu and B.Cu, the via also meets In1.Cu."""
+        four = ('(setup (stackup (layer "F.Cu" (type "copper") (thickness 0.035))'
+                ' (layer "d1" (type "core") (thickness 0.2) (epsilon_r 4.5))'
+                ' (layer "In1.Cu" (type "copper") (thickness 0.035))'
+                ' (layer "d2" (type "core") (thickness 0.2) (epsilon_r 4.5))'
+                ' (layer "B.Cu" (type "copper") (thickness 0.035))))')
+        tree = sexpr('(kicad_pcb ' + four +
+                     '(segment (start 0 0) (end 5 0) (width 0.3) (layer "F.Cu"))'
+                     '(via (at 5 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu"))'
+                     '(segment (start 5 0) (end 10 0) (width 0.3) (layer "In1.Cu")))')
+        port = {'id': 'v', 'start': {'x_mm': 0, 'y_mm': 0, 'layer': 'F.Cu'},
+                'end': {'x_mm': 10, 'y_mm': 0, 'layer': 'In1.Cu'}}
+        (path,) = extract(tree, [port], 2, stackup(tree))
+        self.assertIn('via', [edge['kind'] for edge in path['edges']])
+
+    def test_a_track_ending_off_centre_inside_a_pad_attaches_to_it(self):
+        pad = ('(footprint "test" (at -0.1 0) (property "Reference" "L1")'
+               ' (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")))')
+        tree = sexpr(BOARD[:-1] + pad + ')')
+        port = dict(PORTS[0], start={'reference': 'L1', 'pad': '1'})
+        (path,) = extract(tree, [port], 2, stackup(tree))
+        self.assertEqual(path['edges'][0]['a'][:2], (0.0, 0.0))
 
     def test_formula_refuses_a_nonspiral(self):
         tree = sexpr(BOARD)

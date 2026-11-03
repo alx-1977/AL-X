@@ -160,13 +160,15 @@ DEFINITIONS = (
         'tied_references take the tuned part\'s value together, as matched halves of a '
         'balanced network do; '
         'targets use real, imag, magnitude or q, at frequency/time, with inclusive ranges '
-        'and error_scale. Returns ranked candidates, every target error and one-component '
+        'and error_scale. Returns the 20 best ranked candidates (candidates_omitted counts the '
+        'rest), every target error and one-part-at-a-time '
         'tolerance sensitivity. Never selects a candidate or edits a design. Ties and no '
         'acceptable candidate return needs_judgement. Netlists and complete logs accompany results.',
         obj({'work_copy_id': S, 'netlist': S, 'model_blocks': array(S), 'analysis': ANALYSIS,
              'measurements': array(MEASUREMENT), 'tuning': TUNING}, ('analysis', 'measurements')),
         obj({'status': S, 'reasons': array(S), 'curves': MAP, 'candidates': array(MAP),
-             'netlist': S, 'log': S, 'conventions': MAP}), SideEffect.NONE, FAILURES),
+             'candidates_omitted': I, 'netlist': S, 'log': S, 'conventions': MAP}),
+        SideEffect.NONE, FAILURES),
 )
 
 

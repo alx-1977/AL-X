@@ -27,6 +27,28 @@ def identifier(value):
     return value
 
 
+def node(value):
+    """A SPICE node name as the deck writes it, such as `/RF1` or `out-1`.
+
+    Safe in a deck line, where tokens are separated by whitespace; never put
+    into a control expression, where `/` and `-` are operators.
+    """
+    if not isinstance(value, str) or not re.fullmatch(r'[^\s;`$"\'(),=]+', value):
+        raise AnalysisError('arguments_unusable')
+    return value
+
+
+def logical_lines(lines):
+    """SPICE continuation lines (`+ ...`) joined to the line they continue."""
+    joined = []
+    for line in lines:
+        if line.lstrip().startswith('+') and joined:
+            joined[-1] = joined[-1] + ' ' + line.lstrip()[1:].strip()
+        else:
+            joined.append(line)
+    return joined
+
+
 def clean_deck(netlist, models):
     """Refuse executable control blocks, filesystem directives and hidden analyses.
 
@@ -35,11 +57,13 @@ def clean_deck(netlist, models):
     """
     if not netlist or len(netlist) + sum(map(len, models)) > 1000000:
         raise AnalysisError('arguments_unusable')
-    lines = netlist.splitlines()
+    # Joined first, so a field on a continuation line, such as `+ AC 2`, is
+    # seen and handled with the line it belongs to.
+    lines = logical_lines(netlist.splitlines())
     result = [lines[0] if lines else 'ALX circuit']
     allowed = {'.model', '.subckt', '.ends', '.param', '.func', '.global', '.temp'}
     discarded = {'.end', '.ac', '.tran', '.op', '.save', '.probe', '.title'}
-    for line in lines[1:] + [line for block in models for line in block.splitlines()]:
+    for line in lines[1:] + [line for block in models for line in logical_lines(block.splitlines())]:
         stripped = line.strip()
         if not stripped or stripped.startswith('*'):
             result.append(line)
@@ -54,10 +78,10 @@ def clean_deck(netlist, models):
     return result
 
 
-def measurement_expression(measurement, analysis):
+def measurement_expression(measurement, analysis, alias=lambda name: name):
     kind = measurement['kind']
     if kind in ('voltage', 'impedance'):
-        a, b = identifier(measurement['positive']), identifier(measurement['negative'])
+        a, b = alias(node(measurement['positive'])), alias(node(measurement['negative']))
         if kind == 'impedance' and analysis != 'ac':
             raise AnalysisError('arguments_unusable')
         # The generated AC current source injects +1 A at positive, returns at
@@ -70,12 +94,20 @@ def measurement_expression(measurement, analysis):
     raise AnalysisError('arguments_unusable')
 
 
+# What one simulation may return to the Core: every row of every curve goes
+# into its context, so a valid request must not be able to fill it.
+MAX_POINTS = 2000
+MAX_ROWS = 4000
+MAX_CANDIDATES = 20
+MAX_LOG_CHARS = 20000
+
+
 def build_deck(lines, settings, measurements):
     kind = settings['kind']
     if kind == 'ac':
         start, stop = positive(settings['start_hz']), positive(settings['stop_hz'])
         count = settings['points']
-        if not isinstance(count, int) or not 1 <= count <= 10000 or stop < start:
+        if not isinstance(count, int) or not 1 <= count <= MAX_POINTS or stop < start:
             raise AnalysisError('arguments_unusable')
         scale = settings.get('scale', 'dec')
         if scale not in ('dec', 'oct', 'lin'):
@@ -83,7 +115,7 @@ def build_deck(lines, settings, measurements):
         command = f'ac {scale} {count} {start:.17g} {stop:.17g}'
     elif kind == 'transient':
         step, stop = positive(settings['step_seconds']), positive(settings['stop_seconds'])
-        if stop < step or stop / step > 100000:
+        if stop < step or stop / step > MAX_POINTS:
             raise AnalysisError('arguments_unusable')
         command = f'tran {step:.17g} {stop:.17g}'
     elif kind == 'operating_point':
@@ -92,6 +124,9 @@ def build_deck(lines, settings, measurements):
         raise AnalysisError('arguments_unusable')
     if not 1 <= len(measurements) <= 32 or len({m['id'] for m in measurements}) != len(measurements):
         raise AnalysisError('arguments_unusable')
+    if len(measurements) * (count if kind == 'ac' else stop / step if kind == 'transient' else 1) > MAX_ROWS:
+        raise AnalysisError('arguments_unusable', {'reason': 'result_rows_exceed_bound',
+                                                    'maximum_rows': MAX_ROWS})
     impedance = [m for m in measurements if m['kind'] == 'impedance']
     if impedance and (len(impedance) != 1 or len(measurements) != 1):
         raise AnalysisError('arguments_unusable', {'reason': 'impedance_requires_one_independent_excitation'})
@@ -105,10 +140,22 @@ def build_deck(lines, settings, measurements):
         m = impedance[0]
         if any(line.split() and line.split()[0].lower() == 'ialxprobe' for line in lines):
             raise AnalysisError('arguments_unusable')
-        lines.append(f'Ialxprobe {identifier(m["negative"])} {identifier(m["positive"])} DC 0 AC 1')
+        lines.append(f'Ialxprobe {node(m["negative"])} {node(m["positive"])} DC 0 AC 1')
+    # A node whose name is not a plain identifier is measured through a unity
+    # voltage-controlled source to a plain alias node, which draws no current.
+    aliases = {}
+
+    def alias(name):
+        if name == '0' or re.fullmatch(r'[A-Za-z0-9_]+', name):
+            return name
+        if name not in aliases:
+            aliases[name] = f'alxnode{len(aliases)}'
+            lines.append(f'Ealxnode{len(aliases)-1} {aliases[name]} 0 {name} 0 1')
+        return aliases[name]
+
     controls = ['.control', 'set noaskquit', 'set numdgt=15', 'set wr_vecnames', 'set wr_singlescale', command]
     for index, measurement in enumerate(measurements):
-        expression = measurement_expression(measurement, kind)
+        expression = measurement_expression(measurement, kind, alias)
         controls.extend([f'let alx{index} = {expression}', f'wrdata m{index}.txt alx{index}'])
     return '\n'.join(lines + controls + ['quit', '.endc', '.end', ''])
 
@@ -185,6 +232,10 @@ def enumerate_tuning(lines, tuning, solve):
     # tuned part's value together; each still varies alone for tolerance.
     tied = {ref: [identifier(item).upper() for item in c.get('tied_references', ())]
             for ref, c in zip(refs, components)}
+    tolerance_of = {}
+    for ref, component in zip(refs, components):
+        for item in [ref, *tied[ref]]:
+            tolerance_of[item] = component['tolerance_fraction']
     named = refs + [item for group in tied.values() for item in group]
     if len(set(named)) != len(named):
         raise AnalysisError('arguments_unusable')
@@ -199,7 +250,8 @@ def enumerate_tuning(lines, tuning, solve):
             raise AnalysisError('arguments_unusable')
     # Includes nominal and both perturbations of every component. Bound before
     # launching any solve; never silently truncate the candidate space.
-    if math.prod(len(c['values']) for c in components) * (1+2*len(components)) > 1024:
+    # Nominal, and both perturbations of every part, tied parts included.
+    if math.prod(len(c['values']) for c in components) * (1+2*len(tolerance_of)) > 1024:
         raise AnalysisError('arguments_unusable', {'reason': 'tuning_budget_exceeded'})
     candidates = []
     for combination in itertools.product(*(c['values'] for c in components)):
@@ -208,17 +260,19 @@ def enumerate_tuning(lines, tuning, solve):
         nominal = solve(replace_values(lines, together))
         errors = target_errors(nominal['curves'], targets)
         sensitivity = []
-        for ref, component in zip(refs, components):
+        # Every part varies alone, tied parts too: each has its own tolerance.
+        for ref, tolerance in tolerance_of.items():
             for sign in (-1, 1):
-                varied = dict(together, **{ref: values[ref]*(1+sign*component['tolerance_fraction'])})
+                varied = dict(together, **{ref: together[ref]*(1+sign*tolerance)})
                 response = solve(replace_values(lines, varied))
-                sensitivity.append({'reference': ref, 'fraction': sign*component['tolerance_fraction'],
-                                    'target_errors': target_errors(response['curves'], targets),
-                                    'netlist': response['netlist'], 'log': response['log']})
+                sensitivity.append({'reference': ref, 'fraction': sign*tolerance,
+                                    'target_errors': target_errors(response['curves'], targets)})
+        # Bounded: values, errors and sensitivity per candidate; the full
+        # curves, deck and log of the run accompany the result only once.
         candidates.append({'values': together, 'target_errors': errors,
                            'score': sum(e['normalized_error']**2 for e in errors),
                            'within_targets': all(e['error'] == 0 for e in errors),
-                           'sensitivity': sensitivity, **nominal})
+                           'sensitivity': sensitivity})
     candidates.sort(key=lambda c: c['score'])
     tie_margin = tuning['tie_margin']
     if not math.isfinite(tie_margin) or tie_margin < 0:
@@ -228,4 +282,5 @@ def enumerate_tuning(lines, tuning, solve):
         reasons.append('no_candidate_within_targets')
     if len(candidates) > 1 and candidates[1]['score']-candidates[0]['score'] <= tie_margin:
         reasons.append('equally_good_candidates')
-    return candidates, reasons
+    # The best few, ranked, and how many more were evaluated.
+    return candidates[:MAX_CANDIDATES], reasons, max(0, len(candidates) - MAX_CANDIDATES)

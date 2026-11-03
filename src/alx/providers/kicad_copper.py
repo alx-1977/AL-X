@@ -75,10 +75,16 @@ def arc_points(node, density, min_chord_mm=0.0):
     radius = math.dist(a, (ux, uy))
     count = max(2, math.ceil(abs(sweep)*density*4))
     if min_chord_mm > 0:
-        # Chords much shorter than the track is wide overlap each other at a
-        # tight bend, and FastHenry's overlapping filaments return NaN.
-        # Independent of density: the finer mesh refines the cross-section.
-        count = max(2, min(count, math.ceil(radius*abs(sweep)/min_chord_mm)))
+        # Chords shorter than the track is wide overlap each other at a tight
+        # bend, and FastHenry's overlapping filaments return NaN. The most
+        # chords whose true length (2 r sin(step/2)) is at least the width;
+        # one chord when even two would be too short. Independent of density:
+        # the finer mesh refines the cross-section instead.
+        if min_chord_mm >= 2*radius:
+            longest = 1
+        else:
+            longest = max(1, math.floor(abs(sweep)/(2*math.asin(min_chord_mm/(2*radius)))))
+        count = max(1, min(count, longest))
     return [a] + [(ux+radius*math.cos(angles[0]+sweep*i/count),
                    uy+radius*math.sin(angles[0]+sweep*i/count)) for i in range(1, count)] + [c]
 
@@ -183,9 +189,13 @@ def extract(tree, ports, density, layers):
             insert(a, b, width, layer, node.name, net_name(node),
                    join_a=index == 0, join_b=index == last)
     for via in tree.named('via'):
-        spans = [name for name in values(via, 'layers') if name in copper]
+        # KiCad lists a via's two end layers; it also joins every copper
+        # layer of the stack-up between them.
+        ends = [copper[name]['z_m'] for name in values(via, 'layers') if name in copper]
         drill = float(values(via, 'drill')[0])
-        ordered = sorted(spans, key=lambda name: copper[name]['z_m'])
+        ordered = sorted((name for name, entry in copper.items()
+                          if ends and min(ends) <= entry['z_m'] <= max(ends)),
+                         key=lambda name: copper[name]['z_m'])
         for top, bottom in zip(ordered, ordered[1:]):
             insert(xy(via, 'at'), xy(via, 'at'), drill, top, 'via', net_name(via),
                    layer_b=bottom, extra={'drill_mm': drill})
@@ -215,7 +225,8 @@ def extract(tree, ports, density, layers):
             if layer is not None:
                 width = min(*own[0]['size_mm'], *own[1]['size_mm'])
                 insert(own[0]['position_mm'], own[1]['position_mm'], width, layer, 'net_tie',
-                       own[0]['net'])
+                       own[0]['net'], extra={'tie_nets': (own[0]['net'], own[1]['net']),
+                                             'reference': reference})
 
     def resolve(endpoint):
         if set(endpoint) == {'reference', 'pad'}:
@@ -223,9 +234,16 @@ def extract(tree, ports, density, layers):
             if len(matches) != 1:
                 raise GeometryJudgement('port_pad_ambiguous')
             pad = matches[0]
-            candidates = {node_at(pad['position_mm'], layer) for layer in copper
-                          if layer in pad['layers'] or '*.Cu' in pad['layers']}
-            candidates = [c for c in candidates if c in graph]
+            # A track end anywhere on the pad's copper attaches to it: within
+            # half the pad's smaller side of its centre, so the circle stays
+            # inside the pad whatever its rotation.
+            reach = min(pad['size_mm'])/2
+            x, y = pad['position_mm']
+            candidates = [candidate for layer in copper
+                          if layer in pad['layers'] or '*.Cu' in pad['layers']
+                          for candidate, _ in anchors.get(layer, ())
+                          if candidate in graph
+                          and math.hypot(candidate[0]-x, candidate[1]-y) <= max(reach, JOIN_TOLERANCE_MM)]
             if len(candidates) != 1:
                 raise GeometryJudgement('port_pad_attachment_ambiguous')
             return candidates[0]
@@ -286,22 +304,49 @@ def extract(tree, ports, density, layers):
             nodes.append(current)
         nets = {edges[i]['net'] for i in indices}
         selected = set(indices)
-        # Copper of another net touching the path is a short, not a coil.
+        # Each change of net along the path must happen across a net tie that
+        # joins exactly those two nets; anything else is a short.
+        current = None
+        for index in indices:
+            edge = edges[index]
+            if edge['kind'] == 'net_tie':
+                if current is not None and current not in edge['tie_nets']:
+                    raise GeometryJudgement(
+                        f"port_crosses_nets:{port['id']}:{edge.get('reference')} joins "
+                        f"{'/'.join(edge['tie_nets'])}, reached from {current}")
+                current = next((n for n in edge['tie_nets'] if n != current), current)
+                continue
+            if current is not None and edge['net'] != current:
+                raise GeometryJudgement(
+                    f"port_crosses_nets:{port['id']}:{current} to {edge['net']} at "
+                    f"{edge['a'][0]:.3f},{edge['a'][1]:.3f} {edge['layer']} without a net tie")
+            current = edge['net']
+        # Copper not on the path touching it anywhere along its length: of
+        # another net it is a short; of the same net, touching away from the
+        # path's nodes, it is a second current route the graph does not see.
         for index in indices:
             edge = edges[index]
             if edge['kind'] in ('via', 'net_tie'):
                 continue
-            a, b = edge['a'], edge['b']
-            dx, dy = b[0]-a[0], b[1]-a[1]
-            length2 = dx*dx+dy*dy
+            ends = {edge['a'], edge['b']}
+            reach = edge['width_mm']/2
+            low = (min(edge['a'][0], edge['b'][0])-reach, min(edge['a'][1], edge['b'][1])-reach)
+            high = (max(edge['a'][0], edge['b'][0])+reach, max(edge['a'][1], edge['b'][1])+reach)
             for other_index, other in enumerate(edges):
                 if (other_index in selected or other['layer'] != edge['layer']
-                        or other['net'] in nets or other['kind'] in ('via', 'net_tie')):
+                        or other['kind'] in ('via', 'net_tie')):
                     continue
-                for point in (other['a'], other['b']):
-                    t = ((point[0]-a[0])*dx+(point[1]-a[1])*dy)/length2
-                    if 0 <= t <= 1 and math.dist(point[:2], (a[0]+t*dx, a[1]+t*dy)) <= (edge['width_mm']+other['width_mm'])/2:
-                        raise GeometryJudgement('off_path_copper_contact')
+                margin = other['width_mm']/2
+                if (max(other['a'][0], other['b'][0]) < low[0]-margin
+                        or min(other['a'][0], other['b'][0]) > high[0]+margin
+                        or max(other['a'][1], other['b'][1]) < low[1]-margin
+                        or min(other['a'][1], other['b'][1]) > high[1]+margin):
+                    continue
+                if other['net'] == edge['net'] and ends & {other['a'], other['b']}:
+                    continue    # attached at a node: the graph already holds it
+                if (segment_distance(edge['a'], edge['b'], other['a'], other['b']) <
+                        (edge['width_mm']+other['width_mm'])/2 - JOIN_TOLERANCE_MM):
+                    raise GeometryJudgement('off_path_copper_contact')
         path = [dict(edges[i], a=nodes[j], b=nodes[j+1]) for j, i in enumerate(indices)]
         # Turns touching each other. Pieces close along the path, such as the
         # chords of one arc, meet by construction and are not compared.
@@ -320,9 +365,6 @@ def extract(tree, ports, density, layers):
                 if (segment_distance(edge['a'], edge['b'], other['a'], other['b']) <
                         (edge['width_mm']+other['width_mm'])/2 - JOIN_TOLERANCE_MM):
                     raise GeometryJudgement('copper_self_contact_union_unresolved')
-        if len({e['net'] for e in path if e['kind'] != 'net_tie'}) > 1 and not any(
-                e['kind'] == 'net_tie' for e in path):
-            raise GeometryJudgement('port_crosses_nets')
         paths.append({'id': port['id'], 'net': path[0]['net'], 'nets': sorted(nets), 'edges': path})
     used = set()
     for path in paths:

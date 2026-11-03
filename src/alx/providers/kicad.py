@@ -342,11 +342,14 @@ class KiCadProvider:
                         if not path.is_file():
                             raise KiCadError('invalid_report', {'engine': 'ngspice', 'log': log, 'netlist': deck})
                         curves[measurement['id']] = parse_curve(path.read_text(), settings['kind'] == 'ac')
-                    return {'curves': curves, 'netlist': deck, 'log': log}
+                    from alx.providers.kicad_circuit import MAX_LOG_CHARS
+                    return {'curves': curves, 'netlist': deck, 'log': log[-MAX_LOG_CHARS:]}
 
             result = solve(lines)
-            candidates, reasons = enumerate_tuning(lines, arguments['tuning'], solve) if 'tuning' in arguments else ([], [])
-            return dict(result, candidates=candidates, status='needs_judgement' if reasons else 'ok',
+            candidates, reasons, omitted = (enumerate_tuning(lines, arguments['tuning'], solve)
+                                            if 'tuning' in arguments else ([], [], 0))
+            return dict(result, candidates=candidates, candidates_omitted=omitted,
+                        status='needs_judgement' if reasons else 'ok',
                         reasons=reasons, conventions={
                             'units': 'SI', 'ac_values': 'complex_peak_phasors',
                             'x': {'ac': 'frequency_hz', 'transient': 'time_seconds',
@@ -360,7 +363,8 @@ class KiCadProvider:
                 schematics = list((stage / 'project').glob('*.kicad_sch'))
                 if len(schematics) != 1:
                     return {'status': 'needs_judgement', 'reasons': ['schematic_ambiguous'],
-                            'curves': {}, 'candidates': [], 'netlist': '', 'log': '', 'conventions': {}}
+                            'curves': {}, 'candidates': [], 'candidates_omitted': 0,
+                            'netlist': '', 'log': '', 'conventions': {}}
                 output = stage / 'export.cir'
                 self._run('sch', 'export', 'netlist', '--format', 'spice', '--output', output, schematics[0])
                 return simulate(output.read_text(), stage)

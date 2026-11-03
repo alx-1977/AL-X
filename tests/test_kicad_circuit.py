@@ -95,7 +95,7 @@ class CircuitFormats(unittest.TestCase):
                          'minimum': minimum, 'maximum': maximum, 'error_scale': 50}
                         for q, minimum, maximum in (('real', 49.9, 50.1), ('imag', -.1, .1))],
             'tie_margin': 1e-12}
-        candidates, reasons = enumerate_tuning(lines, tuning, solve)
+        candidates, reasons, _ = enumerate_tuning(lines, tuning, solve)
         self.assertEqual(reasons, [])
         self.assertEqual(len(candidates), 4)
         self.assertEqual(len(calls), 20)
@@ -104,12 +104,68 @@ class CircuitFormats(unittest.TestCase):
         self.assertEqual(len(candidates[0]['sensitivity']), 4)
         self.assertNotIn('selected', candidates[0])
         tuning['targets'][0].update(minimum=1000, maximum=1001)
-        _, reasons = enumerate_tuning(lines, tuning, solve)
+        _, reasons, _ = enumerate_tuning(lines, tuning, solve)
         self.assertIn('no_candidate_within_targets', reasons)
         tuning['tie_margin'] = 1e9
-        _, reasons = enumerate_tuning(lines, tuning, solve)
+        _, reasons, _ = enumerate_tuning(lines, tuning, solve)
         self.assertIn('equally_good_candidates', reasons)
 
+
+    def test_an_ac_source_on_a_continuation_line_is_zeroed_for_impedance(self):
+        """Review of #199: `+ AC 2` belongs to the line it continues."""
+        lines = clean_deck('test\nI1 0 in DC 0\n+ AC 2\nR1 in 0 50\n.end', [])
+        deck = build_deck(lines, {'kind': 'ac', 'start_hz': 1e6, 'stop_hz': 2e6, 'points': 2},
+                          [{'id': 'z', 'kind': 'impedance', 'positive': 'in', 'negative': '0'}])
+        source = next(line for line in deck.splitlines() if line.startswith('I1'))
+        self.assertIn('AC 0', source)
+        self.assertNotIn('AC 2', deck)
+
+    def test_kicad_node_names_are_measured_through_an_alias(self):
+        """Review of #199: `/RF1` and `out-1` are valid nodes but operators in expressions."""
+        lines = clean_deck('test\nV1 /RF1 0 AC 1\nR1 /RF1 out-1 50\nR2 out-1 0 50\n.end', [])
+        deck = build_deck(lines, {'kind': 'ac', 'start_hz': 1e6, 'stop_hz': 2e6, 'points': 2},
+                          [{'id': 'v', 'kind': 'voltage', 'positive': 'out-1', 'negative': '/RF1'}])
+        self.assertIn('Ealxnode0 alxnode0 0 out-1 0 1', deck)
+        self.assertIn('Ealxnode1 alxnode1 0 /RF1 0 1', deck)
+        self.assertIn('let alx0 = v(alxnode0)-v(alxnode1)', deck)
+        with self.assertRaises(AnalysisError):
+            build_deck(lines, {'kind': 'ac', 'start_hz': 1e6, 'stop_hz': 2e6, 'points': 2},
+                       [{'id': 'v', 'kind': 'voltage', 'positive': 'a(b)', 'negative': '0'}])
+
+    def test_a_result_too_large_for_the_core_is_refused_before_running(self):
+        """Review of #199: every returned row enters the Core's context."""
+        lines = clean_deck('test\nV1 a 0 AC 1\nR1 a 0 50\n.end', [])
+        many = [{'id': f'v{i}', 'kind': 'voltage', 'positive': 'a', 'negative': '0'} for i in range(32)]
+        with self.assertRaises(AnalysisError):
+            build_deck(lines, {'kind': 'ac', 'start_hz': 1, 'stop_hz': 2, 'points': 1000}, many)
+        with self.assertRaises(AnalysisError):
+            build_deck(lines, {'kind': 'ac', 'start_hz': 1, 'stop_hz': 2, 'points': 10000}, many[:1])
+
+    def test_tied_parts_each_vary_alone_and_only_the_best_candidates_return(self):
+        """Review of #199: a tied part has its own tolerance run; results are bounded."""
+        lines = clean_deck('test\nV1 a 0 AC 1\nC1 a b 1p\nC2 b 0 1p\nR1 b 0 50\n.end', [])
+        calls = []
+
+        def solve(candidate):
+            calls.append(candidate)
+            return {'curves': {'z': [{'x': 1e6, 'real': 50.0, 'imag': 0.0}]},
+                    'netlist': '', 'log': ''}
+        tuning = {'components': [
+            {'reference': 'C1', 'values': [float(v)*1e-12 for v in range(1, 31)],
+             'tolerance_fraction': .05, 'tied_references': ['C2']}],
+            'targets': [{'measurement_id': 'z', 'quantity': 'real', 'at': 1e6,
+                         'minimum': 40, 'maximum': 60, 'error_scale': 5}],
+            'tie_margin': -1}
+        with self.assertRaises(AnalysisError):          # tie_margin must not be negative
+            enumerate_tuning(lines, tuning, solve)
+        tuning['tie_margin'] = 0
+        calls.clear()
+        candidates, _, omitted = enumerate_tuning(lines, tuning, solve)
+        self.assertEqual(len(calls), 30*5)               # nominal, C1 +-, C2 +-
+        self.assertEqual({item['reference'] for item in candidates[0]['sensitivity']}, {'C1', 'C2'})
+        self.assertEqual(candidates[0]['values']['C1'], candidates[0]['values']['C2'])
+        self.assertEqual((len(candidates), omitted), (20, 10))
+        self.assertNotIn('netlist', candidates[0])
 
 class CircuitProvider(unittest.TestCase):
     def setUp(self):
