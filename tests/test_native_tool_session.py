@@ -101,6 +101,45 @@ class NativeSessionTests(unittest.TestCase):
         fresh = self.model.complete(request())
         self.assertEqual(fresh.tool_use["call_id"], "c1")
 
+    def test_an_abandoned_run_is_recorded_with_its_usage_unknown(self) -> None:
+        """Review of #197: a run that reasoned is never missing from the record."""
+        recorded = []
+        self.model._telemetry_sink = lambda key, values: recorded.append(values)
+        self.model.complete(request(affinity_key="c1"))
+        self.model.abandon_session()
+        (row,) = [item for item in recorded if item.get("outcome") == "abandoned"]
+        self.assertEqual(row["code"], "reasoning.failed")
+        self.assertTrue(row["usage_unknown"])
+
+    def test_a_failed_launch_leaves_nothing_behind(self) -> None:
+        import glob
+
+        def refuse(*_args, **_kwargs):
+            raise OSError("cannot start")
+
+        before = set(glob.glob("/tmp/alx-native-*"))
+        self.model._launcher = refuse
+        with self.assertRaises(Exception):
+            self.model.complete(request())
+        self.assertEqual(set(glob.glob("/tmp/alx-native-*")), before)
+
+    def test_a_cli_that_never_reads_a_large_prompt_cannot_hold_the_turn(self) -> None:
+        import time
+        from alx.providers.errors import ProviderError
+        stalled = Path(tempfile.mkdtemp()) / "claude"
+        self.addCleanup(lambda: stalled.unlink(missing_ok=True))
+        stalled.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+        stalled.chmod(stalled.stat().st_mode | stat.S_IEXEC)
+        model = ClaudeSubscriptionReasoningModel("claude-sonnet-5-5", 2, executable=str(stalled),
+                                                 native_tools=True)
+        self.addCleanup(model.abandon_session)
+        big = request(messages=(ModelMessage(ModelRole.SYSTEM, "rules"),
+                                ModelMessage(ModelRole.USER, "x" * 2_000_000)))
+        started = time.monotonic()
+        with self.assertRaises(ProviderError):
+            model.complete(big)
+        self.assertLess(time.monotonic() - started, 30)
+
     def test_a_tool_result_requires_a_native_request(self) -> None:
         with self.assertRaises(ValueError):
             request(native_tools=False, tool_result="x")

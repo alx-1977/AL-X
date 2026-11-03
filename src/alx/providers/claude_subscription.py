@@ -292,15 +292,25 @@ class _NativeSession:
         self._server.listen(8)
         self._server.settimeout(0.2)
         self._pending: Any = None
+        # The request that started the run and when, for its record.
+        self.request: Any = None
+        self.started_at = monotonic()
         self._idle_seconds = idle_seconds
         self._idle_timer: Any = None
         self._stdout: list[str] = []
         self._stderr: list[str] = []
-        self._process = launcher(
-            argv_for(self._socket_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, cwd=self._directory, env=dict(environment),
-            start_new_session=True, shell=False,
-        )
+        try:
+            self._process = launcher(
+                argv_for(self._socket_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, cwd=self._directory, env=dict(environment),
+                start_new_session=True, shell=False,
+            )
+        except BaseException:
+            # Never stored, so never closed later: release what was made here.
+            self._server.close()
+            import shutil as _shutil
+            _shutil.rmtree(self._directory, ignore_errors=True)
+            raise
         self._readers = [
             threading.Thread(target=self._drain, args=(self._process.stdout, self._stdout),
                              daemon=True),
@@ -309,10 +319,15 @@ class _NativeSession:
         ]
         for reader in self._readers:
             reader.start()
+        # Written off this thread, so a CLI that stalls before reading a large
+        # prompt cannot hold the turn past next_event's deadline, which kills it.
+        threading.Thread(target=self._deliver, args=(prompt,), daemon=True).start()
+
+    def _deliver(self, prompt: str) -> None:
         try:
             self._process.stdin.write(prompt)
             self._process.stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     @staticmethod
@@ -718,10 +733,28 @@ class ClaudeSubscriptionReasoningModel:
         return "\n\n".join(parts)
 
     def abandon_session(self) -> None:
-        """End a paused native session the Core will not continue."""
+        """End a paused native session the Core will not continue.
+
+        The run did reason, so it is recorded like any other call, with its
+        usage marked unknown: the CLI reports usage only when it finishes.
+        """
         session, self._session = self._session, None
-        if session is not None:
-            session.close()
+        if session is None:
+            return
+        session.close()
+        request, started_at = session.request, session.started_at
+        if request is None:
+            return
+        self._emit_telemetry(request.affinity_key, {
+            "code": "reasoning.failed",
+            "outcome": "abandoned",
+            "provider": PROVIDER_NAME,
+            "model": self._model,
+            "duration_ms": round((monotonic() - started_at) * 1000),
+            "error_code": "native_session_abandoned",
+            "usage_unknown": True,
+            **_request_telemetry(request),
+        })
 
     def _native_event(self, request: ModelRequest) -> tuple[str, Any]:
         """Start or continue the native session and wait for its next event.
@@ -740,6 +773,8 @@ class ClaudeSubscriptionReasoningModel:
                 self._launcher, lambda path: self.native_command(request, path), prompt,
                 self.child_environment(), self._timeout_seconds,
             )
+            # Kept for the record of a run that is abandoned rather than finished.
+            session.request, session.started_at = request, monotonic()
             self._session = session
         if request.on_dispatched is not None:
             request.on_dispatched()

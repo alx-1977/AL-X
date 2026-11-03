@@ -1697,9 +1697,10 @@ class ModelReasoner:
         self._spend_authority = spend_authority
         self._on_request_dispatched = on_request_dispatched
         # D-065: the native call this reasoner's paused session is waiting on,
-        # as (call_id, goal_id), or None. Only a transport that can pause a
+        # as (call_id, goal_id, refusals already in the turn, whether that
+        # call_id had already run), or None. Only a transport that can pause a
         # session is offered native tools.
-        self._native_pending: tuple[str, str | None] | None = None
+        self._native_pending: tuple[str, str | None, int, bool] | None = None
         self._native_capable = (getattr(model, "native_tools_enabled", False) is True
                                 and callable(getattr(model, "abandon_session", None)))
 
@@ -1774,7 +1775,10 @@ class ModelReasoner:
             "plan_update": None,
             "memory_proposals": [],
         })
-        self._native_pending = (tool_use["call_id"], goal_id)
+        self._native_pending = (
+            tool_use["call_id"], goal_id, len(context.refused_calls),
+            self._turn_attempt(context, tool_use["call_id"]) is not None,
+        )
         return decision
 
     def decide(self, context: ReasoningContext) -> AgentDecision:
@@ -1837,21 +1841,37 @@ class ModelReasoner:
         """
         if self._native_pending is None:
             return None
-        call_id, goal_id = self._native_pending
+        call_id, goal_id, refusals_before, ran_before = self._native_pending
         goal = context.active_goal
         if goal is not None and goal.goal_id != goal_id:
             return None
-        # Only a call dispatched in this turn continues its session. A goal
-        # keeps attempts across turns, and a session paused at the end of an
-        # earlier one must start again from the full, current context.
-        attempts = (*context.transient_attempts, *(() if goal is None else goal.attempts))
-        for item in reversed(attempts if call_id in context.turn_call_ids else ()):
-            if item.call is not None and item.call.call_id == call_id:
-                return json.dumps(_attempt_payload(item), sort_keys=True, default=str)
-        for item in reversed(context.refused_calls):
+        # A refusal given since the pause answers the call, ahead of any
+        # attempt: a reused call_id is refused, and its earlier attempt's
+        # result is not the outcome of this call.
+        for item in reversed(context.refused_calls[refusals_before:]):
             if item.get("call_id") == call_id or item.get("subject") == call_id:
                 return json.dumps({"refused": _plain(item)}, sort_keys=True, default=str)
-        return None
+        if ran_before:
+            return None
+        attempt = self._turn_attempt(context, call_id)
+        if attempt is None:
+            return None
+        return json.dumps(_attempt_payload(attempt), sort_keys=True, default=str)
+
+    @staticmethod
+    def _turn_attempt(context: ReasoningContext, call_id: str) -> Any:
+        """This turn's recorded attempt for a call id, or None.
+
+        Only a call dispatched in this turn: a goal keeps attempts across
+        turns, and a session paused at the end of an earlier one must start
+        again from the full, current context.
+        """
+        if call_id not in context.turn_call_ids:
+            return None
+        goal = context.active_goal
+        attempts = (*context.transient_attempts, *(() if goal is None else goal.attempts))
+        return next((item for item in reversed(attempts)
+                     if item.call is not None and item.call.call_id == call_id), None)
 
     def _decide(self, context: ReasoningContext) -> AgentDecision:
         # One construction. The object measured, authorised and sent is the

@@ -111,13 +111,21 @@ class NativeTurnTests(unittest.TestCase):
         self.assertEqual(self.dispatched, [])
         self.assertIn("refused", json.loads(transport.requests[1].tool_result))
 
+    def test_a_reused_call_id_is_answered_with_its_refusal_not_the_old_result(self) -> None:
+        """Review of #197: the earlier success must not answer the new call."""
+        second = {**native("n1"), "arguments_json": json.dumps({"id": "other"})}
+        transport = PausingTransport([native("n1"), second], base_output(response="ok"))
+        self.run_turn(transport)
+        self.assertEqual(self.dispatched, ["n1"])
+        self.assertIn("refused", json.loads(transport.requests[2].tool_result))
+
     def test_a_turn_that_starts_fresh_abandons_a_stale_session(self) -> None:
         transport = PausingTransport([native("n1")], base_output(response="done"))
         reasoner = ModelReasoner(transport, "laws", "identity")
         core = CoreAgent(self.store, reasoner, self.dispatch, (READ,), clock=lambda: NOW)
         core.process(conversation(), RETENTION, 8)
         # A paused call from an earlier turn whose outcome this context lacks.
-        reasoner._native_pending = ("gone", None)
+        reasoner._native_pending = ("gone", None, 0, False)
         transport.script = []
         core.process(conversation(), RETENTION, 8)
         self.assertEqual(transport.abandoned, 1)
@@ -137,7 +145,7 @@ class ContinuationBoundaryTests(unittest.TestCase):
         self.transport = PausingTransport([], base_output(response="done"))
         self.reasoner = ModelReasoner(self.transport, "laws", "identity")
         # Paused on n1, whose attempt the goal holds from some turn.
-        self.reasoner._native_pending = ("n1", "g1")
+        self.reasoner._native_pending = ("n1", "g1", 0, False)
 
     def context(self, **changes) -> ReasoningContext:
         return ReasoningContext(self.goal, conversation().turns, (READ,), conversation_id="c1",
