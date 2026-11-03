@@ -22,7 +22,7 @@ from alx.contracts import (  # noqa: E402
     SuccessCriterion, WorkItem,
 )
 from alx.continuity.idle_goal_source import (  # noqa: E402
-    IDLE_GOAL_SECONDS, MAX_IDLE_GOAL_OFFERS, IdleGoalSource,
+    IDLE_GOAL_BACKOFF_SECONDS, IDLE_GOAL_SECONDS, MAX_IDLE_GOAL_OFFERS, IdleGoalSource,
 )
 from alx.continuity.ledger import SQLiteOpportunityLedger  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
@@ -119,11 +119,43 @@ class IdleGoalSourceTests(unittest.TestCase):
         self.assertEqual(self.source.due_opportunities()[0].opportunity_id,
                          opportunity.opportunity_id)
 
+    def test_an_offer_refused_at_a_usage_limit_is_offered_again_after_a_backoff(self) -> None:
+        spend = Spend()
+        source = IdleGoalSource(self.goals, self.ledger, enabled=True,
+                                clock=lambda: self.now, spend=spend)
+        self.goals.create(goal(), "thread", RETENTION)
+        self.later()
+        (first,) = source.due_opportunities()
+        source.claim(first)
+        spend.refused.add(first.opportunity_id)
+        self.assertEqual(source.due_opportunities(), ())          # backing off
+        self.later(timedelta(seconds=IDLE_GOAL_BACKOFF_SECONDS + 1))
+        (second,) = source.due_opportunities()
+        self.assertNotEqual(second.opportunity_id, first.opportunity_id)
+        # A refusal is not one of the three: this is still the first offer.
+        self.assertEqual(second.references[1], f"idle_goal_offer:1/{MAX_IDLE_GOAL_OFFERS}")
+        source.claim(second)
+        spend.answered.add(second.opportunity_id)
+        self.later(timedelta(hours=1))
+        self.assertEqual(source.due_opportunities(), ())          # answered for this state
+
     def test_off_unless_the_runtime_may_think_unprompted(self) -> None:
         self.goals.create(goal(), "thread", RETENTION)
         self.later()
         source = IdleGoalSource(self.goals, self.ledger, clock=lambda: self.now)
         self.assertEqual(source.due_opportunities(), ())
+
+
+class Spend:
+    def __init__(self) -> None:
+        self.answered: set[str] = set()
+        self.refused: set[str] = set()
+
+    def dispatch_started(self, opportunity_id: str) -> bool:
+        return opportunity_id in self.answered or opportunity_id in self.refused
+
+    def dispatch_answered(self, opportunity_id: str) -> bool:
+        return opportunity_id in self.answered
 
 
 if __name__ == "__main__":

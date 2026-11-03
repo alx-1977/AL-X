@@ -116,16 +116,21 @@ class SQLiteOpportunityLedger:
         ).fetchone()
         return row is not None
 
-    def count_recorded(self, identity_prefix: str, since: datetime) -> int:
-        """How many occasions with this identity prefix were recorded since then."""
+    def recorded(self, identity_prefix: str, since: datetime) -> tuple[tuple[str, datetime], ...]:
+        """Occasions with this identity prefix that arose since then, oldest first.
+
+        By `arose_at`, the time the producer gave the occasion, so a producer
+        compares against its own clock.
+        """
         escaped = (identity_prefix.replace("\\", "\\\\")
                    .replace("%", "\\%").replace("_", "\\_"))
-        row = self._connection.execute(
-            "SELECT COUNT(*) FROM cognition_opportunities "
-            "WHERE opportunity_id LIKE ? ESCAPE '\\' AND recorded_at >= ?",
+        rows = self._connection.execute(
+            "SELECT opportunity_id, arose_at FROM cognition_opportunities "
+            "WHERE opportunity_id LIKE ? ESCAPE '\\' AND arose_at >= ? "
+            "ORDER BY arose_at, rowid",
             (escaped + "%", since.astimezone(UTC).isoformat()),
-        ).fetchone()
-        return int(row[0])
+        ).fetchall()
+        return tuple((row[0], datetime.fromisoformat(row[1])) for row in rows)
 
     def defer(self, opportunity_id: str, marker: str, deferred_at: datetime) -> None:
         """Hold an occasion that could not be carried, without closing it.

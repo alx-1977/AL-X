@@ -171,8 +171,10 @@ class RepositoryAuthority:
         pull_requests: Any = None,
         remote_verified: bool = True,
         verified_remote: str = "",
-        # Whether a coding job is working in this checkout now.
-        checkout_busy: Callable[[], bool] | None = None,
+        # Holds the checkout against coding jobs for one operation: reserve
+        # returns False while a job is in it; release ends the hold.
+        reserve_checkout: Callable[[], bool] | None = None,
+        release_checkout: Callable[[], None] | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("repository timeout must be positive")
@@ -193,7 +195,8 @@ class RepositoryAuthority:
         # that git performs when the command runs — after the check — and
         # anything able to write that file could point it elsewhere in between.
         self._verified_remote = verified_remote
-        self._checkout_busy = checkout_busy or (lambda: False)
+        self._reserve_checkout = reserve_checkout or (lambda: True)
+        self._release_checkout = release_checkout or (lambda: None)
 
     # ---- process ---------------------------------------------------------
 
@@ -789,7 +792,41 @@ class RepositoryAuthority:
             raise RepositoryAuthorityError("operation_refused", detail[:400])
 
     def perform(self, request: RepositoryRequest) -> RepositoryOutcome:
-        """Run one operation and report what it did."""
+        """Run one operation and report what it did.
+
+        An operation that changes the checkout holds it for its whole run, so
+        no coding job can start in it meanwhile, and is refused while one is
+        already working there.
+        """
+        operation = request.operation
+        if operation not in CHECKOUT_CHANGING:
+            return self._perform(request)
+        if not self._reserve_checkout():
+            LOGGER.warning(
+                "Repository operation refused: %s while a coding job is running",
+                operation.value,
+            )
+            arguments = normalised_arguments(operation, request.arguments)
+            ref = self._affected_ref(operation, arguments)
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=False,
+                source_ref=ref,
+                source_sha=self._sha_of(ref) if ref else "",
+                remote=self._remote_for(operation),
+                failure_code="operation_refused",
+                refusal_reason=(
+                    "a coding job is working in this checkout; wait for it to "
+                    "finish or stop it first"
+                ),
+            )
+        try:
+            return self._perform(request)
+        finally:
+            self._release_checkout()
+
+    def _perform(self, request: RepositoryRequest) -> RepositoryOutcome:
         operation = request.operation
         # Under the names this operation declares, so a caller who said `head`
         # for a pull request's source branch is not refused for the word.
@@ -811,26 +848,6 @@ class RepositoryAuthority:
                 remote=self._remote_for(operation),
                 failure_code="self_preservation",
                 refusal_reason=refusal,
-            )
-
-        if operation in CHECKOUT_CHANGING and self._checkout_busy():
-            LOGGER.warning(
-                "Repository operation refused: %s while a coding job is running",
-                operation.value,
-            )
-            ref = self._affected_ref(operation, arguments)
-            return RepositoryOutcome(
-                repository=self._system.repository,
-                operation=operation,
-                succeeded=False,
-                source_ref=ref,
-                source_sha=self._sha_of(ref) if ref else "",
-                remote=self._remote_for(operation),
-                failure_code="operation_refused",
-                refusal_reason=(
-                    "a coding job is working in this checkout; wait for it to "
-                    "finish or stop it first"
-                ),
             )
 
         if operation in REMOTE_OPERATIONS and not self._remote_verified:

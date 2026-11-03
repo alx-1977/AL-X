@@ -184,6 +184,15 @@ class ZeroRateStillMarksDispatchTests(unittest.TestCase):
         ledger.settle(answered, *SUBSCRIPTION,
                       {"input_tokens": 90_000, "output_tokens": 900})
         self.assertTrue(ledger.dispatch_answered("plan:answered"))
+        # A first pass answered, then the Core asked again was refused: the
+        # turn ended with no decision acted on, so it is not answered.
+        first = ledger.reserve(*SUBSCRIPTION, 96_000, 32_000, "plan:escalated")
+        ledger.mark_dispatched(first)
+        ledger.settle(first, *SUBSCRIPTION, {"input_tokens": 90_000, "output_tokens": 900})
+        again = ledger.reserve(*SUBSCRIPTION, 96_000, 32_000, "plan:escalated")
+        ledger.mark_dispatched(again)
+        ledger.settle(again, *SUBSCRIPTION, None)
+        self.assertFalse(ledger.dispatch_answered("plan:escalated"))
 
 
 class Harness(unittest.TestCase):

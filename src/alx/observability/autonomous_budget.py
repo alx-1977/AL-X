@@ -248,7 +248,7 @@ class SQLiteAutonomousLedger:
             database.close()
 
     def dispatch_answered(self, opportunity_id: str) -> bool:
-        """Whether a reservation for this occasion came back with measured usage.
+        """Whether this occasion's last dispatched call came back with measured usage.
 
         Narrower than `dispatch_started`. A call the provider refused, such as
         one made while the subscription's usage limit is reached, reports no
@@ -256,15 +256,20 @@ class SQLiteAutonomousLedger:
         reasoned. Counting it as an attempt on 2026-11-02 spent a plan's three
         automatic offers in sixteen minutes of refusals, and nothing offered
         the plan again after the limit reset.
+
+        The last call, not any call: with a first pass, a lighter model may
+        answer and the Core that is asked again may then be refused, and the
+        turn ended without a decision anyone acted on.
         """
         database = self._db()
         try:
             row = database.execute(
-                "SELECT COUNT(*) FROM autonomous_spend "
-                "WHERE opportunity_id = ? AND outcome = ?",
-                (opportunity_id, "settled"),
+                "SELECT outcome FROM autonomous_spend "
+                "WHERE opportunity_id = ? AND outcome != ? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (opportunity_id, "reserved"),
             ).fetchone()
-            return bool(row[0])
+            return row is not None and row[0] == "settled"
         finally:
             database.close()
 

@@ -830,7 +830,8 @@ async def run(repository_root: Path) -> None:
         current_call_id.get,
         merge_configuration.token,
         # The coding runtime is composed below; asked at call time.
-        checkout_busy=lambda: coding_agent_running(),
+        reserve_checkout=lambda: reserve_checkout(),
+        release_checkout=lambda: release_checkout(),
     )
     if repository_runtime is not None:
         register(repository_runtime.definitions, TraceSubsystem.GIT)
@@ -892,8 +893,12 @@ async def run(repository_root: Path) -> None:
         )
     coding_runtime = None
 
-    def coding_agent_running() -> bool:
-        return coding_runtime is not None and coding_runtime.agent.is_running()
+    def reserve_checkout() -> bool:
+        return coding_runtime is None or coding_runtime.agent.reserve_checkout()
+
+    def release_checkout() -> None:
+        if coding_runtime is not None:
+            coding_runtime.agent.release_checkout()
 
     coding_runtime = build_coding_runtime(
         provider_settings.coding.enabled,
@@ -1439,6 +1444,7 @@ async def run(repository_root: Path) -> None:
     # offered back to her, a few times, instead of waiting for Friedl to ask.
     idle_goal_source = IdleGoalSource(
         goal_store, opportunity_ledger, enabled=plan_continuation,
+        spend=autonomous_budget,
     )
     idle_goal_source.recover(autonomous_budget)
     occasion_sources.append(idle_goal_source)
