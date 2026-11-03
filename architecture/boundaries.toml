@@ -373,6 +373,18 @@ entry = "providers/kicad.py::KiCadProvider.write_back"
 forbidden = []
 
 [[outcomes]]
+id = "kicad.copper_is_analysed"
+description = "Registered untainted copper is read through the configured field solvers; uncertainty returns to Core."
+entry = "providers/kicad.py::KiCadProvider.analyse_copper"
+forbidden = []
+
+[[outcomes]]
+id = "kicad.circuit_is_simulated"
+description = "A supplied or exported work-copy SPICE circuit is simulated without modifying a design."
+entry = "providers/kicad.py::KiCadProvider.simulate_circuit"
+forbidden = []
+
+[[outcomes]]
 id = "particle.local_compiled"
 description = "D-062 local Particle compiled outcome."
 entry = "providers/particle_local.py::ParticleLocal.compile"
