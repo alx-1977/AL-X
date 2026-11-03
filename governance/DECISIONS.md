@@ -2746,3 +2746,11 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Law 0 follow-up.** Removed `read_own_source`, `list_particle_usb_devices`,
   `read_particle_serial_log` and `find_kicad_library_footprint` as superseded by
   `run_program`; shared primitives needed by retained capabilities remain.
+
+## D-064 — KiCad copper analysis and circuit simulation
+
+- **Date:** 2026-11-02
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-02.** Source: Friedl's approved copper-analysis and circuit-simulation brief.
+- **Decision.** The KiCad tool may run multi-step deterministic analyses on AL/X's own work copies: (1) copper analysis with FastHenry and FastCap, and (2) circuit simulation with ngspice, including tuning component values against targets AL/X states. These read work copies and produce results only; any change to a design goes through the existing edit and D-061 write-back.
+- **Boundary.** No Law exception; laws and identity remain unchanged.
