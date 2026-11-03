@@ -27,6 +27,7 @@ from alx.providers.kicad_circuit import (
 from alx.providers.kicad_copper import (
     GeometryJudgement, stackup, extract, geometry, fasthenry_input,
     copper_solids, electrostatic_files, winding_model, winding_capacitance, solver_nonconverged,
+    PanelLimit, FASTCAP_OPTIONS, fastcap_accuracy,
     parse_impedance, parse_capacitance, wheeler,
 )
 
@@ -410,30 +411,39 @@ class KiCadProvider:
                                         'self_capacitance_f': None, 'self_resonant_frequency_hz': None}
                                        for p in ports]
                 result['geometry'] = [geometry(path, layers) for path in paths]
+                mesh_stage = ''
                 for density in densities:
+                    mesh_stage = f'mesh-{density}'
                     if paths:
                         paths = extract(tree, ports, density, layers)
                     run = stage / f'mesh-{density}'
                     run.mkdir()
+                    solids, outline, nets = copper_solids(tree, paths, layers, density)
+                    result['capacitance_nets'] = nets
+                    files = electrostatic_files(solids, outline, nets, layers, density)
                     deck, henry_log = '', ''
                     if paths:
                         deck = fasthenry_input(paths, layers, frequency, density)
                         (run / 'copper.inp').write_text(deck)
                         henry_log = self._engine('fasthenry', ['copper.inp'], run)
-                    solids, outline, nets = copper_solids(tree, paths, layers, density)
-                    result['capacitance_nets'] = nets
-                    for name, source in electrostatic_files(solids, outline, nets, layers, density).items():
+                    for name, source in files.items():
                         (run / name).write_text(source)
-                    cap_log = self._engine('fastcap', ['-lcopper.lst'], run)
+                    cap_log = self._engine('fastcap', ['-lcopper.lst', *FASTCAP_OPTIONS], run)
                     mesh = {'density': density, 'fasthenry_log': henry_log,
                             'fastcap_log': cap_log, 'fasthenry_input': deck,
+                            'fastcap_options': list(FASTCAP_OPTIONS),
+                            'fastcap_accuracy': fastcap_accuracy(cap_log),
                             'geometry': [geometry(p, layers) for p in paths]}
                     result['meshes'].append(mesh)
                     if solver_nonconverged(henry_log+'\n'+cap_log):
                         result['reasons'].append('solver_nonconvergence')
                         return result
-                    capacitance = parse_capacitance(cap_log, len(nets))
+                    capacitance = parse_capacitance(cap_log, len(nets), identities=nets)
                     mesh['capacitance_f'] = capacitance
+                    mesh['fastcap_accuracy'] = fastcap_accuracy(cap_log, capacitance)
+                    if any(mesh['fastcap_accuracy'].values()):
+                        if 'fastcap_accuracy_warning' not in result['reasons']:
+                            result['reasons'].append('fastcap_accuracy_warning')
                     mesh['self_capacitance_f'] = []
                     if not paths:
                         continue
@@ -442,15 +452,26 @@ class KiCadProvider:
                             patched, identities, voltages = winding_model(path, solids, density)
                             winding_run = run / ('winding-'+str(len(mesh['self_capacitance_f'])))
                             winding_run.mkdir()
+                            mesh_stage = f'mesh-{density}/winding-{path["id"]}'
                             for name, source in electrostatic_files(
                                     patched, outline, identities, layers, density, surface_patches=True).items():
                                 (winding_run / name).write_text(source)
-                            log = self._engine('fastcap', ['-lcopper.lst'], winding_run)
+                            log = self._engine('fastcap', ['-lcopper.lst', *FASTCAP_OPTIONS], winding_run)
                             mesh.setdefault('winding_logs', []).append(log)
+                            accuracy = fastcap_accuracy(log)
+                            mesh.setdefault('winding_accuracy', []).append(accuracy)
                             if solver_nonconverged(log):
                                 raise GeometryJudgement('winding_solver_nonconvergence')
-                            c = winding_capacitance(parse_capacitance(log, len(identities)), voltages)
+                            matrix = parse_capacitance(log, len(identities), identities=identities)
+                            accuracy.update(fastcap_accuracy(log, matrix))
+                            if any(accuracy.values()):
+                                reason = 'winding_fastcap_accuracy_warning:'+path['id']
+                                if reason not in result['reasons']:
+                                    result['reasons'].append(reason)
+                            c = winding_capacitance(matrix, voltages)
                             mesh['self_capacitance_f'].append(c)
+                        except PanelLimit:
+                            raise
                         except GeometryJudgement as error:
                             mesh['self_capacitance_f'].append(None)
                             reason = str(error)+':'+path['id']
@@ -507,6 +528,10 @@ class KiCadProvider:
                         result['coupling'].append({'ports': [ports[j]['id'], port['id']], 'coefficient': coupling})
                 if not result['reasons']:
                     result['status'] = 'facts'
+            except PanelLimit as error:
+                result['reasons'].append(str(error))
+                result['meshes'].append(dict(error.evidence, mesh_stage=mesh_stage,
+                                             density=density, status='panel_limit_exceeded'))
             except GeometryJudgement as error:
                 result['reasons'].append(str(error))
             return result

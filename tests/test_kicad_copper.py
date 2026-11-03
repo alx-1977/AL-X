@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
@@ -19,7 +21,7 @@ from alx.providers.kicad_copper import (
     GeometryJudgement, arc_points, stackup, extract, geometry, fasthenry_input,
     fastcap_files, parse_impedance, parse_capacitance, wheeler,
     copper_solids, electrostatic_files, winding_model, winding_capacitance,
-    quad_panels, planar_panels,
+    quad_panels, planar_panels, PanelBudget, PanelLimit, MAX_FASTCAP_PANELS, fastcap_accuracy,
 )
 
 
@@ -43,7 +45,112 @@ PORTS = [{'id': 'p', 'start': {'x_mm': 0, 'y_mm': 0, 'layer': 'F.Cu'},
 
 class CopperFormats(unittest.TestCase):
     @requires_shapely
-    def test_spiral_surface_voltage_basis_refines_without_internal_cut_faces(self):
+    def test_installed_fastcap_coplanar_strip_calibration(self):
+        from alx.providers.kicad_copper import FASTCAP_OPTIONS
+        engine = Path('~/.local/share/field-solvers/fastcap-2.0wr/bin/fastcap').expanduser()
+        if not engine.is_file():
+            self.skipTest('required engine binary genuinely absent: '+str(engine))
+        tree = sexpr('''(kicad_pcb
+          (setup (stackup (layer "F.Cu" (type "copper") (thickness 0.035))))
+          (segment (start 0 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+          (segment (start 0 1) (end 20 1) (width 0.2) (layer "F.Cu") (net 2))
+          (gr_rect (start -1 -1) (end 21 2) (layer "Edge.Cuts")))''')
+        layers = stackup(tree)
+        solids, outline, nets = copper_solids(tree, [], layers, 2)
+        files = electrostatic_files(solids, outline, nets, layers, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            for name, source in files.items():
+                (run/name).write_text(source)
+            result = run_kicad_engine(engine, ['-lcopper.lst', *FASTCAP_OPTIONS], run,
+                                      timeout_seconds=60)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            matrix = parse_capacitance(result.stdout+result.stderr, 2, identities=nets)
+        # Complete elliptic integral K via the arithmetic-geometric mean.
+        def elliptic_k(k):
+            a, b = 1., math.sqrt(1-k*k)
+            for _ in range(20):
+                a, b = (a+b)/2, math.sqrt(a*b)
+            return math.pi/(2*a)
+        k = .8/(.8+2*.2)
+        expected = 8.8541878128e-12*elliptic_k(math.sqrt(1-k*k))/elliptic_k(k)*.020
+        mutual = -(matrix[0][1]+matrix[1][0])/2
+        self.assertAlmostEqual(mutual, expected, delta=.30*expected)
+
+    def test_winding_energy_uses_printed_identities_for_both_matrix_axes(self):
+        # Printed order is w2, w0, w1; numeric columns follow that same order.
+        source = '''CAPACITANCE MATRIX, picofarads
+                     1 2 3
+1%alx2 1             6 -1 -3
+1%alx0 2            -1 4 -1
+1%alx1 3            -3 -1 5
+'''
+        matrix = parse_capacitance(source, 3, identities=['w0', 'w1', 'w2'])
+        expected = [[4, -1, -1], [-1, 5, -3], [-1, -3, 6]]
+        for actual, row in zip(matrix, expected):
+            for a, b in zip(actual, row):
+                self.assertAlmostEqual(a, b*1e-12, delta=1e-25)
+        # Row sums (2,1,2), floating offset -0.45, v=(-.45,-.2,.55).
+        self.assertAlmostEqual(winding_capacitance(matrix, [0., .25, 1.]),
+                               3.8e-12, delta=1e-24)
+        with self.assertRaises(AnalysisError):
+            parse_capacitance(source.replace('1%alx2', '1%alx1'), 3,
+                              identities=['w0', 'w1', 'w2'])
+
+    @requires_shapely
+    def test_nearby_strip_panels_resolve_half_gap(self):
+        from shapely.geometry import box
+        solids = [('a', box(0, 0, .020, .0002), 0., 35e-6),
+                  ('b', box(0, .001, .020, .0012), 0., 35e-6)]
+        files = electrostatic_files(solids, box(-.001, -.001, .021, .002),
+                                    ['a', 'b'], [], 2)
+        for name, source in files.items():
+            if not name.startswith('conductor'):
+                continue
+            for line in source.splitlines()[1:]:
+                coords = list(map(float, line.split()[2:]))
+                points = list(zip(coords[::3], coords[1::3], coords[2::3]))
+                self.assertLessEqual(max(p[0] for p in points)-min(p[0] for p in points),
+                                     .0004*(1+1e-10))
+
+    def test_panel_budget_reserves_before_allocating_and_accepts_exact_limit(self):
+        face = [(0., 0., 0.), (.024, 0., 0.), (.024, 0., 10e-6), (0., 0., 10e-6)]
+        budget = PanelBudget(24)
+        self.assertEqual(len(list(quad_panels(face, 2, budget))), 24)
+        self.assertEqual(budget.count, 24)
+        with self.assertRaises(PanelLimit) as caught:
+            next(quad_panels(face, 2, budget))
+        self.assertEqual(caught.exception.evidence, {'limit': 24, 'requested_count': 48})
+        self.assertEqual(budget.count, 24)
+
+    def test_spiral_wall_mesh_counts_without_geometry_engine(self):
+        # Same twelve sides as the pcbnew fixture, including the 10 um mask
+        # walls that previously dominated refinement. No Shapely or solver.
+        for density, expected in ((2, 420), (4, 840)):
+            count = 0
+            for i in range(12):
+                length = (20-i//2)*.001
+                face = [(0., 0., 0.), (length, 0., 0.),
+                        (length, 0., 10e-6), (0., 0., 10e-6)]
+                count += 2*len(list(quad_panels(face, density)))
+            self.assertEqual(count, expected)
+
+    def test_gap_resolved_spiral_walls_without_geometry_engine(self):
+        # 0.8 mm between turns: <=0.4 mm coarse, <=0.2 mm fine.
+        for density in (2, 4):
+            budget = PanelBudget()
+            target = .0004/(density/2)
+            for i in range(12):
+                length = (20-i//2)*.001
+                face = [(0., 0., 0.), (length, 0., 0.),
+                        (length, 0., 24e-6), (0., 0., 24e-6)]
+                panels = list(quad_panels(face, density, budget, max_size=.0004))
+                self.assertLessEqual(max(math.dist(p[0], p[1]) for p in panels),
+                                     target*(1+1e-10))
+            self.assertLess(budget.count*4, MAX_FASTCAP_PANELS)
+
+    @requires_shapely
+    def test_spiral_voltage_patches_are_separated_and_mesh_is_bounded(self):
         x = y = 0
         segments = []
         for i in range(12):
@@ -59,13 +166,43 @@ class CopperFormats(unittest.TestCase):
             paths = extract(tree, ports, density, layers)
             solids, outline, nets = copper_solids(tree, paths, layers, density)
             patched, names, voltages = winding_model(paths[0], solids, density)
-            self.assertEqual(len(names), 12*density)
+            self.assertEqual(len(names), 12*(density//2))
             self.assertTrue(all(a < b for a, b in zip(voltages, voltages[1:])))
-            self.assertAlmostEqual(unary_union([s for _, s, _, _ in patched]).area,
-                                   unary_union([s for _, s, _, _ in solids]).area, delta=1e-16)
+            lengths = [20-i//2 for i in range(12)]
+            subdivisions = density//2
+            expected_voltages = [(sum(lengths[:i])+length*(j+.5)/subdivisions)/sum(lengths)
+                                 for i, length in enumerate(lengths) for j in range(subdivisions)]
+            for actual, expected in zip(voltages, expected_voltages):
+                self.assertAlmostEqual(actual, expected)
+            original = unary_union([s for _, s, _, _ in solids])
+            patch_union = unary_union([s for _, s, _, _ in patched])
+            self.assertTrue(original.covers(patch_union))
+            self.assertGreater(patch_union.area, .94*original.area)
+            self.assertLess(patch_union.area, original.area)
+            for i, (_, shape, _, _) in enumerate(patched):
+                for _, other, _, _ in patched[:i]:
+                    self.assertGreater(shape.distance(other), 0.)
             files = electrostatic_files(patched, outline, names, layers, density, surface_patches=True)
-            # Midpoint of the first straight edge is an internal voltage cut.
-            # No vertical copper face may be added there.
+            count = sum(sum(l.startswith(('T ', 'Q ')) for l in source.splitlines())
+                        for source in files.values())
+            # Leave tolerance for triangulation changes between GEOS versions,
+            # while catching the former tens/hundreds of thousands of panels.
+            self.assertLess(count, {2: 6500, 4: 16000}[density])
+            self.assertGreater(count, {2: 4500, 4: 9000}[density])
+            net_files = electrostatic_files(solids, outline, nets, layers, density)
+            net_count = sum(sum(l.startswith(('T ', 'Q ')) for l in s.splitlines())
+                            for s in net_files.values())
+            self.assertLess(net_count, MAX_FASTCAP_PANELS)
+            self.assertLess(count, MAX_FASTCAP_PANELS)
+            with self.assertRaises(PanelLimit):
+                electrostatic_files(patched, outline, names, layers, density,
+                                    surface_patches=True, max_panels=count-1)
+            self.assertEqual(files, electrostatic_files(
+                patched, outline, names, layers, density,
+                surface_patches=True, max_panels=count))
+            # A slit replaces the first voltage cut in the fine basis.
+            # No panel bridges the removed material at the cut midpoint.
+            cut_faces = set()
             for name, source in files.items():
                 if not name.startswith('conductor'):
                     continue
@@ -73,6 +210,12 @@ class CopperFormats(unittest.TestCase):
                     pts = list(map(float, line.split()[2:]))
                     xs, zs = pts[0::3], pts[2::3]
                     self.assertFalse(all(abs(v-.01) < 1e-12 for v in xs) and max(zs) > min(zs))
+                    if density == 4 and max(zs) > min(zs):
+                        for cut in (.0099, .0101):
+                            if all(abs(v-cut) < 1e-12 for v in xs):
+                                cut_faces.add(cut)
+            if density == 4:
+                self.assertEqual(cut_faces, {.0099, .0101})
 
     def test_recorded_fasthenry_complex_matrix_and_frequency_validation(self):
         output = '''Impedance matrix for frequency = 1.356e+07 2 x 2
@@ -103,6 +246,52 @@ class CopperFormats(unittest.TestCase):
         with self.assertRaises(AnalysisError):
             parse_capacitance('CAPACITANCE MATRIX, picofarads\n1 nan', 1)
 
+    def test_fastcap_actual_header_survives_trailing_matrix_warnings(self):
+        log = '''CAPACITANCE MATRIX, attofarads
+1%GROUP1 1 99
+CAPACITANCE MATRIX, picofarads
+                  1       2
+1%GROUP19 1      2.5     0
+1%GROUP20 2     -0.3     3.1
+
+mksCapDump: Warning - capacitance matrix has non-negative off-diagonals
+  row 1 col 2
+'''
+        self.assertEqual(parse_capacitance(log, 2), [[2.5e-12, 0.], [-.3e-12, 3.1e-12]])
+
+    def test_fastcap_rejects_nonphysical_matrices_with_specific_evidence(self):
+        for matrix, row, column, violation in (
+                ([[-1., -.1], [-.1, 2.]], 1, 1, 'nonpositive_diagonal'),
+                ([[1., -2.], [-2., 3.]], 1, None, 'diagonal_dominance'),
+                ([[1., .1], [-.1, 2.]], 1, 2, 'positive_off_diagonal')):
+            source = 'CAPACITANCE MATRIX, picofarads\n'+''.join(
+                f'1%alx{i} {i+1} '+ ' '.join(map(str, values))+'\n'
+                for i, values in enumerate(matrix))
+            with self.subTest(matrix=matrix), self.assertRaises(AnalysisError) as caught:
+                parse_capacitance(source, 2)
+            self.assertEqual(caught.exception.recovery, {
+                'reason': 'fastcap_matrix_unphysical', 'row': row,
+                'column': column, 'violation': violation})
+
+    def test_fastcap_matrix_validation_allows_print_roundoff(self):
+        source = ('CAPACITANCE MATRIX, picofarads\n'
+                  'a 1 1 .000001 -1.000001\n'
+                  'b 2 0 1 0\nc 3 -1 0 1\n')
+        self.assertEqual(len(parse_capacitance(source, 3)), 3)
+
+    def test_fastcap_accuracy_keeps_warning_pairs_and_checks_matrix_without_warnings(self):
+        warning = 'mksCapDump: Warning - capacitance matrix has non-negative off-diagonals'
+        log = warning+'\n  row 24 col 15\n\n'+warning+'\n  row 24 col 18\n'
+        self.assertEqual(fastcap_accuracy(log)['warnings'], [
+            {'warning': warning, 'row': 24, 'column': 15},
+            {'warning': warning, 'row': 24, 'column': 18}])
+        self.assertEqual(fastcap_accuracy('', [[2e-12, 1e-13], [0., 3e-12]]), {
+            'warnings': [], 'positive_off_diagonals': [
+                {'row': 1, 'column': 2, 'capacitance_f': 1e-13}]})
+        self.assertEqual(fastcap_accuracy('', [[2e-12, -1e-13], [-1e-13, 3e-12]]), {
+            'warnings': [], 'positive_off_diagonals': []})
+
+
     def test_fastcap_unconverged_matrix_is_not_usable(self):
         for warning in ('gcr: WARNING exiting without converging',
                         'gmres: WARNING exiting without converging',
@@ -119,7 +308,7 @@ class CopperFormats(unittest.TestCase):
             area = 0.
             for a, b, c, d in panels:
                 width, height = math.dist(a, b), math.dist(a, d)
-                self.assertLessEqual(max(width/height, height/width), 8*(1+1e-10))
+                self.assertLessEqual(width, .001/(density/2)*(1+1e-10))
                 area += width*height
             self.assertTrue(math.isclose(area, .024*10e-6, rel_tol=1e-10))
             narrow = Polygon([(0., 0.), (.02, 0.), (.02, .0002)])
@@ -127,7 +316,7 @@ class CopperFormats(unittest.TestCase):
             self.assertTrue(all(p[2] == 34e-6 for panel in panels for p in panel))
             self.assertLessEqual(max(math.dist(a, b) for panel in panels
                                      for a, b in zip(panel, panel[1:]+panel[:1])),
-                                 8*.0002/density*(1+1e-3))
+                                 .004/(density/2)*(1+1e-3))
             self.assertTrue(math.isclose(sum(Polygon([p[:2] for p in panel]).area for panel in panels),
                                          narrow.area, rel_tol=1e-12))
 
@@ -319,10 +508,10 @@ class CopperProvider(unittest.TestCase):
             if arguments == ['copper.inp']:
                 (directory/'Zc.mat').write_text('Impedance matrix for frequency = 1.356e7 1 x 1\n .1 +10j\n')
                 return SimpleNamespace(returncode=0, stdout='converged', stderr='')
-            self.assertEqual(arguments, ['-lcopper.lst'])
+            self.assertEqual(arguments, ['-lcopper.lst', '-o6', '-d4', '-t0.0001'])
             size = sum(l.startswith(('C ', 'B ')) and not l.endswith(' +')
                        for l in (directory/'copper.lst').read_text().splitlines())
-            matrix = '\n'.join(str(i+1)+' '+' '.join('2' if i == j else '-0.1' for j in range(size)) for i in range(size))
+            matrix = '\n'.join(f'1%alx{i} {i+1} '+' '.join('2' if i == j else '-0.1' for j in range(size)) for i in range(size))
             return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n'+matrix, stderr='')
         self.provider.execute_engine = runner
         result = self.provider.analyse_copper(self.arguments)
@@ -349,8 +538,8 @@ class CopperProvider(unittest.TestCase):
         calls = []
         def runner(engine, arguments, directory):
             calls.append(arguments)
-            self.assertEqual(arguments, ['-lcopper.lst'])
-            return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n1 2.0\n', stderr='')
+            self.assertEqual(arguments, ['-lcopper.lst', '-o6', '-d4', '-t0.0001'])
+            return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n1%alx0 1 2.0\n', stderr='')
         self.provider.execute_engine = runner
         result = self.provider.analyse_copper(self.arguments)
         self.assertEqual(len(calls), 2)
@@ -368,6 +557,55 @@ class CopperProvider(unittest.TestCase):
         (self.folder/'metadata.json').write_text(json.dumps({'board': 'board.kicad_pcb', 'taint': 'pending'}))
         with self.assertRaisesRegex(KiCadError, 'work_copy_tainted'):
             self.provider.analyse_copper(self.arguments)
+
+    @requires_shapely
+    def test_fastcap_positive_off_diagonals_never_return_winding_capacitance(self):
+        warning = 'mksCapDump: Warning - capacitance matrix has non-negative off-diagonals'
+        def runner(engine, arguments, directory):
+            if arguments == ['copper.inp']:
+                (directory/'Zc.mat').write_text('Impedance matrix for frequency = 1.356e7 1 x 1\n .1 +10j\n')
+                return SimpleNamespace(returncode=0, stdout='converged', stderr='')
+            size = sum(l.startswith(('C ', 'B ')) and not l.endswith(' +')
+                       for l in (directory/'copper.lst').read_text().splitlines())
+            matrix = '\n'.join(f'1%alx{i} {i+1} '+' '.join('2' if i == j else '.1' for j in range(size))
+                               for i in range(size))
+            return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n'+matrix,
+                                   stderr=warning+'\n  row 1 col 2\n')
+        self.provider.execute_engine = runner
+        with self.assertRaises(AnalysisError) as caught:
+            self.provider.analyse_copper(self.arguments)
+        self.assertEqual(caught.exception.recovery, {
+            'reason': 'fastcap_matrix_unphysical', 'row': 1, 'column': 2,
+            'violation': 'positive_off_diagonal'})
+
+    @requires_shapely
+    def test_panel_limit_reports_stage_and_does_not_invoke_engine(self):
+        with patch('alx.providers.kicad.electrostatic_files', side_effect=PanelLimit(20, 21)), \
+                patch.object(self.provider, 'execute_engine') as engine:
+            result = self.provider.analyse_copper(self.arguments)
+        engine.assert_not_called()
+        self.assertEqual(result['reasons'], ['panel_limit_exceeded'])
+        self.assertEqual(result['meshes'], [{'density': 2, 'mesh_stage': 'mesh-2',
+                                            'status': 'panel_limit_exceeded',
+                                            'limit': 20, 'requested_count': 21}])
+        from alx.tools.kicad import DEFINITIONS
+        definition = next(d for d in DEFINITIONS if d.capability_id == 'analyse_kicad_copper')
+        self.assertTrue(definition.output_schema.accepts(result))
+
+    @requires_shapely
+    def test_fastcap_timeout_is_explicit_for_net_and_winding(self):
+        for fail_winding in (False, True):
+            def runner(engine, arguments, directory):
+                if arguments == ['copper.inp']:
+                    (directory/'Zc.mat').write_text('Impedance matrix for frequency = 1.356e7 1 x 1\n .1 +10j\n')
+                    return SimpleNamespace(returncode=0, stdout='', stderr='')
+                if directory.name.startswith('winding-') == fail_winding:
+                    raise subprocess.TimeoutExpired('fastcap', 600)
+                return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, picofarads\n1%alx0 1 2\n', stderr='')
+            self.provider.execute_engine = runner
+            with self.subTest(winding=fail_winding), self.assertRaisesRegex(KiCadError, 'engine_timeout') as caught:
+                self.provider.analyse_copper(self.arguments)
+            self.assertEqual(caught.exception.recovery['engine'], 'fastcap')
 
     @requires_shapely
     def test_solver_nonconvergence_returns_log_for_judgement(self):
@@ -388,7 +626,7 @@ class CopperProvider(unittest.TestCase):
                 winding = directory.name.startswith('winding-')
                 size = sum(l.startswith(('C ', 'B ')) and not l.endswith(' +')
                            for l in (directory/'copper.lst').read_text().splitlines())
-                rows = '\n'.join(str(i+1)+' '+' '.join('2' if i == j else '-0.1' for j in range(size))
+                rows = '\n'.join(f'1%alx{i} {i+1} '+' '.join('2' if i == j else '-0.1' for j in range(size))
                                  for i in range(size))
                 warning = 'gmres: WARNING exiting without converging\n' if winding == fail_winding else ''
                 return SimpleNamespace(returncode=0, stdout='CAPACITANCE MATRIX, attofarads\n'+rows,
@@ -446,6 +684,7 @@ pcbnew.SaveBoard(sys.argv[1],b)
         self.provider.execute_engine = run_kicad_engine
         initial = inventory(self.folder/'project')
         ports = [dict(PORTS[0], end={'x_mm': 3, 'y_mm': 3, 'layer': 'F.Cu'})]
+        started = time.monotonic()
         result = self.provider.analyse_copper(dict(self.arguments, ports=ports))
         self.assertEqual(len(result['meshes']), 2)
         self.assertEqual(result['stackup'][2]['epsilon_r'], 4.1)
@@ -494,6 +733,7 @@ pcbnew.SaveBoard(sys.argv[1],b)
         board.write_text(board.read_text().replace('(epsilon_r 4.1)', '(epsilon_r 1)')
                          .replace('(epsilon_r 4)', '(epsilon_r 1)'))
         vacuum = self.provider.analyse_copper(dict(self.arguments, ports=ports))
+        self.assertLess(time.monotonic()-started, 120, 'both stack-up and vacuum solves must finish within 120 s')
         self.assertGreater(result['ports'][0]['self_capacitance_f'],
                            vacuum['ports'][0]['self_capacitance_f'])
         self.assertLess(result['ports'][0]['self_resonant_frequency_hz'],

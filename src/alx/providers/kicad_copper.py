@@ -271,18 +271,64 @@ def parse_impedance(source, size, frequency):
     return rows
 
 
-def quad_panels(corners, density):
-    """Bilinear subdivision, resolving long walls independently of height.
+MAX_FASTCAP_PANELS = 20000
+# Sixth-order moments reduce far-field truncation error on the thin stack;
+# four partition levels avoid automatic deep trees driven by tiny end facets.
+# Use its supported maximum order (mulGlobal.h: MAXORDER=6), and tighten
+# the residual tolerance from its 0.01 default to 0.0001 for weak couplings.
+# Supported by FastCap 2's parse_command_line in:
+# https://github.com/ediloren/FastCap2/blob/master/src/input.c
+# Keep the bounded mesh; increased order addresses multipole truncation without
+# multiplying panels. Sign violations still return accuracy evidence to AL/X.
+FASTCAP_OPTIONS = ('-o6', '-d4', '-t0.0001')
 
-    Equal counts in both directions preserve the original aspect ratio (up
-    to 2400:1 on the solder-mask walls). Such panels span many solver cells
-    and give a poor near-field/preconditioner basis for the thin stack-up.
+
+class PanelLimit(GeometryJudgement):
+    def __init__(self, limit, requested):
+        super().__init__('panel_limit_exceeded')
+        self.evidence = {'limit': limit, 'requested_count': requested}
+
+
+class PanelBudget:
+    """Reserve each face's prospective subdivision before emitting panels.
+
+    A rejected requested_count is the running total plus that entire face,
+    not an estimate of the unbuilt remainder of the board.
     """
+    def __init__(self, limit=MAX_FASTCAP_PANELS):
+        self.limit, self.count = limit, 0
+
+    def reserve(self, count):
+        requested = self.count + count
+        if requested > self.limit:
+            raise PanelLimit(self.limit, requested)
+        self.count = requested
+
+
+def refinement(length, width, density, max_size=None):
+    """Resolve size/aspect without chasing microscopic mask walls or tips.
+
+    Default length targets range from 1 to 4 mm at density 2, halving at
+    density 4. A physical clearance may require smaller panels. Cap the
+    density multiplier at eight; the solve-wide panel budget is the final
+    bound. Mesh differences remain reported as accuracy evidence.
+    """
+    level = min(8, max(1, math.ceil(density/2)))
+    target = min(.004, max(.001, 16*width))/level
+    if max_size is not None:
+        target = min(target, max_size/level)
+    return max(1, math.ceil(length/target))
+
+
+def quad_panels(corners, density, budget=None, max_size=None):
+    """Bilinear subdivision with bounded size/aspect refinement."""
     a, b, c, d = corners
     width = max(math.dist(a, b), math.dist(c, d))
     height = max(math.dist(a, d), math.dist(b, c))
-    nu = density * max(1, math.ceil(width/(8*height)))
-    nv = density * max(1, math.ceil(height/(8*width)))
+    nu = refinement(width, height, density, max_size)
+    nv = refinement(height, width, density, max_size)
+    if budget is not None:
+        budget.reserve(nu*nv)
     def point(u, v):
         return tuple((1-u)*(1-v)*a[k]+u*(1-v)*b[k]+u*v*c[k]+(1-u)*v*d[k] for k in range(3))
     for i in range(nu):
@@ -472,7 +518,7 @@ def copper_solids(tree, paths, layers, density):
     return solids, outline, nets
 
 
-def planar_panels(shape, z, density):
+def planar_panels(shape, z, density, budget=None, max_size=None):
     """Triangulate the exact polygon union, including holes; refine triangles."""
     from shapely import constrained_delaunay_triangles
     for polygon in polygons(shape):
@@ -481,20 +527,24 @@ def planar_panels(shape, z, density):
             # Uniform barycentric refinement alone leaves millimetre-long
             # slivers along narrow tracks and rounded ends. Slice from the
             # shortest edge towards its opposite vertex instead. This adds
-            # panels linearly with aspect ratio, without moving the boundary.
+            # panels with bounded aspect/size refinement, without moving the
+            # boundary or refining all the way down to tiny rounded tips.
             lengths = [math.dist(corners[i], corners[(i+1)%3]) for i in range(3)]
             i = lengths.index(min(lengths))
             a, b, c = corners[i], corners[(i+1)%3], corners[(i+2)%3]
-            count = density*max(1, math.ceil(max(lengths)/(8*min(lengths))))
+            count = refinement(max(lengths), min(lengths), density, max_size)
+            across = refinement(min(lengths), max(lengths), density, max_size)
+            if budget is not None:
+                budget.reserve(count*across)
 
             def point(u, v):
                 return tuple((1-v)*((1-u)*a[k]+u*b[k])+v*c[k] for k in range(3))
 
             for j in range(count):
-                for i in range(density):
-                    panel = [point(i/density, j/count), point((i+1)/density, j/count)]
+                for i in range(across):
+                    panel = [point(i/across, j/count), point((i+1)/across, j/count)]
                     if j+1 < count:
-                        panel.extend([point((i+1)/density, (j+1)/count), point(i/density, (j+1)/count)])
+                        panel.extend([point((i+1)/across, (j+1)/count), point(i/across, (j+1)/count)])
                     else:
                         panel.append(c)
                     yield panel
@@ -506,7 +556,8 @@ def surface_source(panels):
         for panel in panels)
 
 
-def electrostatic_files(solids, outline, nets, layers, density, surface_patches=False):
+def electrostatic_files(solids, outline, nets, layers, density, surface_patches=False,
+                        max_panels=MAX_FASTCAP_PANELS):
     """Conformal extruded interfaces with one conductor per identity.
 
     Slabs are partitioned before meshing. Internal copper faces disappear;
@@ -516,7 +567,33 @@ def electrostatic_files(solids, outline, nets, layers, density, surface_patches=
     from shapely.geometry import Polygon, LineString
     from shapely import set_precision
     from shapely.ops import unary_union
+    budget = PanelBudget(max_panels)
     empty = Polygon()
+    # Positive separations between original copper pieces capture neighbouring
+    # turns of the SAME net too. Touching pieces are joins / voltage cuts, not
+    # physical gaps. Never chase the zero distance at those artificial cuts.
+    # Bound the longitudinal mesh by half the nearest physical gap; thin walls
+    # must not force equally tiny panels over an entire winding or dielectric.
+    gap = math.inf
+    for i, (net, shape, lo, hi) in enumerate(solids):
+        if net.startswith('@barrel:'):
+            continue
+        for other_net, other, a, b in solids[:i]:
+            if other_net.startswith('@barrel:'):
+                continue
+            # In-plane clearance only. Stack interfaces and via-connected
+            # layers are not separate coplanar turns.
+            if a >= hi or lo >= b:
+                continue
+            if surface_patches and abs(nets.index(net)-nets.index(other_net)) == 1:
+                # Consecutive arclength patches have artificial voltage cuts.
+                # Resolve physical turn clearance globally; the short cut end
+                # faces already get width/thickness refinement locally.
+                continue
+            distance = shape.distance(other)
+            if distance > 1e-9:
+                gap = min(gap, distance)
+    conductor_size = gap/2 if math.isfinite(gap) else None
     boundaries = sorted(set([e['z_m']+sign*e['thickness_m']/2 for e in layers for sign in (-1, 1)] +
                             [z for _, _, lo, hi in solids for z in (lo, hi)]))
     zs = []
@@ -548,7 +625,7 @@ def electrostatic_files(solids, outline, nets, layers, density, surface_patches=
         if shape.is_empty or outside == inside:
             return
         name = f'dielectric{len(files)}.qui'
-        files[name] = surface_source(planar_panels(shape, z, density))
+        files[name] = surface_source(planar_panels(shape, z, density, budget))
         listing.append(f'D {name} {outside:.15g} {inside:.15g} 0 0 0 0 0 {z+1:.15g}')
 
     for index, (lo, hi, er, copper, materials, holes) in enumerate(slabs):
@@ -566,7 +643,7 @@ def electrostatic_files(solids, outline, nets, layers, density, surface_patches=
                                 face = [(u[0], u[1], lo), (v[0], v[1], lo),
                                         (v[0], v[1], hi), (u[0], u[1], hi)]
                                 adjacent_er = 1. if not holes.is_empty and holes.boundary.covers(part) else er
-                                conductors[net][adjacent_er].extend(quad_panels(face, density))
+                                conductors[net][adjacent_er].extend(quad_panels(face, density, budget, conductor_size))
             for side, z in ((-1, lo), (1, hi)):
                 neighbour = index+side
                 other = slabs[neighbour] if 0 <= neighbour < len(slabs) else None
@@ -575,9 +652,9 @@ def electrostatic_files(solids, outline, nets, layers, density, surface_patches=
                 if other:
                     for adjacent_er, material_shape in other[4].items():
                         contact = exposed.intersection(material_shape)
-                        conductors[net][adjacent_er].extend(planar_panels(contact, z, density))
+                        conductors[net][adjacent_er].extend(planar_panels(contact, z, density, budget, conductor_size))
                         exposed = exposed.difference(material_shape)
-                conductors[net][1.].extend(planar_panels(exposed, z, density))
+                conductors[net][1.].extend(planar_panels(exposed, z, density, budget, conductor_size))
         above = slabs[index+1] if index+1 < len(slabs) else None
         for inside, region in materials.items():
             if above:
@@ -597,7 +674,7 @@ def electrostatic_files(solids, outline, nets, layers, density, surface_patches=
                     if not copper[net].is_empty and copper[net].boundary.covers(LineString([u, v])):
                         continue  # already an inner C face of the annular pad
                     face = [(u[0], u[1], lo), (v[0], v[1], lo), (v[0], v[1], hi), (u[0], u[1], hi)]
-                    barrels[net].append((er, list(quad_panels(face, density)), hole.centroid.coords[0], (lo+hi)/2))
+                    barrels[net].append((er, list(quad_panels(face, density, budget, conductor_size)), hole.centroid.coords[0], (lo+hi)/2))
         if er != 1.:
             for poly in polygons(outline):
                 for a, b in zip(poly.exterior.coords, list(poly.exterior.coords)[1:]):
@@ -607,9 +684,12 @@ def electrostatic_files(solids, outline, nets, layers, density, surface_patches=
                     ref = (middle[0]+sign*dy, middle[1]-sign*dx)
                     name = f'dielectric{len(files)}.qui'
                     face = [(a[0], a[1], lo), (b[0], b[1], lo), (b[0], b[1], hi), (a[0], a[1], hi)]
-                    files[name] = surface_source(quad_panels(face, density))
+                    files[name] = surface_source(quad_panels(face, density, budget))
                     listing.append(f'D {name} 1 {er:.15g} 0 0 0 {ref[0]:.15g} {ref[1]:.15g} {(lo+hi)/2:.15g}')
     for index, net in enumerate(nets):
+        # Stable short labels survive FastCap's spatial renumbering. D surfaces
+        # also consume default GROUP numbers, so those are not net identities.
+        listing.append(f'G alx{index}')
         groups = [(er, panels) for er, panels in conductors[net].items() if panels]
         for j, (er, panels) in enumerate(groups):
             name = f'conductor{index}_{j}.qui'
@@ -636,7 +716,8 @@ def winding_model(path, solids, density):
     """Piecewise-constant surface approximation to V(s)=s/length.
 
     This voltage basis represents an isolated winding with a floating common
-    mode. No artificial slit or internal end face is added at patch boundaries.
+    mode. Separate voltage patches by a track-width slit: touching conductors
+    held at different potentials make the electrostatic problem singular.
     Both the surface mesh and voltage basis are refined in the second solve.
     Multiple nets need electrical boundary conditions supplied by Core, so are
     deliberately unavailable rather than silently grounded.
@@ -655,21 +736,25 @@ def winding_model(path, solids, density):
     edges = path['edges']
     faces = ribbon_faces(path, [{'name': edges[0]['layer'], 'z_m': 0., 'thickness_m': 1.}])
     total = sum(math.dist(e['a'][:2], e['b'][:2]) for e in edges)
+    # One voltage sample per straight side in the coarse solve, two in the
+    # fine solve. Further surface refinement need not multiply voltage cuts.
+    # A single straight track still needs two distinct voltages for energy.
+    subdivisions = max(1, density//2)*max(1, math.ceil(2/len(edges)))
     shapes, voltages, traversed = [], [], 0.
     for i, edge in enumerate(edges):
         a, b, c, d = [p[:2] for p in faces[2+4*i]]
         length = math.dist(edge['a'][:2], edge['b'][:2])
-        for j in range(density):
+        for j in range(subdivisions):
             def lerp(p, q, t):
                 return tuple(x+(y-x)*t for x, y in zip(p, q))
-            shape = set_precision(Polygon([lerp(a, d, j/density), lerp(b, c, j/density),
-                                           lerp(b, c, (j+1)/density), lerp(a, d, (j+1)/density)]), 1e-12)
+            shape = set_precision(Polygon([lerp(a, d, j/subdivisions), lerp(b, c, j/subdivisions),
+                                           lerp(b, c, (j+1)/subdivisions), lerp(a, d, (j+1)/subdivisions)]), 1e-12)
             shape = shape.intersection(remaining)
             if shape.is_empty:
                 raise GeometryJudgement('winding_voltage_patch_empty')
             shapes.append(shape)
             remaining = remaining.difference(shape)
-            voltages.append((traversed+length*(j+.5)/density)/total)
+            voltages.append((traversed+length*(j+.5)/subdivisions)/total)
         traversed += length
     for extra in polygons(remaining):
         # Only terminal-pad overhangs have an unambiguous terminal voltage.
@@ -678,6 +763,23 @@ def winding_model(path, solids, density):
             raise GeometryJudgement('winding_pad_voltage_basis_unresolved')
         i = candidates[0]
         shapes[i] = shapes[i].union(extra)
+    # Remove material only around shared cuts, preserving the trace width and
+    # nearby turns. Use the original shapes for every cut so trimming one side
+    # cannot prevent trimming the other. The gap is small relative to a turn's
+    # clearance and length; retain the original arclength voltage samples.
+    half_gap = min(e['width_mm'] for e in edges)*.0005
+    cuts = []
+    for i, shape in enumerate(shapes):
+        shared = [shape.intersection(other) for other in shapes[:i]
+                  if shape.distance(other) < 1e-12]
+        cuts.extend(cut.buffer(half_gap, quad_segs=1, cap_style='square', join_style='mitre')
+                    for cut in shared if not cut.is_empty)
+    slit = unary_union(cuts)
+    shapes = [set_precision(shape.difference(slit), 1e-12) for shape in shapes]
+    if any(shape.is_empty for shape in shapes):
+        raise GeometryJudgement('winding_voltage_patch_empty')
+    if any(shape.distance(other) <= 0 for i, shape in enumerate(shapes) for other in shapes[:i]):
+        raise GeometryJudgement('winding_voltage_patches_touch')
     _, _, lo, hi = solids[0]
     identities = [f'w{i}' for i in range(len(shapes))]
     return [(n, s, lo, hi) for n, s in zip(identities, shapes)], identities, voltages
@@ -705,23 +807,40 @@ def solver_nonconverged(source):
         'without converg', 'nonconverg'))
 
 
-def parse_capacitance(source, size):
+def fastcap_accuracy(source, matrix=()):
+    """Retain FastCap's sign diagnostics and independently check the SI matrix.
+
+    Indices match FastCap's one-based row/column numbers. Zero off-diagonals
+    may be rounding; retain those warnings too, without calling them positive.
+    """
+    warnings = []
+    for match in re.finditer(
+            r'^(mksCapDump: Warning - capacitance matrix has non-negative off-diagonals)[ \t]*\r?\n'
+            r'[ \t]*row[ \t]+(\d+)[ \t]+col[ \t]+(\d+)', source, re.M):
+        warnings.append({'warning': match[1], 'row': int(match[2]), 'column': int(match[3])})
+    positive = [{'row': i+1, 'column': j+1, 'capacitance_f': value}
+                for i, row in enumerate(matrix) for j, value in enumerate(row)
+                if i != j and value > 0]
+    return {'warnings': warnings, 'positive_off_diagonals': positive}
+
+
+def parse_capacitance(source, size, identities=None):
     if solver_nonconverged(source):
         raise AnalysisError('invalid_report', {'reason': 'fastcap_nonconvergence'})
-    sections = re.split(r'CAPACITANCE MATRIX', source, flags=re.I)
-    if len(sections) < 2:
+    headers = list(re.finditer(r'^CAPACITANCE MATRIX(?:,([^\r\n]*))?\r?$', source, re.M))
+    if not headers:
         raise AnalysisError('invalid_report', {'reason': 'fastcap_matrix_missing'})
-    section = sections[-1]
-    header = re.match(r',\s*([^\r\n]*)', section)
-    if not header or not header[1].strip():
+    header = headers[-1]
+    if not header[1] or not header[1].strip():
         raise AnalysisError('invalid_report', {'reason': 'fastcap_units_missing'})
+    section = source[header.end():]
     unit = re.sub(r'[\s-]', '', header[1]).lower()
     factors = {'farads': 1., 'millifarads': 1e-3, 'microfarads': 1e-6,
                'nanofarads': 1e-9, 'picofarads': 1e-12,
                'femtofarads': 1e-15, 'attofarads': 1e-18}
     if unit not in factors:
         raise AnalysisError('invalid_report', {'reason': 'fastcap_units_unknown', 'unit': unit})
-    rows = []
+    rows, labels = [], []
     for line in section.splitlines():
         tokens = line.split()
         # FastCap prints the conductor name before the row number, e.g.
@@ -734,10 +853,38 @@ def parse_capacitance(source, size):
             if not all(math.isfinite(v) for v in row):
                 raise AnalysisError('invalid_report')
             rows.append(row)
+            labels.append(' '.join(tokens[:-size-1]))
         if len(rows) == size:
             break
-    if len(rows) != size or any(rows[i][i] <= 0 for i in range(size)):
+    if len(rows) != size:
         raise AnalysisError('invalid_report')
+    if identities is not None:
+        if len(identities) != size or len(set(identities)) != size:
+            raise AnalysisError('invalid_report')
+        expected = [f'1%alx{i}' for i in range(size)]
+        if sorted(labels) != sorted(expected):
+            raise AnalysisError('invalid_report', {'reason': 'fastcap_conductor_labels', 'labels': labels})
+        order = [labels.index(label) for label in expected]
+        rows = [[rows[i][j] for j in order] for i in order]
+    # Maxwell capacitance matrices have positive self terms, nonpositive
+    # mutual terms and nonnegative row sums. Allow small printed/multipole
+    # roundoff relative to each row, never an absolute tolerance in SI units.
+    for i, row in enumerate(rows):
+        tolerance = 1e-5*max(abs(value) for value in row)
+        violation, column = None, None
+        if row[i] <= 0:
+            violation, column = 'nonpositive_diagonal', i+1
+        else:
+            for j, value in enumerate(row):
+                if i != j and value > tolerance:
+                    violation, column = 'positive_off_diagonal', j+1
+                    break
+            if violation is None and sum(abs(value) for j, value in enumerate(row) if i != j) > row[i]+tolerance:
+                violation = 'diagonal_dominance'
+        if violation:
+            raise AnalysisError('invalid_report', {
+                'reason': 'fastcap_matrix_unphysical', 'row': i+1,
+                'column': column, 'violation': violation})
     return rows
 
 
