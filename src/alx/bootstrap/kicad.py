@@ -1,9 +1,10 @@
 """Compose D-061 capabilities through the existing broker and safety gate."""
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 
 from alx.config.settings import KiCadSettings
-from alx.providers.coding_process import run_kicad_cli, run_kicad_python
+from alx.providers.coding_process import run_kicad_cli, run_kicad_python, run_kicad_engine
 from alx.providers.kicad import KiCadProvider
 from alx.safety import AuthorityPolicy
 from alx.tools.kicad import DEFINITIONS, build_kicad_executors
@@ -23,6 +24,15 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
                                              timeout_seconds=settings.cli_timeout_seconds),
                              partial(run_kicad_python, runner=runner,
                                      timeout_seconds=settings.script_timeout_seconds))
+    provider.engine_paths = {
+        name: Path(environment.get(key, default)).expanduser().absolute()
+        for name, key, default in (
+            ('fasthenry', 'ALX_KICAD_FASTHENRY', '~/.local/share/field-solvers/fasthenry-3.0wr/bin/fasthenry'),
+            ('ngspice', 'ALX_KICAD_NGSPICE', '/opt/homebrew/bin/ngspice'),
+        )
+    }
+    provider.execute_engine = partial(run_kicad_engine, runner=runner,
+                                      timeout_seconds=settings.cli_timeout_seconds)
     permission = 'design.kicad'
     return KiCadRuntime(DEFINITIONS, {
         d.capability_id: AuthorityPolicy(frozenset({permission}),

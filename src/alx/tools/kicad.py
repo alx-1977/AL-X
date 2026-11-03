@@ -34,6 +34,7 @@ FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid
             'original_changed', 'work_copy_changed', 'work_copy_tainted', 'work_copy_busy',
             'script_failed', 'export_would_overwrite', 'rename_ambiguous', 'unsupported_file',
             'project_too_large', 'evidence_full', 'verification_failed', 'unavailable')
+FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed')
 
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
@@ -54,6 +55,18 @@ REFERENCE = obj({'kind': S, 'path': S, 'text': S, 'truncated': B, 'entry': S,
     'pages': array(obj({'page': I, 'text': S, 'truncated': B})),
     'documents': array(S), 'streams': array(S), 'board_records_decoded': B,
     'entries': array(obj({'name': S, 'kind': S, 'bytes': I}, ('name',)))}, ('kind',))
+
+ENDPOINT = obj({'reference': S, 'pad': S, 'x_mm': N, 'y_mm': N, 'layer': S}, ())
+PORT = obj({'id': S, 'start': ENDPOINT, 'end': ENDPOINT})
+MEASUREMENT = obj({'id': S, 'kind': S, 'positive': S, 'negative': S, 'source': S}, ('id', 'kind'))
+ANALYSIS = obj({'kind': S, 'start_hz': N, 'stop_hz': N, 'points': I, 'scale': S,
+                'step_seconds': N, 'stop_seconds': N}, ('kind',))
+TARGET = obj({'measurement_id': S, 'quantity': S, 'at': N, 'minimum': N,
+              'maximum': N, 'error_scale': N})
+TUNING = obj({'components': array(obj({'reference': S, 'values': array(N),
+                                      'tolerance_fraction': N, 'tied_references': array(S)},
+                                     ('reference', 'values', 'tolerance_fraction'))),
+              'targets': array(TARGET), 'tie_margin': N})
 
 DEFINITIONS = (
     CapabilityDefinition('check_kicad_board',
@@ -116,6 +129,44 @@ DEFINITIONS = (
         'Generated reports and renders are excluded.',
         obj({'work_copy_id': S, 'work_copy_revision': S, 'project_dir': S}),
         RECOVERY, SideEffect.EFFECTFUL, FAILURES),
+    CapabilityDefinition('analyse_kicad_copper',
+        'Read a registered untainted work copy. Ports use two reference/pad endpoints or '
+        'two x_mm/y_mm/layer endpoints; a point attaches to the track end whose copper '
+        'covers it. Trace each port\'s coil through tracks, arcs, vias and net ties, run '
+        'the configured FastHenry at both supplied mesh densities at frequency_hz, and '
+        'report per-port inductance, resistance and Q, coupling coefficients, geometry, '
+        'board stack-up, mesh convergence and, for square spirals, the Mohan modified '
+        'Wheeler cross-check. self_capacitance_estimate_f is the stated self-capacitance '
+        'per coil (a few pF for a PCB coil), used for the self-resonance estimate and '
+        'reported as stated_estimate. convergence_margin and formula_margin are fractional '
+        'limits. Ambiguous geometry, a second route between a port\'s ends, copper of '
+        'another net touching a coil, or numerical uncertainty returns needs_judgement. '
+        'Never edits a design.',
+        obj({'work_copy_id': S, 'ports': array(PORT), 'frequency_hz': N,
+             'mesh_densities': array(I), 'convergence_margin': N, 'formula_margin': N,
+             'self_capacitance_estimate_f': N}),
+        obj({'status': S, 'reasons': array(S), 'geometry': array(MAP), 'stackup': array(MAP),
+             'meshes': array(MAP), 'ports': array(MAP), 'coupling': array(MAP),
+             'convergence': MAP, 'formula': array(MAP), 'formula_unavailable': array(MAP),
+             'conventions': MAP}),
+        SideEffect.NONE, FAILURES),
+    CapabilityDefinition('simulate_kicad_circuit',
+        'Run configured ngspice on exactly one of a registered untainted work-copy schematic '
+        '(exported with KiCad CLI) or a supplied SPICE netlist. model_blocks supply missing '
+        'models. analysis.kind is ac, transient or operating_point; measurements.kind is '
+        'voltage, current (voltage source branch) or impedance. Impedance requires a single '
+        'measurement and AC analysis: inject 1 A positive-to-return and zero other AC sources. '
+        'Optional tuning enumerates only supplied R/L/C references and discrete SI values; '
+        'tied_references take the tuned part\'s value together, as matched halves of a '
+        'balanced network do; '
+        'targets use real, imag, magnitude or q, at frequency/time, with inclusive ranges '
+        'and error_scale. Returns ranked candidates, every target error and one-component '
+        'tolerance sensitivity. Never selects a candidate or edits a design. Ties and no '
+        'acceptable candidate return needs_judgement. Netlists and complete logs accompany results.',
+        obj({'work_copy_id': S, 'netlist': S, 'model_blocks': array(S), 'analysis': ANALYSIS,
+             'measurements': array(MEASUREMENT), 'tuning': TUNING}, ('analysis', 'measurements')),
+        obj({'status': S, 'reasons': array(S), 'curves': MAP, 'candidates': array(MAP),
+             'netlist': S, 'log': S, 'conventions': MAP}), SideEffect.NONE, FAILURES),
 )
 
 
@@ -142,4 +193,5 @@ def build_kicad_executors(provider, call_id_source):
                                     CapabilityResultState.FAILED, failure=dict(failure, code=code))
         return invoke
     return {definition.capability_id: bind(definition, method) for definition, method in zip(
-        DEFINITIONS, (provider.check, provider.edit, provider.export, provider.read_reference, provider.write_back))}
+        DEFINITIONS, (provider.check, provider.edit, provider.export, provider.read_reference,
+                      provider.write_back, provider.analyse_copper, provider.simulate_circuit))}

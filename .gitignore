@@ -5,6 +5,7 @@
 
 # Local/runtime state
 /tmp*/
+test-tmp/
 .alx/
 *.db
 *.sqlite

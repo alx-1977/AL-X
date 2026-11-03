@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,13 @@ import fcntl
 from alx.providers.credential_paths import denied
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
+from alx.providers.kicad_circuit import (
+    AnalysisError, clean_deck, build_deck, parse_curve, enumerate_tuning,
+)
+from alx.providers.kicad_copper import (
+    SOLVER_GRID_M, GeometryJudgement, stackup, extract, geometry, fasthenry_input,
+    solver_nonconverged, parse_impedance, wheeler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +278,204 @@ class KiCadProvider:
         self.execute_python = execute_python
         self.design_roots = tuple(p.expanduser().resolve() for p in settings.design_roots)
         self.work_root = settings.work_root.expanduser().resolve()
+        self.engine_paths = {}
+        self.execute_engine = None
+
+    def _engine(self, name, arguments, directory):
+        executable = self.engine_paths.get(name)
+        try:
+            available = executable is not None and executable.is_file() and os.access(executable, os.X_OK)
+        except OSError as error:
+            raise KiCadError('engine_unavailable', {'engine': name, 'path': str(executable),
+                                                   'error': str(error)}) from error
+        if not available or self.execute_engine is None:
+            raise KiCadError('engine_unavailable', {'engine': name, 'path': str(executable)})
+        try:
+            result = self.execute_engine(executable, arguments, directory)
+        except KICAD_CLI_TIMEOUT as error:
+            raise KiCadError('engine_timeout', {'engine': name}) from error
+        except OSError as error:
+            raise KiCadError('engine_unavailable', {'engine': name, 'error': str(error)}) from error
+        log = (getattr(result, 'stdout', '') or '') + '\n' + (getattr(result, 'stderr', '') or '')
+        if result.returncode:
+            raise KiCadError('engine_failed', {'engine': name, 'returncode': result.returncode, 'log': log})
+        return log
+
+    @contextmanager
+    def _analysis_copy(self, work_copy_id):
+        """Analyse disposable snapshots; neither engine ever receives a design path."""
+        with self._locked(work_copy_id):
+            root, meta = self._load(work_copy_id)
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            original = inventory(root / 'project')
+            with tempfile.TemporaryDirectory(prefix='alx-analysis-') as temporary:
+                stage = Path(temporary)
+                shutil.copytree(root / 'project', stage / 'project')
+                try:
+                    yield stage, meta
+                finally:
+                    if inventory(root / 'project') != original:
+                        raise KiCadError('work_copy_changed')
+
+    def simulate_circuit(self, arguments):
+        if ('work_copy_id' in arguments) == ('netlist' in arguments):
+            raise KiCadError('arguments_unusable')
+
+        def simulate(netlist, directory):
+            lines = clean_deck(netlist, arguments.get('model_blocks', []))
+            settings, measurements = arguments['analysis'], arguments['measurements']
+
+            def solve(candidate):
+                with tempfile.TemporaryDirectory(prefix='ngspice-', dir=directory) as temporary:
+                    run = Path(temporary)
+                    deck = build_deck(candidate, settings, measurements)
+                    (run / 'circuit.cir').write_text(deck)
+                    log = self._engine('ngspice', ['-b', 'circuit.cir'], run)
+                    if any(marker in log.lower() for marker in (
+                            'timestep too small', 'singular matrix', 'no convergence',
+                            'simulation(s) aborted', 'fatal error', 'error on line')):
+                        raise KiCadError('engine_failed', {'engine': 'ngspice', 'log': log, 'netlist': deck})
+                    curves = {}
+                    for index, measurement in enumerate(measurements):
+                        path = run / f'm{index}.txt'
+                        if not path.is_file():
+                            raise KiCadError('invalid_report', {'engine': 'ngspice', 'log': log, 'netlist': deck})
+                        curves[measurement['id']] = parse_curve(path.read_text(), settings['kind'] == 'ac')
+                    return {'curves': curves, 'netlist': deck, 'log': log}
+
+            result = solve(lines)
+            candidates, reasons = enumerate_tuning(lines, arguments['tuning'], solve) if 'tuning' in arguments else ([], [])
+            return dict(result, candidates=candidates, status='needs_judgement' if reasons else 'ok',
+                        reasons=reasons, conventions={
+                            'units': 'SI', 'ac_values': 'complex_peak_phasors',
+                            'x': {'ac': 'frequency_hz', 'transient': 'time_seconds',
+                                  'operating_point': 'ngspice_op_scale'}[settings['kind']],
+                            'impedance': 'one_ampere_positive_injection; other_independent_AC_sources_zero; negative_is_return',
+                            'sensitivity': 'one_component_at_a_time_plus_minus_supplied_fraction',
+                            'target_sampling': 'linear_interpolation_between_returned_samples'})
+
+        if 'work_copy_id' in arguments:
+            with self._analysis_copy(arguments['work_copy_id']) as (stage, meta):
+                schematics = list((stage / 'project').glob('*.kicad_sch'))
+                if len(schematics) != 1:
+                    return {'status': 'needs_judgement', 'reasons': ['schematic_ambiguous'],
+                            'curves': {}, 'candidates': [], 'netlist': '', 'log': '', 'conventions': {}}
+                output = stage / 'export.cir'
+                self._run('sch', 'export', 'netlist', '--format', 'spice', '--output', output, schematics[0])
+                return simulate(output.read_text(), stage)
+        with tempfile.TemporaryDirectory(prefix='alx-circuit-') as temporary:
+            return simulate(arguments['netlist'], Path(temporary))
+
+    def analyse_copper(self, arguments):
+        """Coil inductance, resistance and coupling from the board's copper.
+
+        FastHenry runs at two mesh densities so convergence is evidence.
+        Self-capacitance is the caller's stated estimate: it is a few pF beside
+        a matching network of 100+ pF, and solving it (FastCap) is a follow-up.
+        """
+        from alx.providers.kicad_circuit import positive
+        frequency = positive(arguments['frequency_hz'])
+        estimate = positive(arguments['self_capacitance_estimate_f'])
+        densities = arguments['mesh_densities']
+        ports = arguments['ports']
+        if (len(densities) != 2 or any(type(d) is not int or not 1 <= d <= 16 for d in densities)
+                or densities[0] >= densities[1] or not 1 <= len(ports) <= 16
+                or len({p['id'] for p in ports}) != len(ports)
+                or any(not math.isfinite(arguments[k]) or not 0 < arguments[k] <= 1
+                       for k in ('convergence_margin', 'formula_margin'))):
+            raise KiCadError('arguments_unusable')
+        result = {'status': 'needs_judgement', 'reasons': [], 'geometry': [], 'stackup': [],
+                  'meshes': [], 'ports': [], 'coupling': [], 'convergence': {}, 'formula': [],
+                  'formula_unavailable': [],
+                  'conventions': {'units': 'SI', 'frequency_hz': frequency,
+                      'current': 'one_ampere_start_to_end_per_port; other_ports_open',
+                      'conductivity_s_per_m': 5.8e7,
+                      'copper_layer_gaps': 'air; no_filler_specified_by_stackup',
+                      'vias': 'vertical bar on the drill; plating_thickness_not_recorded',
+                      'net_ties': 'link between the tie pads, width of the smaller pad',
+                      'track_joins': 'ends join where their copper overlaps',
+                      'solver_grid_m': SOLVER_GRID_M,
+                      'fasthenry': 'track_cross_sections; pad_spreading_impedance_not_modelled',
+                      'self_capacitance_source': 'stated_estimate',
+                      'self_resonance': '1/(2*pi*sqrt(L*C)); quasistatic_single_mode_estimate',
+                      'convergence': 'relative to sqrt(Xii*Xjj) of the finer mesh',
+                      'convergence_margin': arguments['convergence_margin'],
+                      'formula_margin': arguments['formula_margin']}}
+        with self._analysis_copy(arguments['work_copy_id']) as (stage, meta):
+            tree = sexpr((stage / 'project' / meta['board']).read_text())
+            try:
+                layers = stackup(tree, require_permittivity=False)
+                result['stackup'] = layers
+                for density in densities:
+                    paths = extract(tree, ports, density, layers)
+                    run = stage / f'mesh-{density}'
+                    run.mkdir()
+                    deck = fasthenry_input(paths, layers, frequency, density)
+                    (run / 'copper.inp').write_text(deck)
+                    henry_log = self._engine('fasthenry', ['copper.inp'], run)
+                    mesh = {'density': density, 'fasthenry_log': henry_log, 'fasthenry_input': deck,
+                            'geometry': [geometry(p, layers) for p in paths]}
+                    result['meshes'].append(mesh)
+                    if solver_nonconverged(henry_log):
+                        result['reasons'].append('solver_nonconvergence')
+                        return result
+                    self._read_impedance(run, henry_log, ports, frequency, mesh)
+                result['geometry'] = result['meshes'][-1]['geometry']
+                coarse, fine = result['meshes']
+                for quantity in ('resistance_ohm', 'inductance_h'):
+                    # Relative to the ports' own terms, sqrt(Xii*Xjj): a mutual
+                    # term between nearly uncoupled coils is close to zero, and
+                    # its own relative change says nothing about convergence.
+                    scale = [abs(fine[quantity][i][i]) for i in range(len(ports))]
+                    errors = [[abs(a-b)/max(math.sqrt(scale[i]*scale[j]), 1e-30)
+                               for j, (a, b) in enumerate(zip(left, right))]
+                              for i, (left, right) in enumerate(zip(coarse[quantity], fine[quantity]))]
+                    result['convergence'][quantity] = {'relative_difference': errors,
+                                                       'maximum_relative_difference': max(map(max, errors))}
+                    if max(map(max, errors)) > arguments['convergence_margin']:
+                        result['reasons'].append('mesh_difference:' + quantity)
+                omega = 2*math.pi*frequency
+                for i, port in enumerate(ports):
+                    inductance, resistance = fine['inductance_h'][i][i], fine['resistance_ohm'][i][i]
+                    result['ports'].append({'id': port['id'], 'inductance_h': inductance,
+                        'resistance_ohm': resistance, 'q': omega*inductance/resistance,
+                        'self_capacitance_f': estimate, 'self_capacitance_source': 'stated_estimate',
+                        'self_resonant_frequency_hz': 1/(2*math.pi*math.sqrt(inductance*estimate))})
+                    try:
+                        formula = wheeler(paths[i])
+                        difference = abs(inductance-formula['inductance_h'])/formula['inductance_h']
+                        result['formula'].append(dict(formula, solver_inductance_h=inductance,
+                                                      percentage_difference=100*difference))
+                        if difference > arguments['formula_margin']:
+                            result['reasons'].append('formula_disagreement:' + port['id'])
+                    except GeometryJudgement as error:
+                        # The closed form fits square spirals only. A coil it
+                        # does not fit is reported, not held as a doubt.
+                        result['formula_unavailable'].append({'port': port['id'], 'reason': str(error)})
+                    for j in range(i):
+                        coupling = fine['inductance_h'][i][j]/math.sqrt(inductance*fine['inductance_h'][j][j])
+                        if abs(coupling) > 1+1e-6:
+                            raise KiCadError('invalid_report', {'reason': 'nonpassive_coupling'})
+                        result['coupling'].append({'ports': [ports[j]['id'], port['id']], 'coefficient': coupling})
+                if not result['reasons']:
+                    result['status'] = 'facts'
+            except GeometryJudgement as error:
+                result['reasons'].append(str(error))
+            return result
+
+    @staticmethod
+    def _read_impedance(run, henry_log, ports, frequency, mesh):
+        """FastHenry's impedance matrix into the mesh's resistance and inductance."""
+        matrix = run / 'Zc.mat'
+        if not matrix.is_file():
+            raise KiCadError('invalid_report', {'engine': 'fasthenry', 'log': henry_log})
+        impedance = parse_impedance(matrix.read_text(), len(ports), frequency)
+        omega = 2*math.pi*frequency
+        mesh.update(resistance_ohm=[[z.real for z in row] for row in impedance],
+                    inductance_h=[[z.imag/omega for z in row] for row in impedance])
+        if any(impedance[i][i].real <= 0 or impedance[i][i].imag <= 0 for i in range(len(ports))):
+            raise KiCadError('invalid_report', {'reason': 'nonpassive_copper_matrix'})
 
     def _source(self, path):
         raw = Path(path).expanduser().absolute()

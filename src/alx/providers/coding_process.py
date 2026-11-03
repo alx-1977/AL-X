@@ -481,6 +481,15 @@ def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     )
 
 
+def run_kicad_engine(executable, arguments, directory, *, runner=None, timeout_seconds=600):
+    """Analysis engines share the managed process-group execution boundary."""
+    return run_coding_subprocess(
+        subprocess.run if runner is None else runner, [str(executable), *map(str, arguments)],
+        cwd=str(directory), shell=False, check=False, timeout=timeout_seconds,
+        capture_output=True, text=True, stop_descendants=True,
+    )
+
+
 def kicad_containment_available():
     """KiCad scripts run only under the macOS kernel sandbox; nowhere else."""
     return platform.system() == 'Darwin' and Path('/usr/bin/sandbox-exec').is_file()

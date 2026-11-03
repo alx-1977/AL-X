@@ -2767,3 +2767,24 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Process boundary.** The Claude transport binds one more launcher, `subprocess.Popen`, in its constructor, called only by `_NativeSession` with a fixed argv and no shell; `tests/test_sandbox_capability.py` enforces exactly that and still rejects any other launch site. Native sessions are on for the conversational, autonomous and first-pass Cores (`native_tools=True` in `bootstrap/providers.py`) and off everywhere else.
 - **Remaining stages.** Approval proposals, goal updates, plans and memories move to native tools, then the decision's call action is removed (Law 0).
 - **Boundary.** No Law exception. The transport relays calls and never runs a capability; one dispatch path remains.
+
+## D-066 — KiCad copper analysis and circuit simulation
+
+- **Date:** 2026-11-02, amended 2026-11-03
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-02**, from the copper-analysis and circuit-simulation brief (`Projects/P0012-roomreaderv2-rfid-antenna/docs/ALX_BRIEF_KICAD_ANALYSIS.md`). Amended 2026-11-03: FastCap is deferred and self-capacitance is a stated estimate. Friedl approved ("A"), given that self-capacitance is a few pF beside a matching network of 100+ pF.
+- **Decision.** The KiCad tool may run multi-step deterministic analyses on AL/X's own work copies:
+  1. `analyse_kicad_copper`: trace each port's coil through tracks, arcs, vias and net ties on the stack-up copper layers, and run FastHenry at two mesh densities. It reports inductance, resistance, Q and coupling, convergence and, for square spirals, the modified Wheeler cross-check. Self-capacitance is the caller's stated estimate, reported as such.
+  2. `simulate_kicad_circuit`: run ngspice, including tuning stated component values against targets AL/X states. Tied references give matched halves one value.
+
+  These read work copies and produce results only; any change to a design goes through the existing edit and D-061 write-back.
+- **Modelling conventions** (named in each result):
+  - Track ends join where their copper overlaps.
+  - A via is a vertical bar on its drill, because KiCad does not record plating.
+  - A net tie is a link between its pads.
+  - The solver geometry is on a 10 µm grid.
+  - Arc chords are no shorter than the track width.
+
+  Ambiguous geometry, a second route between a port's ends, and copper of another net touching a coil return `needs_judgement`.
+- **Validation.** FastHenry reproduces Grover's square loop within 2%. On the RoomReader V2 Quad Coil it gave 1.815, 1.828, 1.809 and 1.535 µH, within 1% of an independent calculation.
+- **Boundary.** No Law exception; laws and identity remain unchanged.
