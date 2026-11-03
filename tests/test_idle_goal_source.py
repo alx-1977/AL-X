@@ -139,6 +139,22 @@ class IdleGoalSourceTests(unittest.TestCase):
         self.later(timedelta(hours=1))
         self.assertEqual(source.due_opportunities(), ())          # answered for this state
 
+    def test_refusals_older_than_the_window_never_reuse_an_offer_identity(self) -> None:
+        """PR #195 review: retry numbers came from the window and repeated."""
+        spend = Spend()
+        source = IdleGoalSource(self.goals, self.ledger, enabled=True,
+                                clock=lambda: self.now, spend=spend)
+        self.goals.create(goal(), "thread", RETENTION)
+        self.later()
+        seen = set()
+        for _ in range(4):
+            (offer,) = source.due_opportunities()
+            self.assertNotIn(offer.opportunity_id, seen)
+            seen.add(offer.opportunity_id)
+            self.assertTrue(source.claim(offer))
+            spend.refused.add(offer.opportunity_id)
+            self.later(timedelta(hours=13))   # every earlier refusal leaves the window
+
     def test_off_unless_the_runtime_may_think_unprompted(self) -> None:
         self.goals.create(goal(), "thread", RETENTION)
         self.later()

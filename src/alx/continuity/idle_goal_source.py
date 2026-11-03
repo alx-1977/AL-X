@@ -32,6 +32,7 @@ from alx.contracts.continuity import CognitionOpportunity
 LOGGER = logging.getLogger(__name__)
 
 _PREFIX = "idle_goal:"
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # How long a goal must sit unchanged before it is offered. Long enough that a
 # turn which is about to schedule its own work is never interrupted.
 IDLE_GOAL_SECONDS = 180
@@ -119,9 +120,10 @@ class IdleGoalSource:
         if len(answered) >= self._max_offers:
             return None
         state_prefix = f"{_PREFIX}{goal_id}:{revision}:"
-        this_state = [(identity, at) for identity, at in offers
-                      if identity.startswith(state_prefix)]
-        if any(identity in answered for identity, _at in this_state):
+        # Every offer for this state, not only the window's: the next retry
+        # number must never repeat an identity the ledger already holds.
+        this_state = list(self._ledger.recorded(state_prefix, _EPOCH))
+        if any(self._answered(identity) for identity, _at in this_state):
             return None
         if this_state:
             refused = len(this_state)
