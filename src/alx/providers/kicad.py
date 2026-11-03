@@ -26,7 +26,7 @@ from alx.providers.kicad_circuit import (
 )
 from alx.providers.kicad_copper import (
     GeometryJudgement, stackup, extract, geometry, fasthenry_input,
-    copper_solids, electrostatic_files, winding_model, winding_capacitance,
+    copper_solids, electrostatic_files, winding_model, winding_capacitance, solver_nonconverged,
     parse_impedance, parse_capacitance, wheeler,
 )
 
@@ -429,8 +429,7 @@ class KiCadProvider:
                             'fastcap_log': cap_log, 'fasthenry_input': deck,
                             'geometry': [geometry(p, layers) for p in paths]}
                     result['meshes'].append(mesh)
-                    if any(marker in (henry_log+cap_log).lower() for marker in (
-                            'not converg', 'failed to converg', 'no convergence', 'iteration limit')):
+                    if solver_nonconverged(henry_log+'\n'+cap_log):
                         result['reasons'].append('solver_nonconvergence')
                         return result
                     capacitance = parse_capacitance(cap_log, len(nets))
@@ -448,8 +447,7 @@ class KiCadProvider:
                                 (winding_run / name).write_text(source)
                             log = self._engine('fastcap', ['-lcopper.lst'], winding_run)
                             mesh.setdefault('winding_logs', []).append(log)
-                            if any(marker in log.lower() for marker in (
-                                    'not converg', 'failed to converg', 'no convergence', 'iteration limit')):
+                            if solver_nonconverged(log):
                                 raise GeometryJudgement('winding_solver_nonconvergence')
                             c = winding_capacitance(parse_capacitance(log, len(identities)), voltages)
                             mesh['self_capacitance_f'].append(c)

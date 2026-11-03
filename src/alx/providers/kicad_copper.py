@@ -272,14 +272,23 @@ def parse_impedance(source, size, frequency):
 
 
 def quad_panels(corners, density):
-    """Bilinear subdivision of one oriented rectangular/trapezoid face."""
+    """Bilinear subdivision, resolving long walls independently of height.
+
+    Equal counts in both directions preserve the original aspect ratio (up
+    to 2400:1 on the solder-mask walls). Such panels span many solver cells
+    and give a poor near-field/preconditioner basis for the thin stack-up.
+    """
     a, b, c, d = corners
+    width = max(math.dist(a, b), math.dist(c, d))
+    height = max(math.dist(a, d), math.dist(b, c))
+    nu = density * max(1, math.ceil(width/(8*height)))
+    nv = density * max(1, math.ceil(height/(8*width)))
     def point(u, v):
         return tuple((1-u)*(1-v)*a[k]+u*(1-v)*b[k]+u*v*c[k]+(1-u)*v*d[k] for k in range(3))
-    for i in range(density):
-        for j in range(density):
-            yield [point(i/density, j/density), point((i+1)/density, j/density),
-                   point((i+1)/density, (j+1)/density), point(i/density, (j+1)/density)]
+    for i in range(nu):
+        for j in range(nv):
+            yield [point(i/nu, j/nv), point((i+1)/nu, j/nv),
+                   point((i+1)/nu, (j+1)/nv), point(i/nu, (j+1)/nv)]
 
 
 def ribbon_faces(path, layers):
@@ -468,16 +477,27 @@ def planar_panels(shape, z, density):
     from shapely import constrained_delaunay_triangles
     for polygon in polygons(shape):
         for triangle in constrained_delaunay_triangles(polygon).geoms:
-            a, b, c = [(x, y, z) for x, y in list(triangle.exterior.coords)[:3]]
+            corners = [(x, y, z) for x, y in list(triangle.exterior.coords)[:3]]
+            # Uniform barycentric refinement alone leaves millimetre-long
+            # slivers along narrow tracks and rounded ends. Slice from the
+            # shortest edge towards its opposite vertex instead. This adds
+            # panels linearly with aspect ratio, without moving the boundary.
+            lengths = [math.dist(corners[i], corners[(i+1)%3]) for i in range(3)]
+            i = lengths.index(min(lengths))
+            a, b, c = corners[i], corners[(i+1)%3], corners[(i+2)%3]
+            count = density*max(1, math.ceil(max(lengths)/(8*min(lengths))))
 
-            def point(i, j):
-                return tuple(a[k]+(b[k]-a[k])*i/density+(c[k]-a[k])*j/density for k in range(3))
+            def point(u, v):
+                return tuple((1-v)*((1-u)*a[k]+u*b[k])+v*c[k] for k in range(3))
 
-            for i in range(density):
-                for j in range(density-i):
-                    yield [point(i, j), point(i+1, j), point(i, j+1)]
-                    if i+j+1 < density:
-                        yield [point(i+1, j), point(i+1, j+1), point(i, j+1)]
+            for j in range(count):
+                for i in range(density):
+                    panel = [point(i/density, j/count), point((i+1)/density, j/count)]
+                    if j+1 < count:
+                        panel.extend([point((i+1)/density, (j+1)/count), point(i/density, (j+1)/count)])
+                    else:
+                        panel.append(c)
+                    yield panel
 
 
 def surface_source(panels):
@@ -679,19 +699,36 @@ def winding_capacitance(matrix, voltages):
     return c
 
 
+def solver_nonconverged(source):
+    return any(marker in source.lower() for marker in (
+        'not converg', 'failed to converg', 'no convergence', 'iteration limit',
+        'without converg', 'nonconverg'))
+
+
 def parse_capacitance(source, size):
+    if solver_nonconverged(source):
+        raise AnalysisError('invalid_report', {'reason': 'fastcap_nonconvergence'})
     sections = re.split(r'CAPACITANCE MATRIX', source, flags=re.I)
     if len(sections) < 2:
         raise AnalysisError('invalid_report', {'reason': 'fastcap_matrix_missing'})
     section = sections[-1]
-    if not re.search(r'pico\s*-?\s*farads', section, re.I):
+    header = re.match(r',\s*([^\r\n]*)', section)
+    if not header or not header[1].strip():
         raise AnalysisError('invalid_report', {'reason': 'fastcap_units_missing'})
+    unit = re.sub(r'[\s-]', '', header[1]).lower()
+    factors = {'farads': 1., 'millifarads': 1e-3, 'microfarads': 1e-6,
+               'nanofarads': 1e-9, 'picofarads': 1e-12,
+               'femtofarads': 1e-15, 'attofarads': 1e-18}
+    if unit not in factors:
+        raise AnalysisError('invalid_report', {'reason': 'fastcap_units_unknown', 'unit': unit})
     rows = []
     for line in section.splitlines():
         tokens = line.split()
-        if tokens and tokens[0] == str(len(rows)+1) and len(tokens) >= size+1:
+        # FastCap prints the conductor name before the row number, e.g.
+        # "1%GROUP19 1 1.688". Names may themselves contain spaces/numbers.
+        if len(tokens) >= size+1 and tokens[-size-1] == str(len(rows)+1):
             try:
-                row = [float(v)*1e-12 for v in tokens[-size:]]
+                row = [float(v)*factors[unit] for v in tokens[-size:]]
             except ValueError:
                 continue
             if not all(math.isfinite(v) for v in row):
