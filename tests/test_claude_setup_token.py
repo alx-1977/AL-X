@@ -24,6 +24,15 @@ from alx.providers.claude_subscription import (
 from alx.providers.claude_usage import ClaudeUsageReader
 
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def subscription_waits_are_virtual(monkeypatch):
+    monkeypatch.setattr("alx.providers.subscription_retry.sleep", lambda seconds: None)
+
+
 def sentinel():
     return uuid4().hex
 
@@ -175,7 +184,7 @@ def test_http_core_delivers_research_refusal_once(tmp_path, profile_http, provid
         assert research.setup_token_notice_facts() == newer
 
 
-@pytest.mark.parametrize('failure', ['identity', 'unavailable', 'preparation', 'missing_cli',
+@pytest.mark.parametrize('failure', ['identity', 'preparation', 'missing_cli',
                                    'budget', 'timeout', 'bad_output', 'nonzero', 'success'])
 def test_refusal_acknowledgement_tracks_provider_send(tmp_path, profile_http, failure):
     import subprocess
@@ -191,8 +200,6 @@ def test_refusal_acknowledgement_tracks_provider_send(tmp_path, profile_http, fa
     assert facts == model.setup_token_notice_facts()  # Construction is not delivery.
     if failure == 'identity':
         runner.status_stdout = 'invalid'
-    elif failure == 'unavailable':
-        model.ensure_available = Mock(side_effect=ProviderError('claude_subscription', 'unavailable'))
     elif failure == 'preparation':
         model.command = Mock(side_effect=ValueError('invalid_request'))
     elif failure == 'missing_cli':
@@ -200,10 +207,12 @@ def test_refusal_acknowledgement_tracks_provider_send(tmp_path, profile_http, fa
         model._require_identity = Mock()  # Refuse at model spawn, after identity preflight.
     elif failure in {'timeout', 'nonzero'}:
         original = model._runner
+        sent = []
         def failing_runner(command, **kwargs):
             if command[1:] == ['auth', 'status', '--json']:
                 return original(command, **kwargs)
-            assert model.setup_token_notice_facts() == facts
+            assert model.setup_token_notice_facts() == (facts if not sent else {})
+            sent.append(True)
             assert json.loads(kwargs['input'])['runtime'] == facts
             if failure == 'timeout':
                 raise subprocess.TimeoutExpired('claude', 30)

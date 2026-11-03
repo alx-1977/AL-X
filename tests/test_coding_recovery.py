@@ -68,6 +68,49 @@ class BlockingSession(RecordingSession):
         return CodingSessionResult(True, "completed after child")
 
 
+def test_cancel_reset_wait_releases_worker_checkout(tmp_path, monkeypatch):
+    from alx.providers.subscription_retry import SubscriptionRetryPolicy
+    from tests.test_subscription_retry import FakeSession, RESET_MESSAGE
+    from alx.providers.coding_git import coding_job_lock
+
+    root = _worktree(tmp_path)
+    waiting, release = threading.Event(), threading.Event()
+    calls, results = [], []
+
+    class ObservedPolicy(SubscriptionRetryPolicy):
+        def pause(self, *args, **kwargs):
+            waiting.set()
+            return super().pause(*args, **kwargs)
+
+    # Bound the broken implementation's sleep so a failing test cannot hang.
+    monkeypatch.setattr('alx.providers.subscription_retry.sleep', lambda delay: release.wait(3))
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, '', RESET_MESSAGE)
+
+    session = FakeSession('model', executable='fake', stall_seconds=30,
+                          runner=runner, retry_policy=ObservedPolicy())
+    agent = CodingAgent(PlanningModel(), session, repository=root)
+    request = CodingRequest(task='fix add', job_id='job-1', repair_branch='fix/job-1',
+                            commit_message='fix add')
+    worker = threading.Thread(target=lambda: results.append(agent.run(request)), daemon=True)
+    worker.start()
+    try:
+        assert waiting.wait(5)
+        assert agent.cancel('job-1')
+        worker.join(1)
+        assert not worker.is_alive(), 'reset wait ignored cancellation'
+        assert results[0].status == 'cancelled'
+        assert 'coding_cancelled' in results[0].unresolved_issues
+        assert len(calls) == 1
+        with coding_job_lock(root):
+            pass
+    finally:
+        release.set()
+        worker.join(5)
+
+
 class CodingRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()

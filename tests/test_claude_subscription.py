@@ -18,6 +18,15 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def subscription_waits_are_virtual(monkeypatch):
+    monkeypatch.setattr("alx.providers.subscription_retry.sleep", lambda seconds: None)
+
+
 from alx.contracts import ModelMessage, ModelRequest, ModelRole  # noqa: E402
 from alx.providers.claude_subscription import (  # noqa: E402
     PROVIDER_NAME,
@@ -375,7 +384,7 @@ class NoMeteredBillingTest(unittest.TestCase):
             model.complete(_request())
 
         self.assertEqual(caught.exception.provider, PROVIDER_NAME)
-        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(len(runner.calls), 3)
 
     def test_bounded_research_is_refused(self) -> None:
         """Research settles a dollar reservation from measured usage."""
@@ -384,33 +393,6 @@ class NoMeteredBillingTest(unittest.TestCase):
 
 
 class FailClosedTest(unittest.TestCase):
-    def test_a_usage_limit_is_a_provider_failure(self) -> None:
-        runner = _Recorder("", "Claude usage limit reached. Resets at 5pm", 1)
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
-
-    def test_a_rate_limit_is_a_provider_failure(self) -> None:
-        runner = _Recorder("", "429 too many requests", 1)
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
-
-    def test_missing_authentication_is_a_provider_failure(self) -> None:
-        runner = _Recorder("", "Not logged in. Please run /login", 1)
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "subscription_unauthenticated")
-
     def test_a_missing_cli_is_a_provider_failure(self) -> None:
         def missing(command, **kwargs):
             raise FileNotFoundError(command[0])
@@ -450,19 +432,7 @@ class FailClosedTest(unittest.TestCase):
         with self.assertRaises(ProviderError) as caught:
             model.complete(_request())
 
-        self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
-
-    def test_the_session_limit_wording_is_usage_exhaustion(self) -> None:
-        runner = _Recorder(json.dumps({
-            "is_error": True, "subtype": "success",
-            "result": "You've hit your session limit · resets 12:40pm (Africa/Johannesburg)",
-        }))
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
+        self.assertEqual(caught.exception.reason, "cli_failed")
 
     def test_a_failure_carries_no_prompt(self) -> None:
         """D-012: a failure must not carry the turn that caused it."""
@@ -552,129 +522,7 @@ class MalformedOutputTest(unittest.TestCase):
         self.assertNotIn("\x1b", caught.exception.reason)
 
 
-class TerminalLatchingTest(unittest.TestCase):
-    """An exhausted subscription must not be re-asked once per turn."""
-
-    def test_exhaustion_latches_and_refuses_without_a_second_process(self) -> None:
-        runner = _Recorder("", "usage limit reached", 1)
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
-        self.assertEqual(len(runner.calls), 1, "the CLI was started again")
-
-    def test_ensure_available_refuses_before_a_turn_is_built(self) -> None:
-        runner = _Recorder("", "usage limit reached", 1)
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-
-        with self.assertRaises(ProviderError):
-            model.ensure_available()
-
-    def test_exhaustion_clears_when_the_window_rolls_over(self) -> None:
-        now = [1000.0]
-        runner = _Recorder("", "usage limit reached", 1)
-        model = ClaudeSubscriptionReasoningModel(
-            "opus",
-            60,
-            runner=runner,
-            terminal_failure_cooldown_seconds=900.0,
-            clock=lambda: now[0],
-        )
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-
-        now[0] += 901.0
-        runner.returncode = 0
-        runner.stdout = _envelope(DECISION)
-        runner.stderr = ""
-
-        completion = model.complete(_request())
-        self.assertEqual(completion.provider, PROVIDER_NAME)
-
-    def test_an_authentication_failure_does_not_expire(self) -> None:
-        """Only Friedl can fix it; retrying on a timer only spawns processes."""
-        now = [1000.0]
-        runner = _Recorder("", "not logged in", 1)
-        model = ClaudeSubscriptionReasoningModel(
-            "opus", 60, runner=runner, clock=lambda: now[0]
-        )
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-
-        now[0] += 100_000.0
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "subscription_unauthenticated")
-        self.assertEqual(len(runner.calls), 1)
-
-    def test_an_ordinary_failure_does_not_latch(self) -> None:
-        """A malformed answer is not a reason to stop trying to think."""
-        runner = _Recorder("garbage")
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-
-        runner.stdout = _envelope(DECISION)
-        completion = model.complete(_request())
-
-        self.assertEqual(completion.provider, PROVIDER_NAME)
-        self.assertEqual(len(runner.calls), 2)
-
-    def test_no_retry_happens_inside_one_turn(self) -> None:
-        runner = _Recorder("", "cli exploded", 1)
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-
-        self.assertEqual(len(runner.calls), 1)
-
-
-class MalformationLatchTest(unittest.TestCase):
-    """A provider that cannot produce a decision must stop being asked.
-
-    The first live test spent eleven Opus calls in five minutes because the
-    Core step loop retried a malformed answer it could not diagnose. The loop
-    cannot see the pattern; the provider can.
-    """
-
-    def test_two_consecutive_malformed_answers_latch(self) -> None:
-        runner = _Recorder(_envelope("not an object"))
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "provider_output_unusable")
-        self.assertEqual(
-            len(runner.calls), 2, "a third subscription call was made"
-        )
-
-    def test_the_live_failure_shape_latches(self) -> None:
-        """Exactly what the first live test hit: prose where a decision belongs."""
-        runner = _Recorder(_legacy_envelope("Hi Friedl, I am AL/X."))
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-
-        for _ in range(2):
-            with self.assertRaises(ProviderError):
-                model.complete(_request())
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "provider_output_unusable")
-        self.assertEqual(len(runner.calls), 2)
-
+class RequiredSchemaTest(unittest.TestCase):
     def test_a_missing_required_field_is_malformed(self) -> None:
         runner = _Recorder(_envelope({"action": {"type": "respond"}}))
         model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
@@ -689,72 +537,6 @@ class MalformationLatchTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.reason, "decision_schema_unsatisfied")
 
-    def test_one_malformed_answer_does_not_latch(self) -> None:
-        """A single bad turn is noise, not a broken provider."""
-        runner = _Recorder(_envelope("not an object"))
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-
-        runner.stdout = _envelope(DECISION)
-        completion = model.complete(_request())
-
-        self.assertEqual(completion.provider, PROVIDER_NAME)
-
-    def test_a_success_resets_the_counter(self) -> None:
-        runner = _Recorder(_envelope("not an object"))
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-        with self.assertRaises(ProviderError):
-            model.complete(_request())
-
-        runner.stdout = _envelope(DECISION)
-        model.complete(_request())
-
-        # One more malformed answer must not latch: the run was broken.
-        runner.stdout = _envelope("not an object")
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-        self.assertNotEqual(caught.exception.reason, "provider_output_unusable")
-
-    def test_the_latch_does_not_expire(self) -> None:
-        """Nothing changes on a timer; Friedl restarts once it is fixed."""
-        now = [1000.0]
-        runner = _Recorder(_envelope("not an object"))
-        model = ClaudeSubscriptionReasoningModel(
-            "opus", 60, runner=runner, clock=lambda: now[0]
-        )
-        for _ in range(2):
-            with self.assertRaises(ProviderError):
-                model.complete(_request())
-
-        now[0] += 100_000.0
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-
-        self.assertEqual(caught.exception.reason, "provider_output_unusable")
-        self.assertEqual(len(runner.calls), 2)
-
-    def test_auth_and_exhaustion_latching_are_unchanged(self) -> None:
-        """Fix 3: the existing terminal semantics still hold."""
-        runner = _Recorder("", "usage limit reached", 1)
-        model = ClaudeSubscriptionReasoningModel("opus", 60, runner=runner)
-        with self.assertRaises(ProviderError) as caught:
-            model.complete(_request())
-        self.assertEqual(caught.exception.reason, "subscription_usage_exhausted")
-
-        auth_runner = _Recorder("", "not logged in", 1)
-        auth_model = ClaudeSubscriptionReasoningModel(
-            "opus", 60, runner=auth_runner
-        )
-        with self.assertRaises(ProviderError) as caught:
-            auth_model.complete(_request())
-        self.assertEqual(
-            caught.exception.reason, "subscription_unauthenticated"
-        )
-        # Still latched after one, as before: neither waits for two.
-        with self.assertRaises(ProviderError):
-            auth_model.complete(_request())
-        self.assertEqual(len(auth_runner.calls), 1)
 
 
 class UsageReportingTest(unittest.TestCase):

@@ -67,6 +67,7 @@ from alx.providers.coding_session import (  # noqa: E402
 )
 from alx.providers.coding_workspace import CodingWorkspace  # noqa: E402
 from alx.providers.errors import ProviderError  # noqa: E402
+from alx.providers.subscription_retry import SubscriptionRetryPolicy  # noqa: E402
 from alx.providers import coding_agent as coding_agent_module  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.coding import (  # noqa: E402
@@ -1351,6 +1352,29 @@ class NativeExecutionTests(unittest.TestCase):
             attempt.result.failure["reason_code"], "sandbox_not_applied"
         )
 
+    def test_clipped_session_credentials_never_reach_capability_failure(self) -> None:
+        from alx.providers.codex_coding_session import CodexCodingSession
+        from alx.providers.subscription_retry import SubscriptionRetryPolicy
+
+        worktree = _worktree(self.root)
+        credential = "A1b2C3d4" * 10
+        prefix = "detail " * 16
+        message = prefix + credential + " sk-abc trailing"
+        session = CodexCodingSession("model", stall_seconds=30,
+            runner=lambda command, **kwargs: subprocess.CompletedProcess(
+                command, 1, json.dumps({"type": "error", "message": message}), ""),
+            retry_policy=SubscriptionRetryPolicy(wait=lambda seconds: None))
+        with patch("alx.providers.coding_subscription_session.MAX_RETAINED_OUTPUT_CHARACTERS", 128), \
+             patch.object(session, "install_subscription_auth"), \
+             patch.object(session, "prepare_home"), \
+             patch.object(session, "command", return_value=["fake"]):
+            attempt = self._run(PlanningModel(), session, task="fix add", worktree=str(worktree))
+        self.assertEqual(attempt.result.state, CapabilityResultState.FAILED)
+        details = attempt.result.failure["service_message"]
+        self.assertNotIn(credential[:16], details)
+        self.assertNotIn("sk-abc", details)
+        self.assertEqual(details, (prefix + "[masked] [masked] trailing")[:128])
+
     def test_outcome_separates_job_changes_from_preexisting_dirt(self) -> None:
         """15. Work already in the tree is not claimed as this job's.
 
@@ -1588,22 +1612,27 @@ class SessionLaunchTests(unittest.TestCase):
         for forbidden in ("OpenAI", "Anthropic", "httpx", "xai_sdk"):
             self.assertNotIn(forbidden, source)
 
-    def test_a_failed_sandbox_fails_the_job_closed(self) -> None:
-        """7. A profile that cannot be applied stops the job."""
-        def refuse(*_args, **_kwargs):
-            return subprocess.CompletedProcess(
-                [], 1, "", "error: could not apply the sandbox profile; "
-                "Refusing to start with its protections missing."
-            )
+    def test_a_refused_cli_launch_retries_then_fails_the_job_closed(self) -> None:
+        """7. A refused launch preserves its diagnostic after bounded retries."""
+        message = (
+            "error: could not apply the sandbox profile; "
+            "Refusing to start with its protections missing."
+        )
+        attempts = []
+        waits = []
 
-        session = self._session(runner=refuse)
+        def refuse(*_args, **_kwargs):
+            attempts.append(True)
+            return subprocess.CompletedProcess([], 1, "", message)
+
+        policy = SubscriptionRetryPolicy(max_attempts=3, wait=waits.append)
+        session = self._session(runner=refuse, retry_policy=policy)
         request = CodingRequest(task="t", job_id="job-1", worktree=str(self.root))
         with self.assertRaises(CodingError) as raised:
             session.run_session(request, "briefing")
-        self.assertEqual(raised.exception.code, "sandbox_unusable")
-        self.assertEqual(
-            raised.exception.details["reason_code"], "sandbox_not_applied"
-        )
+        self.assertEqual(raised.exception.details["service_message"], message)
+        self.assertEqual(len(attempts), policy.max_attempts)
+        self.assertEqual(waits, [1.0, 2.0])
 
     def test_a_cut_off_session_is_not_reported_as_complete(self) -> None:
         def truncated(*_args, **_kwargs):

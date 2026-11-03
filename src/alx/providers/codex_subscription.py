@@ -20,6 +20,7 @@ from time import monotonic
 from typing import Any
 
 from alx.contracts import ModelCompletion, ModelRequest, ModelRole, normalise_usage, usage_telemetry
+from alx.providers.subscription_retry import SubscriptionRetryPolicy, cli_failure_message, error_event_message, retry_subscription
 from alx.providers.errors import raise_provider_failure
 
 
@@ -28,13 +29,6 @@ PROVIDER_NAME = "codex_subscription"
 
 _METERED_ENVIRONMENT_KEYS = frozenset(
     {"OPENAI_API_KEY", "CODEX_API_KEY", "XAI_API_KEY", "ANTHROPIC_API_KEY"}
-)
-_AUTHENTICATION_MARKERS = (
-    "not logged in", "log in", "login", "unauthenticated", "unauthorized",
-    "authentication", "chatgpt", "credentials", "auth",
-)
-_USAGE_LIMIT_MARKERS = (
-    "usage limit", "rate limit", "quota", "too many requests", "upgrade",
 )
 
 
@@ -67,12 +61,14 @@ class CodexSubscriptionReasoningModel:
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
+        retry_policy: SubscriptionRetryPolicy | None = None,
         effort: str = "",
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if not model.strip():
             raise ValueError("model must not be blank")
+        self._retry_policy = retry_policy or SubscriptionRetryPolicy()
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._executable = executable
@@ -114,6 +110,7 @@ class CodexSubscriptionReasoningModel:
             raise _CodexProtocolError("request_without_turn_content")
         return "\n\n".join((*system, *content))
 
+    @retry_subscription
     def complete(self, request: ModelRequest) -> ModelCompletion:
         started_at = monotonic()
         details: dict[str, object] = {}
@@ -137,7 +134,8 @@ class CodexSubscriptionReasoningModel:
                 )
             if completed.returncode != 0:
                 raise _CodexProtocolError(
-                    self._failure_code(completed.stderr, completed.stdout),
+                    "cli_failed",
+                    service_message=cli_failure_message(completed.stderr, completed.stdout),
                     exit_status=completed.returncode,
                     stdout_characters=len(completed.stdout or ""),
                     stderr_characters=len(completed.stderr or ""),
@@ -157,12 +155,14 @@ class CodexSubscriptionReasoningModel:
             completion = ModelCompletion(PROVIDER_NAME, self._model, output, usage)
             self._emit(request, "reasoning.completed", started_at, usage, reported)
             return completion
-        except subprocess.TimeoutExpired:
-            details = {"reason_code": "reasoning_timeout"}
+        except subprocess.TimeoutExpired as error:
+            details = {"service_message": error.stderr or error.stdout or "reasoning_timeout"}
             error_code = "reasoning_timeout"
-        except FileNotFoundError:
+        except FileNotFoundError as error:
+            details = {"service_message": str(error)}
             error_code = "cli_not_installed"
-        except OSError:
+        except OSError as error:
+            details = {"service_message": str(error)}
             error_code = "cli_unavailable"
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
             error_code = error.code if isinstance(error, _CodexProtocolError) else "response_invalid"
@@ -180,6 +180,10 @@ class CodexSubscriptionReasoningModel:
             event = json.loads(line)
             if not isinstance(event, Mapping):
                 raise _CodexProtocolError("response_event_invalid")
+            if event.get("type") in ("error", "turn.failed"):
+                raise _CodexProtocolError(
+                    "cli_failed", service_message=error_event_message(event)
+                )
             if event.get("type") == "item.completed":
                 item = event.get("item")
                 if isinstance(item, Mapping) and item.get("type") == "agent_message":
@@ -197,14 +201,6 @@ class CodexSubscriptionReasoningModel:
         # CLI never reported from one it reported as zero.
         return dict(value), normalise_usage(usage), usage
 
-    @staticmethod
-    def _failure_code(stderr: str, stdout: str) -> str:
-        text = f"{stderr}\n{stdout}".lower()
-        if any(marker in text for marker in _USAGE_LIMIT_MARKERS):
-            return "subscription_usage_exhausted"
-        if any(marker in text for marker in _AUTHENTICATION_MARKERS):
-            return "subscription_unauthenticated"
-        return "cli_failed"
 
     def _emit(
         self, request: ModelRequest, code: str, started_at: float,

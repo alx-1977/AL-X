@@ -8,10 +8,8 @@ than a parallel copy of the orchestration.
 
 What lives here is what was already proven neutral by being true of any such
 CLI: per-job temporary state, a briefing handed over as a file, the subprocess
-lifecycle and its error mapping, an environment allowlist that strips every
-metered credential, copying a login file rather than a key, and the failure
-classification that distinguishes containment refusing to start from an
-exhausted subscription from an unauthenticated one.
+lifecycle and its bounded retries, an environment allowlist that strips every
+metered credential, copying a login file rather than a key, and propagation of masked failure diagnostics.
 
 What stays with each adapter is the CLI's own vocabulary: its executable, its
 flags, where it keeps its login, what it calls its tools, and the key
@@ -27,12 +25,17 @@ allowing more than one CLI behind it.
 from __future__ import annotations
 
 import logging
+import io
+import json
 import os
 import shutil
 import subprocess  # noqa: S404 - the coding-session launch site
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from alx.providers.subscription_retry import SubscriptionRetryPolicy, retry_subscription, error_event_message
+from alx.contracts.diagnostics import mask_credentials
 
 from alx.contracts.coding import (
     CodingError,
@@ -49,7 +52,6 @@ LOGGER = logging.getLogger(__name__)
 MAX_SESSION_OUTPUT_BYTES = 512 * 1024 * 1024
 # How much of that output is read back into memory to form the result.
 MAX_RETAINED_OUTPUT_CHARACTERS = 1_000_000
-MAX_RETAINED_STDERR_CHARACTERS = 64_000
 
 
 # The longest spooled line read back whole. Anything longer is never decoded:
@@ -79,17 +81,6 @@ def bounded_lines(handle) -> Iterator[str]:
             continue
         yield line
 
-
-def _tail(path: Path, characters: int) -> str:
-    """The last `characters` of a spooled file, read without loading all of it."""
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - characters * 4))
-            return handle.read().decode("utf-8", errors="replace")[-characters:]
-    except OSError:
-        return ""
 
 # Process basics only. Anything not named here does not reach the child, so a
 # credential the host happens to export cannot be inherited by accident.
@@ -122,37 +113,6 @@ _METERED_KEYS_FOLDED = frozenset(
     key.upper() for key in METERED_ENVIRONMENT_KEYS
 )
 
-USAGE_LIMIT_MARKERS = (
-    "usage limit", "rate limit", "rate_limit", "quota",
-    "too many requests", "resets at", "upgrade to",
-)
-AUTHENTICATION_MARKERS = (
-    "not logged in", "log in", "login", "unauthenticated", "unauthorized",
-    "authentication", "invalid api key", "oauth", "credentials", "auth.json",
-)
-SANDBOX_MARKERS = (
-    "sandbox could not be applied",
-    "refusing to start",
-    "sandbox profile",
-)
-
-
-def classify_failure(stderr: str, stdout: str) -> tuple[str, str]:
-    """Why a subscription coding CLI failed, as a declared failure code.
-
-    Containment refusing to start is checked first and deliberately: it is the
-    containment working, and the job must fail rather than run with its
-    protections missing. An exhausted subscription and an unauthenticated one
-    are distinguished because they need different answers from AL/X.
-    """
-    text = f"{stderr}\n{stdout}".lower()
-    if any(marker in text for marker in SANDBOX_MARKERS):
-        return "sandbox_unusable", "sandbox_not_applied"
-    if any(marker in text for marker in USAGE_LIMIT_MARKERS):
-        return "session_failed", "subscription_usage_exhausted"
-    if any(marker in text for marker in AUTHENTICATION_MARKERS):
-        return "session_failed", "subscription_unauthenticated"
-    return "session_failed", "cli_failed"
 
 
 class SubscriptionCodingSession:
@@ -176,6 +136,7 @@ class SubscriptionCodingSession:
     login_file_name: str = ""
     #: Whether the session can run commands, inside its containment.
     has_terminal: bool = False
+    failure_event_types: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -186,6 +147,7 @@ class SubscriptionCodingSession:
         max_turns: int = 60,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
+        retry_policy: SubscriptionRetryPolicy | None = None,
         effort: str = "",
     ) -> None:
         # The only bound on a session: silence. There is no absolute ceiling;
@@ -198,6 +160,7 @@ class SubscriptionCodingSession:
             raise ValueError("a native session needs more than one turn")
         if not model.strip():
             raise ValueError("model must not be blank")
+        self._retry_policy = retry_policy or SubscriptionRetryPolicy()
         self._model = model
         self._stall_seconds = stall_seconds
         self._executable = executable
@@ -263,14 +226,34 @@ class SubscriptionCodingSession:
         """
         return False
 
-    def failure_output(self, stdout: str) -> str:
-        """The part of stdout that may explain a failed exit.
-
-        The whole of it by default. An adapter whose stdout streams what the
-        agent read returns only the CLI's own error reports: file contents
-        that happen to mention a usage limit must not classify the failure.
-        """
-        return stdout
+    def failure_output(self, lines: Iterable[str], *, structured: bool = True) -> str:
+        """Retain bounded diagnostics, selecting stream errors by event fields."""
+        kept: list[str] = []
+        size = 0
+        for line in lines:
+            if isinstance(line, OversizedLine):
+                continue
+            if structured and self.failure_event_types:
+                try:
+                    event = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(event, Mapping) or event.get('type') not in self.failure_event_types:
+                    continue
+                text = error_event_message(event)
+                if kept:
+                    text = '\n' + text
+            else:
+                text = line
+            # Each record is complete here. Mask before the total-output cut;
+            # oversized records are discarded above, never forwarded as prefixes.
+            text = mask_credentials(text)
+            remaining = MAX_RETAINED_OUTPUT_CHARACTERS - size
+            kept.append(text[:remaining])
+            size += min(len(text), remaining)
+            if size >= MAX_RETAINED_OUTPUT_CHARACTERS:
+                break
+        return ''.join(kept)
 
     # --- neutral orchestration ---------------------------------------------
 
@@ -315,6 +298,7 @@ class SubscriptionCodingSession:
         environment.update(provider)
         return environment
 
+    @retry_subscription
     def run_session(
         self, request: CodingRequest, briefing: str
     ) -> CodingSessionResult:
@@ -362,31 +346,44 @@ class SubscriptionCodingSession:
                     shell=False,
                     check=False,
                 )
+            except subprocess.TimeoutExpired as error:
+                raise CodingError(
+                    "session_interrupted", reason_code="session_timeout",
+                    service_message=error.stderr or error.stdout or "session_timeout",
+                ) from error
             except FileNotFoundError as error:
                 raise CodingError(
-                    "coding_unavailable", reason_code="cli_not_installed"
+                    "coding_unavailable", reason_code="cli_not_installed", service_message=str(error)
                 ) from error
             except OSError as error:
                 raise CodingError(
-                    "coding_unavailable", reason_code="cli_unavailable"
+                    "coding_unavailable", reason_code="cli_unavailable", service_message=str(error)
                 ) from error
-            # A substituted runner may still answer with text directly.
+            # Read records incrementally, including on failure. A session can
+            # spool hundreds of MB; only bounded diagnostics belong in memory.
+            if completed.returncode != 0:
+                if isinstance(completed.stdout, str):
+                    message = self.failure_output(bounded_lines(io.StringIO(completed.stdout)))
+                    stderr = self.failure_output(
+                        bounded_lines(io.StringIO(completed.stderr or "")), structured=False)
+                else:
+                    with open(stdout_path, encoding="utf-8", errors="replace") as spooled:
+                        message = self.failure_output(bounded_lines(spooled))
+                    stderr = ""
+                    if not message:
+                        with open(stderr_path, encoding="utf-8", errors="replace") as spooled:
+                            stderr = self.failure_output(bounded_lines(spooled), structured=False)
+                raise CodingError(
+                    "session_failed", reason_code="cli_failed",
+                    service_message=message or stderr,
+                    exit_status=completed.returncode,
+                )
             if isinstance(completed.stdout, str):
                 stdout = self.retained_output(completed.stdout.splitlines())
-                stderr = (completed.stderr or "")[-MAX_RETAINED_STDERR_CHARACTERS:]
             else:
                 with open(stdout_path, encoding="utf-8", errors="replace") as spooled:
                     stdout = self.retained_output(bounded_lines(spooled))
-                stderr = _tail(stderr_path, MAX_RETAINED_STDERR_CHARACTERS)
 
-        if completed.returncode != 0:
-            code, reason = classify_failure(stderr, self.failure_output(stdout))
-            raise CodingError(
-                code,
-                reason_code=reason,
-                exit_status=completed.returncode,
-                stderr_characters=len(stderr),
-            )
         return self.read_result(stdout)
 
     def install_subscription_auth(self, home: Path) -> None:
@@ -451,11 +448,7 @@ def subscription_cli_present(executable: str) -> bool:
 
 __all__ = [
     "ALLOWED_ENVIRONMENT_KEYS",
-    "AUTHENTICATION_MARKERS",
     "METERED_ENVIRONMENT_KEYS",
-    "SANDBOX_MARKERS",
-    "USAGE_LIMIT_MARKERS",
     "SubscriptionCodingSession",
-    "classify_failure",
     "subscription_cli_present",
 ]

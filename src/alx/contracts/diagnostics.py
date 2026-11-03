@@ -8,7 +8,7 @@ _BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[^\s\"',]+")
 _ASSIGNED = re.compile(
     r"(?i)\b(CLAUDE_CODE_OAUTH_TOKEN|token|api[_-]?key|access[_-]?key|secret[_-]?key|secret|password|signature|"
     r"authorization)([\"']?\s*[=:]\s*[\"']?)(?!\[masked\])([^\s\"',&]+)")
-_PREFIXED = re.compile(r"\b(sk|xi|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_\-]{8,}")
+_PREFIXED = re.compile(r"\b(sk[-_][A-Za-z0-9_\-]+|(?:xi|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_\-]{8,})")
 # A long unbroken run of letters and digits (no slash, so never a path).
 _LONG = re.compile(r"(?<![/\w])[A-Za-z0-9+_\-]{40,}={0,2}(?![/\w])")
 
@@ -33,6 +33,8 @@ def service_message(value: object) -> str:
 def failure_details(error: BaseException) -> dict[str, str]:
     """Only explicitly supplied service diagnostics travel, never arbitrary errors."""
     message = getattr(error, "service_message", "")
+    if getattr(error, "preserve_service_message", False) and isinstance(message, str):
+        return {"service_message": mask_credentials(message)} if message else {}
     return {"service_message": service_message(message)} if message else {}
 
 

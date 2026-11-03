@@ -408,6 +408,17 @@ def check_cancelled() -> None:
         current.check()
 
 
+def wait_with_cancellation(delay: float, wait: Callable[[float], None]) -> None:
+    """Wait on the bound job's stop signal, or use the supplied clock wait."""
+    current = _CURRENT.get()
+    if current is None:
+        wait(delay)
+    else:
+        current.check()
+        current.requested.wait(delay)
+        current.check()
+
+
 def run_coding_subprocess(runner: Callable[..., Any], argv: list[str], **kwargs: Any) -> Any:
     current = _CURRENT.get()
     if current is None and "inactivity_timeout" not in kwargs and "stop_descendants" not in kwargs:

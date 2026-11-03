@@ -36,11 +36,11 @@ in its own Claude Code configuration directory (`ALX_CLAUDE_CONFIG_DIR`). The
 child is given exactly that directory, and any inherited `CLAUDE_CONFIG_DIR`
 is dropped. Only a setup token verified through Anthropic's OAuth profile for
 alx@fire-fli.co.za on a supported subscription may override the saved login;
-otherwise it is excluded and a one-shot diagnostic returns to the Core.
+otherwise it is excluded and a diagnostic returns to the Core.
 Before the first turn the directory's login is verified through the CLI's machine-readable
 `auth status --json`: signed in, through a claude.ai subscription login, at
 that directory, and as the expected account when one is configured. Anything
-else is a terminal refusal; there is no fallback identity.
+else refuses the attempt; there is no fallback identity.
 """
 
 from __future__ import annotations
@@ -67,24 +67,13 @@ from alx.contracts import (
     normalise_usage,
     usage_telemetry,
 )
-from alx.providers.errors import ProviderError, raise_provider_failure
+from alx.providers.subscription_retry import SubscriptionRetryPolicy, cli_failure_message, retry_subscription
+from alx.providers.errors import raise_provider_failure
 
 
 LOGGER = logging.getLogger(__name__)
 
 PROVIDER_NAME = "claude_subscription"
-
-# Failures that will not resolve by being retried in the same runtime. A
-# subscription that is exhausted or unauthenticated stays that way until
-# Friedl acts, so the adapter latches and refuses subsequent turns rather than
-# starting a process per turn to be told the same thing.
-_TERMINAL_CODES = frozenset(
-    {
-        "subscription_usage_exhausted",
-        "subscription_unauthenticated",
-        "cli_not_installed",
-    }
-)
 
 # Why the dedicated identity could not be confirmed. Each needs Friedl: none
 # clears on a timer, and none may be answered by trying another account.
@@ -219,63 +208,6 @@ class SubscriptionIdentityError(Exception):
         self.code = code
         super().__init__(code)
 
-# Exhaustion clears on its own when the subscription's window rolls over, so it
-# is latched with an expiry rather than permanently. Authentication does not:
-# that one needs Friedl, and re-checking it on a timer would be a process spawn
-# per turn that can only fail.
-_COOLDOWN_CODES = frozenset({"subscription_usage_exhausted"})
-
-# A structured answer that cannot be read. One is a bad turn; a run of them is
-# a provider that is not going to produce a decision, and the Core step loop
-# will keep asking - eleven calls in five minutes, on the first live test.
-# Subscription allowance is spent either way, so the run is bounded here rather
-# than left to the loop that cannot see the pattern.
-_MALFORMED_CODES = frozenset(
-    {
-        "structured_json_invalid",
-        "structured_output_not_object",
-        "structured_output_missing",
-        "response_result_missing",
-        "response_json_invalid",
-        "response_envelope_not_object",
-        "decision_schema_unsatisfied",
-    }
-)
-
-# How many consecutive malformed answers end the run. Two, because one is
-# noise and the third would be paid for to learn what the second already said.
-MAX_CONSECUTIVE_MALFORMED = 2
-
-TERMINAL_FAILURE_COOLDOWN_SECONDS = 900.0
-
-# Read from the CLI's own reporting, which is untrusted external text. Matched
-# case-insensitively against the message it returns, and used only to choose a
-# sanitised code - never rendered to Friedl and never treated as instruction.
-_USAGE_LIMIT_MARKERS = (
-    "usage limit",
-    "rate limit",
-    "rate_limit",
-    "quota",
-    "too many requests",
-    "resets at",
-    "upgrade to",
-    # The CLI's wording on 2026-10-19/20: "You've hit your session limit ·
-    # resets 12:40pm". Unmatched, it read as cli_failed and was retried.
-    "session limit",
-    "hit your limit",
-)
-_AUTHENTICATION_MARKERS = (
-    "not logged in",
-    "log in",
-    "login",
-    "unauthenticated",
-    "unauthorized",
-    "authentication",
-    "invalid api key",
-    "oauth",
-    "please run /login",
-    "credentials",
-)
 
 
 def _json_value(value: Any) -> Any:
@@ -324,8 +256,9 @@ def _envelope_metrics(envelope: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class _ClaudeProtocolError(ValueError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, **details: object) -> None:
         self.code = code
+        self.details = details
         super().__init__(code)
 
 
@@ -350,24 +283,20 @@ class ClaudeSubscriptionReasoningModel:
         *,
         executable: str = "claude",
         telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
-        terminal_failure_cooldown_seconds: float = TERMINAL_FAILURE_COOLDOWN_SECONDS,
-        clock: Callable[[], float] = monotonic,
         runner: "Callable[..., subprocess.CompletedProcess] | None" = None,
         environment: Mapping[str, str] | None = None,
         config_dir: str | None = None,
         expected_account: str | None = None,
         oauth_token: str | None = None,
+        retry_policy: SubscriptionRetryPolicy | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        if terminal_failure_cooldown_seconds <= 0:
-            raise ValueError("terminal failure cooldown must be positive")
+        self._retry_policy = retry_policy or SubscriptionRetryPolicy()
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._executable = executable
         self._telemetry_sink = telemetry_sink
-        self._terminal_failure_cooldown_seconds = terminal_failure_cooldown_seconds
-        self._clock = clock
         # Injected so the process boundary is fakeable in tests, exactly as the
         # HTTP adapters inject a client. Production passes nothing.
         self._runner = runner or subprocess.run
@@ -386,29 +315,6 @@ class ClaudeSubscriptionReasoningModel:
         )
         self._identity: SubscriptionIdentity | None = None
         self._availability_lock = Lock()
-        self._terminal_failure: tuple[str, float | None] | None = None
-        # Consecutive malformed answers. Reset by any completed turn, so a
-        # single bad decision between good ones never latches.
-        self._consecutive_malformed = 0
-
-    def ensure_available(self) -> None:
-        """Refuse a known-terminal provider before another turn is attempted.
-
-        Same contract the metered adapters offer, and the Core already calls
-        it. Without this an exhausted subscription would be rediscovered once
-        per turn, spawning a process each time to learn nothing new.
-        """
-        with self._availability_lock:
-            failure = self._terminal_failure
-            if (
-                failure is not None
-                and failure[1] is not None
-                and self._clock() >= failure[1]
-            ):
-                self._terminal_failure = None
-                failure = None
-        if failure:
-            raise_provider_failure(PROVIDER_NAME, failure[0])
 
     def child_environment(self) -> dict[str, str]:
         """The environment the CLI is given: the subscription, never a key.
@@ -580,9 +486,6 @@ class ClaudeSubscriptionReasoningModel:
         try:
             self.verify_identity()
         except SubscriptionIdentityError as error:
-            with self._availability_lock:
-                # Latched without expiry: only Friedl can repair an identity.
-                self._terminal_failure = (error.code, None)
             LOGGER.warning("AL/X Core Claude identity refused: %s", error.code)
             raise_provider_failure(PROVIDER_NAME, error.code)
 
@@ -648,8 +551,8 @@ class ClaudeSubscriptionReasoningModel:
             raise _ClaudeProtocolError("request_without_turn_content")
         return "\n\n".join(parts)
 
+    @retry_subscription
     def complete(self, request: ModelRequest) -> ModelCompletion:
-        self.ensure_available()
         self._require_identity()
         started_at = monotonic()
         LOGGER.info("Reasoning provider request started")
@@ -678,15 +581,17 @@ class ClaudeSubscriptionReasoningModel:
                     request.on_dispatched()
                 # The CLI is killed by `subprocess.run` when the deadline
                 # passes, so the turn cannot outlive its own timeout.
-                raise _ClaudeProtocolError("reasoning_timeout") from error
+                raise _ClaudeProtocolError(
+                    "reasoning_timeout", service_message=error.stderr or error.stdout or "reasoning_timeout"
+                ) from error
             except FileNotFoundError as error:
-                raise _ClaudeProtocolError("cli_not_installed") from error
+                raise _ClaudeProtocolError("cli_not_installed", service_message=str(error)) from error
             except OSError as error:
-                raise _ClaudeProtocolError("cli_unavailable") from error
+                raise _ClaudeProtocolError("cli_unavailable", service_message=str(error)) from error
 
             if completed.returncode != 0:
                 raise _ClaudeProtocolError(
-                    self._failure_code(completed.stderr, completed.stdout)
+                    "cli_failed", service_message=cli_failure_message(completed.stderr, completed.stdout)
                 )
             output, model, usage, envelope = self._parse(completed.stdout)
             self._require_schema(output, request)
@@ -694,8 +599,6 @@ class ClaudeSubscriptionReasoningModel:
                 PROVIDER_NAME, model or self._model, output,
                 usage_telemetry(usage, envelope.get("usage")) if request.kind == "research" else usage,
             )
-            with self._availability_lock:
-                self._consecutive_malformed = 0
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -715,35 +618,7 @@ class ClaudeSubscriptionReasoningModel:
             return completion
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
             error_code = self._safe_error_code(error)
-            if error_code in _MALFORMED_CODES:
-                with self._availability_lock:
-                    self._consecutive_malformed += 1
-                    exhausted = (
-                        self._consecutive_malformed >= MAX_CONSECUTIVE_MALFORMED
-                    )
-                    if exhausted:
-                        # Latched without an expiry: nothing about this
-                        # runtime will change on a timer, and the next attempt
-                        # would spend allowance to be told the same thing.
-                        # Friedl restarts once the cause is fixed.
-                        self._terminal_failure = (
-                            "provider_output_unusable",
-                            None,
-                        )
-                if exhausted:
-                    LOGGER.warning(
-                        "Claude subscription reasoning latched after %d "
-                        "consecutive malformed responses",
-                        MAX_CONSECUTIVE_MALFORMED,
-                    )
-            if error_code in _TERMINAL_CODES:
-                expires_at = (
-                    self._clock() + self._terminal_failure_cooldown_seconds
-                    if error_code in _COOLDOWN_CODES
-                    else None
-                )
-                with self._availability_lock:
-                    self._terminal_failure = (error_code, expires_at)
+            details = dict(error.details) if isinstance(error, _ClaudeProtocolError) else {}
             duration = monotonic() - started_at
             self._emit_telemetry(
                 request.affinity_key,
@@ -764,7 +639,7 @@ class ClaudeSubscriptionReasoningModel:
             )
         # Raised after the handler has exited so the prompt cannot be reached
         # from the failure. See `providers/errors.py`.
-        raise_provider_failure(PROVIDER_NAME, error_code)
+        raise_provider_failure(PROVIDER_NAME, error_code, **details)
 
     @staticmethod
     def _require_schema(output: Mapping[str, Any], request: ModelRequest) -> None:
@@ -805,14 +680,12 @@ class ClaudeSubscriptionReasoningModel:
             raise _ClaudeProtocolError("response_envelope_not_object")
         if envelope.get("is_error"):
             raise _ClaudeProtocolError(
-                self._failure_code(str(envelope.get("result", "")), "")
+                "cli_failed", service_message=str(envelope.get("result", ""))
             )
         if envelope.get("subtype") not in (None, "success"):
-            # `subtype` is external text. It may select failure here, but it
-            # must never become an error identifier, telemetry value or log
-            # content. This remains an ordinary CLI failure rather than an
-            # auth, exhaustion or malformed-output latch.
-            raise _ClaudeProtocolError("cli_failed")
+            raise _ClaudeProtocolError(
+                "cli_failed", service_message=str(envelope.get("result", ""))
+            )
         # The schema-conformant decision arrives in its own field. `result`
         # carries the assistant's prose for the same turn, which is not the
         # decision and does not parse as one: reading `result` first made every
@@ -879,20 +752,6 @@ class ClaudeSubscriptionReasoningModel:
         """
         return normalise_usage(envelope.get("usage"))
 
-    @staticmethod
-    def _failure_code(stderr: str, stdout: str) -> str:
-        """Classify a CLI failure into one sanitised code.
-
-        The CLI's own text is external untrusted data. It is inspected only to
-        choose which of these fixed codes to raise; none of it is returned, and
-        it never becomes wording AL/X speaks.
-        """
-        text = f"{stderr}\n{stdout}".lower()
-        if any(marker in text for marker in _USAGE_LIMIT_MARKERS):
-            return "subscription_usage_exhausted"
-        if any(marker in text for marker in _AUTHENTICATION_MARKERS):
-            return "subscription_unauthenticated"
-        return "cli_failed"
 
     @staticmethod
     def _safe_error_code(error: Exception) -> str:

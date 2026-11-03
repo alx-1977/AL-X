@@ -36,6 +36,15 @@ from test_subscription_autonomy import BASE_ENVIRONMENT  # noqa: E402
 ACCOUNT = "alx@fire-fli.co.za"
 
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def subscription_waits_are_virtual(monkeypatch):
+    monkeypatch.setattr("alx.providers.subscription_retry.sleep", lambda seconds: None)
+
+
 def status(config_dir, **changes):
     values = {
         "loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
@@ -128,11 +137,10 @@ class DedicatedDirectoryTests(IdentityHarness):
         with self.assertRaises(ProviderError):
             model.complete(request())
         self.assertEqual([call["command"][1] for call in runner.calls],
-                         ["auth", "--print", "auth"])
-        # And it stays refused: no later turn falls back to anyone.
+                         ["auth", "--print", "auth", "auth", "auth"])
+        # A repaired identity is verified again; no alternate account is tried.
         runner.status_stdout = status(str(self.dedicated))
-        with self.assertRaises(ProviderError):
-            model.complete(request())
+        model.complete(request())
 
 
 class FailsVisiblyTests(IdentityHarness):

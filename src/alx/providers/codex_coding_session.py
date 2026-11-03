@@ -39,11 +39,11 @@ from pathlib import Path
 
 from alx.contracts.coding import CodingError, CodingRequest, CodingSessionResult
 from alx.providers.coding_containment import CREDENTIAL_DENY_GLOBS, deny_entries
+from alx.providers.subscription_retry import error_event_message
 from alx.providers.coding_subscription_session import (
     MAX_RETAINED_OUTPUT_CHARACTERS,
     OversizedLine,
     SubscriptionCodingSession,
-    classify_failure,
 )
 
 
@@ -212,8 +212,10 @@ class CodexCodingSession(SubscriptionCodingSession):
             if event.get("type") in ("error", "turn.failed")
         ]
         if failures:
-            code, reason = classify_failure(self._error_text(failures), "")
-            raise CodingError(code, reason_code=reason)
+            raise CodingError(
+                "session_failed", reason_code="cli_failed",
+                service_message=self._error_text(failures),
+            )
         completed = [event for event in events if event.get("type") == "turn.completed"]
         if not completed:
             raise CodingError("session_failed", reason_code="session_end_missing")
@@ -267,15 +269,7 @@ class CodexCodingSession(SubscriptionCodingSession):
             kept.append(line.rstrip("\n"))
         return "\n".join(kept)
 
-    def failure_output(self, stdout: str) -> str:
-        """Only the CLI's own error reports, never what the agent read."""
-        try:
-            events = self._events(stdout)
-        except CodingError:
-            return ""
-        return self._error_text([
-            event for event in events if event.get("type") in ("error", "turn.failed")
-        ])
+    failure_event_types = ("error", "turn.failed")
 
     @staticmethod
     def _events(stdout: str) -> list[Mapping[str, object]]:
@@ -299,8 +293,8 @@ class CodexCodingSession(SubscriptionCodingSession):
 
     @staticmethod
     def _error_text(errors: list[Mapping[str, object]]) -> str:
-        """Error events as text, read only to choose a declared failure code."""
-        return "\n".join(json.dumps(event, sort_keys=True) for event in errors)
+        """The CLI's error messages, without rewriting their content."""
+        return "\n".join(error_event_message(event) for event in errors)
 
 
 __all__ = [
