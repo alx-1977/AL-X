@@ -101,10 +101,8 @@ class RetrievalScopeProtocolTest(unittest.TestCase):
     def test_the_current_person_is_projected_to_the_reasoner_request(self) -> None:
         payload = request_payload()
         self.assertEqual(payload["conversation"][-1]["person_id"], "friedl")
-        self.assertEqual(
-            payload["available_memory_sources"][0],
-            {"reference": "turn:t1", "person_id": "friedl"},
-        )
+        self.assertEqual(payload["available_memory_sources"][0], "turn:t1")
+        self.assertEqual(payload["memory_source_persons"], {"turn:t1": "friedl"})
 
     def test_relationship_retrieval_names_the_required_current_person_binding(self) -> None:
         request = reasoner().build_request(context())

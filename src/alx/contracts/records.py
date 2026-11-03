@@ -948,3 +948,30 @@ class GoalState:
     @property
     def completed_actions(self) -> tuple[CapabilityResult, ...]:
         return tuple(item.result for item in self.attempts if item.result is not None and item.disposition in (CapabilityAttemptDisposition.EXECUTED, CapabilityAttemptDisposition.LEGACY))
+
+
+def completion_supported_criteria(state: GoalState) -> frozenset[str]:
+    """The success criteria completion would count as supported now.
+
+    The one rule, shared by completion and by what the Core is shown: an
+    evidence item counts when it has a source and every attempt it cites ran
+    and succeeded. A failed attempt stays durable history but proves nothing.
+    """
+    succeeded = {
+        f"attempt:{item.call.call_id}"
+        for item in state.attempts
+        if item.call is not None
+        and item.disposition is not CapabilityAttemptDisposition.PENDING
+        and item.implementation_invoked is True
+        and item.result is not None
+        and item.result.state is CapabilityResultState.SUCCEEDED
+    }
+    supported: set[str] = set()
+    for item in state.evidence:
+        if not item.source_references:
+            continue
+        if any(reference.startswith("attempt:") and reference not in succeeded
+               for reference in item.source_references):
+            continue
+        supported.update(item.supports)
+    return frozenset(supported)
