@@ -979,8 +979,13 @@ class Spend:
 
     def __init__(self):
         self.reached = set()
+        # Reached the provider but refused, as at a usage limit: no usage came back.
+        self.refused = set()
 
     def dispatch_started(self, opportunity_id):
+        return opportunity_id in self.reached or opportunity_id in self.refused
+
+    def dispatch_answered(self, opportunity_id):
         return opportunity_id in self.reached
 
 
@@ -1546,6 +1551,29 @@ class PaidOfferTests(PlanHarness):
         attention = self.plan_of().attention
         self.assertEqual((attention.paid_offers, attention.blocked), (0, False))
         self.assertEqual(attention.offers, MAX_PAID_PLAN_OFFERS + 2)
+
+    def test_refused_calls_at_a_usage_limit_never_block_and_the_plan_is_offered_again(self):
+        # 2026-11-02 21:02-21:18: three offers reached the provider during the
+        # usage limit, were refused, and blocked the attention for good.
+        self.needing_core()
+        spend = Spend()
+        source = PlanAttentionSource(self.store, Ledger(), True, clock=lambda: self.now,
+                                     spend=spend)
+        for _ in range(MAX_PAID_PLAN_OFFERS + 1):
+            (offer,) = source.due_opportunities()
+            source.claim(offer)
+            spend.refused.add(offer.opportunity_id)
+            source.mark_honoured(offer)
+            source.settle()
+            self.later(PLAN_BACKOFF_CAP)
+        attention = self.plan_of().attention
+        self.assertEqual((attention.paid_offers, attention.blocked), (0, False))
+        # The limit has reset: the plan is still offered, and the answered turn counts.
+        (offer,) = source.due_opportunities()
+        source.claim(offer)
+        spend.reached.add(offer.opportunity_id)
+        source.settle()
+        self.assertEqual(self.plan_of().attention.paid_offers, 1)
 
     def test_the_paid_count_is_read_from_the_ledger_after_restart(self):
         self.needing_core()

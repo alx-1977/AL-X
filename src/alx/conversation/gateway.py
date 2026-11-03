@@ -279,7 +279,10 @@ class ConversationGateway:
             opportunity.opportunity_id,
             "cognition.opportunity",
             opportunity.arose_at,
-            {"origin": opportunity.origin.value},
+            # Structured identifiers the producer wrote, such as the idle goal
+            # an offer names, so she can see what woke her. Never anything said.
+            {"origin": opportunity.origin.value,
+             "references": list(opportunity.references)},
             transient_data=(
                 {} if opportunity.note is None else {"note": opportunity.note}
             ),

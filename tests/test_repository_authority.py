@@ -1823,5 +1823,22 @@ class CheckoutStatusTests(RealRepositoryHarness):
         self.assertEqual(values["entries"], ())
 
 
+class CheckoutBusyTests(RealRepositoryHarness):
+    """2026-11-03: a plan switched to main under a running coding job."""
+
+    def test_checkout_changes_are_refused_while_a_coding_job_runs(self) -> None:
+        self.branch("feat/job")
+        busy = [True]
+        self.authority = RepositoryAuthority(self.system, checkout_busy=lambda: busy[0])
+        refused = self.perform(Operation.SWITCH_BRANCH, branch="main")
+        self.assertFalse(refused.succeeded)
+        self.assertEqual(refused.failure_code, "operation_refused")
+        self.assertEqual(git(self.local, "branch", "--show-current"), "feat/job")
+        # Reading is unaffected, and the switch works once the job is done.
+        self.assertTrue(self.perform(Operation.STATUS).succeeded)
+        busy[0] = False
+        self.assertTrue(self.perform(Operation.SWITCH_BRANCH, branch="main").succeeded)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1000,6 +1000,24 @@ class SQLiteGoalStore:
             (*statuses, _time_to_data(self._now())),
         ).fetchall())
 
+    def list_idle_goal_ids(self, untouched_since: datetime) -> tuple[str, ...]:
+        """Active goals with outstanding work that nothing is carrying forward.
+
+        Active, at least one outstanding item, no blocker, no unfinished plan,
+        and not changed since `untouched_since`. Storage facts only: whether
+        the work is still worth doing is hers to say when she is offered it.
+        """
+        return tuple(item[0] for item in self._connection.execute(
+            "SELECT goal_id FROM goals WHERE unfinished = 1 "
+            "AND json_extract(state_json, '$.status') = 'active' "
+            "AND json_array_length(json_extract(state_json, '$.outstanding_work')) > 0 "
+            "AND COALESCE(json_array_length(json_extract(state_json, '$.blockers')), 0) = 0 "
+            "AND COALESCE(json_extract(state_json, '$.execution_plan.status'), 'none') "
+            "NOT IN ('running', 'waiting', 'needs_core') "
+            "AND updated_at < ? AND retention_until > ? ORDER BY updated_at",
+            (_time_to_data(untouched_since), _time_to_data(self._now())),
+        ).fetchall())
+
     def list_plan_announcement_goal_ids(self) -> tuple[str, ...]:
         """Goals whose plan still holds a reply not yet stored."""
         return tuple(item[0] for item in self._connection.execute(

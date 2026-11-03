@@ -116,6 +116,17 @@ class SQLiteOpportunityLedger:
         ).fetchone()
         return row is not None
 
+    def count_recorded(self, identity_prefix: str, since: datetime) -> int:
+        """How many occasions with this identity prefix were recorded since then."""
+        escaped = (identity_prefix.replace("\\", "\\\\")
+                   .replace("%", "\\%").replace("_", "\\_"))
+        row = self._connection.execute(
+            "SELECT COUNT(*) FROM cognition_opportunities "
+            "WHERE opportunity_id LIKE ? ESCAPE '\\' AND recorded_at >= ?",
+            (escaped + "%", since.astimezone(UTC).isoformat()),
+        ).fetchone()
+        return int(row[0])
+
     def defer(self, opportunity_id: str, marker: str, deferred_at: datetime) -> None:
         """Hold an occasion that could not be carried, without closing it.
 

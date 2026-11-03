@@ -162,6 +162,23 @@ READ_ONLY: frozenset[Operation] = frozenset({
 # been confirmed to be the configured repository: work must not travel to a
 # repository nobody has verified is this one, and a ref must not be deleted
 # there. Local work carries no such risk and is always available.
+# Operations that change what is checked out: the branch, the index or the
+# working tree. Refused while a coding job is working in the checkout, because
+# on 2026-11-03 a plan switched to main under a running job and the job's work
+# landed uncommitted on main.
+CHECKOUT_CHANGING: frozenset[Operation] = frozenset({
+    Operation.PULL_FAST_FORWARD,
+    Operation.SWITCH_BRANCH,
+    Operation.STAGE,
+    Operation.COMMIT,
+    Operation.AMEND,
+    Operation.CHERRY_PICK,
+    Operation.REVERT,
+    Operation.LOCAL_MERGE,
+    Operation.REBASE,
+    Operation.RESET,
+})
+
 REMOTE_OPERATIONS: frozenset[Operation] = frozenset({
     Operation.FETCH,
     Operation.PULL_FAST_FORWARD,
@@ -654,6 +671,7 @@ __all__ = [
     "ARGUMENTS",
     "CANONICAL_BRANCH",
     "GITHUB_OPERATIONS",
+    "CHECKOUT_CHANGING",
     "REMOTE_OPERATIONS",
     "CanonicalSystem",
     "Operation",

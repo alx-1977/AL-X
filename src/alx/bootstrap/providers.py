@@ -49,6 +49,9 @@ class RuntimeProviders:
     # unconfigured, which disables the experiment rather than sending an
     # autonomous turn to the conversational Core under another name.
     autonomous: ReasoningModel | None
+    # EX-001 as amended 2026-11-03: the model that reasons first on an
+    # autonomous turn. None when unconfigured.
+    autonomous_first_pass: ReasoningModel | None
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
@@ -197,7 +200,8 @@ def verify_core_claude_identity(providers: "RuntimeProviders") -> None:
     API-key or wrongly signed-in configuration stops the runtime with a
     configuration error rather than letting another identity answer.
     """
-    for model in (providers.reasoning, providers.autonomous):
+    for model in (providers.reasoning, providers.autonomous,
+                  providers.autonomous_first_pass):
         if not isinstance(model, ClaudeSubscriptionReasoningModel):
             continue
         try:
@@ -274,6 +278,17 @@ def build_runtime_providers(
             oauth_token=settings.claude_oauth_token,
         )
     )
+    autonomous_first_pass = (
+        None if settings.autonomous_first_pass is None
+        else ClaudeSubscriptionReasoningModel(
+            settings.autonomous_first_pass.model,
+            settings.autonomous_first_pass.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+            config_dir=settings.core_claude_config_dir,
+            expected_account=settings.core_claude_account,
+            oauth_token=settings.claude_oauth_token,
+        )
+    )
     coding = _build_coding_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)
 
@@ -294,6 +309,7 @@ def build_runtime_providers(
         reasoning=reasoning,
         specialist=specialist,
         autonomous=autonomous,
+        autonomous_first_pass=autonomous_first_pass,
         coding=coding,
         coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth

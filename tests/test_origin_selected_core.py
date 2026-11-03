@@ -179,5 +179,95 @@ class ArchitectureGateTests(unittest.TestCase):
         self.assertTrue(any("may live only in" in item for item in messages))
 
 
+class FirstPassTests(unittest.TestCase):
+    """EX-001 as amended 2026-11-03: Sonnet first, Opus for anything that changes something."""
+
+    def setUp(self) -> None:
+        from alx.contracts import (
+            CapabilityCall, CapabilityDefinition, SideEffect, StructuredSchema, ValueKind,
+        )
+        schema = StructuredSchema(ValueKind.OBJECT)
+        self.capabilities = (
+            CapabilityDefinition("read_mail_message", "read", schema, schema, SideEffect.NONE),
+            CapabilityDefinition("merge_pull_request", "merge", schema, schema,
+                                 SideEffect.EFFECTFUL),
+        )
+        self.call = lambda capability: CapabilityCall("c", capability, {}, None)
+        self.person = RecordingReasoner("opus-person")
+        self.deep = RecordingReasoner("opus")
+        self.first = ScriptedReasoner()
+        self.reasoner = OriginSelectedReasoner(self.person, self.deep, self.first)
+
+    def context(self, origin=CognitionOrigin.EXTERNAL_EVENT) -> ReasoningContext:
+        return ReasoningContext(None, (), self.capabilities, conversation_id="c1",
+                                origin=origin)
+
+    def test_a_decision_that_changes_nothing_stands_on_the_first_pass(self) -> None:
+        for decision in (
+            AgentDecision(response="nothing needed"),
+            AgentDecision(finish_silently=True),
+            AgentDecision(call=self.call("read_mail_message")),
+        ):
+            with self.subTest(decision=decision):
+                self.first.next = decision
+                self.assertIs(self.reasoner.decide(self.context()), decision)
+        self.assertEqual(self.deep.contexts, [])
+
+    def test_anything_that_changes_something_is_reasoned_again_by_opus(self) -> None:
+        from alx.contracts import (
+            ApprovalProposal, ApprovalScope, GoalMutationKind, GoalProposal, PlanOperation,
+            PlanUpdate,
+        )
+        for decision in (
+            AgentDecision(call=self.call("merge_pull_request")),
+            AgentDecision(call=self.call("not_in_catalogue")),
+            AgentDecision(response="done", goal_id="g", goal_proposal=GoalProposal(
+                GoalMutationKind.REQUEST_COMPLETION)),
+            AgentDecision(response="started", goal_id="g",
+                          plan_update=PlanUpdate(PlanOperation.CANCEL)),
+            AgentDecision(call=self.call("merge_pull_request"),
+                          approval_proposal=ApprovalProposal(
+                              "a", ApprovalScope("merge_pull_request", {}), "turn:t1")),
+        ):
+            with self.subTest(decision=decision):
+                self.first.next = decision
+                self.assertEqual(self.reasoner.decide(self.context()).response, "opus")
+
+    def test_a_person_turn_never_uses_the_first_pass(self) -> None:
+        self.first.next = AgentDecision(response="first")
+        self.assertEqual(
+            self.reasoner.decide(self.context(CognitionOrigin.PERSON_TURN)).response,
+            "opus-person")
+        self.assertEqual(self.first.calls, 0)
+
+    def test_a_first_pass_needs_the_autonomous_core_behind_it(self) -> None:
+        with self.assertRaises(ValueError):
+            OriginSelectedReasoner(self.person, None, self.first)
+
+
+class ScriptedReasoner:
+    def __init__(self) -> None:
+        self.next: AgentDecision | None = None
+        self.calls = 0
+
+    def decide(self, context: ReasoningContext) -> AgentDecision:
+        self.calls += 1
+        assert self.next is not None
+        return self.next
+
+
+class FirstPassGateTests(unittest.TestCase):
+    def test_the_first_pass_test_may_not_read_meaning(self) -> None:
+        import ast
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from check_architecture import _first_pass_test_violations
+
+        tree = ast.parse(
+            "def changes_anything(decision, context):\n"
+            "    return decision.response\n"
+        )
+        self.assertTrue(_first_pass_test_violations("src/alx/bootstrap/reasoning.py", tree))
+
+
 if __name__ == "__main__":
     unittest.main()

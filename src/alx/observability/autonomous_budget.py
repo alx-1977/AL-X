@@ -247,6 +247,27 @@ class SQLiteAutonomousLedger:
         finally:
             database.close()
 
+    def dispatch_answered(self, opportunity_id: str) -> bool:
+        """Whether a reservation for this occasion came back with measured usage.
+
+        Narrower than `dispatch_started`. A call the provider refused, such as
+        one made while the subscription's usage limit is reached, reports no
+        usage and settles `unmeasured`: it reached the provider but nothing
+        reasoned. Counting it as an attempt on 2026-11-02 spent a plan's three
+        automatic offers in sixteen minutes of refusals, and nothing offered
+        the plan again after the limit reset.
+        """
+        database = self._db()
+        try:
+            row = database.execute(
+                "SELECT COUNT(*) FROM autonomous_spend "
+                "WHERE opportunity_id = ? AND outcome = ?",
+                (opportunity_id, "settled"),
+            ).fetchone()
+            return bool(row[0])
+        finally:
+            database.close()
+
     def settle(
         self,
         reservation: AutonomousReservation,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlparse
@@ -773,6 +773,10 @@ AUTONOMOUS_MAX_OUTPUT_TOKENS = 32_000
 # subscription. Not a default: the only value configuration may take. The
 # subscription CLI takes no effort setting, so none is part of the identity.
 AUTONOMOUS_APPROVED_IDENTITY = ("claude_subscription", "claude-opus-5-5")
+# EX-001 as amended 2026-11-03: the model that reasons first on an autonomous
+# turn. A decision from it that would change anything is reasoned again by the
+# autonomous Core above before it is acted on.
+AUTONOMOUS_FIRST_PASS_APPROVED_IDENTITY = ("claude_subscription", "claude-sonnet-5-5")
 # The autonomous input ceiling is not a constant here. It is derived, in
 # bootstrap, from the conversational Core's recorded context window less its
 # recorded maximum output, because the autonomous instance is that same Core. The 96,000 figure D-024a recorded belonged to the retired Luna
@@ -831,6 +835,31 @@ def autonomous_reasoning_settings(
         service_tier="default",
         effort="none",
     )
+
+
+def autonomous_first_pass_settings(
+    environment: Mapping[str, str],
+    autonomous: "ReasoningSettings | None",
+) -> "ReasoningSettings | None":
+    """The lighter model that reasons first on an autonomous turn, or None.
+
+    Only beside an autonomous Core, and only the one model EX-001 names.
+    """
+    model = environment.get("ALX_AUTONOMOUS_FIRST_PASS_MODEL", "").strip()
+    if not model:
+        return None
+    if autonomous is None:
+        raise ConfigurationError(
+            "ALX_AUTONOMOUS_FIRST_PASS_MODEL needs an autonomous Core to "
+            "reason again on anything that changes something"
+        )
+    if (autonomous.provider, model) != AUTONOMOUS_FIRST_PASS_APPROVED_IDENTITY:
+        approved = "/".join(AUTONOMOUS_FIRST_PASS_APPROVED_IDENTITY)
+        raise ConfigurationError(
+            f"the autonomous first pass is approved under EX-001 for {approved} "
+            f"only; refusing {autonomous.provider}/{model}"
+        )
+    return replace(autonomous, model=model)
 
 
 def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:
@@ -1182,6 +1211,9 @@ class RuntimeSettings:
     # D-024a experiment: the Core that answers an autonomous turn. None when
     # unconfigured, which disables the experiment entirely.
     autonomous: "ReasoningSettings | None"
+    # EX-001 as amended 2026-11-03: the model that reasons first on an
+    # autonomous turn. None means the autonomous Core reasons alone.
+    autonomous_first_pass: "ReasoningSettings | None"
     # D-028 coding jobs. Independent of the conversational Core.
     coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
@@ -1245,6 +1277,7 @@ class RuntimeSettings:
             specialist=_specialist_settings(environment, reasoning_provider),
             research=_research_settings(environment, reasoning_provider),
             autonomous=autonomous,
+            autonomous_first_pass=autonomous_first_pass_settings(environment, autonomous),
             coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),

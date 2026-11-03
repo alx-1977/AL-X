@@ -36,6 +36,7 @@ from alx.contracts.github_pull_request import (
 )
 from alx.contracts.repository_authority import (
     GITHUB_OPERATIONS,
+    CHECKOUT_CHANGING,
     REMOTE_OPERATIONS,
     CanonicalSystem,
     Operation,
@@ -170,6 +171,8 @@ class RepositoryAuthority:
         pull_requests: Any = None,
         remote_verified: bool = True,
         verified_remote: str = "",
+        # Whether a coding job is working in this checkout now.
+        checkout_busy: Callable[[], bool] | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("repository timeout must be positive")
@@ -190,6 +193,7 @@ class RepositoryAuthority:
         # that git performs when the command runs — after the check — and
         # anything able to write that file could point it elsewhere in between.
         self._verified_remote = verified_remote
+        self._checkout_busy = checkout_busy or (lambda: False)
 
     # ---- process ---------------------------------------------------------
 
@@ -807,6 +811,26 @@ class RepositoryAuthority:
                 remote=self._remote_for(operation),
                 failure_code="self_preservation",
                 refusal_reason=refusal,
+            )
+
+        if operation in CHECKOUT_CHANGING and self._checkout_busy():
+            LOGGER.warning(
+                "Repository operation refused: %s while a coding job is running",
+                operation.value,
+            )
+            ref = self._affected_ref(operation, arguments)
+            return RepositoryOutcome(
+                repository=self._system.repository,
+                operation=operation,
+                succeeded=False,
+                source_ref=ref,
+                source_sha=self._sha_of(ref) if ref else "",
+                remote=self._remote_for(operation),
+                failure_code="operation_refused",
+                refusal_reason=(
+                    "a coding job is working in this checkout; wait for it to "
+                    "finish or stop it first"
+                ),
             )
 
         if operation in REMOTE_OPERATIONS and not self._remote_verified:

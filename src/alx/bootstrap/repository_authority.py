@@ -58,6 +58,7 @@ def build_repository_authority_runtime(
     call_id_source: Callable[[], str],
     github_token: str = "",
     authority: Any = None,
+    checkout_busy: Callable[[], bool] | None = None,
 ) -> RepositoryAuthorityRuntime | None:
     """Compose repository authority, or leave it unregistered."""
     if not enabled:
@@ -124,6 +125,7 @@ def build_repository_authority_runtime(
             pull_requests=pull_requests,
             remote_verified=remote_verified,
             verified_remote=verified_remote if remote_verified else "",
+            checkout_busy=checkout_busy,
         )
     except (TypeError, ValueError) as error:
         LOGGER.warning(

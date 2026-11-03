@@ -97,6 +97,7 @@ from alx.interfaces.phone import PHONE_CONVERSATION_ID, PhoneLink
 from alx.providers.imessage import IMessageChannel
 from alx.config.settings import phone_settings
 from alx.continuity.pending_relays import SQLitePendingRelays
+from alx.continuity.idle_goal_source import IdleGoalSource
 from alx.continuity.own_time_source import OwnTimeSource
 from alx.continuity.runtime_source import RuntimeStartedSource
 from alx.contracts.repository_authority import valid_sha
@@ -828,6 +829,8 @@ async def run(repository_root: Path) -> None:
         repository_runtime_configuration.timeout_seconds,
         current_call_id.get,
         merge_configuration.token,
+        # The coding runtime is composed below; asked at call time.
+        checkout_busy=lambda: coding_agent_running(),
     )
     if repository_runtime is not None:
         register(repository_runtime.definitions, TraceSubsystem.GIT)
@@ -887,6 +890,11 @@ async def run(repository_root: Path) -> None:
         LOGGER.warning(
             "Coding checkout lacks repository authority: no coding capability"
         )
+    coding_runtime = None
+
+    def coding_agent_running() -> bool:
+        return coding_runtime is not None and coding_runtime.agent.is_running()
+
     coding_runtime = build_coding_runtime(
         provider_settings.coding.enabled,
         providers.coding,
@@ -1131,6 +1139,23 @@ async def run(repository_root: Path) -> None:
                 # reservations are stored anonymously and recovery cannot tell
                 # a dispatched turn from an undispatched claim, which would let
                 # it replay a call that may already have been billed.
+                occasion_spend.current_opportunity_id,
+            ),
+            on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
+        ),
+        # EX-001 as amended 2026-11-03: the lighter model reasons first, with
+        # the same bounds and the same per-occasion spend record.
+        None if providers.autonomous_first_pass is None
+        else build_model_reasoner(
+            providers.autonomous_first_pass,
+            CODE_ROOT,
+            AUTONOMOUS_MAX_OUTPUT_TOKENS,
+            autonomous_ceiling,
+            LedgerSpendAuthority(
+                autonomous_budget,
+                provider_settings.autonomous_first_pass.provider,
+                provider_settings.autonomous_first_pass.model,
+                occasion_spend,
                 occasion_spend.current_opportunity_id,
             ),
             on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
@@ -1410,6 +1435,13 @@ async def run(repository_root: Path) -> None:
         ready=core.plan_evidence_ready,
     )
     occasion_sources.append(plan_source)
+    # An active goal with outstanding work and nothing carrying it forward is
+    # offered back to her, a few times, instead of waiting for Friedl to ask.
+    idle_goal_source = IdleGoalSource(
+        goal_store, opportunity_ledger, enabled=plan_continuation,
+    )
+    idle_goal_source.recover(autonomous_budget)
+    occasion_sources.append(idle_goal_source)
     plan_workers = PlanWorkers(
         core, core_turn_lock, plan_source,
         # The one capability with its own cancel: a running coding job.
