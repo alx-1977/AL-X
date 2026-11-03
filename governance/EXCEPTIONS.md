@@ -329,3 +329,11 @@ is refused at start-up, and unset leaves autonomous turns on Opus alone.
 
 **Unchanged:** everything in "Explicitly prohibited by this exception", the
 absence of any fallback, and the expiry condition.
+
+Amended again the same day, approved by Friedl in conversation ("yes sure"):
+the first pass applies to `EXTERNAL_EVENT`, `SELF_REQUESTED` and `OWN_TIME`
+turns only. A `WORK_COMPLETED` turn, her own job, plan or idle goal coming
+back, goes to the autonomous Opus instance directly, chosen by origin alone.
+Measured on 2026-11-03 under D-065: such turns almost always called an
+effectful capability, so the first pass started a session, handed over and
+was abandoned, paying the context twice.
