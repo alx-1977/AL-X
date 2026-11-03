@@ -321,14 +321,19 @@ untouched for weeks is open work you can offer to resume, not something you were
 project_id says which work a goal belongs to; nothing about being listed means it is
 relevant now, and that judgement is yours.
 recent_finished_goals contains retained finished work begun or answered in this conversation,
-most recent completion first, bounded by count. The two most recent carry their context,
-progress and evidence, with attempts listed without their results; older ones are listed by
-id and objective. Every stored attempt result is a mechanical summary bounded to
+most recent completion first, bounded by count. The two most recent carry their context and
+their latest progress, decisions and evidence, with attempts listed without their results;
+older ones are listed by id and objective. Every stored attempt result is a mechanical summary bounded to
 8,000 characters: long strings use head, original_length and sha256; long lists end
 with an _omitted_items count. read_own_goals returns the same bounded summary.
 A live result is seen whole only on the turn it arrives.
 read_own_goals searches retained goals across conversations by text, or reads a
 goal's stored state by exact id or unambiguous id prefix; it includes finished and unfinished work.
+A goal shows its latest decisions, corrections, progress and evidence; older_*_count says how
+many earlier ones exist, and read_own_goals returns them all. evidence_supporting_criteria
+counts the evidence, shown or not, that supports each success criterion.
+available_memory_sources lists citable references as kind:id; memory_source_persons says
+which person a turn reference came from.
 
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have
@@ -626,14 +631,20 @@ def _state_payload(
             {"id": item.referent_id, "attributes": _plain(item.attributes)}
             for item in state.referents
         ],
+        # The latest records verbatim and a count of the rest, as for progress.
+        # A long goal carried every decision and evidence item on every call:
+        # on 2026-11-03 they were a fifth of each request, most of it settled
+        # history. read_own_goals returns the whole record.
         "decisions": [
             {"id": item.record_id, "summary": item.summary, "evidence_refs": list(item.evidence_refs)}
-            for item in state.decisions
+            for item in _recent(state.decisions, VERBATIM_HISTORY)
         ],
+        "older_decisions_count": max(0, len(state.decisions) - VERBATIM_HISTORY),
         "corrections": [
             {"id": item.record_id, "summary": item.summary, "evidence_refs": list(item.evidence_refs)}
-            for item in state.corrections
+            for item in _recent(state.corrections, VERBATIM_HISTORY)
         ],
+        "older_corrections_count": max(0, len(state.corrections) - VERBATIM_HISTORY),
         "progress": [
             {"id": item.record_id, "summary": item.summary, "evidence_refs": list(item.evidence_refs)}
             for item in (state.progress if full_progress else _recent(state.progress, VERBATIM_HISTORY))
@@ -679,8 +690,15 @@ def _state_payload(
                 "supports": list(item.supports),
                 "source_references": list(item.source_references),
             }
-            for item in state.evidence
+            for item in _recent(state.evidence, VERBATIM_HISTORY)
         ],
+        "older_evidence_count": max(0, len(state.evidence) - VERBATIM_HISTORY),
+        # Which criteria some evidence, shown or older, already supports.
+        "evidence_supporting_criteria": {
+            item.criterion_id: sum(1 for record in state.evidence
+                                   if item.criterion_id in record.supports)
+            for item in state.success_criteria
+        },
         "approvals": [
             {
                 "id": item.approval_id,
@@ -1007,7 +1025,7 @@ def _context_payload(context: ReasoningContext) -> str:
             for item in context.unfinished_goals
         ],
         "recent_finished_goals": [
-            _state_payload(item.state, full_progress=True, finished=True)
+            _state_payload(item.state, finished=True)
             if index < DETAILED_FINISHED_GOALS else {
                 "goal_id": item.state.goal_id,
                 "objective": {"summary": item.state.objective.summary},
@@ -1046,31 +1064,20 @@ def _context_payload(context: ReasoningContext) -> str:
             }
             for item in context.events
         ],
+        # Plain references: the same set, without a wrapper object around
+        # each. On 2026-11-03 a long goal listed 353 of them, a tenth of the
+        # request. Who a turn came from is in memory_source_persons.
         "available_memory_sources": [
-            *(
-                {"reference": f"turn:{item.turn_id}", "person_id": item.person_id}
-                for item in context.turns
-            ),
-            *(
-                {"reference": f"event:{item.event_id}", "person_id": None}
-                for item in context.events
-            ),
-            *(
-                {"reference": f"evidence:{item.evidence_id}", "person_id": None}
-                for item in (() if goal is None else goal.evidence)
-            ),
-            *(
-                {"reference": f"decision:{item.record_id}", "person_id": None}
-                for item in (() if goal is None else goal.decisions)
-            ),
-            *(
-                {"reference": f"correction:{item.record_id}", "person_id": None}
-                for item in (() if goal is None else goal.corrections)
-            ),
-            *(
-                {"reference": f"progress:{item.record_id}", "person_id": None}
-                for item in (() if goal is None else goal.progress)
-            ),
+            *(f"turn:{item.turn_id}" for item in context.turns),
+            *(f"event:{item.event_id}" for item in context.events),
+            *(f"evidence:{item.evidence_id}"
+              for item in (() if goal is None else goal.evidence)),
+            *(f"decision:{item.record_id}"
+              for item in (() if goal is None else goal.decisions)),
+            *(f"correction:{item.record_id}"
+              for item in (() if goal is None else goal.corrections)),
+            *(f"progress:{item.record_id}"
+              for item in (() if goal is None else goal.progress)),
             # Only attempts that actually ran. An attempt still pending, or
             # refused before its implementation was invoked, records nothing
             # that happened, and the grounding check refuses it. Listing every
@@ -1078,12 +1085,14 @@ def _context_payload(context: ReasoningContext) -> str:
             # available and the runtime then rejects, which is how a call that
             # had not executed - and once, one that did not exist at all - came
             # to be cited as evidence.
-            *(
-                {"reference": f"attempt:{item.call.call_id}", "person_id": None}
-                for item in (() if goal is None else goal.attempts)
-                if item.call is not None and _attempt_is_citable(item)
-            ),
+            *(f"attempt:{item.call.call_id}"
+              for item in (() if goal is None else goal.attempts)
+              if item.call is not None and _attempt_is_citable(item)),
         ],
+        "memory_source_persons": {
+            f"turn:{item.turn_id}": item.person_id
+            for item in context.turns if item.person_id is not None
+        },
         # History records cite bare evidence IDs, not provenance references.
         # This list uses the exact predicate the runtime grounding check uses.
         "available_history_evidence_ids": sorted(

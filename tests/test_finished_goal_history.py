@@ -587,12 +587,36 @@ class FinishedHistoryTests(unittest.TestCase):
         self.store.replace(replace(saved.state, status=GoalStatus.COMPLETED, stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET), RETENTION, saved.revision)
         self.assertEqual(self.store.list_recent_finished("c1", 5)[0].state.goal_id, "a")
 
-    def test_finished_progress_is_not_truncated(self):
+    def test_finished_progress_shows_the_latest_and_counts_the_rest(self):
+        # 2026-11-03: two finished goals' full history was an eighth of every
+        # request. The latest records are shown; read_own_goals has the rest.
         progress = tuple(ProgressRecord(str(i), f"progress {i}", ("tracking",))
                          for i in range(VERBATIM_HISTORY + 3))
         self.store.create(replace(shipment(status=GoalStatus.COMPLETED), progress=progress), "c1", RETENTION)
         payload = json.loads(_context_payload(self.follow_up()[0]))
-        self.assertEqual(len(payload["recent_finished_goals"][0]["progress"]), len(progress))
+        finished = payload["recent_finished_goals"][0]
+        self.assertEqual([item["id"] for item in finished["progress"]],
+                         [str(i) for i in range(3, VERBATIM_HISTORY + 3)])
+        self.assertEqual(finished["older_progress_count"], 3)
+
+    def test_an_active_goal_shows_its_latest_history_and_what_is_already_supported(self):
+        from alx.contracts import Evidence
+        count = VERBATIM_HISTORY + 4
+        records = tuple(ProgressRecord(f"d{i}", f"decision {i}") for i in range(count))
+        evidence = tuple(Evidence(f"e{i}", "check", supports=("tracked",) if i < 2 else ())
+                         for i in range(count))
+        state = replace(shipment(), decisions=records, evidence=evidence)
+        from alx.contracts import GoalSummary
+        context = replace(self.follow_up()[0], active_goal=state,
+                          unfinished_goals=(GoalSummary.of(state),))
+        goal = json.loads(_context_payload(context))["active_goal"]
+        self.assertEqual(len(goal["decisions"]), VERBATIM_HISTORY)
+        self.assertEqual(goal["older_decisions_count"], 4)
+        self.assertEqual(goal["decisions"][-1]["id"], f"d{count - 1}")
+        self.assertEqual(len(goal["evidence"]), VERBATIM_HISTORY)
+        self.assertEqual(goal["older_evidence_count"], 4)
+        # The two supporting items are among the older ones, and still counted.
+        self.assertEqual(goal["evidence_supporting_criteria"]["tracked"], 2)
 
     def test_searches_all_statuses_conversations_and_nested_stored_content(self):
         for status in (GoalStatus.ACTIVE, GoalStatus.COMPLETED, GoalStatus.CANCELLED):

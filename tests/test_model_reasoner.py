@@ -716,9 +716,7 @@ class ModelReasonerTests(unittest.TestCase):
             unfinished_goals=(GoalSummary.of(state),),
             conversation_id="conversation-1",
         )))
-        offered = {
-            item["reference"] for item in payload["available_memory_sources"]
-        }
+        offered = set(payload["available_memory_sources"])
         # Executed attempts, succeeded or failed, are real sources.
         self.assertIn("attempt:done-ok", offered)
         self.assertIn("attempt:done-failed", offered)
@@ -783,9 +781,7 @@ class ModelReasonerTests(unittest.TestCase):
             unfinished_goals=(GoalSummary.of(state),),
             conversation_id="conversation-1",
         )))
-        offered = {
-            item["reference"] for item in payload["available_memory_sources"]
-        }
+        offered = set(payload["available_memory_sources"])
         self.assertNotIn("attempt:call-trash-59094", offered)
         self.assertFalse([r for r in offered if r.startswith("attempt:")])
 
