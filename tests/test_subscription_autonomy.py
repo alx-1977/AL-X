@@ -167,6 +167,33 @@ class ZeroRateStillMarksDispatchTests(unittest.TestCase):
         ledger.mark_dispatched(reservation)
         self.assertTrue(ledger.dispatch_started("self:r1"))
 
+    def test_a_refused_call_is_dispatched_but_not_answered(self) -> None:
+        """A usage-limit refusal reports no usage, so it is not an answered turn."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ledger = SQLiteAutonomousLedger(
+            Path(directory.name) / "s.sqlite3", 0.5405, ConfiguredPricingWorstCase()
+        )
+        refused = ledger.reserve(*SUBSCRIPTION, 96_000, 32_000, "plan:refused")
+        ledger.mark_dispatched(refused)
+        ledger.settle(refused, *SUBSCRIPTION, None)
+        self.assertTrue(ledger.dispatch_started("plan:refused"))
+        self.assertFalse(ledger.dispatch_answered("plan:refused"))
+        answered = ledger.reserve(*SUBSCRIPTION, 96_000, 32_000, "plan:answered")
+        ledger.mark_dispatched(answered)
+        ledger.settle(answered, *SUBSCRIPTION,
+                      {"input_tokens": 90_000, "output_tokens": 900})
+        self.assertTrue(ledger.dispatch_answered("plan:answered"))
+        # A first pass answered, then the Core asked again was refused: the
+        # turn ended with no decision acted on, so it is not answered.
+        first = ledger.reserve(*SUBSCRIPTION, 96_000, 32_000, "plan:escalated")
+        ledger.mark_dispatched(first)
+        ledger.settle(first, *SUBSCRIPTION, {"input_tokens": 90_000, "output_tokens": 900})
+        again = ledger.reserve(*SUBSCRIPTION, 96_000, 32_000, "plan:escalated")
+        ledger.mark_dispatched(again)
+        ledger.settle(again, *SUBSCRIPTION, None)
+        self.assertFalse(ledger.dispatch_answered("plan:escalated"))
+
 
 class Harness(unittest.TestCase):
     def setUp(self) -> None:

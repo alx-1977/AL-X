@@ -298,3 +298,34 @@ eligible again when the bound changes or after a fixed retry interval.
 The 96,000-token figure is historical: it belonged to the Luna arrangement and
 is no longer production policy. This amendment grants no provider authority
 beyond the 2026-09-27 amendment.
+
+### Amendment — 2026-11-03: a lighter first pass on autonomous turns
+
+- **Approved by Friedl:** 2026-11-03, in conversation with the implementing
+  model, on options for cutting AL/X's subscription usage: "Let's try all. As
+  long as we keep using Opus when she needs to make any critical decisions?"
+  Exact wording for his confirmation at review.
+- **Why:** on 2026-11-02 and 2026-11-03 AL/X reached her subscription's
+  five-hour limit three times. Most of her reasoning calls are autonomous turns
+  (mail, finished work, plans, her own revisits), and each ran on Opus.
+
+**Approved behaviour, adding to the 2026-09-27 table:** on an autonomous turn,
+`claude_subscription` / `claude-sonnet-5-5` reasons first, over the same Laws,
+identity, catalogue, context, bounds and per-occasion spend record. Its
+decision stands only if acting on it would change nothing. If the decision
+carries a call to a capability declared `EFFECTFUL` (or one not in the
+catalogue), a plan change, an approval, or a request to complete or cancel a
+goal, the same step is reasoned again by the autonomous Opus instance, and only
+that decision is acted on. `PERSON_TURN` is unchanged: always the
+conversational Opus reasoner.
+
+The test is one function, `changes_anything` in `src/alx/bootstrap/reasoning.py`.
+It reads the decision's structure and the capability's declared effect class
+and nothing else; `scripts/check_architecture.py` rejects it reading any other
+attribute. It runs after reasoning, on what was decided, never on what a turn
+is about. Configuration installs it only with `ALX_AUTONOMOUS_FIRST_PASS_MODEL`
+set to `claude-sonnet-5-5` beside the approved autonomous Core; anything else
+is refused at start-up, and unset leaves autonomous turns on Opus alone.
+
+**Unchanged:** everything in "Explicitly prohibited by this exception", the
+absence of any fallback, and the expiry condition.

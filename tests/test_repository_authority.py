@@ -1823,5 +1823,40 @@ class CheckoutStatusTests(RealRepositoryHarness):
         self.assertEqual(values["entries"], ())
 
 
+class CheckoutBusyTests(RealRepositoryHarness):
+    """2026-11-03: a plan switched to main under a running coding job."""
+
+    def test_checkout_changes_are_refused_while_a_coding_job_runs(self) -> None:
+        self.branch("feat/job")
+        job_running = [True]
+        holds = []
+        self.authority = RepositoryAuthority(
+            self.system,
+            reserve_checkout=lambda: (not job_running[0]) and (holds.append(1) or True),
+            release_checkout=lambda: holds.pop(),
+        )
+        refused = self.perform(Operation.SWITCH_BRANCH, branch="main")
+        self.assertFalse(refused.succeeded)
+        self.assertEqual(refused.failure_code, "operation_refused")
+        self.assertEqual(git(self.local, "branch", "--show-current"), "feat/job")
+        # Reading takes no hold and is unaffected.
+        self.assertTrue(self.perform(Operation.STATUS).succeeded)
+        job_running[0] = False
+        self.assertTrue(self.perform(Operation.SWITCH_BRANCH, branch="main").succeeded)
+        self.assertEqual(holds, [])   # the hold was released after the operation
+
+    def test_the_hold_is_released_when_the_operation_fails(self) -> None:
+        holds = []
+        self.authority = RepositoryAuthority(
+            self.system,
+            reserve_checkout=lambda: holds.append(1) or True,
+            release_checkout=lambda: holds.pop(),
+        )
+        try:
+            self.perform(Operation.SWITCH_BRANCH, branch="does-not-exist")
+        except Exception:  # noqa: BLE001 - either a failed outcome or a refusal error
+            pass
+        self.assertEqual(holds, [])
+
 if __name__ == "__main__":
     unittest.main()

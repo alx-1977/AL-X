@@ -95,6 +95,21 @@ class RestartAndCodingExcludeEachOtherTests(unittest.TestCase):
                                 commit_message="m"))
         self.assertEqual(len(self.session.calls), 1)
 
+    def test_a_checkout_hold_and_a_job_exclude_each_other(self) -> None:
+        """PR #195 review: a busy check alone let a job start mid-operation."""
+        from alx.contracts.coding import CodingError, CodingRequest
+        agent = self.agent()
+        self.assertTrue(agent.reserve_checkout())
+        with self.assertRaises(CodingError) as refused:
+            agent.run(CodingRequest(task="t", job_id="j", repair_branch="fix/j",
+                                    commit_message="m"))
+        self.assertEqual(refused.exception.details["reason_code"], "checkout_busy")
+        self.assertEqual(self.session.calls, [])
+        agent.release_checkout()
+        agent.run(CodingRequest(task="t", job_id="j2", repair_branch="fix/j2",
+                                commit_message="m"))
+        self.assertEqual(len(self.session.calls), 1)
+
     def test_storage_configured_anywhere_in_the_checkout_is_blocked(self) -> None:
         """PR #150 review: a storage root other than .alx stayed reachable."""
         from alx.contracts.coding import CodingRequest

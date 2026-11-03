@@ -708,6 +708,40 @@ SEMANTIC_SELECTION_TOKENS = frozenset(
 )
 
 
+# EX-001 as amended 2026-11-03: the one test of whether a first-pass decision
+# may stand. It reads the decision's structure and the capability's declared
+# effect class, and nothing else, so it cannot become a router on meaning.
+FIRST_PASS_TEST = "changes_anything"
+FIRST_PASS_TEST_ATTRIBUTES = frozenset(
+    {
+        "plan_update", "approval_proposal", "goal_proposal", "kind", "call",
+        "capabilities", "capability_id", "side_effect",
+        "REQUEST_COMPLETION", "CANCEL", "EFFECTFUL",
+    }
+)
+
+
+def _first_pass_test_violations(relative_text: str, tree: ast.AST) -> list[Violation]:
+    """The first-pass test may read only the structural fields it names."""
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != FIRST_PASS_TEST:
+            continue
+        if not relative_text.replace("\\", "/").endswith(AUTONOMOUS_SELECTION_OWNER):
+            violations.append(Violation(
+                relative_text, node.lineno,
+                f"{FIRST_PASS_TEST} may live only in {AUTONOMOUS_SELECTION_OWNER}",
+            ))
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Attribute) and inner.attr not in FIRST_PASS_TEST_ATTRIBUTES:
+                violations.append(Violation(
+                    relative_text, inner.lineno,
+                    f"{FIRST_PASS_TEST} may read only a decision's structure and a "
+                    f"capability's effect class; reading {inner.attr!r} is not allowed",
+                ))
+    return violations
+
+
 def _autonomous_selection_violations(
     relative_text: str, tree: ast.AST
 ) -> list[Violation]:
@@ -1105,6 +1139,7 @@ def check_source(root: Path, rules: Rules | None = None) -> list[Violation]:
         visitor.visit(tree)
         violations.extend(visitor.violations)
         violations.extend(_autonomous_selection_violations(relative_text, tree))
+        violations.extend(_first_pass_test_violations(relative_text, tree))
         violations.extend(_note_interpretation_violations(relative_text, tree))
         violations.extend(_opportunity_source_violations(relative_text, tree))
         if owner == "interfaces":

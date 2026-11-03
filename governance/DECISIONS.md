@@ -2746,3 +2746,13 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Law 0 follow-up.** Removed `read_own_source`, `list_particle_usb_devices`,
   `read_particle_serial_log` and `find_kicad_library_footprint` as superseded by
   `run_program`; shared primitives needed by retained capabilities remain.
+
+## D-064 — Unfinished work is never left waiting silently
+
+- **Date:** 2026-11-03
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-03.** Given in conversation with the implementing model: "ALX should not sit around and wait on me all the time" and "I suggest we fix everything here now."
+- **Idle goals are offered back.** An active goal with outstanding work, no blocker, no unfinished plan, unchanged for three minutes, is offered to AL/X as an occasion naming it (`idle_goal:<goal_id>`): one answered offer per goal revision, at most three answered offers in twelve hours. An offer refused before she could reason (a usage limit) is made again after a backoff of five minutes, doubling. The last offer says so, and if she still cannot move the goal she tells Friedl in one line what is holding it. `IdleGoalSource` reads storage facts only; whether and how to carry the work forward is her judgement.
+- **Refused calls are not attempts.** A plan attention's automatic offers count only offers whose last reasoning call a provider answered with measured usage. A call refused at a usage limit no longer spends the cap, so a plan is offered again once the limit resets.
+- **One job at a time in the checkout.** Repository operations that change what is checked out (switch, pull, stage, commit, amend, cherry-pick, revert, local merge, rebase, reset) hold the checkout for their whole run: they are refused with a stated reason while a coding job is in it, and no coding job can start while one holds it.
+- **Boundary.** No Law exception; laws and identity are unchanged.

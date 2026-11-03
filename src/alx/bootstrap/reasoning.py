@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from alx.config import ConfigurationError
-from alx.contracts import AutonomousReasoningDisabled, CognitionOrigin, ReasoningModel
+from alx.contracts import (
+    AgentDecision, AutonomousReasoningDisabled, CognitionOrigin, GoalMutationKind,
+    ReasoningModel, SideEffect,
+)
 from alx.contracts.models import core_input_ceiling
 from alx.core import ModelReasoner
 
@@ -55,6 +58,29 @@ def build_model_reasoner(
     )
 
 
+def changes_anything(decision: AgentDecision, context) -> bool:
+    """Whether acting on this decision would change anything.
+
+    Read from the decision's structure and the capability's declared effect
+    class only, never from what anything says: an effectful call, a plan
+    change, an approval, or closing a goal. Reading, attention state, memory
+    queries, goal progress notes, words and silence change nothing.
+    """
+    if (decision.plan_update is not None or decision.approval_proposal is not None):
+        return True
+    proposal = decision.goal_proposal
+    if proposal is not None and proposal.kind in (
+        GoalMutationKind.REQUEST_COMPLETION, GoalMutationKind.CANCEL,
+    ):
+        return True
+    if decision.call is None:
+        return False
+    definition = next((item for item in context.capabilities
+                       if item.capability_id == decision.call.capability_id), None)
+    # An unknown capability is treated as effectful rather than guessed safe.
+    return definition is None or definition.side_effect is SideEffect.EFFECTFUL
+
+
 class AutonomousReasonerUnavailable(AutonomousReasoningDisabled):
     """An autonomous turn arrived with no autonomous Core configured.
 
@@ -92,6 +118,12 @@ class OriginSelectedReasoner:
     provider-side bounds differ. `CoreAgent`, the broker and the gate are never
     told which one answered, and nothing downstream can find out.
 
+    The 2026-11-03 amendment adds an optional first pass on autonomous turns:
+    a lighter model reasons first, and its decision stands only if
+    `changes_anything` finds it changes nothing. Which Core answers first is
+    still chosen by origin alone; the first pass is checked on what it
+    decided, by structure, after it has reasoned.
+
     The exception expires when the experiment concludes. Until then this has no
     standing as architecture.
     """
@@ -100,8 +132,14 @@ class OriginSelectedReasoner:
         self,
         conversational: ModelReasoner,
         autonomous: ModelReasoner | None = None,
+        autonomous_first_pass: ModelReasoner | None = None,
     ) -> None:
+        if autonomous_first_pass is not None and autonomous is None:
+            raise ValueError("a first pass needs the autonomous Core behind it")
         self._conversational = conversational
+        # EX-001 as amended 2026-11-03: a lighter model reasons first on an
+        # autonomous turn. Its decision stands only if it changes nothing.
+        self._first_pass = autonomous_first_pass
         # None when the experiment is unconfigured. The boundary still exists:
         # an autonomous turn is refused rather than quietly answered by the
         # conversational model, because a silent fallback would run the
@@ -115,5 +153,9 @@ class OriginSelectedReasoner:
         if context.origin.is_autonomous:
             if self._autonomous is None:
                 raise AutonomousReasonerUnavailable(context.origin.value)
+            if self._first_pass is not None:
+                decision = self._first_pass.decide(context)
+                if not changes_anything(decision, context):
+                    return decision
             return self._autonomous.decide(context)
         return self._conversational.decide(context)

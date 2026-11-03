@@ -232,12 +232,17 @@ class PlanAttentionSource:
         return tuple(changed)
 
     def _paid_offers(self, goal_id: str, plan: Any) -> int:
-        """How many of this attention's offers reached a provider, durably."""
+        """How many of this attention's offers were answered by a provider, durably.
+
+        Answered, not merely dispatched: a refused call, such as one made
+        while the usage limit is reached, gave her no turn, so it does not
+        count towards the cap.
+        """
         if self._spend is None:
             return plan.attention.paid_offers
         return sum(
             1 for offer in range(plan.attention.offers)
-            if self._spend.dispatch_started(self._opportunity_id(goal_id, plan, offer))
+            if self._spend.dispatch_answered(self._opportunity_id(goal_id, plan, offer))
         )
 
     def _publish(self, conversation_id: str, goal_id: str, plan_id: str, seq: int,

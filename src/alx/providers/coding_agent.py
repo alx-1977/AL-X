@@ -622,6 +622,9 @@ class CodingAgent:
         # been scheduled. A restart may be scheduled only with no job running,
         # and once it is, no job may start (PR #150 review).
         self._running = 0
+        # Repository operations changing the checkout, in progress now. A job
+        # in the checkout and such an operation exclude each other.
+        self._checkout_holds = 0
         self._restart_pending = False
         # Per-run state lives in `_JobState`, created by `run` and threaded
         # explicitly from there. It used to live here, as three instance
@@ -742,6 +745,18 @@ class CodingAgent:
             self._restart_pending = True
             return True
 
+    def reserve_checkout(self) -> bool:
+        """Hold the checkout for one repository operation, if no job is in it. Atomic."""
+        with self._active_lock:
+            if (self._running > 0 and not self._firmware_pending) or self._active is not None:
+                return False
+            self._checkout_holds += 1
+            return True
+
+    def release_checkout(self) -> None:
+        with self._active_lock:
+            self._checkout_holds = max(0, self._checkout_holds - 1)
+
     def release_restart(self) -> None:
         """The restart did not start after all: jobs may run again."""
         with self._active_lock:
@@ -774,6 +789,9 @@ class CodingAgent:
                 raise _before_implementation(CodingError(
                     "coding_unavailable", reason_code="restart_pending"))
             if self._firmware_pending or (request.firmware_repository is not None and self._running):
+                raise _before_implementation(CodingError(
+                    'coding_unavailable', reason_code='checkout_busy'))
+            if request.firmware_repository is None and self._checkout_holds:
                 raise _before_implementation(CodingError(
                     'coding_unavailable', reason_code='checkout_busy'))
             self._running += 1
