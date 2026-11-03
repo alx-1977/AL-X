@@ -778,7 +778,13 @@ class ClaudeSubscriptionReasoningModel:
             self._session = session
         if request.on_dispatched is not None:
             request.on_dispatched()
-        event = session.next_event(self._timeout_seconds)
+        try:
+            event = session.next_event(self._timeout_seconds)
+        except BaseException:
+            # The run is over and reported by complete(); nothing may report it again.
+            self._session = None
+            session.close()
+            raise
         if event[0] == "exit":
             self._session = None
             session.close()

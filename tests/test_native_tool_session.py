@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 import stat
 import sys
 import tempfile
@@ -135,10 +136,18 @@ class NativeSessionTests(unittest.TestCase):
         self.addCleanup(model.abandon_session)
         big = request(messages=(ModelMessage(ModelRole.SYSTEM, "rules"),
                                 ModelMessage(ModelRole.USER, "x" * 2_000_000)))
+        recorded = []
+        model._telemetry_sink = lambda key, values: recorded.append(values)
         started = time.monotonic()
         with self.assertRaises(ProviderError):
-            model.complete(big)
+            model.complete(replace(big, affinity_key="c1"))
         self.assertLess(time.monotonic() - started, 30)
+        # Each try is reported by its own failure; abandoning afterwards adds
+        # no second record for a run already reported (review of #197).
+        failures = len(recorded)
+        model.abandon_session()
+        self.assertEqual(len(recorded), failures)
+        self.assertNotIn("abandoned", [item.get("outcome") for item in recorded])
 
     def test_a_tool_result_requires_a_native_request(self) -> None:
         with self.assertRaises(ValueError):
