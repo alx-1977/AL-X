@@ -249,6 +249,16 @@ class FirstPassTests(unittest.TestCase):
             "opus-person")
         self.assertEqual(self.first.calls, 0)
 
+    def test_her_own_work_coming_back_goes_to_opus_without_a_first_pass(self) -> None:
+        """Finished jobs, plans and idle goals: the first pass only handed over."""
+        self.first.next = AgentDecision(response="first")
+        outcome = self.reasoner.decide(self.context(CognitionOrigin.WORK_COMPLETED))
+        self.assertEqual(outcome.response, "opus")
+        self.assertEqual(self.first.calls, 0)
+        for origin in (CognitionOrigin.EXTERNAL_EVENT, CognitionOrigin.SELF_REQUESTED):
+            with self.subTest(origin=origin):
+                self.assertEqual(self.reasoner.decide(self.context(origin)).response, "first")
+
     def test_escalating_ends_the_first_pass_session(self) -> None:
         self.first.next = AgentDecision(call=self.call("merge_pull_request"))
         self.reasoner.decide(self.context())

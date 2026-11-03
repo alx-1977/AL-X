@@ -153,7 +153,12 @@ class OriginSelectedReasoner:
         if context.origin.is_autonomous:
             if self._autonomous is None:
                 raise AutonomousReasonerUnavailable(context.origin.value)
-            if self._first_pass is not None:
+            # Her own work coming back (a finished job, a plan needing her, an
+            # idle goal) is nearly always acted on, and a first pass would
+            # only start, hand over and pay the context twice. It goes to the
+            # autonomous Core directly, by origin alone (EX-001, 2026-11-03).
+            if (self._first_pass is not None
+                    and context.origin is not CognitionOrigin.WORK_COMPLETED):
                 # A session the autonomous Core paused is continued by it (D-065).
                 if self._autonomous.can_continue(context):
                     return self._autonomous.decide(context)
