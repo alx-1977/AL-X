@@ -310,7 +310,7 @@ class KiCadProvider:
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
             original = inventory(root / 'project')
-            with tempfile.TemporaryDirectory(prefix='analysis-', dir=root) as temporary:
+            with tempfile.TemporaryDirectory(prefix='alx-analysis-') as temporary:
                 stage = Path(temporary)
                 shutil.copytree(root / 'project', stage / 'project')
                 try:
@@ -365,8 +365,7 @@ class KiCadProvider:
                 output = stage / 'export.cir'
                 self._run('sch', 'export', 'netlist', '--format', 'spice', '--output', output, schematics[0])
                 return simulate(output.read_text(), stage)
-        self.work_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='circuit-', dir=self.work_root) as temporary:
+        with tempfile.TemporaryDirectory(prefix='alx-circuit-') as temporary:
             return simulate(arguments['netlist'], Path(temporary))
 
     def analyse_copper(self, arguments):

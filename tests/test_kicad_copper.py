@@ -1,5 +1,6 @@
 """Recorded field-solver protocols and fail-closed copper geometry evidence."""
 import json
+import importlib.util
 import math
 from pathlib import Path
 import sys
@@ -21,6 +22,11 @@ from alx.providers.kicad_copper import (
 )
 
 
+requires_shapely = unittest.skipUnless(
+    importlib.util.find_spec('shapely') is not None,
+    'Shapely >=2.1 is required for copper surface meshing (requirements.txt)')
+
+
 STACK = '''(setup (stackup
  (layer "F.Mask" (type "Top Solder Mask") (thickness 0.01) (epsilon_r 4))
  (layer "F.Cu" (type "copper") (thickness 0.024))
@@ -35,6 +41,7 @@ PORTS = [{'id': 'p', 'start': {'x_mm': 0, 'y_mm': 0, 'layer': 'F.Cu'},
 
 
 class CopperFormats(unittest.TestCase):
+    @requires_shapely
     def test_spiral_surface_voltage_basis_refines_without_internal_cut_faces(self):
         x = y = 0
         segments = []
@@ -85,6 +92,7 @@ class CopperFormats(unittest.TestCase):
             with self.assertRaises(AnalysisError):
                 parse_capacitance(output, 1)
 
+    @requires_shapely
     def test_board_stackup_and_exact_track_geometry(self):
         tree = sexpr(BOARD)
         layers = stackup(tree)
@@ -109,6 +117,7 @@ class CopperFormats(unittest.TestCase):
         self.assertTrue(any(line.startswith('C ') and ' +' in line for line in files['copper.lst'].splitlines()))
         self.assertTrue(any(line.startswith('C ') and ' 4.1 ' in line for line in files['copper.lst'].splitlines()))
 
+    @requires_shapely
     def test_dielectric_changes_deck_and_missing_outline_is_explicit(self):
         tree = sexpr(BOARD)
         layers = stackup(tree)
@@ -122,6 +131,7 @@ class CopperFormats(unittest.TestCase):
         with self.assertRaisesRegex(GeometryJudgement, 'board_outline_unresolved'):
             fastcap_files(paths, layers, 2, sexpr(BOARD.replace(OUTLINE, '')))
 
+    @requires_shapely
     def test_pad_and_via_union_one_net_and_nominal_bore_barrel(self):
         board = BOARD.replace(SEGMENT, SEGMENT[:-1]+' (net 1))')[:-1]+'''
           (footprint "test" (at 0 0) (property "Reference" "L1")
@@ -154,6 +164,7 @@ class CopperFormats(unittest.TestCase):
                     face = Polygon(list(zip(coords[0::3], coords[1::3])))
                     self.assertLess(face.intersection(hole).area, 1e-16)
 
+    @requires_shapely
     def test_through_hole_pad_uses_annuli_and_barrel_same_conductor(self):
         tree = sexpr(BOARD[:-1]+'''(footprint "test" (at 0 0) (property "Reference" "L1")
             (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.4) (layers "*.Cu") )) )''')
@@ -176,6 +187,7 @@ class CopperFormats(unittest.TestCase):
         with self.assertRaisesRegex(GeometryJudgement, 'nonpositive'):
             winding_capacitance(matrix, [1., 1.])
 
+    @requires_shapely
     def test_pad_port_and_rotated_pad_position(self):
         pad = '''(footprint "test" (at 0 1 90) (property "Reference" "L1")
             (pad "1" smd rect (at 1 0 90) (size 1 0.5) (layers "F.Cu")))'''
@@ -236,10 +248,24 @@ class CopperProvider(unittest.TestCase):
         engine.chmod(0o700)
         self.provider.engine_paths = {'fasthenry': engine, 'fastcap': engine}
 
+    def test_analysis_snapshot_uses_system_temp_and_is_removed(self):
+        initial = inventory(self.folder/'project')
+        with self.provider._analysis_copy(self.copy_id) as (stage, meta):
+            self.assertTrue(stage.is_relative_to(Path(tempfile.gettempdir())))
+            self.assertFalse(stage.resolve().is_relative_to(Path(__file__).resolve().parents[1]))
+            self.assertFalse(stage.resolve().is_relative_to(self.folder.resolve()))
+            self.assertEqual((stage/'project'/meta['board']).read_text(), BOARD)
+            (stage/'solver-output').write_text('disposable')
+        self.assertFalse(stage.exists())
+        self.assertEqual(inventory(self.folder/'project'), initial)
+
+    @requires_shapely
     def test_both_engines_both_meshes_design_unchanged_and_winding_facts(self):
         initial = inventory(self.folder/'project')
         calls = []
         def runner(engine, arguments, directory):
+            self.assertFalse(directory.resolve().is_relative_to(Path(__file__).resolve().parents[1]))
+            self.assertFalse(directory.resolve().is_relative_to(self.folder.resolve()))
             calls.append((arguments, directory))
             if arguments == ['copper.inp']:
                 (directory/'Zc.mat').write_text('Impedance matrix for frequency = 1.356e7 1 x 1\n .1 +10j\n')
@@ -266,6 +292,7 @@ class CopperProvider(unittest.TestCase):
         self.assertNotEqual(port['self_capacitance_f'], port['net_capacitance_to_infinity_f'])
         self.assertEqual(result['convergence']['inductance_h']['maximum_relative_difference'], 0)
 
+    @requires_shapely
     def test_via_capacitance_remains_available_without_inventing_plating_for_henry(self):
         board = BOARD.replace(SEGMENT, SEGMENT[:-1]+' (net 1))')[:-1]+'''
           (via (at 10 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)))'''
@@ -293,6 +320,7 @@ class CopperProvider(unittest.TestCase):
         with self.assertRaisesRegex(KiCadError, 'work_copy_tainted'):
             self.provider.analyse_copper(self.arguments)
 
+    @requires_shapely
     def test_solver_nonconvergence_returns_log_for_judgement(self):
         def runner(engine, arguments, directory):
             return SimpleNamespace(returncode=0, stdout='failed to converge', stderr='evidence')
@@ -301,6 +329,7 @@ class CopperProvider(unittest.TestCase):
         self.assertIn('solver_nonconvergence', result['reasons'])
         self.assertIn('evidence', result['meshes'][0]['fasthenry_log'])
 
+    @requires_shapely
     def test_installed_engines_on_pcbnew_square_spiral(self):
         settings = self.provider.settings
         engines = {
@@ -342,8 +371,20 @@ pcbnew.SaveBoard(sys.argv[1],b)
         ports = [dict(PORTS[0], end={'x_mm': 3, 'y_mm': 3, 'layer': 'F.Cu'})]
         result = self.provider.analyse_copper(dict(self.arguments, ports=ports))
         self.assertEqual(len(result['meshes']), 2)
+        self.assertEqual(result['stackup'][2]['epsilon_r'], 4.1)
+        self.assertTrue(all(len(m['self_capacitance_f']) == 1 for m in result['meshes']))
         self.assertEqual(len(result['formula']), 1)
         self.assertGreater(result['ports'][0]['self_capacitance_f'], 0)
         self.assertGreater(result['ports'][0]['self_resonant_frequency_hz'], 0)
         self.assertLessEqual(result['formula'][0]['percentage_difference'], 10)
         self.assertEqual(inventory(self.folder/'project'), initial)
+
+        # Hold copper geometry fixed and solve again in vacuum to verify that
+        # the winding energy uses the saved stack-up dielectric interfaces.
+        board.write_text(board.read_text().replace('(epsilon_r 4.1)', '(epsilon_r 1)')
+                         .replace('(epsilon_r 4)', '(epsilon_r 1)'))
+        vacuum = self.provider.analyse_copper(dict(self.arguments, ports=ports))
+        self.assertGreater(result['ports'][0]['self_capacitance_f'],
+                           vacuum['ports'][0]['self_capacitance_f'])
+        self.assertLess(result['ports'][0]['self_resonant_frequency_hz'],
+                        vacuum['ports'][0]['self_resonant_frequency_hz'])
