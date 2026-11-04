@@ -453,12 +453,13 @@ class ReasonerParsingTests(unittest.TestCase):
     context = ModelReasonerTests.context
     plan_output = ModelReasonerTests.plan_output
     plan_step_schema = ModelReasonerTests.plan_step_schema
+    plan_definition_schema = ModelReasonerTests.plan_definition_schema
 
     def test_a_goal_mutation_step_is_parsed_without_a_revision(self):
         output = self.plan_output({
             "step_id": "close-a", "goal_id": "a", "operation": "cancel",
             "reason": "merged", "new_evidence": [], "wake_core_on_completion": False,
-        }, disposition="finish_silently")
+        })
         decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
         planned = decision.plan_update.plan.steps[0]
         self.assertIsNone(planned.call)

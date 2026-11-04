@@ -1874,6 +1874,123 @@ class ReplyDurabilityTests(PlanHarness):
     def finishing(self):
         return Reasoner(SELECT, resolve(PlanOperation.FINISH, "It is merged and done."))
 
+    def test_a_native_finish_waits_for_the_reply_and_is_written_with_it(self):
+        """D-065: a finish given as its own step closes where the turn ends."""
+        self.finish_ready()
+        seen = []
+
+        class Watching(Reasoner):
+            def decide(inner, context):
+                seen.append(self.plan_of().status)
+                return Reasoner.decide(inner, context)
+
+        reasoner = Watching(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                            AgentDecision(response="It is merged and done."))
+        gateway = self.gateway(reasoner)
+        self.finish_turn(gateway)
+        # Still open while she composed her words; closed in one write with them.
+        self.assertEqual(seen[-1], PlanStatus.NEEDS_CORE)
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+        self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertEqual(self.plan_of().announcements, ())
+
+    def test_a_native_finish_is_kept_for_the_words_that_end_the_turn(self):
+        """Words deferred by the continuation notice do not drop the held finish."""
+        self.finish_ready()
+        self.set_goal(outstanding_work=(WorkItem("next", "Still to do"),))
+        reasoner = Reasoner(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                            AgentDecision(response="Done, I think."),
+                            AgentDecision(response="It is merged and done."))
+        agent = self.agent(reasoner)
+        outcome_ = self.person(agent, budget=6)
+        self.assertEqual(reasoner.contexts[3].continuation_notices[0]["reason"],
+                         "remaining_work_still_executable")
+        self.assertEqual(outcome_.response, "It is merged and done.")
+        self.assertIsNotNone(outcome_.response_turn_id)
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+
+    def test_a_native_finish_closes_its_own_plan_after_a_goal_switch(self):
+        """Review of #200: switching goals before the reply must not move the close."""
+        self.finish_ready()
+        self.store.create(new_goal("other"), "thread", RETENTION)
+        self.set_goal("other", execution_plan=replace(self.plan_of(), plan_id="plan:other"))
+        reasoner = Reasoner(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                            AgentDecision(goal_id="other"),
+                            AgentDecision(response="It is merged and done."))
+        self.finish_turn(self.gateway(reasoner))
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+        self.assertEqual(self.plan_of("other").status, PlanStatus.NEEDS_CORE)
+        self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertEqual(self.plan_of().announcements, ())
+
+    def test_a_native_finish_is_written_when_a_refusal_ends_the_turn(self):
+        """Review of #200: the accepted close survives an ending by refusal."""
+        from alx.contracts import MemoryKind, MemoryProposal
+        self.finish_ready()
+        ungrounded = AgentDecision(memory_proposals=(MemoryProposal(
+            "m-1", MemoryKind.FACTUAL, "unsupported", ("turn:not-real",), NOW),))
+        reasoner = Reasoner(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                            ungrounded, ungrounded,
+                            AgentDecision(response="It is merged and done."))
+        self.finish_turn(self.gateway(reasoner))
+        # The last step was response-only, and its words carry the close.
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "memory_proposal_invalid")
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+        self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertEqual(self.plan_of().announcements, ())
+
+    def native_finish(self, *after):
+        return Reasoner(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                        *after)
+
+    def test_a_native_finish_waits_when_the_turn_runs_out_of_steps(self):
+        """Second review of #200: no words, no close; the attention stays to answer."""
+        self.finish_ready()
+        outcome_ = self.person(self.agent(self.native_finish()), budget=2)
+        self.assertEqual(outcome_.reason, "budget_exhausted")
+        self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
+        self.assertEqual(self.plan_of().announcements, ())
+
+    def test_a_failed_native_close_write_stores_no_reply(self):
+        """Second review of #200: words claiming an unwritten close are not delivered."""
+        self.finish_ready()
+        gateway = self.gateway(self.native_finish(AgentDecision(response="It is merged and done.")))
+        original = self.store.replace
+
+        def failing(state, *arguments, **keywords):
+            if (state.execution_plan is not None
+                    and state.execution_plan.status is PlanStatus.COMPLETED):
+                raise OSError("goal store unavailable")
+            return original(state, *arguments, **keywords)
+        self.store.replace = failing
+        with self.assertRaises(OSError):
+            self.finish_turn(gateway)
+        self.store.replace = original
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
+
+    def test_a_held_close_keeps_what_the_final_reply_rests_on(self):
+        """Second review of #200: a recovered reply keeps its mail deadline."""
+        from alx.contracts import ContentOrigin, RetentionPolicy
+        from alx.contracts.mail import MailReference
+        from alx.core.loop import CoreOutcome, _HeldClose
+        self.finish_ready()
+        snapshot = self.store.load("goal")
+        plan_ = snapshot.state.execution_plan
+        mail = RetentionPolicy().direct_mail(self.now, (MailReference("INBOX", "7", "1"),))
+        agent = self.agent()
+        held = [_HeldClose(PlanUpdate(PlanOperation.FINISH), "goal",
+                           (plan_.plan_id, plan_.attention_seq),
+                           RetentionPolicy().non_mail(ContentOrigin.ALX, self.now))]
+        settled = agent._settle_held_close(
+            CoreOutcome(CoreState.RESPONDED, snapshot, response="Done, from that mail.",
+                        response_provenance=mail), held, conversation())
+        stored = self.store.load("goal")
+        self.assertEqual(stored.state.execution_plan.announcements[0].turn_id,
+                         settled.response_turn_id)
+        self.assertIn(ContentOrigin.MAIL_MESSAGE, stored.provenance.origins)
+        self.assertIsNotNone(stored.provenance.content_expires_at)
+
     def test_the_ordinary_path_stores_the_reply_once_and_clears_it(self):
         self.finish_ready()
         gateway = self.gateway(self.finishing())
@@ -2054,16 +2171,17 @@ class RejectedDecisionCorrectionTests(PlanHarness):
         self.assertEqual(self.names(), ["coding"])
 
     def test_a_second_rejection_stops_and_the_person_is_still_answered(self):
-        reasoner = self.Rejecting(self.rejected(), self.rejected("values..x"),
+        reasoner = self.Rejecting(self.rejected(), self.rejected(),
                                   AgentDecision(response="I could not start that work."))
         outcome = self.person(self.agent(reasoner), budget=6)
-        # Two decisions that could plan, then one that can only speak.
+        # Two decisions that could plan, then one that can only speak: the
+        # same rejection twice, so nothing she was told changed.
         self.assertEqual(reasoner.calls, 3)
         self.assertIsNone(reasoner.contexts[1].response_only_reason)
         self.assertEqual(reasoner.contexts[2].response_only_reason, "decision_rejected")
         self.assertEqual([item["subject"] for item in reasoner.contexts[2].refused_calls],
                          ["plan condition path is unusable: 'succeeded'",
-                          "plan condition path is unusable: 'values..x'"])
+                          "plan condition path is unusable: 'succeeded'"])
         self.assertEqual((outcome.state, outcome.response),
                          (CoreState.RESPONDED, "I could not start that work."))
         self.assertIsNone(self.plan_of())
@@ -2319,9 +2437,12 @@ class GateTests(PlanHarness):
                          ("turn:person-1", "Do the work", "person-1"))
         self.assertTrue(installed.plan_id.startswith("plan:"))
 
-    def test_a_plan_update_travels_only_with_words_or_silence(self):
-        with self.assertRaisesRegex(ValueError, "response or silence"):
-            AgentDecision(goal_id="goal", plan_update=PlanUpdate(PlanOperation.RESUME))
+    def test_a_plan_update_travels_only_with_words_silence_or_alone(self):
+        # Alone it is one of the Core's native steps (D-065); never with a call.
+        AgentDecision(plan_update=PlanUpdate(PlanOperation.RESUME))
+        with self.assertRaisesRegex(ValueError, "response, silence, or alone"):
+            AgentDecision(call=CapabilityCall("c", "coding", {}),
+                          plan_update=PlanUpdate(PlanOperation.RESUME))
 
 
 class RecordTests(unittest.TestCase):

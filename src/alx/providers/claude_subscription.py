@@ -272,25 +272,25 @@ _BRIDGE_SCRIPT = Path(__file__).resolve().with_name("native_tool_bridge.py")
 class _NativeSession:
     """One Claude CLI run that may pause on native tool calls (D-065).
 
-    The CLI is started with the tool bridge as its only MCP server. When the
-    model calls `call_capability`, the bridge connects to this session's socket
-    and waits; the session hands the call to the Core and holds the connection
-    until the Core answers. The CLI keeps its conversation, and its cache, for
-    the whole turn. Nothing here runs a capability.
+    The CLI is started with the tool bridge as its only MCP server, offering
+    exactly the tools the request carries. When the model calls one, the
+    bridge connects to this session's socket and waits; the session hands the
+    call to the Core and holds the connection until the Core answers. The CLI
+    keeps its conversation, and its cache, for the whole turn. Nothing here
+    runs a capability or reads what a call means.
     """
 
-    def __init__(self, launcher: Callable[..., Any], argv_for: Callable[[str], list[str]],
-                 prompt: str, environment: Mapping[str, str], idle_seconds: float) -> None:
+    def __init__(self, launcher: Callable[..., Any], argv_for: Callable[[str, str], list[str]],
+                 prompt: str, environment: Mapping[str, str], idle_seconds: float,
+                 tools: Any = ()) -> None:
         import socket
         import tempfile
         import threading
         # A short path: unix socket paths are limited to about 100 bytes.
         self._directory = tempfile.mkdtemp(prefix="alx-native-", dir="/tmp")
         self._socket_path = os.path.join(self._directory, "s")
-        self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server.bind(self._socket_path)
-        self._server.listen(8)
-        self._server.settimeout(0.2)
+        self._tools_path = os.path.join(self._directory, "tools.json")
+        self._server: Any = None
         self._pending: Any = None
         # The request that started the run and when, for its record.
         self.request: Any = None
@@ -300,14 +300,24 @@ class _NativeSession:
         self._stdout: list[str] = []
         self._stderr: list[str] = []
         try:
+            # The tool definitions, exactly as the request carries them, for
+            # the bridge to list.
+            with open(self._tools_path, "w", encoding="utf-8") as handle:
+                json.dump(_json_value(tuple(tools)), handle)
+            self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._server.bind(self._socket_path)
+            self._server.listen(8)
+            self._server.settimeout(0.2)
             self._process = launcher(
-                argv_for(self._socket_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                argv_for(self._socket_path, self._tools_path), stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, cwd=self._directory, env=dict(environment),
                 start_new_session=True, shell=False,
             )
         except BaseException:
             # Never stored, so never closed later: release what was made here.
-            self._server.close()
+            if self._server is not None:
+                self._server.close()
             import shutil as _shutil
             _shutil.rmtree(self._directory, ignore_errors=True)
             raise
@@ -340,7 +350,7 @@ class _NativeSession:
         return self._process.poll() is None
 
     def next_event(self, timeout_seconds: float) -> tuple[str, Any]:
-        """Wait for a native call, ("tool", input), or the end, ("exit", (code, out, err))."""
+        """Wait for a native call, ("tool", {"name", "input"}), or the end, ("exit", (code, out, err))."""
         import socket
         deadline = monotonic() + timeout_seconds
         while monotonic() < deadline:
@@ -357,8 +367,9 @@ class _NativeSession:
                         break
                     received += chunk
                 try:
-                    call = json.loads(received.decode("utf-8"))["input"]
-                except (ValueError, KeyError):
+                    message = json.loads(received.decode("utf-8"))
+                    call = {"name": message["name"], "input": message["input"]}
+                except (ValueError, KeyError, TypeError):
                     connection.close()
                     continue
                 self._pending = connection
@@ -447,7 +458,6 @@ class ClaudeSubscriptionReasoningModel:
         oauth_token: str | None = None,
         retry_policy: SubscriptionRetryPolicy | None = None,
         launcher: "Callable[..., subprocess.Popen] | None" = None,
-        native_tools: bool = False,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -455,8 +465,6 @@ class ClaudeSubscriptionReasoningModel:
         # D-065: the one other way this transport starts the CLI, for a native
         # session that pauses. Bound here once; used only by _NativeSession.
         self._launcher = launcher or subprocess.Popen
-        # Whether the Core may call capabilities natively through this transport.
-        self.native_tools_enabled = native_tools
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._executable = executable
@@ -655,20 +663,22 @@ class ClaudeSubscriptionReasoningModel:
             LOGGER.warning("AL/X Core Claude identity refused: %s", error.code)
             raise_provider_failure(PROVIDER_NAME, error.code)
 
-    def native_command(self, request: ModelRequest, socket_path: str) -> list[str]:
+    def native_command(self, request: ModelRequest, socket_path: str,
+                       tools_path: str) -> list[str]:
         """The argument vector for a native-tool session (D-065).
 
-        As `command`, with the tool bridge as the only MCP server and its one
-        tool the only tool allowed. Built-in tools stay removed.
+        As `command`, with the tool bridge as the only MCP server and exactly
+        the request's tools allowed. Built-in tools stay removed.
         """
         bridge = {"mcpServers": {"alx": {
             "command": sys.executable,
-            "args": ["-I", str(_BRIDGE_SCRIPT), socket_path],
+            "args": ["-I", str(_BRIDGE_SCRIPT), socket_path, tools_path],
         }}}
         argv = self.command(request)
         index = argv.index("--mcp-config")
         argv[index + 1] = json.dumps(bridge)
-        return [*argv, "--allowedTools", "mcp__alx__call_capability"]
+        allowed = ",".join(f"mcp__alx__{item['name']}" for item in request.tools)
+        return [*argv, "--allowedTools", allowed]
 
     def command(self, request: ModelRequest) -> list[str]:
         """The exact argument vector for one turn.
@@ -770,8 +780,8 @@ class ClaudeSubscriptionReasoningModel:
             self.abandon_session()
             prompt = self._user_prompt(request)
             session = _NativeSession(
-                self._launcher, lambda path: self.native_command(request, path), prompt,
-                self.child_environment(), self._timeout_seconds,
+                self._launcher, lambda path, tools: self.native_command(request, path, tools),
+                prompt, self.child_environment(), self._timeout_seconds, request.tools,
             )
             # Kept for the record of a run that is abandoned rather than finished.
             session.request, session.started_at = request, monotonic()
@@ -827,7 +837,7 @@ class ClaudeSubscriptionReasoningModel:
         started_at = monotonic()
         LOGGER.info("Reasoning provider request started")
         try:
-            if request.native_tools:
+            if request.tools:
                 try:
                     kind, payload = self._native_event(request)
                 except subprocess.TimeoutExpired as error:

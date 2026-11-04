@@ -801,7 +801,7 @@ class UndeliveredReachesCoreTests(unittest.TestCase):
 
         from alx.core.loop import CoreAgent
 
-        source = inspect.getsource(CoreAgent.process)
+        source = inspect.getsource(CoreAgent._process)
         self.assertIn("undelivered_responses=self._undelivered_responses()", source)
 
 

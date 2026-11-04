@@ -36,8 +36,10 @@ from alx.specialists.research import ResearchCeilingFailed  # noqa: E402
 
 
 BASE_ENVIRONMENT = {
-    "ALX_REASONING_PROVIDER": "openai",
-    "ALX_REASONING_MODEL": "gpt-5.4",
+    # The Core is the Claude subscription (D-065); research names its own.
+    "ALX_REASONING_PROVIDER": "claude_subscription",
+    "ALX_REASONING_MODEL": "claude-opus-5-5",
+    "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
     "OPENAI_API_KEY": "test-key",
     "ALX_STT_PROVIDER": "cartesia",
     "ALX_STT_MODEL": "ink",

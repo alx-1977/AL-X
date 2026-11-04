@@ -56,11 +56,14 @@ class MultiGoalProgressionTests(Fixture):
 
     def test_departed_goal_cannot_be_revisited_even_after_completion(self):
         self.create("a", "b")
-        reasoner = Queued(cancel("a"), cancel("b"), AgentDecision(goal_id="a"))
+        reasoner = Queued(cancel("a"), cancel("b"), AgentDecision(goal_id="a"),
+                          AgentDecision(response="Both are closed."))
         result = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(result.state, CoreState.CHECKPOINTED)
-        self.assertEqual(result.reason, "goal_selection_revisited")
-        self.assertEqual(len(reasoner.contexts), 3)
+        # The revisit is refused and she is told; nothing is loaded or written.
+        self.assertEqual(result.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[3].refused_goal_selections[0]["reason"],
+                         "goal_selection_revisited")
+        self.assertEqual(reasoner.contexts[3].active_goal.goal_id, "b")
         self.assertEqual(self.store.load("a").revision, 2)
 
     def test_active_goal_cycle_preserves_answer_but_does_not_dispatch_again(self):
@@ -111,12 +114,15 @@ class MultiGoalProgressionTests(Fixture):
         self.create("a", "b")
         reasoner = Queued(
             AgentDecision(goal_id="a"), AgentDecision(goal_id="b"),
-            AgentDecision(goal_id="a"),
+            AgentDecision(goal_id="a"), AgentDecision(goal_id="a"),
+            AgentDecision(response="I have looked at both."),
         )
         result = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(result.state, CoreState.CHECKPOINTED)
+        # Refused once, then the same again ends the turn with words.
+        self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual(result.reason, "goal_selection_revisited")
-        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(len(reasoner.contexts), 5)
+        self.assertEqual(reasoner.contexts[3].active_goal.goal_id, "b")
         self.assertEqual([self.store.load(g).revision for g in ("a", "b")], [1, 1])
 
     def test_inspection_does_not_authorize_an_unoffered_goal(self):
@@ -134,14 +140,14 @@ class MultiGoalProgressionTests(Fixture):
 
     def test_noop_mutation_cannot_manufacture_progress_with_a_revision(self):
         self.create("a", "b")
-        reasoner = Queued(
-            AgentDecision(goal_id="a", goal_proposal=GoalProposal(GoalMutationKind.UPDATE)),
-            cancel("b"),
-        )
+        noop = AgentDecision(goal_id="a", goal_proposal=GoalProposal(GoalMutationKind.UPDATE))
+        reasoner = Queued(noop, noop, AgentDecision(response="Nothing needed changing."))
         result = self.agent(reasoner).process(conversation(), RETENTION, 25)
+        # Told once that nothing changed; the same again ends the turn.
+        self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"], "goal_update_no_change")
         self.assertEqual(result.reason, "goal_selection_no_progress")
-        self.assertEqual(len(reasoner.contexts), 1)
-        self.assertEqual(self.store.load("b").revision, 1)
+        self.assertEqual(result.state, CoreState.RESPONDED)
+        self.assertEqual([self.store.load(g).revision for g in ("a", "b")], [1, 1])
 
     def test_independent_answer_survives_deferred_revisit_without_mutation(self):
         self.create("a")
@@ -181,10 +187,11 @@ class MultiGoalProgressionTests(Fixture):
         reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(goal_id="b"), AgentDecision(
             goal_id="a", goal_proposal=GoalProposal(GoalMutationKind.CANCEL),
             response="I closed it.", response_requires_goal_commit=True,
-        ))
+        ), AgentDecision(response="I could not close it."))
         result = self.agent(reasoner).process(conversation(), RETENTION, 3)
-        self.assertIsNone(result.response)
-        self.assertEqual(result.state, CoreState.CHECKPOINTED)
+        # The words that claimed the commit are not delivered; one
+        # response-only step says what is true.
+        self.assertEqual(result.response, "I could not close it.")
         self.assertEqual(result.reason, "goal_selection_revisited")
         self.assertEqual(self.store.load("a").revision, 1)
 
