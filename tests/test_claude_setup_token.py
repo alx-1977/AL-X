@@ -63,8 +63,9 @@ def test_oversized_autonomous_request_retains_refusal_for_later_dispatch(tmp_pat
         conversation_id='notice-delivery', runtime=later))
     assert json.loads(dispatched.messages[-1].content)['runtime'] == first
     # The stub returns malformed model output: delivery still counts.
+    from dataclasses import replace
     with pytest.raises(ProviderError):
-        model.complete(dispatched)
+        model.complete(replace(dispatched, tools=()))
     assert model.setup_token_notice_facts() == {}
 
 
@@ -73,8 +74,12 @@ def notice_request(model):
     from alx.core.model_reasoner import ModelReasoner
     reasoner = ModelReasoner(model, 'laws', 'identity',
                             on_request_dispatched=model.acknowledge_setup_token_notice)
-    return reasoner.build_request(ReasoningContext(None, (), (),
-        conversation_id='notice-delivery', runtime=model.setup_token_notice_facts()))
+    from dataclasses import replace
+    # Without tools, so it takes the one-shot run this stub answers; a native
+    # session calls the same receipt (test_native_tool_session).
+    return replace(reasoner.build_request(ReasoningContext(None, (), (),
+        conversation_id='notice-delivery', runtime=model.setup_token_notice_facts())),
+        tools=())
 
 
 @pytest.mark.parametrize('provider', ['openai', 'xai', 'kimi'])

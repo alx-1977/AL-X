@@ -290,6 +290,11 @@ class ReasoningContext:
     # Why the loop is making this call, derived from its own state. Operator
     # telemetry only: it is never placed in the model's context.
     purpose: ReasoningPurpose | None = None
+    # Which turn and which step of it this context is for. A native session
+    # paused on one step is continued only by the next step of the same turn
+    # (D-065). Never placed in the model's context.
+    turn_key: str | None = None
+    step_index: int = 0
 
     def __post_init__(self) -> None:
         # Private durable recovery facts are for mechanical readers only. Strip
@@ -397,8 +402,9 @@ class AgentDecision:
     # goal; None without one is goal-less conversation. A decision that
     # carries only a goal_id asks for that goal's full state before acting.
     goal_id: str | None = None
-    # A plan change travels with the words or silence that end the decision,
-    # the way a goal update does. It is never the decision's one action.
+    # A plan change. It travels with the words or silence that end the turn,
+    # or alone as one of the Core's native steps (D-065), never with a call
+    # or a memory retrieval.
     plan_update: PlanUpdate | None = None
     raised_mail_observations: tuple[MailReference, ...] = ()
 
@@ -413,13 +419,17 @@ class AgentDecision:
             raise TypeError("finish_silently must be a bool")
         chosen = sum(item is not None for item in (self.call, self.response, self.memory_query))
         chosen += int(self.finish_silently)
-        if chosen == 0 and self.goal_id is not None:
-            # Selecting a goal may carry a mutation of that same goal: the
-            # Core says which work this is and what it now knows about it in
-            # one decision. An approval may not travel alone, because an
-            # approval authorises one exact call and there is none here.
+        if chosen == 0:
+            # An intermediate step: it selects a goal, or writes a goal
+            # mutation, memories or a plan change, and the turn goes on
+            # (D-065). An approval may not travel alone, because an approval
+            # authorises one exact call and there is none here.
             if self.approval_proposal is not None or self.response_requires_goal_commit:
-                raise ValueError("a goal selection carries no approval or commit flag")
+                raise ValueError("an intermediate step carries no approval or commit flag")
+            if (self.goal_id is None and self.goal_proposal is None
+                    and not self.memory_proposals and self.plan_update is None):
+                raise ValueError("a decision contains a call, a response, silence, a "
+                                 "memory query, a goal selection or a write")
         elif chosen != 1:
             raise ValueError("a decision contains exactly one call, response, or memory query")
         if self.goal_id is not None and not self.goal_id.strip():
@@ -436,18 +446,19 @@ class AgentDecision:
             raise ValueError("only a response can depend on a goal commit")
         if self.approval_proposal is not None and self.call is None:
             raise ValueError("an approval proposal requires an exact capability call")
-        if self.plan_update is not None and self.response is None and not self.finish_silently:
-            raise ValueError("a plan update travels with a response or silence")
+        if self.plan_update is not None and (self.call is not None
+                                             or self.memory_query is not None):
+            raise ValueError("a plan update travels with a response, silence, or alone")
         object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
             raise ValueError("a decision cannot repeat a memory identifier")
 
     @property
-    def selects_only(self) -> bool:
+    def intermediate(self) -> bool:
+        """A step that ends nothing: no call, words, silence or retrieval."""
         return (
-            self.goal_id is not None
-            and self.call is None
+            self.call is None
             and self.response is None
             and self.memory_query is None
             and not self.finish_silently

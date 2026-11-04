@@ -617,13 +617,15 @@ class KimiProviderTests(unittest.TestCase):
 
         self.assertIsNone(_build_reasoning_model(self.settings("nonesuch"), None))
 
-    def test_the_core_accepts_kimi_as_its_reasoning_provider(self) -> None:
+    def test_the_core_is_built_only_on_the_subscription(self) -> None:
+        """D-065 stage 3: Kimi, like xAI and OpenAI, serves research, not the Core."""
         import ast
 
         source = (
             Path(__file__).resolve().parents[1] / "src/alx/bootstrap/providers.py"
         ).read_text()
-        self.assertIn('settings.reasoning.provider in ("xai", "kimi")', source)
+        self.assertNotIn('settings.reasoning.provider in ("xai", "kimi")', source)
+        self.assertIn("settings.reasoning.provider != CLAUDE_SUBSCRIPTION_PROVIDER", source)
         ast.parse(source)
 
     def test_switching_vendor_adds_no_second_path(self) -> None:

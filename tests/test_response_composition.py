@@ -103,11 +103,10 @@ class ResponseBoundaryTests(unittest.TestCase):
         context = fixtures.ModelReasonerTests().context()
         for output in (
             fixtures.base_output(disposition='finish_silently'),
-            fixtures.base_output(disposition='call_capability', call_id='next-call',
-                                 capability_id=fixtures.CAPABILITY.capability_id,
-                                 arguments_json='{}'),
-            fixtures.base_output(response='Verified.', response_requires_goal_commit=True,
-                goal_update=fixtures.goal_update('request_completion', new_evidence=[{
+            fixtures.call_tool(call_id='next-call',
+                               capability_id=fixtures.CAPABILITY.capability_id),
+            fixtures.tool('update_goal', **fixtures.goal_update(
+                'request_completion', new_evidence=[{
                     'id': 'proof', 'kind': 'observation', 'attributes_json': '{}',
                     'supports': ['criterion-1'], 'source_references': ['turn:turn-1'],
                 }])),
@@ -118,7 +117,6 @@ class ResponseBoundaryTests(unittest.TestCase):
             self.assertEqual(person, autonomous)
         self.assertEqual(person.goal_proposal.new_evidence[0].source_references, ('turn:turn-1',))
         self.assertEqual(person.goal_proposal.new_evidence[0].supports, ('criterion-1',))
-        self.assertTrue(person.response_requires_goal_commit)
 
     def test_relationship_preferences_use_the_existing_memory_context(self):
         memory = MemorySnapshot(

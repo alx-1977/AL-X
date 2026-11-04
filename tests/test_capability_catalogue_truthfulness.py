@@ -41,7 +41,7 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.core import ModelReasoner  # noqa: E402
 from alx.core.model_reasoner import (  # noqa: E402
-    PROTOCOL_INSTRUCTIONS, decision_schema,
+    PROTOCOL_INSTRUCTIONS, native_tools,
 )
 from alx.tools import MOVE_MAIL_MESSAGE_TO_TRASH  # noqa: E402
 
@@ -221,8 +221,8 @@ class CatalogueAndDispatchAgree(unittest.TestCase):
         from alx.core.loop import CoreAgent
 
         self.assertIn(
-            "item.capability_id == action[\"capability_id\"]",
-            inspect.getsource(model_reasoner.ModelReasoner._decision_from_output),
+            "item.capability_id == arguments[\"capability_id\"]",
+            inspect.getsource(model_reasoner._native_call),
         )
         self.assertIn(
             "item.capability_id == capability_id",
@@ -256,11 +256,10 @@ class ProtocolStatesTheRule(unittest.TestCase):
 
     def test_the_decision_schema_states_the_same_rule(self) -> None:
         """The field Core fills carries it too, not only the prose."""
-        variants = decision_schema()["properties"]["action"]["anyOf"]
         described = [
-            item["properties"]["capability_id"]["description"]
-            for item in variants
-            if item["properties"].get("type", {}).get("const") == "call_capability"
+            item["inputSchema"]["properties"]["capability_id"]["description"]
+            for item in native_tools()
+            if item["name"] == "call_capability"
         ]
         self.assertEqual(len(described), 1)
         self.assertIn("exactly as written", described[0])

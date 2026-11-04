@@ -217,53 +217,30 @@ def build_runtime_providers(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> RuntimeProviders:
-    if settings.reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER:
-        # Friedl's Claude subscription, through the Claude Code CLI. No API key
-        # is held, none is passed to the child, and there is no metered path to
-        # fall back to: if the subscription cannot answer, the turn fails and
-        # AL/X says nothing rather than quietly billing another provider.
-        if not subscription_cli_present():
-            raise ConfigurationError(
-                "the Claude Code CLI is required for the "
-                f"{CLAUDE_SUBSCRIPTION_PROVIDER} reasoner and was not found"
-            )
-        reasoning = ClaudeSubscriptionReasoningModel(
-            settings.reasoning.model,
-            settings.reasoning.timeout_seconds,
-            telemetry_sink=telemetry_sink,
-            # D-065: the Core calls capabilities natively in one session.
-            native_tools=True,
-            # AL/X's own Claude login, never the person's.
-            config_dir=settings.core_claude_config_dir,
-            expected_account=settings.core_claude_account,
-            oauth_token=settings.claude_oauth_token,
-        )
-    elif settings.reasoning.provider == "openai":
-        reasoning = OpenAIReasoningModel(
-            settings.reasoning.model,
-            settings.reasoning.api_key,
-            settings.reasoning.base_url,
-            settings.reasoning.timeout_seconds,
-            streaming=settings.reasoning.streaming,
-            service_tier=settings.reasoning.service_tier,
-            reasoning_effort=settings.reasoning.effort,
-            telemetry_sink=telemetry_sink,
-        )
-    elif settings.reasoning.provider in ("xai", "kimi"):
-        # Same OpenAI-style transport; the vendor is a base URL and a key.
-        reasoning = XAIReasoningModel(
-            settings.reasoning.model,
-            settings.reasoning.api_key,
-            settings.reasoning.base_url,
-            settings.reasoning.timeout_seconds,
-            streaming=settings.reasoning.streaming,
-            service_tier=settings.reasoning.service_tier,
-            telemetry_sink=telemetry_sink,
-        )
-    else:
+    if settings.reasoning.provider != CLAUDE_SUBSCRIPTION_PROVIDER:
+        # Settings refuse any other Core; this is the same rule at the point
+        # of construction (D-065, stage 3).
         raise ConfigurationError(
             f"reasoning provider adapter is not installed: {settings.reasoning.provider}"
         )
+    # Friedl's Claude subscription, through the Claude Code CLI. No API key
+    # is held, none is passed to the child, and there is no metered path to
+    # fall back to: if the subscription cannot answer, the turn fails and
+    # AL/X says nothing rather than quietly billing another provider.
+    if not subscription_cli_present():
+        raise ConfigurationError(
+            "the Claude Code CLI is required for the "
+            f"{CLAUDE_SUBSCRIPTION_PROVIDER} reasoner and was not found"
+        )
+    reasoning = ClaudeSubscriptionReasoningModel(
+        settings.reasoning.model,
+        settings.reasoning.timeout_seconds,
+        telemetry_sink=telemetry_sink,
+        # AL/X's own Claude login, never the person's.
+        config_dir=settings.core_claude_config_dir,
+        expected_account=settings.core_claude_account,
+        oauth_token=settings.claude_oauth_token,
+    )
     specialist = _build_reasoning_model(settings.specialist, telemetry_sink)
     # D-024a as amended 2026-09-27: the autonomous Core, when switched on, is
     # the conversational subscription Core built again the same way. Settings
@@ -275,7 +252,6 @@ def build_runtime_providers(
             settings.autonomous.model,
             settings.autonomous.timeout_seconds,
             telemetry_sink=telemetry_sink,
-            native_tools=True,
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,
@@ -287,7 +263,6 @@ def build_runtime_providers(
             settings.autonomous_first_pass.model,
             settings.autonomous_first_pass.timeout_seconds,
             telemetry_sink=telemetry_sink,
-            native_tools=True,
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,

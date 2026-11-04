@@ -48,6 +48,7 @@ def _template_environment() -> dict[str, str]:
     # than passing quietly.
     for key, value in {
         "ALX_PRIMARY_PERSON_ID": "friedl",
+        "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
         "OPENAI_API_KEY": "test-key",
         "XAI_API_KEY": "test-key",
         "CARTESIA_API_KEY": "test-key",
@@ -281,10 +282,10 @@ class StartupSmokeTest(unittest.TestCase):
                 self.assertEqual(observed["synthesis_calls"], 0)
 
     def test_startup_verifies_the_core_claude_identity_first(self) -> None:
-        # The template's Core is metered and has no Claude identity; the
+        # The template's Core is the subscription Core (D-065); the
         # commissioning runtime has two subscription Cores, both checked.
         for label, overrides, cores in (
-            ("disabled", {}, 0), ("commissioning", self._commissioning(), 2),
+            ("disabled", {}, 1), ("commissioning", self._commissioning(), 2),
         ):
             with self.subTest(configuration=label):
                 checks = self._run_runtime(overrides)["identity_checks"]

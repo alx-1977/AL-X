@@ -57,7 +57,7 @@ def status(config_dir, **changes):
 
 def turn_envelope():
     return json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                       "result": "", "structured_output": {"action": {}}})
+                       "result": "", "structured_output": {"turn": {}}})
 
 
 def request():
@@ -280,12 +280,19 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(model.config_dir, os.path.join(self.home, ".claude-alx"))
             self.assertEqual(model._expected_account, ACCOUNT)
 
-    def test_a_metered_core_has_no_claude_identity(self):
-        settings = RuntimeSettings.from_environment({
-            **BASE_ENVIRONMENT, "ALX_REASONING_PROVIDER": "openai",
-            "ALX_REASONING_MODEL": "gpt", "OPENAI_API_KEY": "key",
-        })
-        self.assertIsNone(settings.core_claude_config_dir)
+    def test_a_metered_core_is_refused(self):
+        """The Core acts only through native tools, which only Claude carries.
+
+        Friedl removed the OpenAI, xAI and Kimi Core options on 2026-11-04
+        (D-065, stage 3) rather than keep a Core that could talk but not act.
+        """
+        for provider in ("openai", "xai", "kimi"):
+            with self.subTest(provider=provider), self.assertRaisesRegex(
+                    ConfigurationError, "only through claude_subscription"):
+                RuntimeSettings.from_environment({
+                    **BASE_ENVIRONMENT, "ALX_REASONING_PROVIDER": provider,
+                    "ALX_REASONING_MODEL": "gpt", "OPENAI_API_KEY": "key",
+                })
 
 
 if __name__ == "__main__":

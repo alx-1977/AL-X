@@ -496,72 +496,53 @@ NO_PROVIDER = "none"
 def _core_reasoning_settings(
     environment: Mapping[str, str],
     provider: str,
-    provider_key_name: str,
-    provider_base_name: str,
-    provider_base_fallback: "str | None",
 ) -> "ReasoningSettings":
-    """The conversational Core's reasoner.
+    """The conversational Core's reasoner: the Claude subscription, only.
 
-    The subscription path is configured differently from the metered ones
-    because it genuinely is different: it authenticates through the Claude Code
-    installation, so there is no key to supply and no base URL to point at.
-    Demanding either would refuse a correct configuration, and accepting a key
+    The Core acts only through its native tools, which only the Claude
+    subscription transport carries (D-065, stage 3). Friedl chose on
+    2026-11-04 to remove the OpenAI, xAI and Kimi Core options rather than
+    leave a Core that could talk but never act. They remain available to the
+    specialist and to research, which are configured separately.
+
+    The subscription authenticates through the Claude Code installation, so
+    there is no key to supply and no base URL to point at. Accepting a key
     would put a billable credential into the one path whose entire purpose is
     not to use one.
-
-    Nothing else about the Core changes. The same dataclass is returned, so the
-    reasoner, the loop and the capability layer see one shape.
     """
-    if provider == CLAUDE_SUBSCRIPTION_PROVIDER:
-        api_key = environment.get("ALX_REASONING_API_KEY", "").strip()
-        if api_key:
-            # Refused rather than ignored. A key sitting in the configuration
-            # of a path that must never bill is either a misunderstanding or a
-            # leftover, and silently not using it would leave Friedl believing
-            # something about this runtime that is not true.
-            raise ConfigurationError(
-                "ALX_REASONING_API_KEY must not be set for "
-                f"{CLAUDE_SUBSCRIPTION_PROVIDER}: it authenticates through the "
-                "Claude Code subscription and never through a billed key"
-            )
-        return ReasoningSettings(
-            provider=provider,
-            model=_required(environment, "ALX_REASONING_MODEL"),
-            api_key="",
-            base_url="",
-            timeout_seconds=_positive_integer(
-                environment, "ALX_REASONING_TIMEOUT_SECONDS", 300
-            ),
-            # The port is not a streaming port: `complete()` returns one whole
-            # completion. The CLI is asked for one JSON result, so there is no
-            # stream to enable and the setting would describe nothing.
-            streaming=False,
-            service_tier="default",
-            # A subscription turn has no tier or effort dial to set. Fixed at
-            # the neutral value rather than read from configuration, so no
-            # setting appears to be active while doing nothing.
-            effort="medium",
+    if provider != CLAUDE_SUBSCRIPTION_PROVIDER:
+        raise ConfigurationError(
+            f"the Core reasons only through {CLAUDE_SUBSCRIPTION_PROVIDER}; "
+            f"refusing ALX_REASONING_PROVIDER={provider} (D-065)"
+        )
+    api_key = environment.get("ALX_REASONING_API_KEY", "").strip()
+    if api_key:
+        # Refused rather than ignored. A key sitting in the configuration
+        # of a path that must never bill is either a misunderstanding or a
+        # leftover, and silently not using it would leave Friedl believing
+        # something about this runtime that is not true.
+        raise ConfigurationError(
+            "ALX_REASONING_API_KEY must not be set for "
+            f"{CLAUDE_SUBSCRIPTION_PROVIDER}: it authenticates through the "
+            "Claude Code subscription and never through a billed key"
         )
     return ReasoningSettings(
         provider=provider,
         model=_required(environment, "ALX_REASONING_MODEL"),
-        api_key=_credential(
-            environment, "ALX_REASONING_API_KEY", provider_key_name
-        ),
-        base_url=_configured(
-            environment,
-            "ALX_REASONING_BASE_URL",
-            provider_base_name,
-            provider_base_fallback,
-        ).rstrip("/"),
+        api_key="",
+        base_url="",
         timeout_seconds=_positive_integer(
-            environment, "ALX_REASONING_TIMEOUT_SECONDS", 120
+            environment, "ALX_REASONING_TIMEOUT_SECONDS", 300
         ),
-        streaming=_boolean(environment, "ALX_REASONING_STREAMING", True),
-        service_tier=environment.get(
-            "ALX_REASONING_SERVICE_TIER", "default"
-        ).strip().lower(),
-        effort=environment.get("ALX_REASONING_EFFORT", "medium").strip().lower(),
+        # The port is not a streaming port: `complete()` returns one whole
+        # completion. The CLI is asked for one JSON result, so there is no
+        # stream to enable and the setting would describe nothing.
+        streaming=False,
+        service_tier="default",
+        # A subscription turn has no tier or effort dial to set. Fixed at
+        # the neutral value rather than read from configuration, so no
+        # setting appears to be active while doing nothing.
+        effort="medium",
     )
 
 
@@ -1226,32 +1207,7 @@ class RuntimeSettings:
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> RuntimeSettings:
         reasoning_provider = _required(environment, "ALX_REASONING_PROVIDER")
-        # The subscription path authenticates through the Claude Code
-        # installation, so it has no key and no base URL to configure. Asking
-        # for either would either refuse a correct configuration or invite a
-        # key into the one path whose purpose is not to use one.
-        provider_key_name = {
-            "openai": "OPENAI_API_KEY",
-            "xai": "XAI_API_KEY",
-            "kimi": "KIMI_API_KEY",
-        }.get(reasoning_provider, "ALX_REASONING_API_KEY")
-        provider_base_name = {
-            "openai": "OPENAI_BASE_URL",
-            "xai": "XAI_BASE_URL",
-            "kimi": "KIMI_BASE_URL",
-        }.get(reasoning_provider, "ALX_REASONING_BASE_URL")
-        provider_base_fallback = {
-            "openai": "https://api.openai.com",
-            "xai": "https://api.x.ai",
-            "kimi": "https://api.moonshot.ai",
-        }.get(reasoning_provider)
-        reasoning = _core_reasoning_settings(
-            environment,
-            reasoning_provider,
-            provider_key_name,
-            provider_base_name,
-            provider_base_fallback,
-        )
+        reasoning = _core_reasoning_settings(environment, reasoning_provider)
         autonomous = autonomous_reasoning_settings(environment)
         # The approval is for the conversational Core answering autonomous
         # turns too. If conversation moved to another model, the approved
@@ -1265,10 +1221,7 @@ class RuntimeSettings:
                 f"refusing {autonomous.provider}/{autonomous.model} beside "
                 f"{reasoning.provider}/{reasoning.model}"
             )
-        core_claude = (
-            core_claude_identity(environment)
-            if reasoning.provider == CLAUDE_SUBSCRIPTION_PROVIDER else (None, None)
-        )
+        core_claude = core_claude_identity(environment)
         return cls(
             core_claude_config_dir=core_claude[0],
             core_claude_account=core_claude[1],

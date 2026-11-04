@@ -2025,6 +2025,8 @@ class LiveCoreCatalogueTests(unittest.TestCase):
         from alx.core.loop import CoreAgent
         from alx.core.model_reasoner import _catalogue_payload
         from alx.interfaces.server import LiveVoiceServer
+        from alx.bootstrap import providers as runtime_providers
+        from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
         from alx.providers.grok_subscription import GrokSubscriptionReasoningModel
         from alx.providers.openai import OpenAIReasoningModel
         from alx.providers.xai import XAIReasoningModel
@@ -2072,6 +2074,10 @@ class LiveCoreCatalogueTests(unittest.TestCase):
             (OpenAIReasoningModel, "complete", refuse),
             (XAIReasoningModel, "complete", refuse),
             (GrokSubscriptionReasoningModel, "complete", refuse),
+            # The Core is the subscription Core (D-065); its login is not read.
+            (ClaudeSubscriptionReasoningModel, "complete", refuse),
+            (ClaudeSubscriptionReasoningModel, "verify_identity", lambda _model: None),
+            (runtime_providers, "subscription_cli_present", lambda: True),
             (CoreAgent, "__init__", capture),
         ]
         originals = [(target, name, getattr(target, name)) for target, name, _ in patches]

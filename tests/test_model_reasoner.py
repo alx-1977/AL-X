@@ -38,54 +38,53 @@ def goal() -> GoalState:
 
 
 def base_output(**changes):
-    values = {
-        "goal_id": None,
-        "goal_update": None,
-        "plan_update": None,
-        "memory_proposals": [],
-    }
+    """The decision that ends a turn: words or silence (D-065)."""
     action_type = changes.pop("disposition", "respond")
     if action_type == "respond":
         action = {
             "type": "respond",
             "response": changes.pop("response", "A normal response."),
             "raised_mail_observations": changes.pop("raised_mail_observations", []),
-            "response_requires_goal_commit": changes.pop(
-                "response_requires_goal_commit", False
-            ),
-        }
-    elif action_type == "finish_silently":
-        changes.pop("response", None)
-        action = {"type": "finish_silently"}
-    elif action_type == "call_capability":
-        changes.pop("response", None)
-        action = {
-            "type": "call_capability",
-            "call_id": changes.pop("call_id"),
-            "capability_id": changes.pop("capability_id"),
-            "arguments_json": changes.pop("arguments_json"),
-            "approval_id": changes.pop("approval_id", None),
-            "approval_proposal": changes.pop("approval_proposal", None),
         }
     else:
         changes.pop("response", None)
-        action = {
-            "type": "retrieve_memories",
-            "memory_query_id": changes.pop("memory_query_id"),
-            "memory_kinds": changes.pop("memory_kinds", []),
-            "memory_ids": changes.pop("memory_ids", []),
-            "memory_person_id": changes.pop("memory_person_id", None),
-            "memory_formed_after": changes.pop("memory_formed_after", None),
-            "memory_formed_before": changes.pop("memory_formed_before", None),
-            "memory_source_references": changes.pop("memory_source_references", []),
-            "memory_source_match": changes.pop("memory_source_match", "any"),
-            "memory_include_superseded": changes.pop(
-                "memory_include_superseded", False
-            ),
-        }
-    values["action"] = action
+        action = {"type": "finish_silently"}
+    values = {"action": action}
     values.update(changes)
     return values
+
+
+def tool(name, **arguments):
+    """One native tool step, as the transport hands it to the reasoner."""
+    return {"name": name, "input": arguments}
+
+
+def call_tool(call_id="call-1", capability_id="search_records", arguments_json="{}",
+              approval_id=None, approval_source_reference=None):
+    return tool("call_capability", call_id=call_id, capability_id=capability_id,
+                arguments_json=arguments_json, approval_id=approval_id,
+                approval_source_reference=approval_source_reference)
+
+
+def memory_query_tool(**changes):
+    values = {
+        "memory_query_id": changes.pop("memory_query_id", "query-1"),
+        "memory_kinds": changes.pop("memory_kinds", []),
+        "memory_ids": changes.pop("memory_ids", []),
+        "memory_person_id": changes.pop("memory_person_id", None),
+        "memory_formed_after": changes.pop("memory_formed_after", None),
+        "memory_formed_before": changes.pop("memory_formed_before", None),
+        "memory_source_references": changes.pop("memory_source_references", []),
+        "memory_source_match": changes.pop("memory_source_match", "any"),
+        "memory_include_superseded": changes.pop("memory_include_superseded", False),
+    }
+    values.update(changes)
+    return tool("retrieve_memories", **values)
+
+
+def tool_schema(name):
+    from alx.core.model_reasoner import native_tools
+    return next(item["inputSchema"] for item in native_tools() if item["name"] == name)
 
 
 def goal_update(operation="update", **changes):
@@ -107,12 +106,16 @@ def goal_update(operation="update", **changes):
 
 
 class FakeModel:
+    """Answers every request with one output, or one native tool step."""
+
     def __init__(self, output) -> None:
         self.output = output
         self.requests = []
 
     def complete(self, request):
         self.requests.append(request)
+        if isinstance(self.output, dict) and set(self.output) == {"name", "input"}:
+            return ModelCompletion("fake", "fake-model", {}, tool_use=self.output)
         return ModelCompletion("fake", "fake-model", self.output)
 
 
@@ -140,18 +143,16 @@ class ModelReasonerTests(unittest.TestCase):
             "waiting_for": "CI" if wait_seconds else None,
         }
 
-    def plan_output(self, *steps, disposition="respond", **plan):
-        output = base_output(goal_id="goal-1", disposition=disposition)
-        output["plan_update"] = {
-            "operation": "install",
-            "plan": {"plan_id": "plan-1", "context_preconditions_json": "{}",
-                     "steps": list(steps), **plan},
-        }
-        return output
+    def plan_output(self, *steps, **plan):
+        return tool("update_plan", operation="install", plan={
+            "plan_id": "plan-1", "context_preconditions_json": "{}",
+            "steps": list(steps), **plan})
+
+    def plan_definition_schema(self):
+        return tool_schema("update_plan")["properties"]["plan"]["anyOf"][1]
 
     def plan_step_schema(self):
-        install = decision_schema()["properties"]["plan_update"]["anyOf"][1]
-        return install["properties"]["plan"]["properties"]["steps"]["items"]
+        return self.plan_definition_schema()["properties"]["steps"]["items"]
 
     def test_plan_update_is_parsed_as_durable_structured_intent(self) -> None:
         decision = ModelReasoner(
@@ -160,32 +161,32 @@ class ModelReasonerTests(unittest.TestCase):
         ).decide(self.context())
         update = decision.plan_update
         self.assertEqual(update.operation, PlanOperation.INSTALL)
-        self.assertEqual(decision.response, "A normal response.")
+        # A native step on its own (D-065): her words come at the turn's end.
+        self.assertTrue(decision.intermediate)
         step = update.plan.steps[0]
         self.assertEqual((step.wait_seconds, step.max_wait_seconds), (30, 600))
         self.assertIs(step.completion_conditions[0].equals, True)
         # Runtime-owned provenance: the Core binds it on installation.
         self.assertIsNone(update.plan.source_turn_id)
 
-    def test_resolution_carries_no_plan_and_travels_with_words_or_silence(self) -> None:
+    def test_resolution_carries_no_plan(self) -> None:
         for operation in ("resume", "accept", "finish", "cancel"):
-            for disposition in ("respond", "finish_silently"):
-                with self.subTest(operation=operation, disposition=disposition):
-                    output = base_output(goal_id="goal-1", disposition=disposition)
-                    output["plan_update"] = {"operation": operation}
-                    self.assertTrue(_schema_accepts(decision_schema(), output))
-                    decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(
-                        self.context())
-                    self.assertEqual(decision.plan_update.operation.value, operation)
-                    self.assertIsNone(decision.plan_update.plan)
+            with self.subTest(operation=operation):
+                arguments = {"operation": operation, "plan": None}
+                self.assertTrue(_schema_accepts(tool_schema("update_plan"), arguments))
+                decision = ModelReasoner(FakeModel(tool("update_plan", **arguments)),
+                                         "laws", "identity").decide(self.context())
+                self.assertEqual(decision.plan_update.operation.value, operation)
+                self.assertIsNone(decision.plan_update.plan)
 
-    def test_plan_update_cannot_accompany_a_call(self) -> None:
-        output = base_output(goal_id="goal-1", disposition="call_capability",
-                             call_id="call-9", capability_id="search_records",
-                             arguments_json="{}")
-        output["plan_update"] = {"operation": "resume"}
-        with self.assertRaisesRegex(DecisionValidationError, "response or silence"):
-            ModelReasoner(FakeModel(output), "laws", "identity").decide(self.context())
+    def test_a_plan_travels_exactly_with_an_install(self) -> None:
+        for arguments in ({"operation": "install", "plan": None},
+                          {"operation": "resume", "plan": self.plan_output(
+                              self.plan_step())["input"]["plan"]}):
+            with self.subTest(operation=arguments["operation"]), self.assertRaisesRegex(
+                    DecisionValidationError, "exactly when it installs"):
+                ModelReasoner(FakeModel(tool("update_plan", **arguments)),
+                              "laws", "identity").decide(self.context())
 
     def test_plan_step_schema_holds_the_execution_step_contract(self) -> None:
         schema = self.plan_step_schema()
@@ -261,13 +262,12 @@ class ModelReasonerTests(unittest.TestCase):
             ModelReasoner(FakeModel(self.plan_output(extra)), "laws", "identity").decide(context)
 
     def test_plan_schema_leaves_objective_and_source_turn_to_the_runtime(self) -> None:
-        install = decision_schema()["properties"]["plan_update"]["anyOf"][1]
-        plan = install["properties"]["plan"]
+        plan = self.plan_definition_schema()
         for runtime_owned in ("objective_source", "objective_summary", "source_turn_id",
                               "cursor", "status", "attention"):
             self.assertNotIn(runtime_owned, plan["properties"])
         restated = self.plan_output(self.plan_step(), objective_summary="investigate")
-        self.assertFalse(_schema_accepts(decision_schema(), restated))
+        self.assertFalse(_schema_accepts(tool_schema("update_plan"), restated["input"]))
         decision = ModelReasoner(FakeModel(self.plan_output(self.plan_step())),
                                  "laws", "identity").decide(self.context())
         self.assertIsNone(decision.plan_update.plan.objective_source)
@@ -286,7 +286,7 @@ class ModelReasonerTests(unittest.TestCase):
             with self.subTest(case=name):
                 output = self.plan_output(dict(self.plan_step(),
                                                completion_conditions=[condition]))
-                self.assertFalse(_schema_accepts(decision_schema(), output))
+                self.assertFalse(_schema_accepts(tool_schema("update_plan"), output["input"]))
                 if name != "condition with an extra field":
                     with self.assertRaises(DecisionValidationError):
                         ModelReasoner(FakeModel(output), "laws", "identity").decide(
@@ -302,9 +302,7 @@ class ModelReasonerTests(unittest.TestCase):
         def output(path, equals):
             step = dict(self.plan_step(), completion_conditions=[
                 {"path": path, "equals_json": equals, "negate": False}])
-            return dict(self.plan_output(step), action={
-                "type": "respond", "response": "Started; I will report back.",
-                "response_requires_goal_commit": False, "raised_mail_observations": []})
+            return self.plan_output(step)
 
         class Sequence:
             def __init__(self, *outputs):
@@ -313,9 +311,14 @@ class ModelReasonerTests(unittest.TestCase):
 
             def complete(self, request):
                 self.requests.append(request)
-                return ModelCompletion("fake", "fake-model", self.outputs.pop(0))
+                item = self.outputs.pop(0)
+                if set(item) == {"name", "input"}:
+                    return ModelCompletion("fake", "fake-model", {}, tool_use=item)
+                return ModelCompletion("fake", "fake-model", item)
 
-        model = Sequence(output("succeeded", '"succeeded"'), output("state", '"succeeded"'))
+        model = Sequence(tool("select_goal", goal_id="goal-1"),
+                         output("succeeded", '"succeeded"'), output("state", '"succeeded"'),
+                         base_output(response="Started; I will report back."))
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
@@ -327,10 +330,11 @@ class ModelReasonerTests(unittest.TestCase):
         outcome = CoreAgent(store, ModelReasoner(model, "laws", "identity"),
                             lambda call, state: None, (CAPABILITY,), clock=lambda: NOW,
                             plan_continuation=True).process(
-            thread, retention, 4, origin=CognitionOrigin.PERSON_TURN)
-        self.assertEqual(len(model.requests), 2)
-        second = "\n".join(message.content for message in model.requests[1].messages)
-        self.assertIn("plan condition path is unusable: 'succeeded'", second)
+            thread, retention, 6, origin=CognitionOrigin.PERSON_TURN)
+        self.assertEqual(len(model.requests), 4)
+        # The rejection answers the step in the same session.
+        self.assertIn("plan condition path is unusable: 'succeeded'",
+                      model.requests[2].tool_result)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         installed = store.load("goal-1").state.execution_plan
         self.assertEqual(installed.status, PlanStatus.RUNNING)
@@ -348,8 +352,7 @@ class ModelReasonerTests(unittest.TestCase):
             reasoner.decide(self.context())
 
     def test_the_schema_describes_the_path_grammar(self) -> None:
-        install = decision_schema()["properties"]["plan_update"]["anyOf"][1]
-        step = install["properties"]["plan"]["properties"]["steps"]["items"]["anyOf"][0]
+        step = self.plan_step_schema()["anyOf"][0]
         path = step["properties"]["completion_conditions"]["items"]["properties"]["path"]
         self.assertIn("state", path["description"])
         self.assertIn("values", path["description"])
@@ -371,12 +374,6 @@ class ModelReasonerTests(unittest.TestCase):
 
         head = "c" * 40
         raw = {
-            "goal_id": "goal-1",
-            "goal_update": None,
-            "memory_proposals": [],
-            "action": {"type": "respond", "response": "Watching the checks.",
-                       "response_requires_goal_commit": False, "raised_mail_observations": []},
-            "plan_update": {
                 "operation": "install",
                 "plan": {
                     "plan_id": "watch-and-record",
@@ -409,14 +406,14 @@ class ModelReasonerTests(unittest.TestCase):
                         },
                     ],
                 },
-            },
         }
-        # 1. The exported schema accepts it.
-        self.assertTrue(_schema_accepts(decision_schema(), raw))
+        # 1. The exported tool schema accepts it.
+        self.assertTrue(_schema_accepts(tool_schema("update_plan"), raw))
         # 2. The parser reads it.
         active = replace(goal(), context={"head": head})
         context = replace(self.context(active), capabilities=(CAPABILITY, CHECKS))
-        decision = ModelReasoner(FakeModel(raw), "laws", "identity").decide(context)
+        decision = ModelReasoner(FakeModel(tool("update_plan", **raw)),
+                                 "laws", "identity").decide(context)
         proposed = decision.plan_update.plan
         self.assertEqual([item.call.call_id for item in proposed.steps],
                          ["read-checks", "search-after"])
@@ -437,13 +434,16 @@ class ModelReasonerTests(unittest.TestCase):
             raise AssertionError("no planned step runs inside a Core turn")
 
         class Decisions:
+            steps = [AgentDecision(goal_id="goal-1"), decision,
+                     AgentDecision(response="Watching the checks.")]
+
             def decide(self, _context):
-                return decision
+                return self.steps.pop(0)
 
         thread = ConversationSnapshot("conversation-1", context.turns, 1, retention)
         outcome = CoreAgent(store, Decisions(), dispatch, (CAPABILITY, CHECKS),
                             clock=lambda: NOW, plan_continuation=True).process(
-            thread, retention, 3, origin=CognitionOrigin.PERSON_TURN)
+            thread, retention, 4, origin=CognitionOrigin.PERSON_TURN)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Watching the checks.")
         installed = store.load("goal-1").state.execution_plan
@@ -521,22 +521,20 @@ class ModelReasonerTests(unittest.TestCase):
         payload = json.loads(request.messages[-1].content)
         self.assertEqual(payload["terminal_checkpoint_reason"], "review_unavailable")
         properties = request.output_schema["properties"]
+        self.assertEqual(set(properties), {"action"})
         self.assertEqual(properties["action"]["properties"]["type"]["const"], "respond")
-        self.assertEqual(properties["goal_id"], {"type": "null"})
-        self.assertEqual(properties["goal_update"], {"type": "null"})
-        self.assertEqual(properties["memory_proposals"]["maxItems"], 0)
+        # Words only: no tool is offered on that step.
+        self.assertEqual(request.tools, ())
 
     def test_terminal_checkpoint_parser_rejects_work_even_if_provider_ignores_schema(self):
         context = replace(self.context(), response_only_reason="review_unavailable")
-        for output in (
-            base_output(disposition="call_capability", call_id="c2",
-                        capability_id="search_records", arguments_json="{}"),
-            base_output(response="Done", goal_update=goal_update()),
-            base_output(response="Done", goal_id="goal-1"),
-            base_output(response="Done", response_requires_goal_commit=True),
+        for output, refusal in (
+            (call_tool(call_id="c2"), "not offered"),
+            (tool("update_goal", **goal_update()), "not offered"),
+            (base_output(disposition="finish_silently"), "response only"),
         ):
             with self.subTest(output=output):
-                with self.assertRaisesRegex(DecisionValidationError, "response only"):
+                with self.assertRaisesRegex(DecisionValidationError, refusal):
                     ModelReasoner(FakeModel(output), "laws", "identity").decide(context)
 
     def test_silent_completion_is_a_general_core_decision(self) -> None:
@@ -583,24 +581,18 @@ class ModelReasonerTests(unittest.TestCase):
                 "source_references": ["turn:turn-1"],
             }],
         )
-        decision = ModelReasoner(FakeModel(base_output(
-            response="Verified.", response_requires_goal_commit=True,
-            goal_update=update,
-        )), "laws", "identity").decide(self.context())
+        decision = ModelReasoner(FakeModel(tool("update_goal", **update)),
+                                 "laws", "identity").decide(self.context())
         self.assertEqual(decision.goal_proposal.kind, GoalMutationKind.REQUEST_COMPLETION)
         self.assertEqual(
             decision.goal_proposal.new_evidence[0].source_references,
             ("turn:turn-1",),
         )
-        self.assertTrue(decision.response_requires_goal_commit)
+        self.assertTrue(decision.intermediate)
         self.assertFalse(hasattr(decision, "goal"))
 
     def test_language_blind_capability_call_remains_one_core_action(self) -> None:
-        output = base_output(
-            disposition="call_capability", response=None,
-            call_id="call-1", capability_id="search_records",
-            arguments_json=json.dumps({"record_type": "note"}),
-        )
+        output = call_tool(arguments_json=json.dumps({"record_type": "note"}))
         decision = ModelReasoner(FakeModel(output), "laws", "identity").decide(
             self.context()
         )
@@ -609,9 +601,7 @@ class ModelReasonerTests(unittest.TestCase):
 
     def test_notebook_content_is_transient_but_identity_is_durable(self) -> None:
         finding = "The complete finding must live only in the notebook."
-        output = base_output(
-            disposition="call_capability",
-            call_id="call-1",
+        output = call_tool(
             capability_id="record_research_entry",
             arguments_json=json.dumps({
                 "entry_id": "entry-1",
@@ -637,25 +627,22 @@ class ModelReasonerTests(unittest.TestCase):
 
     def test_exact_action_approval_proposal_stays_bound_to_same_call(self) -> None:
         arguments = '{"mailbox_id":"INBOX","uid_validity":"777","uid":"2"}'
-        output = base_output(
-            disposition="call_capability",
-            response=None,
-            call_id="call-1",
+        output = call_tool(
             capability_id="move_mail_message_to_trash",
             arguments_json=arguments,
             approval_id="approval-1",
-            approval_proposal={
-                "approval_id": "approval-1",
-                "capability_id": "move_mail_message_to_trash",
-                "arguments_json": arguments,
-                "source_reference": "turn:turn-1",
-            },
+            approval_source_reference="turn:turn-1",
         )
         decision = ModelReasoner(
             FakeModel(output), "laws", "identity"
         ).decide(self.context())
         self.assertEqual(decision.approval_proposal.approval_id, "approval-1")
+        self.assertEqual(decision.approval_proposal.source_reference, "turn:turn-1")
+        # The approval covers exactly the call it was proposed with.
         self.assertTrue(decision.approval_proposal.scope.matches(decision.call))
+        with self.assertRaisesRegex(DecisionValidationError, "approval_id"):
+            ModelReasoner(FakeModel(call_tool(approval_source_reference="turn:turn-1")),
+                          "laws", "identity").decide(self.context())
 
     def test_the_protocol_states_how_a_memory_identifier_may_be_used(self) -> None:
         """A reused identifier ended a live conversation mid-sentence.
@@ -768,7 +755,8 @@ class ModelReasonerTests(unittest.TestCase):
 
         self.assertIn("available_history_evidence_ids", PROTOCOL_INSTRUCTIONS)
         self.assertIn("never\ninvent an identifier", PROTOCOL_INSTRUCTIONS)
-        description = json.dumps(decision_schema())
+        from alx.core.model_reasoner import native_tools
+        description = json.dumps(native_tools())
         self.assertIn("Never invent", description)
 
     def test_a_future_call_id_is_never_offered(self) -> None:
@@ -796,7 +784,7 @@ class ModelReasonerTests(unittest.TestCase):
             self.assertIn(stated, PROTOCOL_INSTRUCTIONS)
 
     def test_the_evidence_schema_states_the_same_rule(self) -> None:
-        description = json.dumps(decision_schema())
+        description = json.dumps(tool_schema("update_goal"))
         self.assertIn("an attempt that has not run yet is not a source", description)
 
     def test_the_protocol_states_when_a_queue_must_continue_this_turn(self) -> None:
@@ -830,7 +818,7 @@ class ModelReasonerTests(unittest.TestCase):
 
     def test_supersession_is_expressible_in_the_decision_schema(self) -> None:
         """The guidance names a field the model can actually set."""
-        variants = decision_schema()["properties"]["memory_proposals"]["items"]["anyOf"]
+        variants = tool_schema("remember")["properties"]["memories"]["items"]["anyOf"]
         for variant in variants:
             self.assertIn("supersedes_memory_id", variant["properties"])
 
@@ -904,7 +892,7 @@ class ModelReasonerTests(unittest.TestCase):
         )
         self.assertIn("These exact post-reply\nactions have standing authority", protocol)
         self.assertIn(
-            "If active_goal is null and you\nchoose an effectful call, include a create goal",
+            "when active_goal is null, select the unfinished goal the\ncall continues or create one",
             protocol,
         )
 
@@ -916,18 +904,18 @@ class ModelReasonerTests(unittest.TestCase):
             "supersedes_memory_id": None, "person_id": None,
             "meaning": "I became more willing to challenge weak assumptions.",
         }
-        decision = ModelReasoner(FakeModel(base_output(memory_proposals=[proposal])),
+        decision = ModelReasoner(FakeModel(tool("remember", memories=[proposal])),
                                  "laws", "identity").decide(self.context())
         self.assertEqual(decision.memory_proposals[0].kind,
                          MemoryKind.AUTOBIOGRAPHICAL)
         self.assertEqual(decision.memory_proposals[0].formed_at, NOW)
 
     def test_schema_requires_sourced_evidence_and_has_no_model_completion_flag(self) -> None:
-        schema = decision_schema()
-        update = schema["properties"]["goal_update"]["anyOf"][1]
+        from alx.core.model_reasoner import native_tools
+        update = tool_schema("update_goal")
         evidence = update["properties"]["new_evidence"]["items"]
         self.assertIn("source_references", evidence["required"])
-        encoded = json.dumps(schema)
+        encoded = json.dumps([decision_schema(), native_tools()])
         self.assertNotIn('"complete"', encoded)
         self.assertNotIn("respond_completed", encoded)
 
@@ -937,10 +925,7 @@ class ModelReasonerTests(unittest.TestCase):
             item for item in variants
             if item["properties"]["type"].get("const") == "respond"
         )
-        capability = next(
-            item for item in variants
-            if item["properties"]["type"].get("const") == "call_capability"
-        )
+        capability = tool_schema("call_capability")
         self.assertNotIn("call_id", response["properties"])
         self.assertNotIn("response", capability["properties"])
         self.assertFalse(response["additionalProperties"])

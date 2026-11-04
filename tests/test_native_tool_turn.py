@@ -1,10 +1,14 @@
-"""D-065: native calls run through the Core's own step loop, in one paused session.
+"""D-065: every step of a Core turn is a native tool, run through the Core's own loop.
 
-The fake transport pauses twice on native calls and then answers. Each call is
-dispatched by `CoreAgent.process` exactly as a decision's call would be, and
-the transport is continued with the attempt the Core recorded, not with
-anything the transport made up. A refused native call is continued with the
-refusal.
+The fake transport pauses on each scripted native step and then answers. Each
+step is handled by `CoreAgent.process` exactly as any decision would be, and
+the transport is continued with what the Core recorded, not with anything the
+transport made up: an attempt, a selected goal, a goal mutation's outcome,
+stored memories, or a refusal and its reason.
+
+Stage 3 moved goal selection and updates, approvals, plans and memories into
+native tools and deleted the decision's own call, selection, retrieval and
+write fields (Law 0): a turn's final decision is words or silence only.
 """
 
 from __future__ import annotations
@@ -21,35 +25,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.contracts import (  # noqa: E402
     CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityDefinition,
     CapabilityResult, CapabilityResultState, ConversationOrigin, ConversationSnapshot,
-    ConversationTurn, GoalState, GoalSummary, ModelCompletion, Objective, ReasoningContext,
-    SideEffect, StructuredSchema, SuccessCriterion, ValueKind,
+    ConversationTurn, DecisionValidationError, GoalState, GoalStatus, GoalSummary,
+    ModelCompletion, Objective, ReasoningContext, SideEffect, StructuredSchema,
+    SuccessCriterion, ValueKind,
 )
 from alx.core.loop import CoreAgent, CoreState  # noqa: E402
-from alx.core.model_reasoner import ModelReasoner  # noqa: E402
+from alx.core.model_reasoner import (  # noqa: E402
+    ModelReasoner, _NativePending, decision_schema, native_tools,
+)
 from alx.goals import SQLiteGoalStore  # noqa: E402
 
-from tests.test_model_reasoner import base_output  # noqa: E402
+from tests.test_model_reasoner import base_output, goal_update  # noqa: E402
 
 NOW = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=1)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
 READ = CapabilityDefinition("read_note", "Read a note", SCHEMA, SCHEMA, SideEffect.NONE)
+CLEAN = CapabilityDefinition("clean_branch", "Delete a branch", SCHEMA, SCHEMA,
+                             SideEffect.EFFECTFUL)
+
+
+def tool(name: str, **arguments) -> dict:
+    return {"name": name, "input": arguments}
 
 
 def native(call_id: str, capability_id: str = "read_note") -> dict:
-    return {"call_id": call_id, "capability_id": capability_id,
-            "arguments_json": json.dumps({"id": call_id}), "approval_id": None}
+    return tool("call_capability", call_id=call_id, capability_id=capability_id,
+                arguments_json=json.dumps({"id": call_id}), approval_id=None,
+                approval_source_reference=None)
 
 
 class PausingTransport:
-    """Pauses on each scripted native call, then answers with the last output."""
+    """Pauses on each scripted native step, then answers with the last output."""
 
     def __init__(self, script: list, final: dict) -> None:
         self.script = list(script)
         self.final = final
         self.requests = []
         self.abandoned = 0
-        self.native_tools_enabled = True
 
     def complete(self, request):
         self.requests.append(request)
@@ -60,11 +73,18 @@ class PausingTransport:
     def abandon_session(self) -> None:
         self.abandoned += 1
 
+    def results(self) -> list:
+        return [json.loads(item.tool_result) for item in self.requests[1:]]
 
-def conversation() -> ConversationSnapshot:
-    turn = ConversationTurn("c1", "t1", ConversationOrigin.TYPED, "What do my notes say?",
-                            NOW, "friedl")
+
+def conversation(text: str = "What do my notes say?") -> ConversationSnapshot:
+    turn = ConversationTurn("c1", "t1", ConversationOrigin.TYPED, text, NOW, "friedl")
     return ConversationSnapshot("c1", (turn,), 1, RETENTION)
+
+
+def goal(goal_id: str = "g1") -> GoalState:
+    return GoalState(goal_id, Objective("turn:t1", "Tidy the branches"),
+                     (SuccessCriterion("clean", "the old branch is gone"),))
 
 
 class NativeTurnTests(unittest.TestCase):
@@ -82,10 +102,11 @@ class NativeTurnTests(unittest.TestCase):
             CapabilityResult(call.call_id, call.capability_id, CapabilityResultState.SUCCEEDED,
                              {"text": f"note {call.call_id}"}))
 
-    def run_turn(self, transport):
+    def run_turn(self, transport, budget=8, text="What do my notes say?"):
         core = CoreAgent(self.store, ModelReasoner(transport, "laws", "identity"),
-                         self.dispatch, (READ,), clock=lambda: NOW)
-        return core.process(conversation(), RETENTION, 8)
+                         self.dispatch, (READ, CLEAN), clock=lambda: NOW,
+                         identifier_factory=lambda: "g-new")
+        return core.process(conversation(text), RETENTION, budget)
 
     def test_two_native_reads_and_an_answer_in_one_paused_session(self) -> None:
         transport = PausingTransport([native("n1"), native("n2")],
@@ -94,13 +115,15 @@ class NativeTurnTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Both notes read.")
         self.assertEqual(self.dispatched, ["n1", "n2"])
-        first, second, third = transport.requests
-        self.assertTrue(first.native_tools)
+        first = transport.requests[0]
+        self.assertEqual([item["name"] for item in first.tools],
+                         [item["name"] for item in native_tools()])
         self.assertIsNone(first.tool_result)
         # Each continuation carries the attempt the Core recorded for that call.
-        self.assertEqual(json.loads(second.tool_result)["call_id"], "n1")
-        self.assertEqual(json.loads(second.tool_result)["result_values"], {"text": "note n1"})
-        self.assertEqual(json.loads(third.tool_result)["call_id"], "n2")
+        first_result, second_result = transport.results()
+        self.assertEqual(first_result["call_id"], "n1")
+        self.assertEqual(first_result["result_values"], {"text": "note n1"})
+        self.assertEqual(second_result["call_id"], "n2")
         self.assertEqual(transport.abandoned, 0)
 
     def test_a_refused_native_call_continues_with_the_refusal(self) -> None:
@@ -109,31 +132,162 @@ class NativeTurnTests(unittest.TestCase):
         outcome = self.run_turn(transport)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(self.dispatched, [])
-        self.assertIn("refused", json.loads(transport.requests[1].tool_result))
+        self.assertIn("refused", transport.results()[0])
 
     def test_a_reused_call_id_is_answered_with_its_refusal_not_the_old_result(self) -> None:
         """Review of #197: the earlier success must not answer the new call."""
-        second = {**native("n1"), "arguments_json": json.dumps({"id": "other"})}
+        second = native("n1")
+        second["input"] = {**second["input"], "arguments_json": json.dumps({"id": "other"})}
         transport = PausingTransport([native("n1"), second], base_output(response="ok"))
         self.run_turn(transport)
         self.assertEqual(self.dispatched, ["n1"])
-        self.assertIn("refused", json.loads(transport.requests[2].tool_result))
+        self.assertIn("refused", transport.results()[1])
 
     def test_a_turn_that_starts_fresh_abandons_a_stale_session(self) -> None:
         transport = PausingTransport([native("n1")], base_output(response="done"))
         reasoner = ModelReasoner(transport, "laws", "identity")
         core = CoreAgent(self.store, reasoner, self.dispatch, (READ,), clock=lambda: NOW)
         core.process(conversation(), RETENTION, 8)
-        # A paused call from an earlier turn whose outcome this context lacks.
-        reasoner._native_pending = ("gone", None, 0, False)
+        # A step paused in an earlier turn: this turn never continues it.
+        reasoner._native_pending = _NativePending(
+            "call_capability", "gone", "an-earlier-turn", 0, None, 0, 0, 0, frozenset(), False)
         transport.script = []
         core.process(conversation(), RETENTION, 8)
         self.assertEqual(transport.abandoned, 1)
         self.assertIsNone(transport.requests[-1].tool_result)
 
+    def test_selecting_the_goal_after_a_refused_call_lets_the_call_run(self) -> None:
+        """2026-11-04: an effectful call before selecting her goal was refused,
+        she could only retry it, and the person turn ended without a word.
+        Selecting is now a step of the same session, and the call then runs."""
+        self.store.create(goal(), "c1", RETENTION)
+        call = tool("call_capability", call_id="clean-1", capability_id="clean_branch",
+                    arguments_json="{}", approval_id=None, approval_source_reference=None)
+        retry = {**call, "input": {**call["input"], "call_id": "clean-2"}}
+        transport = PausingTransport(
+            [call, tool("select_goal", goal_id="g1"), retry],
+            base_output(response="The old branch is gone."))
+        outcome = self.run_turn(transport, text="Clean up the old branch.")
+        self.assertEqual((outcome.state, outcome.response),
+                         (CoreState.RESPONDED, "The old branch is gone."))
+        self.assertEqual(self.dispatched, ["clean-2"])
+        refused, selected, ran = transport.results()
+        self.assertEqual(refused["refused"]["reason"], "active_goal_required")
+        self.assertEqual(selected["selected_goal"]["goal_id"], "g1")
+        self.assertEqual(selected["selected_goal"]["status"], "active")
+        self.assertEqual(ran["call_id"], "clean-2")
+        self.assertEqual(transport.abandoned, 0)
+
+    def test_the_same_refusal_twice_still_answers_the_person(self) -> None:
+        call = tool("call_capability", call_id="clean-1", capability_id="clean_branch",
+                    arguments_json="{}", approval_id=None, approval_source_reference=None)
+        retry = {**call, "input": {**call["input"], "call_id": "clean-2"}}
+        transport = PausingTransport([call, retry],
+                                     base_output(response="I need the goal for that first."))
+        outcome = self.run_turn(transport, text="Clean up the old branch.")
+        self.assertEqual((outcome.state, outcome.reason),
+                         (CoreState.RESPONDED, "active_goal_required"))
+        self.assertEqual(outcome.response, "I need the goal for that first.")
+        # The words come from a step offered no tools.
+        self.assertEqual(transport.requests[-1].tools, ())
+        self.assertEqual(self.dispatched, [])
+
+    def test_a_goal_is_created_then_worked_under_in_the_same_session(self) -> None:
+        create = tool("update_goal", **goal_update(
+            "create", objective_summary="Tidy the branches",
+            success_criteria=[{"id": "clean", "description": "the old branch is gone"}]))
+        call = tool("call_capability", call_id="clean-1", capability_id="clean_branch",
+                    arguments_json="{}", approval_id=None, approval_source_reference=None)
+        transport = PausingTransport([create, call], base_output(response="Done."))
+        outcome = self.run_turn(transport, text="Clean up the old branch.")
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        created, ran = transport.results()
+        self.assertEqual(created["goal_updated"]["goal_id"], "g-new")
+        self.assertEqual(created["goal_updated"]["status"], "active")
+        self.assertEqual(ran["call_id"], "clean-1")
+        self.assertEqual(self.store.load("g-new").state.attempts[-1].call.call_id, "clean-1")
+
+    def test_a_refused_goal_update_is_answered_and_changes_nothing(self) -> None:
+        update = tool("update_goal", **goal_update("request_completion"))
+        transport = PausingTransport([update], base_output(response="Nothing to close."))
+        outcome = self.run_turn(transport)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        (refused,) = transport.results()
+        self.assertEqual(refused["refused"]["reason"], "goal_missing")
+        self.assertEqual(self.store.list_goals(), ())
+
+    def test_a_malformed_step_is_answered_with_its_rejection_in_the_same_session(self) -> None:
+        broken = tool("call_capability", call_id="n1", capability_id="read_note",
+                      arguments_json="not json", approval_id=None,
+                      approval_source_reference=None)
+        transport = PausingTransport([broken, native("n2")], base_output(response="ok"))
+        outcome = self.run_turn(transport)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        rejected, ran = transport.results()
+        self.assertEqual(rejected["refused"]["reason"], "decision_rejected")
+        self.assertEqual(ran["call_id"], "n2")
+        self.assertEqual(transport.abandoned, 0)
+
+    def test_memories_formed_in_a_step_are_reported_stored(self) -> None:
+        from alx.memories import SQLiteMemoryStore
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        memories = SQLiteMemoryStore(Path(directory.name) / "memories.sqlite3")
+        self.addCleanup(memories.close)
+        remember = tool("remember", memories=[{
+            "id": "m-1", "kind": "factual", "content": "Friedl keeps notes in the notebook.",
+            "source_references": ["turn:t1"], "supersedes_memory_id": None,
+            "person_id": None, "meaning": None,
+        }])
+        transport = PausingTransport([remember], base_output(response="Noted."))
+        core = CoreAgent(self.store, ModelReasoner(transport, "laws", "identity"),
+                         self.dispatch, (READ,), clock=lambda: NOW, memory_store=memories)
+        outcome = core.process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(transport.results()[0], {"stored_memories": ["m-1"]})
+        self.assertEqual(memories.load("m-1").current.content,
+                         "Friedl keeps notes in the notebook.")
+
+
+class OneProductionPathTests(unittest.TestCase):
+    """Law 0: each outcome the decision used to carry now has one native path."""
+
+    def test_the_final_decision_is_words_or_silence_only(self) -> None:
+        schema = decision_schema()
+        self.assertEqual(set(schema["properties"]), {"action"})
+        kinds = {item["properties"]["type"]["const"]
+                 for item in schema["properties"]["action"]["anyOf"]}
+        self.assertEqual(kinds, {"respond", "finish_silently"})
+        rendered = json.dumps(schema)
+        for removed in ("call_capability", "select_goal", "retrieve_memories",
+                        "goal_update", "plan_update", "memory_proposals",
+                        "approval_proposal", "response_requires_goal_commit"):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, rendered)
+
+    def test_the_parser_refuses_an_old_decision_action(self) -> None:
+        context = ReasoningContext(None, conversation().turns, (READ,), conversation_id="c1")
+        for action in (
+            {"type": "call_capability", "call_id": "n1", "capability_id": "read_note",
+             "arguments_json": "{}", "approval_id": None, "approval_proposal": None},
+            {"type": "select_goal"},
+            {"type": "retrieve_memories", "memory_query_id": "q1"},
+        ):
+            with self.subTest(action=action["type"]):
+                transport = PausingTransport([], {"action": action})
+                with self.assertRaisesRegex(DecisionValidationError, "unknown decision action"):
+                    ModelReasoner(transport, "laws", "identity").decide(context)
+
+    def test_each_step_kind_has_exactly_one_tool(self) -> None:
+        names = [item["name"] for item in native_tools()]
+        self.assertEqual(sorted(names), sorted(set(names)))
+        self.assertEqual(set(names), {"call_capability", "select_goal", "update_goal",
+                                      "update_plan", "retrieve_memories", "remember"})
+
 
 class ContinuationBoundaryTests(unittest.TestCase):
-    """Review of #197: a session is continued only from its own turn."""
+    """Review of #197: a session is continued only by the next step of its own turn."""
 
     def setUp(self) -> None:
         call = CapabilityCall("n1", "read_note", {}, None)
@@ -144,12 +298,15 @@ class ContinuationBoundaryTests(unittest.TestCase):
                               (SuccessCriterion("read", "read"),), attempts=(recorded,))
         self.transport = PausingTransport([], base_output(response="done"))
         self.reasoner = ModelReasoner(self.transport, "laws", "identity")
-        # Paused on n1, whose attempt the goal holds from some turn.
-        self.reasoner._native_pending = ("n1", "g1", 0, False)
+        # Paused on n1 at step 0 of turn "turn-a".
+        self.reasoner._native_pending = _NativePending(
+            "call_capability", "n1", "turn-a", 0, "g1", 0, 0, 0, frozenset(), False)
 
     def context(self, **changes) -> ReasoningContext:
-        return ReasoningContext(self.goal, conversation().turns, (READ,), conversation_id="c1",
-                                unfinished_goals=(GoalSummary.of(self.goal),), **changes)
+        values = dict(conversation_id="c1", unfinished_goals=(GoalSummary.of(self.goal),),
+                      turn_key="turn-a", step_index=1)
+        values.update(changes)
+        return ReasoningContext(self.goal, conversation().turns, (READ,), **values)
 
     def test_an_attempt_from_an_earlier_turn_does_not_continue_the_session(self) -> None:
         self.assertFalse(self.reasoner.can_continue(self.context()))
@@ -162,13 +319,27 @@ class ContinuationBoundaryTests(unittest.TestCase):
         self.reasoner.decide(self.context(turn_call_ids=("n1",)))
         self.assertEqual(json.loads(self.transport.requests[-1].tool_result)["call_id"], "n1")
 
+    def test_another_turn_or_a_later_step_does_not(self) -> None:
+        for changes in ({"turn_key": "turn-b"}, {"step_index": 2}, {"turn_key": None}):
+            with self.subTest(changes=changes):
+                self.assertFalse(self.reasoner.can_continue(
+                    self.context(turn_call_ids=("n1",), **changes)))
+
     def test_a_words_only_step_starts_fresh_instead_of_failing(self) -> None:
-        self.transport.final = {**base_output(response="Sorry."), "goal_id": None}
         decision = self.reasoner.decide(self.context(turn_call_ids=("n1",),
                                                      response_only_reason="blocked"))
-        self.assertEqual(decision.response, "Sorry.")
-        self.assertFalse(self.transport.requests[-1].native_tools)
+        self.assertEqual(decision.response, "done")
+        self.assertEqual(self.transport.requests[-1].tools, ())
         self.assertEqual(self.transport.abandoned, 1)
+
+    def test_a_selected_goal_answers_a_select_step(self) -> None:
+        self.reasoner._native_pending = _NativePending(
+            "select_goal", "g1", "turn-a", 0, None, 0, 0, 0, frozenset(), False)
+        self.reasoner.decide(self.context())
+        answer = json.loads(self.transport.requests[-1].tool_result)
+        self.assertEqual(answer["selected_goal"]["goal_id"], "g1")
+        self.assertIn("attempt:n1", answer["selected_goal"]["goal_memory_sources"])
+        self.assertIs(GoalStatus(answer["selected_goal"]["status"]), GoalStatus.ACTIVE)
 
 
 if __name__ == "__main__":

@@ -109,11 +109,15 @@ class SelectionContinuationTests(Fixture):
 
     def test_reselecting_the_same_goal_does_not_buy_an_extra_step(self):
         self.store.create(active_goal(), "conversation-1", RETENTION)
-        reasoner = Queued(self.selection(), self.selection())
+        # Re-selecting the selected goal with nothing new is refused once
+        # (D-065: she is told); asking again ends the turn with words.
+        reasoner = Queued(self.selection(), self.selection(memory=False),
+                          self.selection(memory=False),
+                          AgentDecision(response="That one is already open."))
         result = self.core(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(result.state, CoreState.CHECKPOINTED)
+        self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual(result.reason, "goal_selection_redundant")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 4)
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
 
     def test_prior_successful_effect_is_not_redispatched(self):

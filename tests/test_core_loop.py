@@ -163,12 +163,13 @@ class CategoryARecoveryTests(unittest.TestCase):
             AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
             AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
             AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
-            AgentDecision(response="unreachable"),
+            AgentDecision(response="I could not run that again."),
             selects="goal-1",
         )
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "call_id_reused")
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "call_id_reused")
         self.assertEqual([item.call_id for item in dispatched], ["call-1"])
 
     def test_a_rejected_call_id_leaves_no_state_or_tool_effect(self) -> None:
@@ -215,12 +216,14 @@ class CategoryARecoveryTests(unittest.TestCase):
             AgentDecision(memory_query=query),
             AgentDecision(memory_query=query),
             AgentDecision(memory_query=query),
-            AgentDecision(response="unreachable"),
+            AgentDecision(response="I could not look that up."),
             selects="goal-1",
         )
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        # Stopped, and the person is told rather than left in silence.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "memory_query_id_reused")
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "memory_query_id_reused")
 
     def test_an_invalid_memory_proposal_is_corrected(self) -> None:
         """4: the ungrounded proposal is dropped, a valid turn continues."""
@@ -251,12 +254,13 @@ class CategoryARecoveryTests(unittest.TestCase):
         reasoner = Queued(
             AgentDecision(response="One.", memory_proposals=(ungrounded,)),
             AgentDecision(response="Two.", memory_proposals=(ungrounded,)),
-            AgentDecision(response="unreachable"),
+            AgentDecision(response="I could not keep that."),
             selects="goal-1",
         )
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "memory_proposal_invalid")
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "memory_proposal_invalid")
 
     def test_a_memory_cannot_cite_an_attempt_that_never_ran(self) -> None:
         """Durable memory must not record something that never happened.
@@ -370,12 +374,13 @@ class CategoryARecoveryTests(unittest.TestCase):
                     "appr-mismatch-2", ApprovalScope("remove_item", {}), "turn:turn-1",
                 ),
             ),
-            AgentDecision(response="unreachable"),
+            AgentDecision(response="I could not record that approval."),
             selects="goal-1",
         )
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 8)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "approval_call_id_mismatch")
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "approval_call_id_mismatch")
 
     def test_the_step_budget_still_bounds_corrections(self) -> None:
         """6: a correction is a step, and the budget still ends the turn."""
@@ -1252,16 +1257,19 @@ class CoreTests(unittest.TestCase):
         reasoner = Queued(
             AgentDecision(call=call),
             # The refusal returns to her once with its reason; repeating the
-            # same impossible call ends the turn.
+            # same impossible call ends the turn, with one response-only step
+            # so the person is told (2026-11-04: it ended in silence).
             AgentDecision(call=CapabilityCall("call-2", "change", {})),
-            AssertionError("a third paid decision occurred"),
+            AgentDecision(response="I need a goal for that first."),
+            AssertionError("a further paid decision occurred"),
         )
         agent = CoreAgent(self.store, reasoner, dispatch, (effectful,), clock=lambda: NOW)
         outcome = agent.process(conversation(), RETENTION, 25)
         self.assertEqual(dispatched, [], "nothing may act without an active goal")
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "active_goal_required")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "active_goal_required")
         self.assertEqual(
             reasoner.contexts[1].refused_calls[0]["reason"], "active_goal_required",
         )
@@ -1334,11 +1342,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(reasoner.contexts[1].transient_attempts, (attempt,))
 
     def test_provider_validation_error_gets_one_correction_and_no_more(self) -> None:
-        # The rejection is new evidence, so she may correct it once. A second
-        # rejection buys no further planning: a person hears one response-only
-        # step, and nothing is ever asked a fourth time.
+        # The rejection is new evidence, so she may correct it. The same
+        # rejection again buys no further planning: a person hears one
+        # response-only step, and nothing is ever asked a fourth time.
         reasoner = Queued(DecisionValidationError("malformed"),
-                          DecisionValidationError("malformed again"),
+                          DecisionValidationError("malformed"),
                           AgentDecision(response="I could not do that."),
                           AssertionError("a further attempt occurred"))
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 6)

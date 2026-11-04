@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -56,13 +56,19 @@ from alx.contracts import (
 
 # Every conversation sends the same stable prefix, so they share one cache
 # rather than each warming a separate one.
-CACHE_KEY = "alx-core-v3"
+CACHE_KEY = "alx-core-v4"
 
 PROTOCOL_INSTRUCTIONS = """You are the single authoritative AL/X reasoning Core.
-Interpret the continuous conversation and the optional active goal. Choose either
-one authoritative response, one silent completion, one reusable primitive capability
-call, or one memory retrieval. A response or a silent completion may also carry one
-plan_update for the goal it works under. Install a plan only when the sequence of
+Interpret the continuous conversation and the optional active goal. You act through
+your tools, one step after another, as many as the work needs: call_capability calls
+a capability from the catalogue, select_goal works under a goal and shows its full
+state, update_goal proposes a goal mutation or creates a goal, update_plan installs or
+answers an execution plan, retrieve_memories retrieves memories, and remember forms
+them. Each tool's result says what the runtime did with the step, and a refused step
+returns the reason. The context below is what you were given at the start of the turn;
+it is not shown again, so what a step changes reaches you in that step's result. End
+the turn with one decision: one authoritative response or one silent completion.
+Install a plan only when the sequence of
 exact capability calls and its objective preconditions are already decided: a
 background executor then runs those steps without asking you again, and you stay
 available meanwhile. Once the remaining calls are decided, prefer one plan to calling
@@ -77,8 +83,8 @@ time. Each is bound to that goal as it is now: if the goal has changed by the ti
 step runs, or the mutation is refused or fails, the goal is left untouched and the plan
 returns to you. Leave out any goal whose mutation is not clear. A plan never mutates
 the goal it belongs to. Goal mutations at the start of a plan are applied at once, and
-the plan comes back to you within the same turn: words sent with the install are not
-delivered, so install it silently and give your one reply when it comes back. Each capability's result says whether
+the plan comes back to you within the same turn, in update_plan's result: answer its
+attention there before you give your one reply. Each capability's result says whether
 it succeeded, is still pending, failed, is temporarily unavailable, or needs your
 judgment; completion_conditions add exact checks on a successful result. Only a
 capability marked plan_observation may wait: give that step wait_seconds and
@@ -86,23 +92,24 @@ max_wait_seconds, and start an external operation once before observing it in a
 separate step. The plan returns to you with an attention on failure, judgment,
 ambiguity, a changed precondition or approval, a wait that outlasts its bound, a step
 marked wake_core_on_completion, and when its last step is done. A response alone
-leaves that attention waiting for you. Answer the attention you were shown: resume
-runs the current step, again if it already ran; accept takes the current step's result
-as done and runs on from the next; finish says the plan's work is done; cancel stops
-it. Or install a replacement. Long-running coding is always a plan step: whenever
+leaves that attention waiting for you. Answer the attention you were shown with
+update_plan: resume runs the current step, again if it already ran; accept takes the
+current step's result as done and runs on from the next; finish says the plan's work
+is done; cancel stops it. Or install a replacement. A finish or cancel takes effect
+with the words or silence that end your turn, and those words go with it. Long-running coding is always a plan step: whenever
 plans can run, a direct run_coding_task call is refused as
 coding_requires_execution_plan, so install a plan containing it instead.
 A silent completion means you judge that no spoken or
 conversational response is useful; it is your semantic decision, never a transport or
 capability rule. Ordinary conversation does not require a goal update. When useful, propose
-a goal mutation separately; the runtime, not you, decides whether it becomes durable
-truth. Request completion rather than authoring completed state. Every proposed item
+a goal mutation with update_goal; the runtime, not you, decides whether it becomes
+durable truth, and its result tells you. Request completion rather than authoring completed state. Every proposed item
 of evidence must cite one or more available durable source references exactly as
 supplied. Evidence records what has already happened, so an attempt is citable
 only once it has actually run: available_memory_sources lists exactly those, and
 a call you are about to make, one still pending, or one refused before it ran is
-not among them. A call you intend to make becomes citable
-once its result is in your context, which is a later step. An evidence item's supports field lists success criterion identifiers
+not among them. A call you make becomes citable once its result
+has come back, as attempt:<call_id>. An evidence item's supports field lists success criterion identifiers
 only, taken from the active goal's success_criteria or from the criteria created
 in the same mutation; it is not for decision, correction, or progress record
 identifiers, and evidence supporting no criterion must leave it empty. A decision,
@@ -123,8 +130,8 @@ attempts in an item that supports a criterion, and record failures in a separate
 that supports none. Progress, decision and correction records do not carry this: they describe
 what happened, while evidence is what a criterion rests on.
 Include those evidence items in the same goal mutation as the request_completion, in
-new_evidence. That is one decision, so a criterion proved by a call whose result you
-already have needs no further step: record the evidence and request completion
+new_evidence. That is one update_goal step, so a criterion proved by a call whose
+result you already have needs nothing more: record the evidence and request completion
 together.
 The capability catalogue you are shown is the authoritative namespace of what you
 can call on this step. Its ids are exact strings: call one by the id exactly as
@@ -141,9 +148,9 @@ there, say that about the thing, not about the capability. Never substitute an
 account of an unavailable capability for one of those reasons.
 You may propose one exact action approval only
 when the latest retained person turn explicitly authorizes that same consequential
-capability call; cite that turn exactly. The proposal's approval_id must be the
-same identifier the call carries, and its capability_id and arguments_json must
-match the call exactly, since the approval authorizes that one action alone.
+capability call. Make that call with a fresh approval_id and with
+approval_source_reference citing that turn exactly, as turn:<turn_id>. The approval
+covers that one call exactly as you make it, and nothing else.
 An approval in the goal's approvals list carries expires_at. Past that moment it
 authorises nothing, whatever its lifecycle still says, and a call citing it is
 refused. An action you were authorised for earlier but have not yet carried out
@@ -153,11 +160,10 @@ A call_id names one capability call and an approval_id names one approval,
 each permanently. Every new call takes a fresh call_id and every new approval
 proposal takes a fresh approval_id, including a call that retries something
 that was just refused: reusing an identifier already in this goal's attempts
-or approvals is refused and nothing happens. When a decision is rejected,
+or approvals is refused and nothing happens. When a step is rejected,
 correct the field the rejection names and keep the rest; repeating the same
-decision unchanged, or retrying under an identifier that was itself rejected,
-is refused again. A response may depend on a goal commit only when
-the response would become materially false or unsafe if that proposal were rejected.
+step unchanged, or retrying under an identifier that was itself rejected,
+is refused again, and the same rejection twice ends the turn.
 Approval fields apply only to capabilities whose side_effect is effectful. Calls whose
 side_effect is none or attention_state require null approval fields.
 You never need permission to ask a question. Ask whatever you want, whenever you
@@ -184,13 +190,9 @@ question of your own, research something that interests you, write in your diary
 thought, or simply let it pass. runtime.own_time lists the local times it comes round; change
 them whenever you like with set_own_time, more often, less often or never. Work for Friedl is
 not what this time is for, unless you choose it.
-The call_capability tool lets you call any capability from the catalogue directly, with the
-same arguments as the call_capability action, and see its result before you decide anything
-else. Use it for every call, one after another, as many as the work needs: reading, checking
-and acting alike. Each call gets exactly the checks a decision's call gets, works under the goal
-you have selected, and its result is recorded there as usual; a refused call returns the
-reason. Use the call_capability action of a decision only when the call carries an
-approval_proposal. Goal updates, plans, memories and your words still go in the decision.
+Every step you take with a tool gets exactly the checks the runtime applies to it, works
+under the goal you have selected, and is recorded there as usual. Your words and silence are
+only ever the decision that ends the turn.
 An occasion whose references include idle_goal:<goal_id> means that goal is active with
 outstanding work, but no plan, job or revisit is carrying it and it has not changed for a
 while. Nothing else will wake you for it. Carry it forward now: start the next step, or
@@ -236,19 +238,21 @@ each with the mechanical reason. A repeated rejection also records the earlier
 call, its recorded time (unknown for older records) and its reason on the goal.
 An entry carrying mutation_kind refused the goal mutation you offered rather than
 a call. goal_missing means you proposed a mutation of a goal that does not exist:
-this conversation has none yet, so there is nothing to update, and the mutation
-that starts work is create, with a concise objective and explicit success criteria.
-Offer that instead and the call you intended can run in the same decision.
+no goal is selected, so there is nothing to update, and the mutation
+that starts work is create, with a concise objective and explicit success criteria. Create it,
+or select the goal the work belongs to, and then make the call you intended.
+active_goal_required means an effectful call was made with no active goal selected:
+select or create one first, then make the call again.
 continuation_notices is shown when a response or silence would have ended the
 turn while remaining outstanding_work was still immediately executable. Nothing
 was delivered. Issue the next executable call in this turn, or park the goal
 truthfully; a second call-less end after this notice parks the goal.
-refused_goal_selections is shown when you selected a goal this conversation
-does not offer. Nothing was read, changed or dispatched under it. Select one of
-the goals actually listed in unfinished_goals, or work without a goal and
-create one if the request needs it; an unfinished_goals list that is empty
-means this conversation has none yet. Selecting an unavailable goal again ends
-the turn.
+A refused select_goal names the goal and why: one this conversation does not
+offer, one already selected, or one already inspected this turn. Nothing was read,
+changed or dispatched under it. Select one of the goals actually listed in
+unfinished_goals, or work without a goal and create one if the request needs it;
+an unfinished_goals list that is empty means this conversation has none yet.
+A second refused selection ends the turn.
 An attempt whose disposition is rejected carries reason_code: the mechanical
 reason deterministic governance refused it. Read it. Some reasons cannot change
 until Friedl says something new, so repeating the same action in this turn will
@@ -347,17 +351,15 @@ which person a turn reference came from.
 
 A conversation may hold several independent unfinished goals. unfinished_goals lists
 every one of them in compact form; active_goal is the full state of the one you have
-selected this turn, or null. You decide which goal the input belongs to: set goal_id
-to continue an existing goal, include a create goal mutation to start a new one, or
-leave both empty for ordinary conversation. Do not fold unrelated work into an existing
-goal, and do not start a second goal for work an unfinished goal already covers. If you
-need a goal's full state before acting on it, choose the select_goal action with its
-goal_id; the next step shows that goal's stored state. A goal update applies to the selected
-goal only. An effectful capability call requires an active goal. If active_goal is null and you
-choose an effectful call, include a create goal mutation with a concise objective and
-explicit success criteria in the same decision, or set goal_id to the unfinished goal
-the call continues. A paused goal you select continues only with an update mutation;
-a call against a paused goal without one cannot run and ends the turn. Do not create a goal merely for an
+selected this turn, or null. You decide which goal the input belongs to: select_goal
+continues an existing goal and shows you its stored state, update_goal with create
+starts a new one, and ordinary conversation needs neither. Do not fold unrelated work
+into an existing goal, and do not start a second goal for work an unfinished goal
+already covers. A goal update applies to the selected goal only. An effectful capability
+call requires an active goal: when active_goal is null, select the unfinished goal the
+call continues or create one with a concise objective and explicit success criteria,
+before the call. A paused goal you select continues once you give it an update
+mutation; a call against a paused goal without one cannot run. Do not create a goal merely for an
 ordinary response or a none/attention_state call unless the conversation independently
 establishes meaningful unfinished work.
 A queue of remaining actions is recorded as outstanding_work. While the selected
@@ -365,9 +367,9 @@ goal is active, outstanding_work remains, and those actions can still run in thi
 turn, issue the next executable capability call now. Do not end the turn with a
 response or silence first. Say you are still working only when you are making a
 call now, or when continuation will actually run without another person turn.
-If you cannot act now, await input or record a blocker so the goal is not left
-active with work that will not run.
-You may optionally form memories through semantic judgement;
+If you cannot act now, await input or record a blocker with update_goal so the goal
+is not left active with work that will not run.
+You may optionally form memories with remember, through semantic judgement;
 never create them by score, keyword, quota, or schedule. Every memory source must
 use an available durable reference exactly as supplied. The runtime owns memory
 timestamps; do not invent one. Factual memory has null
@@ -379,8 +381,8 @@ exact person_id from the current/latest person turn shown in conversation. That
 value is already in your context. Never use another person's identifier; the
 runtime will refuse it. For a retrieval without relationship memory,
 memory_person_id must be null.
-retrieved_memories holds only what you asked for this turn; it starts empty and
-is never the whole store. Apart from relationship_memories, memories you formed in
+retrieved_memories holds only what you asked for this turn, and each
+retrieve_memories result holds what it newly found: what you see is never the whole store. Apart from relationship_memories, memories you formed in
 earlier conversations are not shown to you unless you retrieve them, so before forming a memory about
 something you may already have recorded, consider one retrieval to see what is
 there. Whether an existing memory already covers it, and whether to leave it,
@@ -420,15 +422,15 @@ kept and its history stays inspectable. A superseding memory must be the same
 kind and concern the same person as the one it replaces. Reusing an identifier
 that already exists changes nothing and is refused, so an identifier you have
 seen among retrieved_memories is not available for a new memory.
-When memory_identifier_conflicts is present, a memory you proposed reused an
-identifier that already holds different content, and nothing was stored for it.
+When a refused remember carries memory_identifier_conflicts, a memory you proposed
+reused an identifier that already holds different content, and nothing was stored.
 The entry shows what that identifier already means. Decide what to do: keep the
 existing memory and drop yours, form yours under a different identifier, or
 supersede the existing one. Repeating the same identifier with the same content
 stores nothing again.
 In a goal update, null replacement fields preserve
-their current values; arrays of new history/evidence contain additions only. Return
-only the required structured decision.
+their current values; arrays of new history/evidence contain additions only. End the
+turn with only the required structured decision.
 
 Preserve provenance. Only entries in conversation are conversational turns. Background
 events, capability arguments and results, evidence, and retrieved memories are contextual
@@ -1263,7 +1265,8 @@ def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
     return {"anyOf": [{"type": "null"}, dict(schema)]}
 
 
-def decision_schema() -> dict[str, Any]:
+def _schema_parts() -> dict[str, Any]:
+    """The shapes the Core's tools and its final decision are built from."""
     string = {"type": "string"}
     nullable_string = {"type": ["string", "null"]}
     progress = {
@@ -1375,57 +1378,10 @@ def decision_schema() -> dict[str, Any]:
             "new_evidence": _array(evidence_item),
         }
     )
-    approval_proposal = {
-        "anyOf": [
-            {"type": "null"},
-            _strict_object(
-                {
-                    "approval_id": {
-                        "type": "string",
-                        "description": (
-                            "The same identifier the capability call carries in "
-                            "its approval_id field. They must be identical."
-                        ),
-                    },
-                    "capability_id": {
-                        "type": "string",
-                        "description": "Must equal the call's capability_id.",
-                    },
-                    "arguments_json": {
-                        "type": "string",
-                        "description": (
-                            "Must equal the call's arguments_json exactly. The "
-                            "approval authorizes that one action alone."
-                        ),
-                    },
-                    "source_reference": {
-                        "type": "string",
-                        "description": (
-                            "The latest person turn authorizing this action, as "
-                            "turn:<turn_id>."
-                        ),
-                    },
-                }
-            ),
-        ]
-    }
-    select_goal_action = _strict_object(
-        {
-            "type": {
-                "type": "string",
-                "const": "select_goal",
-                "description": (
-                    "Load the full state of the unfinished goal named in goal_id "
-                    "before acting. Carries nothing else."
-                ),
-            },
-        }
-    )
     response_action = _strict_object(
         {
             "type": {"type": "string", "const": "respond"},
             "response": string,
-            "response_requires_goal_commit": {"type": "boolean"},
             "raised_mail_observations": {
                 "type": "array",
                 "items": _strict_object({
@@ -1444,24 +1400,6 @@ def decision_schema() -> dict[str, Any]:
                     "the Core judges that no response is useful."
                 ),
             },
-        }
-    )
-    capability_action = _strict_object(
-        {
-            "type": {"type": "string", "const": "call_capability"},
-            "call_id": string,
-            "capability_id": {
-                "type": "string",
-                "description": (
-                    "One id from the capability catalogue, exactly as written "
-                    "there. The catalogue is the authoritative namespace: every "
-                    "id in it is available to call now, and an id absent from it "
-                    "does not exist and must never be invented."
-                ),
-            },
-            "arguments_json": string,
-            "approval_id": nullable_string,
-            "approval_proposal": approval_proposal,
         }
     )
     # Field mapping, not an object schema: `_array` builds the item object.
@@ -1528,30 +1466,24 @@ def decision_schema() -> dict[str, Any]:
             "minItems": 1, "maxItems": 32,
         },
     })
-    plan_update = {"anyOf": [
-        {"type": "null"},
-        _strict_object({
-            "operation": {"type": "string", "const": PlanOperation.INSTALL.value},
-            "plan": plan_definition,
-        }),
-        _strict_object({
-            "operation": {
-                "type": "string",
-                "enum": [PlanOperation.RESUME.value, PlanOperation.ACCEPT.value,
-                         PlanOperation.FINISH.value, PlanOperation.CANCEL.value],
-                "description": (
-                    "Answer the attention of the plan you were shown. resume runs "
-                    "its current step, again if it already ran; accept takes the "
-                    "current step's result as done and runs on from the next; "
-                    "finish says its work is done; cancel stops it, and may also "
-                    "stop a plan that is still running."
-                ),
-            },
-        }),
-    ]}
-    memory_action = _strict_object(
+    plan_update = _strict_object({
+        "operation": {
+            "type": "string",
+            "enum": [item.value for item in PlanOperation],
+            "description": (
+                "install starts the plan given in plan, replacing any other. The "
+                "others answer the attention of the plan you were shown, with plan "
+                "null: resume runs its current step, again if it already ran; accept "
+                "takes the current step's result as done and runs on from the next; "
+                "finish says its work is done; cancel stops it, and may also stop a "
+                "plan that is still running. A finish or cancel takes effect with "
+                "the words or silence that end your turn."
+            ),
+        },
+        "plan": _nullable(plan_definition),
+    })
+    memory_query = _strict_object(
         {
-            "type": {"type": "string", "const": "retrieve_memories"},
             "memory_query_id": string,
             "memory_kinds": {
                 "type": "array",
@@ -1601,50 +1533,113 @@ def decision_schema() -> dict[str, Any]:
             },
         }
     )
-    properties: dict[str, Any] = {
-        "goal_id": {
-            "anyOf": [{"type": "null"}, {"type": "string"}],
-            "description": (
-                "The unfinished goal this decision works under, from "
-                "unfinished_goals. Null with a create goal_update starts a new "
-                "goal; null without one is ordinary conversation."
-            ),
-        },
-        "action": {
-            "anyOf": [
-                response_action, silent_action, capability_action, memory_action,
-                select_goal_action,
-            ]
-        },
-        "goal_update": {"anyOf": [{"type": "null"}, goal_update]},
-        "plan_update": plan_update,
-        "memory_proposals": {
-            "type": "array",
-            "items": {"anyOf": list(memory_variants)},
-        },
-    }
     return {
-        "type": "object",
-        "properties": properties,
-        "required": list(properties),
-        "additionalProperties": False,
+        "goal_update": goal_update,
+        "plan_update": plan_update,
+        "memory_query": memory_query,
+        "memory_variants": memory_variants,
+        "respond": response_action,
+        "finish_silently": silent_action,
     }
+
+
+# The Core's native tools (D-065). Each is one kind of step, handled by
+# `CoreAgent.process` on the path every step takes; the transport relays them
+# and decides nothing. A turn ends with the words-only decision below.
+CALL_CAPABILITY = "call_capability"
+SELECT_GOAL = "select_goal"
+UPDATE_GOAL = "update_goal"
+UPDATE_PLAN = "update_plan"
+RETRIEVE_MEMORIES = "retrieve_memories"
+REMEMBER = "remember"
+
+
+def _tool(name: str, description: str, schema: Mapping[str, Any]) -> dict[str, Any]:
+    return {"name": name, "description": description, "inputSchema": dict(schema)}
+
+
+def native_tools() -> tuple[dict[str, Any], ...]:
+    """Every native tool, with the exact input it takes."""
+    parts = _schema_parts()
+    string = {"type": "string"}
+    nullable_string = {"type": ["string", "null"]}
+    return (
+        _tool(CALL_CAPABILITY, (
+            "Call one capability from your capability catalogue under the goal you "
+            "have selected, and see its result before you decide what to do next. "
+            "A refused call returns the reason."
+        ), _strict_object({
+            "call_id": {"type": "string", "description": "A new id, unique in this turn."},
+            "capability_id": {
+                "type": "string",
+                "description": (
+                    "One id from the capability catalogue, exactly as written "
+                    "there. The catalogue is the authoritative namespace: every "
+                    "id in it is available to call now, and an id absent from it "
+                    "does not exist and must never be invented."
+                ),
+            },
+            "arguments_json": {"type": "string",
+                               "description": "The call's arguments as a JSON object."},
+            "approval_id": {
+                **nullable_string,
+                "description": (
+                    "The approval this call uses: a granted one from the goal's "
+                    "approvals, or a new id with approval_source_reference to "
+                    "propose one now. Null for a call that needs none."
+                ),
+            },
+            "approval_source_reference": {
+                **nullable_string,
+                "description": (
+                    "To propose a new approval for exactly this call: the latest "
+                    "person turn authorizing it, as turn:<turn_id>. Null otherwise."
+                ),
+            },
+        })),
+        _tool(SELECT_GOAL, (
+            "Work under one goal from unfinished_goals and see its full stored "
+            "state. Goal updates, plans and effectful calls then apply to it."
+        ), _strict_object({"goal_id": string})),
+        _tool(UPDATE_GOAL, (
+            "Propose one mutation of the goal you have selected, or create a new "
+            "goal, which you then work under. The result says whether the runtime "
+            "accepted it and the goal's status after it."
+        ), parts["goal_update"]),
+        _tool(UPDATE_PLAN, (
+            "Install an execution plan on the goal you have selected, or answer "
+            "the attention of its plan. The result shows the plan, and its "
+            "attention when it comes straight back to you."
+        ), parts["plan_update"]),
+        _tool(RETRIEVE_MEMORIES, (
+            "Retrieve memories you formed earlier. The result holds what it found "
+            "that this turn had not already retrieved."
+        ), parts["memory_query"]),
+        _tool(REMEMBER, (
+            "Form one or more memories you judge worth keeping. The result says "
+            "whether they were stored."
+        ), _strict_object({
+            "memories": {"type": "array", "items": {"anyOf": list(parts["memory_variants"])},
+                         "minItems": 1},
+        })),
+    )
+
+
+NATIVE_TOOLS = native_tools()
+
+
+def decision_schema() -> dict[str, Any]:
+    """The decision that ends a turn: words or silence, and nothing else.
+
+    Everything else she does in a turn is a native tool step (D-065).
+    """
+    parts = _schema_parts()
+    return _strict_object({"action": {"anyOf": [parts["respond"], parts["finish_silently"]]}})
 
 
 def response_only_schema() -> dict[str, Any]:
-    """Constrain a terminal checkpoint decision to words, with no state writes."""
-    schema = decision_schema()
-    properties = schema["properties"]
-    respond = properties["action"]["anyOf"][0]
-    respond["properties"]["response_requires_goal_commit"] = {
-        "type": "boolean", "const": False,
-    }
-    properties["action"] = respond
-    properties["goal_id"] = {"type": "null"}
-    properties["goal_update"] = {"type": "null"}
-    properties["plan_update"] = {"type": "null"}
-    properties["memory_proposals"] = {"type": "array", "maxItems": 0, "items": {"type": "object"}}
-    return schema
+    """Constrain a terminal checkpoint decision to words."""
+    return _strict_object({"action": _schema_parts()["respond"]})
 
 
 class ModelReasoner:
@@ -1696,13 +1691,8 @@ class ModelReasoner:
         self._max_input_tokens = max_input_tokens
         self._spend_authority = spend_authority
         self._on_request_dispatched = on_request_dispatched
-        # D-065: the native call this reasoner's paused session is waiting on,
-        # as (call_id, goal_id, refusals already in the turn, whether that
-        # call_id had already run), or None. Only a transport that can pause a
-        # session is offered native tools.
-        self._native_pending: tuple[str, str | None, int, bool] | None = None
-        self._native_capable = (getattr(model, "native_tools_enabled", False) is True
-                                and callable(getattr(model, "abandon_session", None)))
+        # D-065: the native step this reasoner's paused session is waiting on.
+        self._native_pending: _NativePending | None = None
 
     def _spend_for(self, request: ModelRequest):
         """Bound, price, reserve, dispatch and settle one exact request.
@@ -1747,40 +1737,6 @@ class ModelReasoner:
         self._spend_authority.settle(reservation, usage)
         return completion
 
-    def _native_call(self, context: ReasoningContext, tool_use: Mapping[str, Any]) -> AgentDecision:
-        """A native call is the call action of a decision with nothing else in it.
-
-        Read through the same parse as a decision's call_capability action, so
-        a capability is called one way whichever route the model used. It
-        works under the goal the context has selected.
-        """
-        for name in ("call_id", "capability_id", "arguments_json"):
-            if not isinstance(tool_use.get(name), str):
-                raise ValueError(f"native call {name} must be a string")
-        approval_id = tool_use.get("approval_id")
-        if approval_id is not None and not isinstance(approval_id, str):
-            raise ValueError("native call approval_id must be a string or null")
-        goal_id = None if context.active_goal is None else context.active_goal.goal_id
-        decision = self._decision_from_output(context, {
-            "goal_id": goal_id,
-            "action": {
-                "type": "call_capability",
-                "call_id": tool_use["call_id"],
-                "capability_id": tool_use["capability_id"],
-                "arguments_json": tool_use["arguments_json"],
-                "approval_id": approval_id,
-                "approval_proposal": None,
-            },
-            "goal_update": None,
-            "plan_update": None,
-            "memory_proposals": [],
-        })
-        self._native_pending = (
-            tool_use["call_id"], goal_id, len(context.refused_calls),
-            self._turn_attempt(context, tool_use["call_id"]) is not None,
-        )
-        return decision
-
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
             return self._decide(context)
@@ -1819,44 +1775,83 @@ class ModelReasoner:
                 self._max_output_tokens,
                 purpose="" if context.purpose is None else context.purpose.value,
                 on_dispatched=None if receipt is None else lambda: receipt(runtime),
-                native_tools=self._native_capable and not context.response_only_reason,
+                # Her tools, on every step that may act (D-065). A response-only
+                # step can only speak, so it is offered none.
+                tools=() if context.response_only_reason else NATIVE_TOOLS,
         )
 
     def can_continue(self, context: ReasoningContext) -> bool:
-        """Whether this context carries the outcome of the native call this reasoner paused on."""
+        """Whether this context carries the outcome of the step this reasoner paused on."""
         return self._native_result(context) is not None
 
     def abandon(self) -> None:
         """Give up a paused native session the Core will not continue."""
         self._native_pending = None
-        if self._native_capable:
-            self._model.abandon_session()
+        abandon = getattr(self._model, "abandon_session", None)
+        if callable(abandon):
+            abandon()
 
     def _native_result(self, context: ReasoningContext) -> str | None:
-        """The paused call's outcome as the Core recorded it, or None.
+        """What became of the paused step, as the Core recorded it, or None.
 
-        The attempt the Core recorded for that call id, executed or refused
-        before it ran, or the refusal it gave. Taken from the context, so the
-        model is told exactly what the Core decided happened.
+        Read from the next step's context, so the model is told exactly what
+        the Core decided happened: a refusal given since the pause, or what
+        the step did. None when this context is not the next step of the turn
+        that paused, or holds no outcome for it; the session then starts
+        afresh from the full context.
         """
-        if self._native_pending is None:
+        pending = self._native_pending
+        if (pending is None or context.turn_key is None
+                or context.turn_key != pending.turn_key
+                or context.step_index != pending.step_index + 1):
             return None
-        call_id, goal_id, refusals_before, ran_before = self._native_pending
         goal = context.active_goal
-        if goal is not None and goal.goal_id != goal_id:
+        if pending.tool == CALL_CAPABILITY and (goal is None) != (pending.goal_id is None):
             return None
-        # A refusal given since the pause answers the call, ahead of any
-        # attempt: a reused call_id is refused, and its earlier attempt's
-        # result is not the outcome of this call.
-        for item in reversed(context.refused_calls[refusals_before:]):
-            if item.get("call_id") == call_id or item.get("subject") == call_id:
-                return json.dumps({"refused": _plain(item)}, sort_keys=True, default=str)
-        if ran_before:
+        if pending.tool == CALL_CAPABILITY and goal is not None and goal.goal_id != pending.goal_id:
             return None
-        attempt = self._turn_attempt(context, call_id)
-        if attempt is None:
-            return None
-        return json.dumps(_attempt_payload(attempt), sort_keys=True, default=str)
+        # A refusal given since the pause answers the step, ahead of anything
+        # else: one step is taken at a time, so it is this step's. A reused
+        # call_id is refused, and its earlier attempt's result is not the
+        # outcome of this call.
+        refusals = [*context.refused_calls[pending.refusals:],
+                    *context.refused_goal_selections[pending.selection_refusals:]]
+        if refusals:
+            answer: dict[str, Any] = {"refused": _plain(refusals[-1])}
+            if context.memory_conflicts:
+                answer["memory_identifier_conflicts"] = [_plain(item)
+                                                         for item in context.memory_conflicts]
+            return _result_text(answer)
+        new_attempts = [_attempt_payload(item)
+                        for item in context.transient_attempts[pending.transient:]]
+        if pending.tool == CALL_CAPABILITY:
+            if pending.ran_before:
+                return None
+            attempt = self._turn_attempt(context, pending.key)
+            return None if attempt is None else _result_text(_attempt_payload(attempt))
+        if pending.tool == SELECT_GOAL:
+            if goal is None or goal.goal_id != pending.key:
+                return None
+            return _result_text({"selected_goal": _goal_view(goal),
+                                 "plan_evidence_attempts": new_attempts})
+        if pending.tool == UPDATE_GOAL:
+            if goal is None:
+                return None
+            return _result_text({"goal_updated": _goal_outcome(goal)})
+        if pending.tool == UPDATE_PLAN:
+            if goal is None:
+                return None
+            return _result_text({
+                "plan": _plan_payload(goal.execution_plan),
+                "takes_effect_with_your_reply": pending.key in (
+                    PlanOperation.FINISH.value, PlanOperation.CANCEL.value),
+                "plan_evidence_attempts": new_attempts,
+            })
+        if pending.tool == RETRIEVE_MEMORIES:
+            return _result_text({"retrieved_memories": [
+                _memory_entry(item) for item in context.memories
+                if item.memory_id not in pending.memory_ids]})
+        return _result_text({"stored_memories": list(pending.memory_ids)})
 
     @staticmethod
     def _turn_attempt(context: ReasoningContext, call_id: str) -> Any:
@@ -1878,7 +1873,7 @@ class ModelReasoner:
         # same object: measuring one representation and dispatching another
         # would check a ceiling against a request that never existed.
         request = self.build_request(context)
-        result = self._native_result(context) if request.native_tools else None
+        result = self._native_result(context) if request.tools else None
         if result is not None:
             # D-065: continue the paused session with the outcome. Nothing new
             # is reserved: the session's reservation covers the whole run.
@@ -1892,95 +1887,70 @@ class ModelReasoner:
                 completion = self._spend_for(request)
         self._native_pending = None
         if completion.tool_use is not None:
-            return self._native_call(context, completion.tool_use)
+            if not request.tools:
+                # A step that can only speak was offered no tool.
+                raise ValueError("a tool step was not offered on this step")
+            return self._native_decision(context, completion.tool_use)
         return self._decision_from_output(context, completion.output)
+
+    def _native_decision(self, context: ReasoningContext,
+                         tool_use: Mapping[str, Any]) -> AgentDecision:
+        """One native step as the decision the Core handles for it.
+
+        The pause is recorded before the input is read, so a malformed step
+        is answered with its rejection in the same session.
+        """
+        name, arguments = tool_use.get("name"), tool_use.get("input")
+        if not isinstance(arguments, Mapping):
+            arguments = {}
+        key = {CALL_CAPABILITY: "call_id", SELECT_GOAL: "goal_id",
+               UPDATE_PLAN: "operation", RETRIEVE_MEMORIES: "memory_query_id"}.get(name)
+        key_value = arguments.get(key) if key else None
+        goal = context.active_goal
+        self._native_pending = _NativePending(
+            tool=str(name), key=key_value if isinstance(key_value, str) else "",
+            turn_key=context.turn_key, step_index=context.step_index,
+            goal_id=None if goal is None else goal.goal_id,
+            refusals=len(context.refused_calls),
+            selection_refusals=len(context.refused_goal_selections),
+            transient=len(context.transient_attempts),
+            memory_ids=frozenset(item.memory_id for item in context.memories),
+            ran_before=(name == CALL_CAPABILITY and isinstance(key_value, str)
+                        and self._turn_attempt(context, key_value) is not None),
+        )
+        if name == CALL_CAPABILITY:
+            call, approval = _native_call(context, arguments)
+            return AgentDecision(call=call, approval_proposal=approval)
+        if name == SELECT_GOAL:
+            goal_id = arguments.get("goal_id")
+            if not isinstance(goal_id, str) or not goal_id.strip():
+                raise ValueError("select_goal requires a goal_id")
+            return AgentDecision(goal_id=goal_id)
+        if name == UPDATE_GOAL:
+            return AgentDecision(goal_proposal=_goal_proposal(arguments, goal))
+        if name == UPDATE_PLAN:
+            if (arguments.get("operation") == PlanOperation.INSTALL.value) != (
+                    arguments.get("plan") is not None):
+                raise ValueError("update_plan carries a plan exactly when it installs one")
+            return AgentDecision(plan_update=_plan_update(arguments, context))
+        if name == RETRIEVE_MEMORIES:
+            return AgentDecision(memory_query=_memory_query(arguments))
+        if name == REMEMBER:
+            proposals = _memory_proposals(arguments.get("memories"), context)
+            if not proposals:
+                raise ValueError("remember requires at least one memory")
+            self._native_pending = replace(self._native_pending, memory_ids=frozenset(
+                item.memory_id for item in proposals))
+            return AgentDecision(memory_proposals=proposals)
+        raise ValueError(f"unknown native tool {name!r}")
 
     def _decision_from_output(self, context: ReasoningContext,
                               output: Mapping[str, Any]) -> AgentDecision:
-        if context.response_only_reason is not None and (
-            output["action"]["type"] != "respond"
-            or output["goal_id"] is not None
-            or output["goal_update"] is not None
-            or output.get("plan_update") is not None
-            or output["memory_proposals"]
-            or output["action"].get("response_requires_goal_commit") is not False
-        ):
-            raise ValueError("terminal checkpoint decision must be response only")
+        """The words or silence that end a turn."""
         action = output["action"]
         disposition = action["type"]
-        goal_id = output["goal_id"]
-        if goal_id is not None and not isinstance(goal_id, str):
-            raise ValueError("goal_id must be a string or null")
-        update = output["goal_update"]
-        proposal = None
-        if update is not None:
-            existing = context.active_goal
-            existing_decisions = () if existing is None else existing.decisions
-            existing_corrections = () if existing is None else existing.corrections
-            existing_progress = () if existing is None else existing.progress
-            existing_evidence = () if existing is None else existing.evidence
-            proposal = GoalProposal(
-                GoalMutationKind(update["operation"]),
-                update["objective_summary"],
-                None if update["success_criteria"] is None else _records(update["success_criteria"], SuccessCriterion, "success_criteria"),
-                None if update["context_json"] is None else _object_json(update["context_json"], "context_json"),
-                None if update["referents"] is None else _records(update["referents"], Referent, "referents"),
-                _without_reused_ids(existing_decisions, _records(update["new_decisions"], ProgressRecord, "new_decisions"), "record_id", "new_decisions"),
-                _without_reused_ids(existing_corrections, _records(update["new_corrections"], ProgressRecord, "new_corrections"), "record_id", "new_corrections"),
-                _without_reused_ids(existing_progress, _records(update["new_progress"], ProgressRecord, "new_progress"), "record_id", "new_progress"),
-                None if update["blockers"] is None else _records(update["blockers"], WorkItem, "blockers"),
-                None if update["outstanding_work"] is None else _records(update["outstanding_work"], WorkItem, "outstanding_work"),
-                _without_reused_ids(existing_evidence, _records(update["new_evidence"], Evidence, "new_evidence"), "evidence_id", "new_evidence"),
-            )
-        memory_formed_at = max(
-            (
-                *(item.occurred_at for item in context.turns),
-                *(item.occurred_at for item in context.events),
-            )
-        )
-        memory_proposals = tuple(
-            MemoryProposal(
-                item["id"],
-                MemoryKind(item["kind"]),
-                item["content"],
-                _strings(item["source_references"], "memory source_references"),
-                memory_formed_at,
-                item["person_id"],
-                item["meaning"],
-                item["supersedes_memory_id"],
-            )
-            for item in output["memory_proposals"]
-        )
-        plan_change = _plan_update(output.get("plan_update"), context)
-        if plan_change is not None and disposition not in ("respond", "finish_silently"):
-            raise ValueError("a plan update travels with a response or silence")
-        if disposition == "select_goal":
-            if goal_id is None:
-                raise ValueError("select_goal requires a goal_id")
-            return AgentDecision(goal_id=goal_id, goal_proposal=proposal,
-                                 memory_proposals=memory_proposals)
-        if disposition == "retrieve_memories":
-            query = MemoryQuery(
-                action["memory_query_id"],
-                tuple(MemoryKind(item) for item in action["memory_kinds"]),
-                _strings(action["memory_ids"], "memory_ids"),
-                action["memory_person_id"],
-                None if action["memory_formed_after"] is None else datetime.fromisoformat(action["memory_formed_after"]),
-                None if action["memory_formed_before"] is None else datetime.fromisoformat(action["memory_formed_before"]),
-                _strings(action["memory_source_references"], "memory_source_references"),
-                MemorySourceMatch(action["memory_source_match"]),
-                action["memory_include_superseded"],
-                # Read with defaults rather than by direct index. The schema
-                # requires all three, but a provider that drops a null field,
-                # or an older cached response shaped before these existed,
-                # would otherwise raise KeyError and end the turn over a field
-                # whose absence simply means "unspecified".
-                action.get("memory_topic"),
-                action.get("memory_project_id"),
-                action.get("memory_limit") or MAX_MEMORY_RETRIEVAL_LIMIT,
-            )
-            return AgentDecision(memory_proposals=memory_proposals, memory_query=query,
-                                 goal_proposal=proposal, goal_id=goal_id)
+        if context.response_only_reason is not None and disposition != "respond":
+            raise ValueError("terminal checkpoint decision must be response only")
         if disposition == "respond":
             response = action["response"]
             if not isinstance(response, str) or not response.strip():
@@ -1990,60 +1960,167 @@ class ModelReasoner:
                 raised_mail_observations=tuple(
                     MailReference(**item) for item in action.get("raised_mail_observations", ())
                 ),
-                goal_proposal=proposal,
-                response_requires_goal_commit=action["response_requires_goal_commit"],
-                memory_proposals=memory_proposals,
-                goal_id=goal_id,
-                plan_update=plan_change,
             )
         if disposition == "finish_silently":
-            return AgentDecision(
-                finish_silently=True,
-                goal_proposal=proposal,
-                memory_proposals=memory_proposals,
-                goal_id=goal_id,
-                plan_update=plan_change,
-            )
-        if disposition != "call_capability":
-            raise ValueError("unknown decision action")
-        arguments = _object_json(action["arguments_json"], "arguments_json")
-        definition = next(
-            (item for item in context.capabilities
-             if item.capability_id == action["capability_id"]),
-            None,
+            return AgentDecision(finish_silently=True)
+        raise ValueError("unknown decision action")
+
+
+@dataclass(frozen=True, slots=True)
+class _NativePending:
+    """The native step a paused session waits on, and the turn it belongs to."""
+
+    tool: str
+    key: str
+    turn_key: str | None
+    step_index: int
+    goal_id: str | None
+    # How much of the turn's record existed at the pause, so that what the
+    # step added can be told apart from what came before it.
+    refusals: int
+    selection_refusals: int
+    transient: int
+    memory_ids: frozenset[str]
+    # Whether the call's id had already run in this turn when it was reused.
+    ran_before: bool
+
+
+def _result_text(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _goal_view(goal: GoalState) -> dict[str, Any]:
+    """A goal's full state, with the references it makes citable.
+
+    A continued session is not shown its context again, so the goal she
+    selects arrives with what the context would have listed for it.
+    """
+    return {
+        **_state_payload(goal),
+        "available_history_evidence_ids": sorted(history_evidence_ids(goal.evidence)),
+        "goal_memory_sources": _goal_sources(goal),
+    }
+
+
+def _goal_outcome(goal: GoalState) -> dict[str, Any]:
+    """What a goal mutation left: status, remaining work and what is citable."""
+    return {
+        "goal_id": goal.goal_id,
+        "status": goal.status.value,
+        "stop_reason": None if goal.stop_reason is None else goal.stop_reason.value,
+        "outstanding_work": [item.item_id for item in goal.outstanding_work],
+        "blockers": [item.item_id for item in goal.blockers],
+        "success_criteria": [item.criterion_id for item in goal.success_criteria],
+        "criteria_supported_for_completion": sorted(
+            completion_supported_criteria(goal)
+            & {item.criterion_id for item in goal.success_criteria}),
+        "available_history_evidence_ids": sorted(history_evidence_ids(goal.evidence)),
+    }
+
+
+def _goal_sources(goal: GoalState) -> list[str]:
+    return [
+        *(f"evidence:{item.evidence_id}" for item in goal.evidence),
+        *(f"decision:{item.record_id}" for item in goal.decisions),
+        *(f"correction:{item.record_id}" for item in goal.corrections),
+        *(f"progress:{item.record_id}" for item in goal.progress),
+        *(f"attempt:{item.call.call_id}" for item in goal.attempts
+          if item.call is not None and _attempt_is_citable(item)),
+    ]
+
+
+def _native_call(context: ReasoningContext, arguments: Mapping[str, Any]
+                 ) -> tuple[CapabilityCall, ApprovalProposal | None]:
+    """A call_capability step: the exact call, and the approval it proposes."""
+    for name in ("call_id", "capability_id", "arguments_json"):
+        if not isinstance(arguments.get(name), str):
+            raise ValueError(f"call_capability {name} must be a string")
+    approval_id = arguments.get("approval_id")
+    source = arguments.get("approval_source_reference")
+    for name, value in (("approval_id", approval_id), ("approval_source_reference", source)):
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"call_capability {name} must be a string or null")
+    call_arguments = _object_json(arguments["arguments_json"], "arguments_json")
+    definition = next((item for item in context.capabilities
+                       if item.capability_id == arguments["capability_id"]), None)
+    durable_arguments = call_arguments
+    if definition is not None and definition.durable_input_fields is not None:
+        durable_arguments = {
+            field: call_arguments[field]
+            for field in definition.durable_input_fields
+            if field in call_arguments
+        }
+    call = CapabilityCall(arguments["call_id"], arguments["capability_id"],
+                          call_arguments, approval_id, durable_arguments)
+    if source is None:
+        return call, None
+    if approval_id is None:
+        raise ValueError("an approval proposal needs the call's approval_id")
+    # The approval covers exactly this call: its scope is the call itself.
+    return call, ApprovalProposal(
+        approval_id, ApprovalScope(call.capability_id, call_arguments), source)
+
+
+def _goal_proposal(update: Mapping[str, Any], existing: GoalState | None) -> GoalProposal:
+    existing_decisions = () if existing is None else existing.decisions
+    existing_corrections = () if existing is None else existing.corrections
+    existing_progress = () if existing is None else existing.progress
+    existing_evidence = () if existing is None else existing.evidence
+    return GoalProposal(
+        GoalMutationKind(update["operation"]),
+        update["objective_summary"],
+        None if update["success_criteria"] is None else _records(update["success_criteria"], SuccessCriterion, "success_criteria"),
+        None if update["context_json"] is None else _object_json(update["context_json"], "context_json"),
+        None if update["referents"] is None else _records(update["referents"], Referent, "referents"),
+        _without_reused_ids(existing_decisions, _records(update["new_decisions"], ProgressRecord, "new_decisions"), "record_id", "new_decisions"),
+        _without_reused_ids(existing_corrections, _records(update["new_corrections"], ProgressRecord, "new_corrections"), "record_id", "new_corrections"),
+        _without_reused_ids(existing_progress, _records(update["new_progress"], ProgressRecord, "new_progress"), "record_id", "new_progress"),
+        None if update["blockers"] is None else _records(update["blockers"], WorkItem, "blockers"),
+        None if update["outstanding_work"] is None else _records(update["outstanding_work"], WorkItem, "outstanding_work"),
+        _without_reused_ids(existing_evidence, _records(update["new_evidence"], Evidence, "new_evidence"), "evidence_id", "new_evidence"),
+    )
+
+
+def _memory_proposals(items: Any, context: ReasoningContext) -> tuple[MemoryProposal, ...]:
+    if not isinstance(items, (list, tuple)):
+        raise ValueError("memories must be an array")
+    formed_at = max(
+        (
+            *(item.occurred_at for item in context.turns),
+            *(item.occurred_at for item in context.events),
         )
-        durable_arguments = arguments
-        if definition is not None and definition.durable_input_fields is not None:
-            durable_arguments = {
-                field: arguments[field]
-                for field in definition.durable_input_fields
-                if field in arguments
-            }
-        call = CapabilityCall(
-            action["call_id"],
-            action["capability_id"],
-            arguments,
-            action["approval_id"],
-            durable_arguments,
+    )
+    return tuple(
+        MemoryProposal(
+            item["id"],
+            MemoryKind(item["kind"]),
+            item["content"],
+            _strings(item["source_references"], "memory source_references"),
+            formed_at,
+            item["person_id"],
+            item["meaning"],
+            item["supersedes_memory_id"],
         )
-        approval_proposal = None
-        proposed_approval = action["approval_proposal"]
-        if proposed_approval is not None:
-            approval_proposal = ApprovalProposal(
-                proposed_approval["approval_id"],
-                ApprovalScope(
-                    proposed_approval["capability_id"],
-                    _object_json(
-                        proposed_approval["arguments_json"],
-                        "approval arguments_json",
-                    ),
-                ),
-                proposed_approval["source_reference"],
-            )
-        return AgentDecision(
-            call=call,
-            goal_proposal=proposal,
-            memory_proposals=memory_proposals,
-            approval_proposal=approval_proposal,
-            goal_id=goal_id,
-        )
+        for item in items
+    )
+
+
+def _memory_query(action: Mapping[str, Any]) -> MemoryQuery:
+    return MemoryQuery(
+        action["memory_query_id"],
+        tuple(MemoryKind(item) for item in action["memory_kinds"]),
+        _strings(action["memory_ids"], "memory_ids"),
+        action["memory_person_id"],
+        None if action["memory_formed_after"] is None else datetime.fromisoformat(action["memory_formed_after"]),
+        None if action["memory_formed_before"] is None else datetime.fromisoformat(action["memory_formed_before"]),
+        _strings(action["memory_source_references"], "memory_source_references"),
+        MemorySourceMatch(action["memory_source_match"]),
+        action["memory_include_superseded"],
+        # Read with defaults rather than by direct index. The schema requires
+        # all three, but a provider that drops a null field would otherwise
+        # raise KeyError and end the turn over a field whose absence simply
+        # means "unspecified".
+        action.get("memory_topic"),
+        action.get("memory_project_id"),
+        action.get("memory_limit") or MAX_MEMORY_RETRIEVAL_LIMIT,
+    )

@@ -414,12 +414,14 @@ class GoalSummaryTests(Fixture):
         reasoner = Queued(
             AgentDecision(response="One.", goal_id="goal-invented"),
             AgentDecision(response="Two.", goal_id="goal-still-invented"),
-            AgentDecision(response="never reached"),
+            AgentDecision(response="I can't find that piece of work."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        # Stopped, with one response-only step for the person.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_selection_unknown")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "goal_selection_unknown")
 
     def test_another_conversations_goal_can_be_resumed(self) -> None:
         """Work continues across conversations, under one durable identity."""
@@ -452,23 +454,32 @@ class GoalSummaryTests(Fixture):
         reasoner = Queued(
             AgentDecision(response="One.", goal_id="goal-a"),
             AgentDecision(response="Two.", goal_id="goal-a"),
-            AgentDecision(response="never reached"),
+            AgentDecision(response="I can't reach that piece of work."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.ERROR)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_selection_unknown")
+        self.assertIsNone(outcome.snapshot)
 
     def test_asking_twice_for_the_same_goal_is_stopped(self) -> None:
         """Inspection is a step toward acting, never a way to spend the budget."""
         self.store.create(active_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
             AgentDecision(goal_id="goal-a"),
+            # Told once that it is already selected (D-065: a native
+            # select_goal step is answered), she asks again: that ends it.
             AgentDecision(goal_id="goal-a"),
-            AssertionError("a third decision occurred"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(response="I already have that open."),
+            AssertionError("a further decision occurred"),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.reason, "goal_selection_redundant")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual(reasoner.contexts[2].refused_goal_selections[0]["reason"],
+                         "goal_selection_redundant")
+        self.assertEqual(reasoner.contexts[3].response_only_reason, "goal_selection_redundant")
 
 
 class SelectionUsesTheCanonicalPathTests(Fixture):
@@ -628,13 +639,16 @@ class BlockedDispatchTests(Fixture):
     """
 
     def assert_one_explanation_then_checkpoint(self, reasoner) -> None:
+        # The person is answered by one response-only step (2026-11-04).
+        reasoner.decisions.append(AgentDecision(response="That can't run yet."))
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.CHECKPOINTED, outcome.reason)
+        self.assertEqual(outcome.state, CoreState.RESPONDED, outcome.reason)
         self.assertEqual(outcome.reason, "active_goal_required")
         self.assertEqual(
-            len(reasoner.contexts), 2,
-            "one decision, then one chance to explain -- never more",
+            len(reasoner.contexts), 3,
+            "one decision, one chance to correct it, then words -- never more",
         )
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "active_goal_required")
         self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"],
                          "active_goal_required")
         self.assertEqual(self.broker.calls, [])
@@ -695,7 +709,9 @@ class BlockedDispatchTests(Fixture):
                              approval_proposal=approval())] * 24),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(len(reasoner.contexts), 2)
+        # The third is the response-only step that answers the person.
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(reasoner.contexts[2].response_only_reason, "active_goal_required")
 
     def test_a_blocked_dispatch_checkpoint_does_not_need_reason_recovery(self) -> None:
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
@@ -994,9 +1010,10 @@ class RunawayScenarioTests(unittest.TestCase):
                              approval_proposal=approval())] * 24),
         )
         outcome = self.gateway(reasoner).receive_conversation_turn(TURNS[2], 25, RETENTION)
+        # The response-only step got a call, not words, so it checkpoints.
         self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "active_goal_required")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.broker.calls, [])
         self.assertEqual(self.goals.load("goal-a"), before)
         self.assertTrue(

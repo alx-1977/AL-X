@@ -70,16 +70,22 @@ class ModelRequest:
     # Local accounting hook: approve and identify a fresh request before a
     # transport retries. Never sent to the model or serialized into telemetry.
     on_retry: Callable[[Exception], ModelRequest] | None = field(default=None, repr=False, compare=False)
-    # D-065: the model may call capabilities natively within one reasoning
-    # session. A transport that cannot pauses nothing and simply ignores it.
-    native_tools: bool = False
+    # D-065: the Core's native tools, each as name, description and
+    # inputSchema. A request that carries them may pause on a tool call
+    # within one reasoning session; a transport only relays them.
+    tools: tuple[StructuredData, ...] = ()
     # D-065: continue the paused session with this result for the native call
     # it last returned, instead of starting a new one. The Core composes it.
     tool_result: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
-        if self.tool_result is not None and not self.native_tools:
+        object.__setattr__(self, "tools", tuple(freeze_data(item) for item in self.tools))
+        names = [item.get("name") for item in self.tools]
+        if any(not isinstance(name, str) or not name for name in names) or len(
+                set(names)) != len(names):
+            raise ValueError("each native tool has its own name")
+        if self.tool_result is not None and not self.tools:
             raise ValueError("a tool result continues a native-tool session")
         if self.purpose and self.purpose not in _PURPOSES:
             raise ValueError("purpose must be a ReasoningPurpose value")
@@ -109,9 +115,9 @@ class ModelCompletion:
     model: str
     output: StructuredData
     usage: StructuredData = field(default_factory=dict)
-    # D-065: the model called a capability natively and its session is paused
-    # for the result. The call's input, exactly as the model gave it; `output`
-    # is then empty. Only the Core interprets it.
+    # D-065: the model called one of its native tools and its session is
+    # paused for the result: {"name": tool, "input": what the model gave},
+    # exactly as given; `output` is then empty. Only the Core interprets it.
     tool_use: StructuredData | None = None
 
     def __post_init__(self) -> None:
@@ -205,6 +211,8 @@ def input_token_upper_bound(request: "ModelRequest") -> int:
         ],
         "output_schema_name": request.output_schema_name,
         "output_schema": _plain(request.output_schema),
+        # The tool definitions travel with the request too.
+        "tools": _plain(request.tools),
     }
     encoded = json.dumps(
         wire, ensure_ascii=False, separators=(",", ":"), sort_keys=True

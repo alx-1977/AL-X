@@ -38,7 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.core.model_reasoner import (  # noqa: E402
-    PROTOCOL_INSTRUCTIONS, decision_schema,
+    PROTOCOL_INSTRUCTIONS, native_tools,
 )
 
 
@@ -135,7 +135,8 @@ class TheSchemaStatesTheSameRule(unittest.TestCase):
     """The field the Core actually fills carries it too."""
 
     def _operation(self) -> dict:
-        update = decision_schema()["properties"]["goal_update"]["anyOf"][1]
+        update = next(item["inputSchema"] for item in native_tools()
+                      if item["name"] == "update_goal")
         return update["properties"]["operation"]
 
     def test_request_completion_is_offered_as_an_operation(self) -> None:

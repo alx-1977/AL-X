@@ -615,10 +615,9 @@ class AskingIsFreeTests(unittest.TestCase):
         creates. AL/X selected it, was refused, retried, and the session ended.
         """
         from alx.contracts import GoalMutationKind
-        from alx.core.model_reasoner import decision_schema
+        from alx.core.model_reasoner import native_tools
 
-        schema = decision_schema()
-        rendered = str(schema)
+        rendered = str(native_tools())
         self.assertNotIn(GoalMutationKind.AWAIT_APPROVAL.value, rendered)
         # Every other mutation remains available; nothing else was narrowed.
         for kind in GoalMutationKind:
@@ -1049,9 +1048,11 @@ class ApprovalSlipDoesNotEndTheSessionTests(unittest.TestCase):
         store.close()
         directory.cleanup()
 
-    def test_the_model_is_told_the_identifiers_must_match(self) -> None:
+    def test_the_model_is_told_the_approval_covers_its_call_alone(self) -> None:
+        # D-065: an approval is proposed with the call it covers, so there is
+        # no second identifier or argument copy left to keep in step.
         source = (REPOSITORY_ROOT / "src/alx/core/model_reasoner.py").read_text("utf-8")
-        self.assertIn("same identifier the call carries", source)
+        self.assertIn("covers that one call exactly as you make it", source)
 
 
 class AttentionAndTidyingGuidanceTests(unittest.TestCase):

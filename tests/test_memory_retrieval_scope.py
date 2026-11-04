@@ -107,9 +107,8 @@ class RetrievalScopeProtocolTest(unittest.TestCase):
     def test_relationship_retrieval_names_the_required_current_person_binding(self) -> None:
         request = reasoner().build_request(context())
         text = protocol_text()
-        person_field = request.output_schema["properties"]["action"]["anyOf"][3][
-            "properties"
-        ]["memory_person_id"]
+        retrieval = next(item for item in request.tools if item["name"] == "retrieve_memories")
+        person_field = retrieval["inputSchema"]["properties"]["memory_person_id"]
         for stated in (
             "memory_person_id is required",
             "exact person_id from the current/latest person turn",

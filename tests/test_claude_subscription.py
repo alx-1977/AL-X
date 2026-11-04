@@ -632,14 +632,15 @@ class ConfigurationTest(unittest.TestCase):
         settings = self._settings()
         self.assertIsNone(settings.autonomous)
 
-    def test_the_existing_api_providers_remain_selectable(self) -> None:
-        settings = self._settings(
-            ALX_REASONING_PROVIDER="openai",
-            ALX_REASONING_MODEL="gpt-5.6-sol",
-            OPENAI_API_KEY="sk-core",
-        )
-        self.assertEqual(settings.reasoning.provider, "openai")
-        self.assertEqual(settings.reasoning.api_key, "sk-core")
+    def test_the_api_providers_are_no_longer_a_core(self) -> None:
+        """D-065 stage 3: the Core acts only through native tools (Friedl, 2026-11-04)."""
+        from alx.config import ConfigurationError
+        with self.assertRaisesRegex(ConfigurationError, "only through claude_subscription"):
+            self._settings(
+                ALX_REASONING_PROVIDER="openai",
+                ALX_REASONING_MODEL="gpt-5.6-sol",
+                OPENAI_API_KEY="sk-core",
+            )
 
     def test_bootstrap_builds_the_subscription_reasoner(self) -> None:
         from alx.bootstrap.providers import build_runtime_providers
@@ -714,15 +715,6 @@ class ResearchTierIsolationTest(unittest.TestCase):
             configured = getattr(settings.research, tier)
             self.assertEqual(configured.model, "configured-model")
             self.assertEqual(configured.api_key, "fake-key")
-
-    def test_other_core_provider_does_not_require_claude(self):
-        from alx.bootstrap.providers import build_runtime_providers
-        settings = self._settings(ALX_REASONING_PROVIDER="openai",
-                                  ALX_REASONING_MODEL="configured-model",
-                                  OPENAI_API_KEY="fake-key")
-        with patch("alx.bootstrap.providers.subscription_cli_present",
-                   side_effect=AssertionError("must not inspect Claude")):
-            self.assertIsNotNone(build_runtime_providers(settings).reasoning)
 
     def test_subscription_startup_still_refuses_missing_cli(self):
         from alx.bootstrap.providers import build_runtime_providers

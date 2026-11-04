@@ -17,16 +17,15 @@ from alx.config import (  # noqa: E402
 from alx.providers import (  # noqa: E402
     CartesiaTranscriber,
     ElevenLabsSynthesizer,
-    OpenAIReasoningModel,
-    XAIReasoningModel,
 )
 
 
 def environment(**changes: str) -> dict[str, str]:
     values = {
-        "ALX_REASONING_PROVIDER": "xai",
+        # The Core reasons only through the Claude subscription (D-065).
+        "ALX_REASONING_PROVIDER": "claude_subscription",
         "ALX_REASONING_MODEL": "reasoning-model",
-        "ALX_REASONING_API_KEY": "reasoning-secret",
+        "ALX_CLAUDE_ACCOUNT": "core@example.invalid",
         "ALX_STT_PROVIDER": "cartesia",
         "ALX_STT_MODEL": "stt-model",
         "ALX_STT_API_KEY": "stt-secret",
@@ -99,7 +98,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(codex.coding.reasoning.model, "gpt-5.6-luna")
         self.assertEqual(enabled.coding.reasoning.provider, "grok_subscription")
         self.assertEqual(enabled.coding.reasoning.api_key, "")
-        self.assertEqual(enabled.reasoning.provider, "xai")
+        self.assertEqual(enabled.reasoning.provider, "claude_subscription")
         self.assertEqual(enabled.reasoning.model, "reasoning-model")
         with self.assertRaises(ConfigurationError) as raised:
             RuntimeSettings.from_environment(
@@ -130,9 +129,9 @@ class RuntimeConfigurationTests(unittest.TestCase):
 
     def test_every_provider_and_model_is_configuration(self) -> None:
         settings = RuntimeSettings.from_environment(environment())
-        self.assertEqual(settings.reasoning.provider, "xai")
+        self.assertEqual(settings.reasoning.provider, "claude_subscription")
         self.assertEqual(settings.reasoning.model, "reasoning-model")
-        self.assertTrue(settings.reasoning.streaming)
+        self.assertFalse(settings.reasoning.streaming)
         self.assertEqual(settings.reasoning.service_tier, "default")
         self.assertEqual(settings.reasoning.effort, "medium")
         self.assertEqual(settings.speech_to_text.model, "stt-model")
@@ -152,25 +151,12 @@ class RuntimeConfigurationTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             RuntimeSettings.from_environment(environment(ALX_TTS_SPEED="1.21"))
 
-    def test_current_provider_key_names_are_compatible_but_generic_keys_win(self) -> None:
-        values = environment()
-        values.pop("ALX_REASONING_API_KEY")
-        values["XAI_API_KEY"] = "current-key"
-        settings = RuntimeSettings.from_environment(values)
-        self.assertEqual(settings.reasoning.api_key, "current-key")
-        values["ALX_REASONING_API_KEY"] = "generic-key"
-        settings = RuntimeSettings.from_environment(values)
-        self.assertEqual(settings.reasoning.api_key, "generic-key")
-
-    def test_generic_endpoints_override_compatible_provider_names(self) -> None:
+    def test_generic_settings_override_compatible_provider_names(self) -> None:
         values = environment(
-            ALX_REASONING_BASE_URL="https://generic-model.example/",
-            XAI_BASE_URL="https://provider-model.example",
             ALX_TTS_VOICE_ID="generic-voice",
             ELEVENLABS_VOICE_ID="provider-voice",
         )
         settings = RuntimeSettings.from_environment(values)
-        self.assertEqual(settings.reasoning.base_url, "https://generic-model.example")
         self.assertEqual(settings.text_to_speech.voice_id, "generic-voice")
 
     def test_missing_selection_and_unknown_adapter_fail_closed(self) -> None:
@@ -178,14 +164,10 @@ class RuntimeConfigurationTests(unittest.TestCase):
         values.pop("ALX_REASONING_MODEL")
         with self.assertRaises(ConfigurationError):
             RuntimeSettings.from_environment(values)
-        settings = RuntimeSettings.from_environment(
-            environment(
-                ALX_REASONING_PROVIDER="not-installed",
-                ALX_REASONING_BASE_URL="https://not-installed.example",
-            )
-        )
         with self.assertRaises(ConfigurationError):
-            build_runtime_providers(settings)
+            RuntimeSettings.from_environment(
+                environment(ALX_REASONING_PROVIDER="not-installed")
+            )
 
     def test_invalid_turn_profile_fails_closed(self) -> None:
         with self.assertRaises(ConfigurationError):
@@ -196,18 +178,6 @@ class RuntimeConfigurationTests(unittest.TestCase):
             RuntimeSettings.from_environment(
                 environment(ALX_STT_TURN_END_TIMEOUT_MS="12000")
             )
-        with self.assertRaises(ConfigurationError):
-            RuntimeSettings.from_environment(
-                environment(ALX_REASONING_STREAMING="sometimes")
-            )
-        with self.assertRaises(ConfigurationError):
-            RuntimeSettings.from_environment(
-                environment(ALX_REASONING_SERVICE_TIER="unlimited")
-            )
-        with self.assertRaises(ConfigurationError):
-            RuntimeSettings.from_environment(
-                environment(ALX_REASONING_EFFORT="unlimited")
-            )
 
     def test_pronunciation_dictionary_locator_is_mandatory_and_complete(self) -> None:
         values = environment()
@@ -216,8 +186,12 @@ class RuntimeConfigurationTests(unittest.TestCase):
             RuntimeSettings.from_environment(values)
 
     def test_composition_root_returns_only_neutral_runtime_ports(self) -> None:
-        providers = build_runtime_providers(RuntimeSettings.from_environment(environment()))
-        self.assertIsInstance(providers.reasoning, XAIReasoningModel)
+        from unittest import mock
+        from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
+        with mock.patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
+            providers = build_runtime_providers(
+                RuntimeSettings.from_environment(environment()))
+        self.assertIsInstance(providers.reasoning, ClaudeSubscriptionReasoningModel)
         # Transcription reaches Cartesia through the gate that decides which
         # audio is worth paying to transmit. Asserting the wrapper and its
         # contents keeps the composition root honest about both: an unwrapped
@@ -227,18 +201,6 @@ class RuntimeConfigurationTests(unittest.TestCase):
             providers.speech_to_text._transcriber, CartesiaTranscriber
         )
         self.assertIsInstance(providers.text_to_speech, ElevenLabsSynthesizer)
-
-    def test_openai_provider_uses_openai_credential_and_default_endpoint(self) -> None:
-        values = environment(ALX_REASONING_PROVIDER="openai")
-        values.pop("ALX_REASONING_API_KEY")
-        values["OPENAI_API_KEY"] = "openai-secret"
-
-        settings = RuntimeSettings.from_environment(values)
-        providers = build_runtime_providers(settings)
-
-        self.assertEqual(settings.reasoning.api_key, "openai-secret")
-        self.assertEqual(settings.reasoning.base_url, "https://api.openai.com")
-        self.assertIsInstance(providers.reasoning, OpenAIReasoningModel)
 
     def test_llamaparse_is_independent_of_core_and_specialist(self) -> None:
         settings = LlamaParseSettings.from_environment(environment())

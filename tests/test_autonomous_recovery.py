@@ -464,9 +464,9 @@ class ApprovedIdentityOnlyTests(unittest.TestCase):
         from alx.config.settings import ConfigurationError, RuntimeSettings
 
         environment = {
-            "ALX_REASONING_PROVIDER": "openai",
-            "ALX_REASONING_MODEL": "gpt-5.6-sol",
-            "OPENAI_API_KEY": "key",
+            # The same provider, another model: still a different Core.
+            "ALX_REASONING_PROVIDER": "claude_subscription",
+            "ALX_REASONING_MODEL": "claude-sonnet-5-5",
             "ALX_STT_PROVIDER": "cartesia",
             "ALX_STT_MODEL": "ink",
             "ALX_TTS_PROVIDER": "none",

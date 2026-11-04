@@ -381,8 +381,12 @@ class MemoryIdentityConflictTest(unittest.TestCase):
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
 
         self.assertEqual(len(reasoner.contexts), 2)
-        self.assertEqual(outcome.reason, "memory_identity_conflict")
         self.assertNotEqual(outcome.reason, "memory_persistence_error")
+        # Her finished answer is delivered, and the record says plainly that
+        # the memory was not stored.
+        self.assertEqual((outcome.state, outcome.response),
+                         (CoreState.RESPONDED, "Sleep well."))
+        self.assertEqual(outcome.memory_state, "unresolved_identity_conflict")
 
     def test_startup_flushes_a_legitimate_pending_memory_batch(self) -> None:
         """Preflight does not weaken crash-safe replay of valid batches."""

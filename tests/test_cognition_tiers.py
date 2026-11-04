@@ -187,7 +187,7 @@ class CognitionTierTest(unittest.TestCase):
         self.assertEqual(answer, {"finding": "judge-model"})
         self.assertEqual(self.judge.calls, 1)
         request = self.judge.requests[0]
-        self.assertFalse(hasattr(request, "tools"))
+        self.assertEqual(getattr(request, "tools", ()), ())
         self.assertFalse(hasattr(request, "capabilities"))
 
     def test_an_invalid_tier_is_refused(self) -> None:

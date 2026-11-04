@@ -364,16 +364,14 @@ class ModelContractAlignmentTests(unittest.TestCase):
     not be reintroduced by the schema.
     """
 
-    def schema(self) -> dict:
-        from alx.core.model_reasoner import decision_schema
-
-        return decision_schema()
-
     def memory_action(self) -> dict:
-        for variant in self.schema()["properties"]["action"]["anyOf"]:
-            if variant["properties"]["type"].get("const") == "retrieve_memories":
-                return variant
-        raise AssertionError("the retrieval action is missing from the schema")
+        """The retrieve_memories tool's input schema (D-065)."""
+        from alx.core.model_reasoner import native_tools
+
+        for item in native_tools():
+            if item["name"] == "retrieve_memories":
+                return item["inputSchema"]
+        raise AssertionError("the retrieval tool is missing")
 
     def test_the_limit_is_bounded_in_the_schema(self) -> None:
         """Unbounded, a model emitting 1000 ends the turn on a ValueError."""
@@ -449,7 +447,6 @@ class ModelContractAlignmentTests(unittest.TestCase):
         from alx.core.model_reasoner import ModelReasoner
 
         action = {
-            "type": "retrieve_memories",
             "memory_query_id": "q1",
             "memory_kinds": ["factual"],
             "memory_ids": [],
@@ -474,12 +471,8 @@ class ModelContractAlignmentTests(unittest.TestCase):
                 return ModelCompletion(
                     provider="test",
                     model="test",
-                    output={
-                        "goal_id": None,
-                        "action": action,
-                        "goal_update": None,
-                        "memory_proposals": [],
-                    },
+                    output={},
+                    tool_use={"name": "retrieve_memories", "input": action},
                 )
 
         decision = ModelReasoner(
