@@ -785,6 +785,9 @@ class VoiceSession:
         self, conversation_id: str, response: str, feed: _ExchangeFeed | None = None,
     ):
         """Send Core words to the console, confirm that send, then synthesize."""
+        expires_at = getattr(response, "expires_at", None)
+        if expires_at is not None and expires_at <= self._clock():
+            return
         yield VoiceEvent(VoiceEventKind.TEXT, text=response)
         # Resumption means the consumer successfully sent TEXT. Closing or
         # failing that send leaves this response unconfirmed. Keep its source

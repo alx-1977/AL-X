@@ -885,6 +885,26 @@ class AttentionTests(PlanHarness):
         self.work(agent)
         return agent
 
+    def test_pending_stop_note_honours_mail_content_deadline(self):
+        from alx.contracts.mail import MailReference
+        from alx.contracts.provenance import RetentionPolicy
+
+        self.needing_core()
+        provenance = RetentionPolicy().direct_mail(
+            self.now, (MailReference("INBOX", "1", "1"),))
+        snapshot = self.store.load("goal")
+        provenance = replace(provenance, origins=provenance.origins | snapshot.provenance.origins)
+        self.store.replace(replace(snapshot.state, execution_plan=replace(
+            self.plan_of(), attention=replace(self.plan_of().attention, blocked=True))),
+            RETENTION + timedelta(days=60), snapshot.revision, provenance)
+        (note,) = self.store.pending_plan_stop_notes()
+        deadline = note.provenance.content_expires_at
+        self.now = deadline - timedelta(seconds=1)
+        self.assertEqual(self.store.pending_plan_stop_notes(), (note,))
+        for at in (deadline, deadline + timedelta(seconds=1)):
+            self.now = at
+            self.assertEqual(self.store.pending_plan_stop_notes(), ())
+
     def source(self, notices=None, spend=None):
         return PlanAttentionSource(
             self.store, Ledger(), enabled=True, clock=lambda: self.now, spend=spend,

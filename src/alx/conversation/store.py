@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from alx.contracts import ConversationOrigin, ConversationSnapshot, ConversationTurn
@@ -253,7 +253,7 @@ class SQLiteConversationStore:
         return True
 
     def pending_plan_stop_notes(self) -> tuple[ConversationTurn, ...]:
-        """Return stop notes without TEXT receipts, in insertion order.
+        """Return unexpired stop notes without TEXT receipts, in insertion order.
 
         The turn itself is the outbox record: there is no append/enqueue gap.
         Receipts remain after delivery so rescanning an attention cannot resend.
@@ -263,7 +263,9 @@ class SQLiteConversationStore:
             "t.content_expires_at, t.mail_references FROM conversation_turns t "
             "LEFT JOIN response_receipts r ON t.conversation_id = r.conversation_id "
             "AND t.turn_id = r.turn_id WHERE t.turn_id LIKE 'plan-stop:%' "
-            "AND r.turn_id IS NULL ORDER BY t.rowid"
+            "AND r.turn_id IS NULL AND (t.content_expires_at IS NULL "
+            "OR julianday(t.content_expires_at) > julianday(?)) ORDER BY t.rowid",
+            (datetime.now(UTC).isoformat(),),
         ))
 
     def mail_observation_raised_at(self, reference: MailReference) -> datetime | None:

@@ -1122,13 +1122,14 @@ class SQLiteGoalStore:
         )
 
     def pending_plan_stop_notes(self) -> tuple[PlanStopNote, ...]:
+        now = _time_to_data(self._now())
         return tuple(PlanStopNote(
             *row[:5], _time_from_data(row[5]), provenance_from_storage(*row[6:]),
         ) for row in self._connection.execute(
             "SELECT goal_id, plan_id, attention_seq, objective, conversation_id, retention_until, "
             "content_origins, content_recorded_at, content_expires_at, mail_references "
-            "FROM plan_stop_notes WHERE stored = 0 AND retention_until > ? ORDER BY rowid",
-            (_time_to_data(self._now()),),
+            f"FROM plan_stop_notes WHERE stored = 0 AND {RETAINED_GOAL} ORDER BY rowid",
+            (now, now),
         ))
 
     def acknowledge_plan_stop_note(self, note: PlanStopNote) -> None:
