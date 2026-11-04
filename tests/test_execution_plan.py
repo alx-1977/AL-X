@@ -885,11 +885,30 @@ class AttentionTests(PlanHarness):
         self.work(agent)
         return agent
 
+    def test_pending_stop_note_honours_mail_content_deadline(self):
+        from alx.contracts.mail import MailReference
+        from alx.contracts.provenance import RetentionPolicy
+
+        self.needing_core()
+        provenance = RetentionPolicy().direct_mail(
+            self.now, (MailReference("INBOX", "1", "1"),))
+        snapshot = self.store.load("goal")
+        provenance = replace(provenance, origins=provenance.origins | snapshot.provenance.origins)
+        self.store.replace(replace(snapshot.state, execution_plan=replace(
+            self.plan_of(), attention=replace(self.plan_of().attention, blocked=True))),
+            RETENTION + timedelta(days=60), snapshot.revision, provenance)
+        (note,) = self.store.pending_plan_stop_notes()
+        deadline = note.provenance.content_expires_at
+        self.now = deadline - timedelta(seconds=1)
+        self.assertEqual(self.store.pending_plan_stop_notes(), (note,))
+        for at in (deadline, deadline + timedelta(seconds=1)):
+            self.now = at
+            self.assertEqual(self.store.pending_plan_stop_notes(), ())
+
     def source(self, notices=None, spend=None):
         return PlanAttentionSource(
             self.store, Ledger(), enabled=True, clock=lambda: self.now, spend=spend,
-            notify=(lambda conversation_id, values: notices.append((conversation_id, values)))
-            if notices is not None else None,
+            notify=notices.append if notices is not None else None,
         )
 
     def test_exhausted_offers_block_and_notify_once_without_reasoning(self):
@@ -909,13 +928,13 @@ class AttentionTests(PlanHarness):
         self.assertEqual(attention.paid_offers, MAX_PAID_PLAN_OFFERS)
         self.assertEqual(source.due_opportunities(), ())
         source.settle()
-        self.assertEqual([values["state"] for _thread, values in notices], ["blocked"])
-        self.assertEqual(notices[0][0], "thread")
-        # A restart cannot extend the cap, and shows the block again.
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0].conversation_id, "thread")
+        # A restart cannot extend the cap.
         self.restart()
         restarted = []
         self.source(restarted, spend).settle()
-        self.assertEqual([values["state"] for _thread, values in restarted], ["blocked"])
+        self.assertEqual(restarted, [])
         self.assertEqual(self.source().due_opportunities(), ())
 
     def test_blocked_attention_stays_visible_to_every_core_turn_until_resolved(self):
@@ -932,9 +951,130 @@ class AttentionTests(PlanHarness):
         self.assertEqual(self.plan_of().status, PlanStatus.RUNNING)
         notices = []
         source = self.source(notices)
-        source._notified[("goal", self.plan_of().plan_id, 1)] = "thread"
         source.settle()
-        self.assertEqual(notices[0][1]["state"], "resolved")
+        # Resolving before the first scan cannot erase the pending stop note.
+        self.assertEqual(len(notices), 1)
+        source.settle()
+        self.assertEqual(len(notices), 1)
+        self.assertFalse(hasattr(source, "_notified"))
+        self.assertFalse(hasattr(source, "_publish"))
+
+    def test_stop_note_is_durable_pending_and_not_repeated_after_delivery(self):
+        from alx.conversation.gateway import ConversationGateway
+        from alx.conversation.store import SQLiteConversationStore
+
+        self.needing_core()
+        self.set_goal(execution_plan=replace(self.plan_of(), attention=replace(
+            self.plan_of().attention, blocked=True)))
+        path = self.path.parent / "conversation.sqlite3"
+        conversations = SQLiteConversationStore(path)
+        conversations.create("thread", RETENTION)
+        gateway = ConversationGateway(None, conversations, clock=lambda: self.now)
+        source = PlanAttentionSource(self.store, Ledger(), True,
+                                     notify=gateway.retain_plan_stop_note)
+        source.settle()
+        source.settle()
+        (note,) = conversations.pending_plan_stop_notes()
+        self.assertEqual(note.content,
+                         'Work on “Do the work” has stopped and needs you or AL/X to pick it up.')
+        self.assertNotIn("goal", note.content)
+        # Away: no acknowledgement, even if a transport accepted a queue.
+        offered = []
+        gateway.deliver_plan_stop_notes(offered.append)
+        self.assertEqual(offered, [note])
+        conversations.close()
+        self.restart()
+        conversations = SQLiteConversationStore(path)
+        self.addCleanup(conversations.close)
+        gateway = ConversationGateway(None, conversations, clock=lambda: self.now)
+        PlanAttentionSource(self.store, Ledger(), True,
+                            notify=gateway.retain_plan_stop_note).settle()
+        self.assertEqual(conversations.pending_plan_stop_notes(), (note,))
+        gateway.response_delivered("thread", note.turn_id)
+        conversations.close()
+        conversations = SQLiteConversationStore(path)
+        self.addCleanup(conversations.close)
+        gateway = ConversationGateway(None, conversations, clock=lambda: self.now)
+        PlanAttentionSource(self.store, Ledger(), True,
+                            notify=gateway.retain_plan_stop_note).settle()
+        self.assertEqual(conversations.pending_plan_stop_notes(), ())
+        self.assertEqual(len(conversations.load("thread").turns), 1)
+        # A later attention on the same plan is a distinct notification.
+        self.set_goal(execution_plan=replace(self.plan_of(),
+            attention_seq=self.plan_of().attention.seq + 1, attention=replace(
+                self.plan_of().attention, seq=self.plan_of().attention.seq + 1)))
+        PlanAttentionSource(self.store, Ledger(), True,
+                            notify=gateway.retain_plan_stop_note).settle()
+        self.assertEqual(len(conversations.pending_plan_stop_notes()), 1)
+        self.assertEqual(len(conversations.load("thread").turns), 2)
+
+    def test_stop_handoff_survives_restart_resolution_and_failed_acknowledgement(self):
+        from alx.conversation.gateway import ConversationGateway
+        from alx.conversation.store import SQLiteConversationStore
+
+        self.needing_core()
+        self.set_goal(execution_plan=replace(self.plan_of(), attention=replace(
+            self.plan_of().attention, blocked=True)))
+        # Block and pending identity were committed together. Replacing the
+        # entire plan before the first tick does not discard that identity.
+        (pending,) = self.store.pending_plan_stop_notes()
+        self.set_goal(execution_plan=None)
+        self.restart()
+        self.assertEqual(self.store.pending_plan_stop_notes(), (pending,))
+        path = self.path.parent / "conversation.sqlite3"
+        conversations = SQLiteConversationStore(path)
+        gateway = ConversationGateway(None, conversations)
+
+        def interrupted_handoff(note):
+            gateway.retain_plan_stop_note(note)
+            raise RuntimeError("crash after append, before handoff acknowledgement")
+
+        PlanAttentionSource(self.store, Ledger(), True, notify=interrupted_handoff).settle()
+        self.assertEqual(self.store.pending_plan_stop_notes(), (pending,))
+        conversations.close()
+        self.restart()
+        conversations = SQLiteConversationStore(path)
+        self.addCleanup(conversations.close)
+        gateway = ConversationGateway(None, conversations)
+        PlanAttentionSource(self.store, Ledger(), True,
+                            notify=gateway.retain_plan_stop_note).settle()
+        self.assertEqual(self.store.pending_plan_stop_notes(), ())
+        self.assertEqual(len(conversations.load("thread").turns), 1)
+        self.assertEqual(len(conversations.pending_plan_stop_notes()), 1)
+
+    def test_upgrade_retains_existing_blocked_attention(self):
+        self.needing_core()
+        self.set_goal(execution_plan=replace(self.plan_of(), attention=replace(
+            self.plan_of().attention, blocked=True)))
+        # Represent the previous schema, before the atomic pending table.
+        with self.store._connection:
+            self.store._connection.execute("DROP TABLE plan_stop_notes")
+            self.store._connection.execute("PRAGMA user_version = 12")
+        self.restart()
+        (note,) = self.store.pending_plan_stop_notes()
+        self.assertEqual(note.objective, "Do the work")
+        self.assertEqual(note.conversation_id, "thread")
+
+    def test_stop_note_normalizes_and_truncates_the_objective(self):
+        from alx.conversation.gateway import ConversationGateway
+        from alx.conversation.store import SQLiteConversationStore
+
+        self.needing_core()
+        self.set_goal(objective=Objective("turn:person-1", "  Finish\n  " + "x" * 200),
+                      execution_plan=replace(self.plan_of(), attention=replace(
+                          self.plan_of().attention, blocked=True)))
+        conversations = SQLiteConversationStore(self.path.parent / "conversation.sqlite3")
+        self.addCleanup(conversations.close)
+        conversations.create("thread", RETENTION)
+        gateway = ConversationGateway(None, conversations)
+        PlanAttentionSource(self.store, Ledger(), True,
+                            notify=gateway.retain_plan_stop_note).settle()
+        (note,) = conversations.pending_plan_stop_notes()
+        objective = note.content.split('“')[1].split('”')[0]
+        self.assertEqual(len(objective), 120)
+        self.assertTrue(objective.startswith("Finish x"))
+        self.assertTrue(objective.endswith("…"))
+        self.assertEqual(len(note.content.splitlines()), 1)
 
     def test_an_offer_that_never_reached_a_provider_costs_nothing_and_backs_off(self):
         self.needing_core()
@@ -1557,8 +1697,9 @@ class PaidOfferTests(PlanHarness):
         # usage limit, were refused, and blocked the attention for good.
         self.needing_core()
         spend = Spend()
+        notices = []
         source = PlanAttentionSource(self.store, Ledger(), True, clock=lambda: self.now,
-                                     spend=spend)
+                                     spend=spend, notify=notices.append)
         for _ in range(MAX_PAID_PLAN_OFFERS + 1):
             (offer,) = source.due_opportunities()
             source.claim(offer)
@@ -1568,6 +1709,7 @@ class PaidOfferTests(PlanHarness):
             self.later(PLAN_BACKOFF_CAP)
         attention = self.plan_of().attention
         self.assertEqual((attention.paid_offers, attention.blocked), (0, False))
+        self.assertEqual(notices, [])
         # The limit has reset: the plan is still offered, and the answered turn counts.
         (offer,) = source.due_opportunities()
         source.claim(offer)
@@ -2534,6 +2676,20 @@ class SinglePathTests(unittest.TestCase):
         self.assertEqual(self.callers("outcome_of"),
                          ["core/plan_results.py::classify_planned_result"])
 
+    def test_structural_blocked_notice_path_is_deleted(self):
+        from alx.interfaces.diagnostic_feed import VoiceDiagnosticFeed
+
+        self.assertFalse(hasattr(PlanAttentionSource, "_publish"))
+        self.assertNotIn("plan.attention", VoiceDiagnosticFeed._STATE_KEYS)
+        root = Path(__file__).resolve().parents[1]
+        bootstrap = (root / "src/alx/bootstrap/live_voice.py").read_text()
+        frontend = (root / "src/alx/interfaces/assets/app.js").read_text()
+        self.assertNotIn('"plan.attention"', bootstrap)
+        self.assertNotIn('"plan.attention"', frontend)
+        self.assertNotIn("showPlanAttention", frontend)
+        self.assertNotIn("blockedPlans", frontend)
+        self.assertIn("notify=gateway.retain_plan_stop_note", bootstrap)
+
     def test_superseded_continuation_machinery_is_deleted(self):
         import alx.continuity.ledger as ledger
         import alx.continuity.plan_source as plan_source
@@ -2552,7 +2708,8 @@ class SinglePathTests(unittest.TestCase):
         # plan, not on any continuation identity.
         self.assertEqual(self.callers("_append_reply"),
                          ["conversation/gateway.py::_store_response",
-                          "conversation/gateway.py::reconcile_plan_announcements"])
+                          "conversation/gateway.py::reconcile_plan_announcements",
+                          "conversation/gateway.py::retain_plan_stop_note"])
 
 
 if __name__ == "__main__":

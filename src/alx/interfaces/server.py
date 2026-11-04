@@ -129,6 +129,8 @@ class LiveVoiceServer:
         # sockets cannot tell the difference.
         self._delivery_queues: dict[str, list[Any]] = {}
         self._queued_occasions: dict[Any, list[QueuedDelivery]] = {}
+        # Close releases claims; durable TEXT receipts retire stop notes.
+        self._queued_stop_notes: dict[Any, set[tuple[str, str]]] = {}
         # Typed lines waiting to become person turns. Separate from delivery
         # because one carries input and the other carries output; conflating
         # them is how a console starts inferring where text should go.
@@ -160,12 +162,18 @@ class LiveVoiceServer:
         wording is the Core's own, unaltered.
         """
         source_conversation_id = conversation_id
+        identity = self._identify(conversation_id, response)
+        stop_note = identity is not None and identity[0].startswith("plan-stop:")
+        # This mechanical note was explicitly requested for the conversation
+        # surface, held for his next session while away.
+        presence = getattr(self, "_presence", None)
+        if stop_note and presence is not None and presence()[0] == "away":
+            return ResponseDelivery.UNDELIVERABLE
         phone = getattr(self, "_phone", None)
-        if phone is not None and phone.carries(conversation_id):
+        if not stop_note and phone is not None and phone.carries(conversation_id):
             # D-049: he is away, or this is the phone thread. Sent to his
             # phone, and copied into the phone thread so his answer there has
             # it. If it cannot be sent it takes the ordinary path below.
-            identity = self._identify(conversation_id, response)
             if phone.send(response):
                 if identity is not None:
                     self._session.response_delivered(source_conversation_id, identity[0])
@@ -173,7 +181,6 @@ class LiveVoiceServer:
                                  PHONE_CONVERSATION_ID)
                 return ResponseDelivery.DELIVERED
         registered = self._delivery_queues.get(conversation_id) or []
-        identity = self._identify(conversation_id, response)
         if not registered:
             # A mail thread has no listener of its own. An absent session
             # makes this occasion undelivered evidence for a later Core turn.
@@ -205,6 +212,12 @@ class LiveVoiceServer:
                 # would speak it after that answer.
                 acknowledged.put(accepted)
                 return
+            stop_key = ((source_conversation_id, identity[0])
+                        if identity is not None and identity[0].startswith("plan-stop:") else None)
+            if stop_key is not None and any(
+                    stop_key in keys for keys in self._queued_stop_notes.values()):
+                acknowledged.put(True)
+                return
             current = self._delivery_queues.get(conversation_id) or []
             for waiting in reversed(listeners):
                 if waiting not in current:
@@ -217,6 +230,8 @@ class LiveVoiceServer:
                     delivery = (QueuedDelivery(words, opportunity_id)
                                 if opportunity_id is not None else words)
                     waiting.put_nowait(delivery)
+                    if stop_key is not None:
+                        self._queued_stop_notes.setdefault(waiting, set()).add(stop_key)
                     if isinstance(delivery, QueuedDelivery):
                         self._queued_occasions.setdefault(waiting, []).append(delivery)
                     accepted = True
@@ -453,6 +468,7 @@ class LiveVoiceServer:
         finally:
             if session_open_task is not None:
                 session_open_task.cancel()
+            self._queued_stop_notes.pop(deliveries, None)
             for delivery in self._queued_occasions.pop(deliveries, []):
                 if not delivery.started and self._mark_undelivered is not None:
                     try:

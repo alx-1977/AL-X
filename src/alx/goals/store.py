@@ -32,10 +32,11 @@ from alx.contracts.scope import (
     scope_to_storage,
 )
 from alx.contracts.storage import serialized_store
+from alx.contracts.records import PlanStopNote
 from alx.goals.result_summary import RESULT_LIMIT, bound_result, serialized_size
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -684,6 +685,26 @@ class SQLiteGoalStore:
                     "UPDATE goals SET state_json = ? WHERE goal_id = ?",
                     (json.dumps(data, separators=(",", ":")), goal_id),
                 )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS plan_stop_notes ("
+                "goal_id TEXT NOT NULL REFERENCES goals(goal_id) ON DELETE CASCADE, "
+                "plan_id TEXT NOT NULL, attention_seq INTEGER NOT NULL, objective TEXT NOT NULL, "
+                "conversation_id TEXT NOT NULL, retention_until TEXT NOT NULL, "
+                "content_origins TEXT, content_recorded_at TEXT, content_expires_at TEXT, "
+                "mail_references TEXT, stored INTEGER NOT NULL DEFAULT 0, "
+                "PRIMARY KEY(goal_id, plan_id, attention_seq))"
+            )
+            # Existing blocked attentions receive the same durable handoff.
+            self._connection.execute(
+                "INSERT OR IGNORE INTO plan_stop_notes "
+                "SELECT goal_id, json_extract(state_json, '$.execution_plan.plan_id'), "
+                "json_extract(state_json, '$.execution_plan.attention.seq'), "
+                "json_extract(state_json, '$.objective[1]'), "
+                "COALESCE(json_extract(state_json, '$.execution_plan.source_conversation_id'), "
+                "conversation_id), retention_until, "
+                "content_origins, content_recorded_at, content_expires_at, mail_references, 0 "
+                "FROM goals WHERE json_extract(state_json, '$.execution_plan.attention.blocked') = 1"
+            )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _with_recovery(self, state: GoalState, *, legacy: bool = False) -> GoalState:
@@ -737,6 +758,7 @@ class SQLiteGoalStore:
                     "UPDATE goals SET state_json = ? WHERE goal_id = ?",
                     (self._record_state(state), state.goal_id),
                 )
+                self._retain_plan_stop_note(state, conversation_id, retention_until, provenance)
         except sqlite3.IntegrityError as error:
             if self._connection.execute("SELECT 1 FROM goals WHERE goal_id = ?", (state.goal_id,)).fetchone():
                 raise GoalAlreadyExists(state.goal_id) from error
@@ -1099,6 +1121,26 @@ class SQLiteGoalStore:
             scope,
         )
 
+    def pending_plan_stop_notes(self) -> tuple[PlanStopNote, ...]:
+        now = _time_to_data(self._now())
+        return tuple(PlanStopNote(
+            *row[:5], _time_from_data(row[5]), provenance_from_storage(*row[6:]),
+        ) for row in self._connection.execute(
+            "SELECT goal_id, plan_id, attention_seq, objective, conversation_id, retention_until, "
+            "content_origins, content_recorded_at, content_expires_at, mail_references "
+            f"FROM plan_stop_notes WHERE stored = 0 AND {RETAINED_GOAL} ORDER BY rowid",
+            (now, now),
+        ))
+
+    def acknowledge_plan_stop_note(self, note: PlanStopNote) -> None:
+        """Called only after the stable conversation turn is durably stored."""
+        with self._connection:
+            self._connection.execute(
+                "UPDATE plan_stop_notes SET stored = 1 "
+                "WHERE goal_id = ? AND plan_id = ? AND attention_seq = ?",
+                (note.goal_id, note.plan_id, note.attention_seq),
+            )
+
     def pending_memory_batches(self, goal_id: str) -> tuple[PendingMemoryBatch, ...]:
         rows = self._connection.execute(
             "SELECT goal_revision, proposal_json, retention_until, content_origins, content_recorded_at, content_expires_at, mail_references FROM pending_memory_batches WHERE goal_id = ? ORDER BY goal_revision, ordinal",
@@ -1234,4 +1276,19 @@ class SQLiteGoalStore:
             (state.goal_id,),
         ).fetchone()
         assert row is not None
+        self._retain_plan_stop_note(state, row[0], retention_until, retained)
         return row[0], retained, scope_from_storage(row[1])
+
+    def _retain_plan_stop_note(self, state: GoalState, conversation_id: str,
+                               retention_until: datetime,
+                               provenance: ContentProvenance | None) -> None:
+        plan = state.execution_plan
+        if plan is not None and plan.attention is not None and plan.attention.blocked:
+            # The block and the pending handoff commit together, even if a
+            # later turn resolves or replaces the attention before a tick.
+            self._connection.execute(
+                "INSERT OR IGNORE INTO plan_stop_notes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (state.goal_id, plan.plan_id, plan.attention.seq, state.objective.summary,
+                 plan.source_conversation_id or conversation_id, _time_to_data(retention_until),
+                 *provenance_to_storage(provenance)),
+            )

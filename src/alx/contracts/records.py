@@ -145,6 +145,25 @@ class Objective:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanStopNote:
+    """Durable facts for Friedl's requested mechanical stop notification."""
+
+    goal_id: str
+    plan_id: str
+    attention_seq: int
+    objective: str
+    conversation_id: str
+    retention_until: datetime
+    provenance: ContentProvenance | None = None
+
+    @property
+    def turn_id(self) -> str:
+        # Length prefixes keep arbitrary identifiers unambiguous.
+        return (f"plan-stop:{len(self.goal_id)}:{self.goal_id}:"
+                f"{len(self.plan_id)}:{self.plan_id}:{self.attention_seq}")
+
+
+@dataclass(frozen=True, slots=True)
 class SuccessCriterion:
     criterion_id: str
     description: str
