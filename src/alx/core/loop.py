@@ -487,25 +487,38 @@ class CoreAgent:
 
     def _settle_held_close(self, outcome: CoreOutcome, held: list["_HeldClose"],
                            conversation: ConversationSnapshot) -> CoreOutcome:
+        """Write a held close with the words or silence that ended the turn.
+
+        Only a turn she ended herself closes the plan: words, including the
+        one response-only step a refusal allows, or silence she chose. A turn
+        that ends in an error or runs out of steps leaves the plan and its
+        attention as they were, to be answered again. A failed write raises,
+        so no reply claiming the close is delivered.
+        """
         if not held:
             return outcome
         close = held[0]
+        if not (outcome.state is CoreState.RESPONDED or (
+                outcome.state is CoreState.FINISHED_SILENTLY
+                and outcome.reason == "core_selected_silence")):
+            return outcome
+        target = self._store.load(close.goal_id)
+        # Checked when her final words came; checked again because a plan
+        # step on another goal may have changed this one since.
+        refusal = self._plan_update_refusal(close.update, target, close.rendered, None, None)
+        if refusal is not None:
+            LOGGER.info("Held plan %s not applied: %s", close.update.operation.value, refusal)
+            return outcome
         # One reply per turn: words that already announce a close of their
         # own are not stored a second time with this one.
         reply = (outcome.response if outcome.state is CoreState.RESPONDED
                  and outcome.response_turn_id is None else None)
-        try:
-            target = self._store.load(close.goal_id)
-            refusal = self._plan_update_refusal(close.update, target, close.rendered, None, None)
-            if refusal is not None:
-                # The plan changed under it since she gave it; nothing closes.
-                LOGGER.info("Held plan %s not applied: %s", close.update.operation.value, refusal)
-                return outcome
-            target, reply_turn = self._apply_plan_update(
-                target, close.update, conversation, close.provenance, reply)
-        except Exception as error:  # noqa: BLE001 - the turn's outcome stands
-            LOGGER.warning("Held plan close could not be written: %s", type(error).__name__)
-            return outcome
+        # What the reply rests on, and what the goal already rests on.
+        provenance = RetentionPolicy().derive(ContentOrigin.ALX, self._clock(), [
+            item for item in (outcome.response_provenance or close.provenance,
+                              target.provenance) if item is not None])
+        target, reply_turn = self._apply_plan_update(
+            target, close.update, conversation, provenance, reply)
         same_goal = (outcome.snapshot is not None
                      and outcome.snapshot.state.goal_id == close.goal_id)
         # Words that carry the close are stored from that plan, under its
@@ -1249,6 +1262,24 @@ class CoreAgent:
                 continue
 
             if decision.call is None:
+                if held and not decision.intermediate:
+                    # Her words or silence would end the turn and carry the
+                    # close she gave earlier. If its plan has changed since,
+                    # the words claim a close that cannot happen: they are not
+                    # delivered, and she reasons again with the refusal.
+                    close = held[0]
+                    close_refusal = self._plan_update_refusal(
+                        close.update, self._store.load(close.goal_id), close.rendered,
+                        None, None)
+                    if close_refusal is not None:
+                        held.clear()
+                        subject = f"{close.update.operation.value}:{close_refusal}"
+                        if self._already_refused(refused_calls, close_refusal, subject):
+                            return stopped(CoreState.CHECKPOINTED, close_refusal)
+                        refused_calls = (*refused_calls, {
+                            "reason": close_refusal, "subject": subject,
+                        })
+                        continue
                 if decision.plan_update is not None:
                     plan_refusal = self._plan_update_refusal(
                         decision.plan_update, snapshot, rendered_plan,

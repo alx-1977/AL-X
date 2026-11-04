@@ -1939,6 +1939,58 @@ class ReplyDurabilityTests(PlanHarness):
         self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
         self.assertEqual(self.plan_of().announcements, ())
 
+    def native_finish(self, *after):
+        return Reasoner(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                        *after)
+
+    def test_a_native_finish_waits_when_the_turn_runs_out_of_steps(self):
+        """Second review of #200: no words, no close; the attention stays to answer."""
+        self.finish_ready()
+        outcome_ = self.person(self.agent(self.native_finish()), budget=2)
+        self.assertEqual(outcome_.reason, "budget_exhausted")
+        self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
+        self.assertEqual(self.plan_of().announcements, ())
+
+    def test_a_failed_native_close_write_stores_no_reply(self):
+        """Second review of #200: words claiming an unwritten close are not delivered."""
+        self.finish_ready()
+        gateway = self.gateway(self.native_finish(AgentDecision(response="It is merged and done.")))
+        original = self.store.replace
+
+        def failing(state, *arguments, **keywords):
+            if (state.execution_plan is not None
+                    and state.execution_plan.status is PlanStatus.COMPLETED):
+                raise OSError("goal store unavailable")
+            return original(state, *arguments, **keywords)
+        self.store.replace = failing
+        with self.assertRaises(OSError):
+            self.finish_turn(gateway)
+        self.store.replace = original
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
+
+    def test_a_held_close_keeps_what_the_final_reply_rests_on(self):
+        """Second review of #200: a recovered reply keeps its mail deadline."""
+        from alx.contracts import ContentOrigin, RetentionPolicy
+        from alx.contracts.mail import MailReference
+        from alx.core.loop import CoreOutcome, _HeldClose
+        self.finish_ready()
+        snapshot = self.store.load("goal")
+        plan_ = snapshot.state.execution_plan
+        mail = RetentionPolicy().direct_mail(self.now, (MailReference("INBOX", "7", "1"),))
+        agent = self.agent()
+        held = [_HeldClose(PlanUpdate(PlanOperation.FINISH), "goal",
+                           (plan_.plan_id, plan_.attention_seq),
+                           RetentionPolicy().non_mail(ContentOrigin.ALX, self.now))]
+        settled = agent._settle_held_close(
+            CoreOutcome(CoreState.RESPONDED, snapshot, response="Done, from that mail.",
+                        response_provenance=mail), held, conversation())
+        stored = self.store.load("goal")
+        self.assertEqual(stored.state.execution_plan.announcements[0].turn_id,
+                         settled.response_turn_id)
+        self.assertIn(ContentOrigin.MAIL_MESSAGE, stored.provenance.origins)
+        self.assertIsNotNone(stored.provenance.content_expires_at)
+
     def test_the_ordinary_path_stores_the_reply_once_and_clears_it(self):
         self.finish_ready()
         gateway = self.gateway(self.finishing())
