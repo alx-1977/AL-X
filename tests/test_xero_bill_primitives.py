@@ -462,7 +462,8 @@ class XeroPrimitiveTests(unittest.TestCase):
             # Nothing attaches a goal for the Core; it selects the goal this
             # work belongs to, before and after the restart.
             first_reasoner = Queued(
-                AgentDecision(call=capture_call, goal_id="goal-1")
+                AgentDecision(goal_id="goal-1"),
+                AgentDecision(call=capture_call),
             )
             first = CoreAgent(
                 store,
@@ -470,7 +471,7 @@ class XeroPrimitiveTests(unittest.TestCase):
                 dispatch,
                 XERO_DEFINITIONS,
                 clock=lambda: now,
-            ).process(conversation, retention, 1)
+            ).process(conversation, retention, 2)
             self.assertEqual(first.state, CoreState.CHECKPOINTED)
             captured = first.snapshot.state.attempts[-1].result.values
             self.assertTrue(captured["completed"])
@@ -487,9 +488,8 @@ class XeroPrimitiveTests(unittest.TestCase):
             # what the capture actually recorded.
             second_reasoner = Queued(
                 AgentDecision(goal_id="goal-1"),
-                AgentDecision(call=read_call, goal_id="goal-1"),
-                AgentDecision(response="The draft bill exists and matches the invoice.",
-                              goal_id="goal-1"),
+                AgentDecision(call=read_call),
+                AgentDecision(response="The draft bill exists and matches the invoice."),
             )
             second = CoreAgent(
                 restarted_store,

@@ -352,10 +352,9 @@ class FinishedHistoryTests(unittest.TestCase):
     def test_reminder_completion_then_follow_up_after_restart(self):
         self.store.create(shipment(), "c1", RETENTION)
         completing = RecordingReasoner(
-            AgentDecision(goal_id="e8b6a256", goal_proposal=GoalProposal(
-                GoalMutationKind.REQUEST_COMPLETION,
-            )),
-            AgentDecision(response="Checked.", goal_id="e8b6a256"),
+            AgentDecision(goal_id="e8b6a256"),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION)),
+            AgentDecision(response="Checked."),
         )
         completion_contexts = self.follow_up(completing)
         self.assertEqual(self.store.load("e8b6a256").state.status, GoalStatus.COMPLETED)
@@ -403,10 +402,12 @@ class FinishedHistoryTests(unittest.TestCase):
                 success_criteria=(SuccessCriterion("tracked", "Status checked"),),
                 context={"occasion": "self-requested follow-up"},
                 referents=(Referent("parcel", {"carrier": "FedEx"}),),
-            ), call=CapabilityCall("track", "track_shipment", {"tracking_number": "878504110311"})),
-            AgentDecision(response="The parcel was delivered.", goal_proposal=GoalProposal(
+            )),
+            AgentDecision(call=CapabilityCall("track", "track_shipment", {"tracking_number": "878504110311"})),
+            AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.REQUEST_COMPLETION, new_evidence=(evidence,),
-            ), response_requires_goal_commit=True),
+            )),
+            AgentDecision(response="The parcel was delivered."),
         )
         definition = CapabilityDefinition(
             "track_shipment", "Read shipment status", StructuredSchema(ValueKind.OBJECT),
@@ -551,15 +552,16 @@ class FinishedHistoryTests(unittest.TestCase):
             current[0] = call.call_id
             return broker.dispatch(call, AuthorityContext("friedl", frozenset({"self.read"}), self.now))
         reasoner = RecordingReasoner(
-            AgentDecision(goal_id="big", call=CapabilityCall("read-big", READ_OWN_GOALS, {"goal_id": "big"})),
-            AgentDecision(goal_id="big", response="Read it."),
+            AgentDecision(goal_id="big"),
+            AgentDecision(call=CapabilityCall("read-big", READ_OWN_GOALS, {"goal_id": "big"})),
+            AgentDecision(response="Read it."),
         )
         contexts = self.follow_up(reasoner, dispatch)
-        self.assertEqual(contexts[1].turn_call_ids, ("read-big",))
-        attempts = json.loads(_context_payload(contexts[1]))["active_goal"]["attempts"]
+        self.assertEqual(contexts[2].turn_call_ids, ("read-big",))
+        attempts = json.loads(_context_payload(contexts[2]))["active_goal"]["attempts"]
         read = [item for item in attempts if item["call_id"] == "read-big"][0]
         self.assertEqual(read["result_values"]["goals"][0]["goal_id"], "big")
-        later = replace(contexts[1], turn_call_ids=(), active_goal=self.store.load("big").state)
+        later = replace(contexts[2], turn_call_ids=(), active_goal=self.store.load("big").state)
         attempts = json.loads(_context_payload(later))["active_goal"]["attempts"]
         read = [item for item in attempts if item["call_id"] == "read-big"][0]
         self.assertEqual(read["result_values"]["goal_ids"], ["big"])
@@ -748,11 +750,13 @@ class FinishedHistoryTests(unittest.TestCase):
         provenance = RetentionPolicy().direct_mail(NOW, (MailReference("INBOX", "42", "1"),))
         self.store.create(shipment(status=GoalStatus.COMPLETED), "c1", RETENTION, provenance)
         self.store.create(shipment("open"), "c1", RETENTION)
-        reasoner = RecordingReasoner(AgentDecision(
-            goal_id="open", response="Checked.", goal_proposal=GoalProposal(
+        reasoner = RecordingReasoner(
+            AgentDecision(goal_id="open"),
+            AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.UPDATE, context={"tracking_number": "878504110311"},
-            ),
-        ))
+            )),
+            AgentDecision(response="Checked."),
+        )
         self.follow_up(reasoner)
         self.assertEqual(self.store.load("open").provenance.content_expires_at,
                          provenance.content_expires_at)

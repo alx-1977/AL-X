@@ -466,9 +466,10 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
             {MARK_MAIL_MESSAGE_SEEN: seen, MOVE_MAIL_MESSAGE_TO_TRASH: trash},
         )
         reasoner = Queued(
-            AgentDecision(call=seen_call, goal_id="goal-1"),
-            AgentDecision(call=trash_call, goal_id="goal-1"),
-            AgentDecision(response="Handled.", goal_id="goal-1"),
+            AgentDecision(goal_id="goal-1"),
+            AgentDecision(call=seen_call),
+            AgentDecision(call=trash_call),
+            AgentDecision(response="Handled."),
         )
         directory = tempfile.TemporaryDirectory()
         store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
@@ -488,16 +489,16 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
                     "conversation-1", (), 1, now + timedelta(days=1)
                 ),
                 now + timedelta(days=1),
-                3,
+                4,
             )
             self.assertEqual(outcome.state, CoreState.RESPONDED)
             self.assertEqual(calls, [MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH])
             self.assertEqual(
-                reasoner.contexts[1].active_goal.attempts[-1].call.capability_id,
+                reasoner.contexts[2].active_goal.attempts[-1].call.capability_id,
                 MARK_MAIL_MESSAGE_SEEN,
             )
             self.assertEqual(
-                reasoner.contexts[2].active_goal.attempts[-1].call.capability_id,
+                reasoner.contexts[3].active_goal.attempts[-1].call.capability_id,
                 MOVE_MAIL_MESSAGE_TO_TRASH,
             )
         finally:
@@ -810,6 +811,7 @@ class UnheardTextTests(unittest.TestCase):
             goal_proposal=GoalProposal(
                 kind=GoalMutationKind.CREATE, objective_summary="Reply",
                 success_criteria=(SuccessCriterion("criterion-1", "sent"),)),
+        ), AgentDecision(
             call=CapabilityCall("call-1", SEND_MAIL_REPLY, arguments, "approval-1"),
             approval_proposal=ApprovalProposal(
                 "approval-1", ApprovalScope(SEND_MAIL_REPLY, arguments), "turn:t1"),
@@ -827,7 +829,7 @@ class UnheardTextTests(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "I cannot send that yet.")
         # The Core reasoned again after the refusal rather than ending the turn.
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         store.close()
         directory.cleanup()
 
@@ -911,6 +913,8 @@ class ApprovalExpiryTests(unittest.TestCase):
                 goal_proposal=GoalProposal(
                     kind=GoalMutationKind.CREATE, objective_summary="Act",
                     success_criteria=(SuccessCriterion("criterion-1", "done"),)),
+            ),
+            AgentDecision(
                 call=call,
                 approval_proposal=ApprovalProposal(
                     "approval-1", ApprovalScope("act", arguments), "turn:t1"),
@@ -936,7 +940,7 @@ class ApprovalExpiryTests(unittest.TestCase):
             clock=lambda: now, identifier_factory=lambda: "goal-1",
             approval_ttl_seconds=600,
         )
-        agent.process(conversation, now + timedelta(days=1), 2)
+        agent.process(conversation, now + timedelta(days=1), 3)
         approval = store.load("goal-1").state.approvals[0]
         self.assertEqual(approval.expires_at, now + timedelta(minutes=10))
         store.close()
@@ -1029,6 +1033,8 @@ class ApprovalSlipDoesNotEndTheSessionTests(unittest.TestCase):
                 goal_proposal=GoalProposal(
                     kind=GoalMutationKind.CREATE, objective_summary="Reply",
                     success_criteria=(SuccessCriterion("criterion-1", "sent"),)),
+            ),
+            AgentDecision(
                 call=CapabilityCall("call-1", SEND_MAIL_REPLY, arguments, "approval-1"),
                 # Deliberately mismatched: the slip seen live.
                 approval_proposal=ApprovalProposal(
@@ -1044,7 +1050,7 @@ class ApprovalSlipDoesNotEndTheSessionTests(unittest.TestCase):
         ).process(conversation, now + timedelta(days=1), 3)
         self.assertEqual(dispatched, [], "nothing may be sent without an approval")
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(len(reasoner.contexts), 2, "the Core must get another turn")
+        self.assertEqual(len(reasoner.contexts), 3, "the Core must get another turn")
         store.close()
         directory.cleanup()
 

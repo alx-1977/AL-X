@@ -18,7 +18,9 @@ from alx.interfaces.server import LiveVoiceServer
 
 
 def cancel(goal_id):
-    return AgentDecision(goal_id=goal_id, goal_proposal=GoalProposal(GoalMutationKind.CANCEL))
+    """Select a goal, then cancel it: two steps (D-065)."""
+    return (AgentDecision(goal_id=goal_id),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.CANCEL)))
 
 
 class MultiGoalProgressionTests(Fixture):
@@ -29,12 +31,12 @@ class MultiGoalProgressionTests(Fixture):
     def test_three_existing_goals_reconcile_and_survive_restart(self):
         self.create("a", "b", "c")
         reasoner = Queued(
-            AgentDecision(goal_id="a"), cancel("a"), cancel("b"), cancel("c"),
+            *cancel("a"), *cancel("b"), *cancel("c"),
             AgentDecision(response="Those three are obsolete and closed."),
         )
-        result = self.agent(reasoner).process(conversation(), RETENTION, 5)
+        result = self.agent(reasoner).process(conversation(), RETENTION, 7)
         self.assertEqual(result.state, CoreState.RESPONDED)
-        self.assertEqual(len(reasoner.contexts), 5)
+        self.assertEqual(len(reasoner.contexts), 7)
         self.assertEqual(self.broker.executed, 0)
         with SQLiteGoalStore(self.root / "goals.sqlite3") as restarted:
             for identifier in ("a", "b", "c"):
@@ -45,10 +47,10 @@ class MultiGoalProgressionTests(Fixture):
         reasoner = Queued(
             AgentDecision(goal_id="a"),
             AgentDecision(call=CapabilityCall("work-a", "study_question", {})),
-            cancel("b"),
+            *cancel("b"),
             AgentDecision(response="The action succeeded and the obsolete goal is closed."),
         )
-        result = self.agent(reasoner).process(conversation(), RETENTION, 4)
+        result = self.agent(reasoner).process(conversation(), RETENTION, 5)
         self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual(self.broker.executed, 1)
         self.assertEqual(len(self.store.load("a").state.attempts), 1)
@@ -56,36 +58,21 @@ class MultiGoalProgressionTests(Fixture):
 
     def test_departed_goal_cannot_be_revisited_even_after_completion(self):
         self.create("a", "b")
-        reasoner = Queued(cancel("a"), cancel("b"), AgentDecision(goal_id="a"),
+        reasoner = Queued(*cancel("a"), *cancel("b"), AgentDecision(goal_id="a"),
                           AgentDecision(response="Both are closed."))
         result = self.agent(reasoner).process(conversation(), RETENTION, 25)
         # The revisit is refused and she is told; nothing is loaded or written.
         self.assertEqual(result.state, CoreState.RESPONDED)
-        self.assertEqual(reasoner.contexts[3].refused_goal_selections[0]["reason"],
+        self.assertEqual(reasoner.contexts[5].refused_goal_selections[0]["reason"],
                          "goal_selection_revisited")
-        self.assertEqual(reasoner.contexts[3].active_goal.goal_id, "b")
+        self.assertEqual(reasoner.contexts[5].active_goal.goal_id, "b")
         self.assertEqual(self.store.load("a").revision, 2)
-
-    def test_active_goal_cycle_preserves_answer_but_does_not_dispatch_again(self):
-        self.create("a", "b")
-        reasoner = Queued(
-            AgentDecision(goal_id="a", call=CapabilityCall("a-work", "study_question", {})),
-            AgentDecision(goal_id="b", call=CapabilityCall("b-work", "study_question", {})),
-            AgentDecision(goal_id="a", response="Both actions ran; further work remains.",
-                          goal_proposal=GoalProposal(GoalMutationKind.CANCEL)),
-        )
-        result = self.agent(reasoner).process(conversation(), RETENTION, 3)
-        self.assertEqual(result.reason, "goal_selection_revisited")
-        self.assertEqual(result.response, "Both actions ran; further work remains.")
-        self.assertEqual(self.broker.executed, 2)
-        self.assertEqual(self.store.load("a").state.status, GoalStatus.ACTIVE)
-        self.assertEqual(self.store.load("b").state.status, GoalStatus.ACTIVE)
 
     def test_inspection_allows_a_second_offered_goal_without_a_write(self):
         self.create("a", "b")
         reasoner = Queued(
             AgentDecision(goal_id="a"), AgentDecision(goal_id="b"),
-            AgentDecision(goal_id="b", response="I inspected both goals."),
+            AgentDecision(response="I inspected both goals."),
         )
         result = self.agent(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(result.response, "I inspected both goals.")
@@ -129,86 +116,43 @@ class MultiGoalProgressionTests(Fixture):
         self.create("a", "b")
         reasoner = Queued(
             AgentDecision(goal_id="a"), AgentDecision(goal_id="not-offered"),
-            AgentDecision(goal_id="b", response="I can inspect the offered goal."),
+            AgentDecision(goal_id="b"),
+            AgentDecision(response="I can inspect the offered goal."),
         )
-        result = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        result = self.agent(reasoner).process(conversation(), RETENTION, 4)
         self.assertEqual(result.response, "I can inspect the offered goal.")
         self.assertEqual(reasoner.contexts[2].active_goal.goal_id, "a")
         self.assertEqual(reasoner.contexts[2].refused_goal_selections[0]["reason"],
                          "goal_selection_unknown")
+        self.assertEqual(reasoner.contexts[3].active_goal.goal_id, "b")
         self.assertEqual([self.store.load(g).revision for g in ("a", "b")], [1, 1])
 
     def test_noop_mutation_cannot_manufacture_progress_with_a_revision(self):
         self.create("a", "b")
-        noop = AgentDecision(goal_id="a", goal_proposal=GoalProposal(GoalMutationKind.UPDATE))
-        reasoner = Queued(noop, noop, AgentDecision(response="Nothing needed changing."))
+        noop = AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE))
+        reasoner = Queued(AgentDecision(goal_id="a"), noop, noop,
+                          AgentDecision(response="Nothing needed changing."))
         result = self.agent(reasoner).process(conversation(), RETENTION, 25)
         # Told once that nothing changed; the same again ends the turn.
-        self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"], "goal_update_no_change")
+        self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"], "goal_update_no_change")
         self.assertEqual(result.reason, "goal_selection_no_progress")
         self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual([self.store.load(g).revision for g in ("a", "b")], [1, 1])
 
-    def test_independent_answer_survives_deferred_revisit_without_mutation(self):
-        self.create("a")
-        self.store.create(replace(active_goal("b"), outstanding_work=(WorkItem("pending", "Still needed"),)),
-                          "conversation-1", RETENTION)
-        reasoner = Queued(
-            AgentDecision(goal_id="a"), AgentDecision(goal_id="b"),
-            AgentDecision(goal_id="a", goal_proposal=GoalProposal(GoalMutationKind.CANCEL),
-                          response="The remaining work is still open."),
-        )
-        result = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(result.response, "The remaining work is still open.")
-        self.assertEqual(result.reason, "goal_selection_revisited")
-        self.assertEqual(self.store.load("a").revision, 1)
-        self.assertEqual(self.store.load("b").state.status, GoalStatus.AWAITING_INPUT)
-        self.assertEqual(result.snapshot.state.status, GoalStatus.AWAITING_INPUT)
-        # A fresh turn may resume that durable work; the guard is not goal state.
-        following = self.agent(Queued(cancel("a"), AgentDecision(response="Closed.")))
-        self.assertEqual(following.process(conversation(), RETENTION, 2).response, "Closed.")
-
-    def test_deferred_answer_parks_a_blocked_departing_goal(self):
-        self.create("a")
-        self.store.create(replace(active_goal("b"), blockers=(WorkItem("blocked", "Needs evidence"),)),
-                          "conversation-1", RETENTION)
-        result = self.agent(Queued(
-            AgentDecision(goal_id="a"), AgentDecision(goal_id="b"),
-            AgentDecision(goal_id="a", response="The evidence is still missing."),
-        )).process(conversation(), RETENTION, 3)
-        self.assertEqual(result.response, "The evidence is still missing.")
-        self.assertEqual(result.reason, "goal_selection_revisited")
-        self.assertEqual(result.snapshot.state.status, GoalStatus.BLOCKED)
-        self.assertEqual(self.store.load("b").state.status, GoalStatus.BLOCKED)
-        self.assertEqual(self.store.load("a").revision, 1)
-
-    def test_commit_dependent_answer_does_not_survive_refused_selection(self):
-        self.create("a", "b")
-        reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(goal_id="b"), AgentDecision(
-            goal_id="a", goal_proposal=GoalProposal(GoalMutationKind.CANCEL),
-            response="I closed it.", response_requires_goal_commit=True,
-        ), AgentDecision(response="I could not close it."))
-        result = self.agent(reasoner).process(conversation(), RETENTION, 3)
-        # The words that claimed the commit are not delivered; one
-        # response-only step says what is true.
-        self.assertEqual(result.response, "I could not close it.")
-        self.assertEqual(result.reason, "goal_selection_revisited")
-        self.assertEqual(self.store.load("a").revision, 1)
-
     def test_preserved_answer_still_passes_memory_grounding(self):
         self.create("a", "b")
         invalid = MemoryProposal("m", MemoryKind.FACTUAL, "unsupported", ("turn:missing",), NOW)
-        reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(
-            goal_id="b", response="An independent answer.", memory_proposals=(invalid,),
-        ), AgentDecision(response="Corrected."))
-        result = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(goal_id="b"),
+                          AgentDecision(memory_proposals=(invalid,)),
+                          AgentDecision(response="Corrected."))
+        result = self.agent(reasoner).process(conversation(), RETENTION, 4)
         self.assertEqual(result.response, "Corrected.")
         self.assertEqual(reasoner.contexts[-1].refused_calls[0]["reason"], "memory_proposal_invalid")
 
     def test_existing_step_budget_bounds_productive_progress(self):
         self.create("a", "b", "c")
-        result = self.agent(Queued(cancel("a"), cancel("b"), cancel("c"))).process(
-            conversation(), RETENTION, 2)
+        result = self.agent(Queued(*cancel("a"), *cancel("b"), *cancel("c"))).process(
+            conversation(), RETENTION, 4)
         self.assertEqual(result.reason, "budget_exhausted")
         self.assertEqual(self.store.load("a").state.status, GoalStatus.CANCELLED)
         self.assertEqual(self.store.load("b").state.status, GoalStatus.CANCELLED)
@@ -216,7 +160,7 @@ class MultiGoalProgressionTests(Fixture):
 
     def test_single_goal_inspection_and_answer_is_unchanged(self):
         self.create("a")
-        reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(goal_id="a", response="Still open."))
+        reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(response="Still open."))
         result = self.agent(reasoner).process(conversation(), RETENTION, 2)
         self.assertEqual(result.response, "Still open.")
         self.assertIsNone(result.reason)
@@ -224,13 +168,16 @@ class MultiGoalProgressionTests(Fixture):
 
     def test_completion_still_requires_sourced_evidence_after_switch(self):
         self.create("a", "b")
-        reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(
-            goal_id="b", goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION),
-            response="The second goal still needs evidence.",
-        ))
+        reasoner = Queued(
+            AgentDecision(goal_id="a"), AgentDecision(goal_id="b"),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION)),
+            AgentDecision(response="The second goal still needs evidence."),
+        )
         core = self.agent(reasoner)
-        result = core.process(conversation(), RETENTION, 2)
-        self.assertEqual(result.reason, "goal_proposal_rejected")
+        result = core.process(conversation(), RETENTION, 4)
+        self.assertEqual(result.response, "The second goal still needs evidence.")
+        self.assertEqual(reasoner.contexts[3].refused_calls[0]["mutation_kind"],
+                         "request_completion")
         self.assertEqual(core.last_goal_rejection["reason"], "completion_lacks_sourced_evidence")
         self.assertEqual(self.store.load("a").revision, 1)
         self.assertEqual(self.store.load("b").revision, 1)
@@ -238,11 +185,13 @@ class MultiGoalProgressionTests(Fixture):
     def test_grounded_completion_after_switch_still_succeeds(self):
         self.create("a", "b")
         evidence = Evidence("ev", "confirmation", supports=("a-1",), source_references=("turn:turn-3",))
-        reasoner = Queued(AgentDecision(goal_id="a"), AgentDecision(
-            goal_id="b", goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION, new_evidence=(evidence,)),
-            response="The second goal is complete.", response_requires_goal_commit=True,
-        ))
-        result = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        reasoner = Queued(
+            AgentDecision(goal_id="a"), AgentDecision(goal_id="b"),
+            AgentDecision(goal_proposal=GoalProposal(
+                GoalMutationKind.REQUEST_COMPLETION, new_evidence=(evidence,))),
+            AgentDecision(response="The second goal is complete."),
+        )
+        result = self.agent(reasoner).process(conversation(), RETENTION, 4)
         self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual(self.store.load("a").revision, 1)
         self.assertEqual(self.store.load("b").state.status, GoalStatus.COMPLETED)
@@ -251,8 +200,8 @@ class MultiGoalProgressionTests(Fixture):
         external = RetentionPolicy().non_mail(ContentOrigin.EXTERNAL, NOW)
         self.store.create(active_goal("a"), "conversation-1", RETENTION, external)
         self.create("b", "c")
-        result = self.agent(Queued(cancel("a"), cancel("b"), cancel("c"),
-                                  AgentDecision(response="Reconciled."))).process(conversation(), RETENTION, 4)
+        result = self.agent(Queued(*cancel("a"), *cancel("b"), *cancel("c"),
+                                  AgentDecision(response="Reconciled."))).process(conversation(), RETENTION, 7)
         self.assertIn(ContentOrigin.EXTERNAL, result.response_provenance.origins)
         self.assertIn(ContentOrigin.EXTERNAL, self.store.load("c").provenance.origins)
 

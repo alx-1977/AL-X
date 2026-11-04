@@ -38,15 +38,13 @@ class ReceiptTests(unittest.TestCase):
         self.addCleanup(self.goals.close)
         self.events = [event(A), event(B)]
 
-    def respond(self, refs, person=False, during=None, memory_conflict=False):
+    def respond(self, refs, person=False, during=None):
         class Reasoner:
             def decide(inner, context):
                 if during:
                     during()
                 return AgentDecision(response='Core-authored announcement', raised_mail_observations=refs)
         core = CoreAgent(self.goals, Reasoner(), lambda call, state: None, ())
-        if memory_conflict:
-            core._conflicting_memories = lambda *args: ({'memory_id': 'clash'},)
         gateway = ConversationGateway(core, self.store, contextual_events=lambda: tuple(self.events),
                                       clock=lambda: NOW)
         if person:
@@ -370,13 +368,6 @@ class ReceiptTests(unittest.TestCase):
                 self.assertEqual(outcome.raised_mail_observations, ())
                 self.assertTrue(gateway.response_delivered(source, outcome.response_turn_id))
                 self.assertIsNone(self.store.mail_observation_raised_at(ref))
-
-    def test_response_retained_after_memory_conflict_keeps_observation_coverage(self):
-        gateway, outcome, source = self.respond((A,), memory_conflict=True)
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.memory_state, 'unresolved_identity_conflict')
-        gateway.response_delivered(source, outcome.response_turn_id)
-        self.assertEqual(self.store.mail_observation_raised_at(A), NOW)
 
     def test_person_confirmation_retains_original_context_with_identical_later_words(self):
         from alx.interfaces.live_voice import StoredResponse, VoiceSession

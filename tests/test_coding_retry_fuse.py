@@ -220,8 +220,9 @@ class CodingRetryFuseTests(unittest.TestCase):
             def __init__(self):
                 self.contexts = []
                 self.decisions = [
-                    AgentDecision(call=CapabilityCall("third", "run_coding_task", {"task": "changed", "worktree": "."}), goal_id="goal-a"),
-                    AgentDecision(response="The prior jobs failed.", goal_id="goal-a"),
+                    AgentDecision(goal_id="goal-a"),
+                    AgentDecision(call=CapabilityCall("third", "run_coding_task", {"task": "changed", "worktree": "."})),
+                    AgentDecision(response="The prior jobs failed."),
                 ]
             def decide(self, context):
                 self.contexts.append(context)
@@ -249,7 +250,7 @@ class CodingRetryFuseTests(unittest.TestCase):
             self.assertEqual(attempts[-1].reason_code, "coding_retry_exhausted")
             self.assertFalse(attempts[-1].implementation_invoked)
             self.assertIsNot(attempts[-1].disposition, CapabilityAttemptDisposition.PENDING)
-            self.assertEqual(len(reasoner.contexts[1].active_goal.attempts), 5)
+            self.assertEqual(len(reasoner.contexts[2].active_goal.attempts), 5)
 
     def test_same_and_reworded_attempts_after_exhaustion_stay_stably_exhausted(self):
         now = datetime(2026, 9, 16, tzinfo=UTC)
@@ -258,9 +259,10 @@ class CodingRetryFuseTests(unittest.TestCase):
         class Reasoner:
             def __init__(self):
                 self.decisions = [
-                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."}), goal_id="goal-a"),
-                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."}), goal_id="goal-a"),
-                    AgentDecision(response="The coding path is exhausted.", goal_id="goal-a"),
+                    AgentDecision(goal_id="goal-a"),
+                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."})),
+                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."})),
+                    AgentDecision(response="The coding path is exhausted."),
                 ]
             def decide(self, context):
                 return self.decisions.pop(0)
@@ -273,13 +275,15 @@ class CodingRetryFuseTests(unittest.TestCase):
             capability = CapabilityDefinition("run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL)
             agent = CoreAgent(store, Reasoner(), lambda *_: self.fail("must not dispatch"), (capability,), clock=lambda: now)
             conversation = ConversationSnapshot("conversation", (ConversationTurn("conversation", "t", ConversationOrigin.TYPED, "continue", now, "friedl"),), 1, retention)
-            outcome = agent.process(conversation, retention, 4)
+            outcome = agent.process(conversation, retention, 5)
             class Reworded:
                 def decide(self, context):
-                    return AgentDecision(call=CapabilityCall("reworded", "run_coding_task", {"task": "different wording", "worktree": "."}), goal_id="goal-a")
+                    if context.active_goal is None:
+                        return AgentDecision(goal_id="goal-a")
+                    return AgentDecision(call=CapabilityCall("reworded", "run_coding_task", {"task": "different wording", "worktree": "."}))
 
             reworded = CoreAgent(store, Reworded(), lambda *_: self.fail("must not dispatch"), (capability,), clock=lambda: now)
-            reworded_outcome = reworded.process(conversation, retention, 1)
+            reworded_outcome = reworded.process(conversation, retention, 2)
             refusals = [item for item in store.load("goal-a").state.attempts if item.reason_code == "coding_retry_exhausted"]
             self.assertEqual(len(refusals), 1)
             self.assertEqual(outcome.response, "The coding path is exhausted.")
@@ -384,6 +388,8 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
                 self.decisions = 0
 
             def decide(self, context):
+                if context.active_goal is None:
+                    return AgentDecision(goal_id="goal-a")
                 self.decisions += 1
                 if self.decisions == 3:
                     # Friedl, or AL/X's repository authority, restores main.
@@ -393,9 +399,8 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
                         call=CapabilityCall(
                             f"job-{self.decisions}", "run_coding_task", arguments
                         ),
-                        goal_id="goal-a",
                     )
-                return AgentDecision(response="done", goal_id="goal-a")
+                return AgentDecision(response="done")
 
         git(self.root, "switch", "-q", "-c", "left-behind")
         with tempfile.TemporaryDirectory() as directory:
@@ -504,15 +509,14 @@ class TaskFailuresShareOneBound(unittest.TestCase):
 
         class Reasoner:
             def __init__(self):
-                self.decisions = [
+                self.decisions = [AgentDecision(goal_id="goal-a")] + [
                     AgentDecision(
                         call=CapabilityCall(
                             call_id, "run_coding_task", {"task": f"changed plan {call_id}"}
                         ),
-                        goal_id="goal-a",
                     )
                     for call_id in calls
-                ] + [AgentDecision(response="done", goal_id="goal-a")]
+                ] + [AgentDecision(response="done")]
 
             def decide(self, context):
                 return self.decisions.pop(0)
@@ -531,7 +535,7 @@ class TaskFailuresShareOneBound(unittest.TestCase):
                     "conversation", "t", ConversationOrigin.TYPED, "continue", now, "friedl"
                 ),
             ), 1, retention)
-            self.last_outcome = agent.process(conversation, retention, len(calls) + 2)
+            self.last_outcome = agent.process(conversation, retention, len(calls) + 3)
             final = store.load("goal-a").state.attempts
         refused = [
             item for item in final
@@ -635,15 +639,14 @@ class TaskFailuresShareOneBound(unittest.TestCase):
         class Reasoner:
             def __init__(self) -> None:
                 self.decisions = [
+                    AgentDecision(goal_id="goal-a"),
                     AgentDecision(
                         call=CapabilityCall(
                             "reworded", "run_coding_task", {"task": "try again"}
                         ),
-                        goal_id="goal-a",
                     ),
                     AgentDecision(
                         response="The coding planner is bounded; I can still help.",
-                        goal_id="goal-a",
                     ),
                 ]
 

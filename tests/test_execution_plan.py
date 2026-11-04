@@ -93,17 +93,24 @@ def plan(*steps: ExecutionStep, **changes) -> ExecutionPlan:
     return replace(ExecutionPlan("plan", None, None, None, tuple(steps)), **changes)
 
 
-def install(workflow: ExecutionPlan, response="Started.") -> AgentDecision:
-    return AgentDecision(response=response, goal_id="goal",
-                         plan_update=PlanUpdate(PlanOperation.INSTALL, workflow))
-
-
-def resolve(operation: PlanOperation, response="Understood.") -> AgentDecision:
-    return AgentDecision(response=response, goal_id="goal",
-                         plan_update=PlanUpdate(operation))
-
-
 SELECT = AgentDecision(goal_id="goal")
+
+
+def install(workflow: ExecutionPlan, response="Started.", *,
+            select=True) -> tuple[AgentDecision, ...]:
+    """A person turn's steps: select the goal, install the plan, say so.
+
+    `select=False` when the turn already works under the goal."""
+    return (*((SELECT,) if select else ()),
+            AgentDecision(plan_update=PlanUpdate(PlanOperation.INSTALL, workflow)),
+            AgentDecision(response=response))
+
+
+def resolve(operation: PlanOperation, response="Understood.") -> tuple[AgentDecision, ...]:
+    """Resolve the selected goal's plan, then say so. Spread after SELECT on a
+    person turn; a plan occasion already works under its goal."""
+    return (AgentDecision(plan_update=PlanUpdate(operation)),
+            AgentDecision(response=response))
 
 
 def outcome(state=CapabilityResultState.SUCCEEDED, result_outcome=None, values=None,
@@ -218,7 +225,7 @@ class PlanHarness(unittest.TestCase):
 
     def installed(self, *steps, agent=None, **changes):
         """Install a plan through a real person turn and return the agent."""
-        agent = agent or self.agent(Reasoner(install(plan(*steps, **changes))))
+        agent = agent or self.agent(Reasoner(*install(plan(*steps, **changes))))
         outcome_ = self.person(agent)
         self.assertEqual(outcome_.state, CoreState.RESPONDED, outcome_.reason)
         return agent
@@ -228,7 +235,7 @@ class PlanRunnableSignalTests(PlanHarness):
     """A runnable plan wakes the tick, so its first step does not wait for it."""
 
     def test_installing_a_plan_tells_the_runtime_once(self):
-        agent = self.agent(Reasoner(install(plan(step("coding")))))
+        agent = self.agent(Reasoner(*install(plan(step("coding")))))
         told: list[bool] = []
         agent.plan_runnable_listener = lambda: told.append(True)
         self.person(agent)
@@ -249,10 +256,10 @@ class LifecycleTests(PlanHarness):
 
     def test_core_is_called_only_for_judgment_and_completion(self):
         reasoner = Reasoner(
-            install(plan(step("coding"), step("ci", wait=10), step("review", wait=10),
+            *install(plan(step("coding"), step("ci", wait=10), step("review", wait=10),
                          step("merge"), step("cleanup"))),
-            resolve(PlanOperation.ACCEPT, "The finding is acceptable; merging."),
-            resolve(PlanOperation.FINISH, "Merged and cleaned up."),
+            *resolve(PlanOperation.ACCEPT, "The finding is acceptable; merging."),
+            *resolve(PlanOperation.FINISH, "Merged and cleaned up."),
         )
         agent = self.agent(reasoner)
         self.outputs = {"ci": [PENDING, PENDING, SUCCESS], "review": [PENDING, JUDGE]}
@@ -263,23 +270,24 @@ class LifecycleTests(PlanHarness):
             self.work(agent)
         attention = self.plan_of().attention
         self.assertEqual(attention.reason, "planned_evidence_requires_judgement")
-        self.assertEqual(reasoner.calls, 1)
+        # The person turn's three steps: select, install, words.
+        self.assertEqual(reasoner.calls, 3)
         # The judgment wake shows her the full result it was raised for.
         self.occasion(agent)
-        evidence = reasoner.contexts[1].transient_attempts
+        evidence = reasoner.contexts[3].transient_attempts
         self.assertEqual(evidence[-1].result.values["findings"], ("fix",))
         self.work(agent)
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
         self.occasion(agent)
-        self.assertEqual(reasoner.calls, 3)
+        self.assertEqual(reasoner.calls, 7)
         self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
         self.assertEqual(self.names(), ["coding", "ci", "ci", "ci", "review", "review",
                                         "merge", "cleanup"])
 
     def test_a_wake_answered_without_resolution_keeps_its_exact_attention(self):
-        reasoner = Reasoner(install(plan(step("coding"), step("merge"))),
-                            AgentDecision(response="Looking into the failure.", goal_id="goal"),
-                            resolve(PlanOperation.RESUME))
+        reasoner = Reasoner(*install(plan(step("coding"), step("merge"))),
+                            AgentDecision(response="Looking into the failure."),
+                            *resolve(PlanOperation.RESUME))
         agent = self.agent(reasoner)
         self.outputs["coding"] = [FAILED, SUCCESS]
         self.person(agent)
@@ -310,8 +318,8 @@ class LifecycleTests(PlanHarness):
             with self.subTest(operation=operation.value):
                 self.set_goal(execution_plan=None, attempts=())
                 self.calls.clear()
-                reasoner = Reasoner(install(plan(step("review", wait=10), step("merge"))),
-                                    resolve(operation))
+                reasoner = Reasoner(*install(plan(step("review", wait=10), step("merge"))),
+                                    *resolve(operation))
                 agent = self.agent(reasoner)
                 self.outputs["review"] = [JUDGE, JUDGE]
                 self.person(agent)
@@ -321,15 +329,17 @@ class LifecycleTests(PlanHarness):
                 self.assertEqual(self.names(), expected)
 
     def test_accept_cannot_run_past_the_last_step(self):
-        reasoner = Reasoner(install(plan(step("review", wait=10))),
-                            resolve(PlanOperation.ACCEPT),
-                            resolve(PlanOperation.FINISH, "Done."))
+        # The refused accept is followed by the finish she gives instead.
+        reasoner = Reasoner(*install(plan(step("review", wait=10))),
+                            AgentDecision(plan_update=PlanUpdate(PlanOperation.ACCEPT)),
+                            *resolve(PlanOperation.FINISH, "Done."))
         agent = self.agent(reasoner)
         self.outputs["review"] = JUDGE
         self.person(agent)
         self.work(agent)
         self.occasion(agent)
-        self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"],
+        # Install took three steps, the refused accept one more.
+        self.assertEqual(reasoner.contexts[4].refused_calls[0]["reason"],
                          "plan_has_no_remaining_steps")
         self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
 
@@ -353,11 +363,13 @@ class UnrelatedActivityTests(PlanHarness):
         self.assertEqual(before.status, PlanStatus.WAITING)
         reasoner = Reasoner(
             # The same capability, called directly with other arguments.
-            AgentDecision(call=CapabilityCall("direct-ci", "ci", {"pr": 7}), goal_id="goal"),
+            SELECT,
+            AgentDecision(call=CapabilityCall("direct-ci", "ci", {"pr": 7})),
             # A goal update that touches nothing the plan declared.
-            AgentDecision(response="Noted.", goal_id="goal", goal_proposal=GoalProposal(
+            AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.UPDATE,
                 outstanding_work=(WorkItem("merge", "merge after CI"),))),
+            AgentDecision(response="Noted."),
         )
         self.person(self.agent(reasoner), "person-1", "person-2")
         after = self.plan_of()
@@ -428,12 +440,12 @@ class ResultIdentityTests(PlanHarness):
 
     def cancel(self, agent):
         self.person(self.same_process(
-            agent, Reasoner(SELECT, resolve(PlanOperation.CANCEL, "Stopped."))))
+            agent, Reasoner(SELECT, *resolve(PlanOperation.CANCEL, "Stopped."))))
         self.assertEqual(self.plan_of().status, PlanStatus.CANCELLED)
 
     def replace_plan(self, agent):
         self.person(self.same_process(
-            agent, Reasoner(SELECT, install(plan(step("cleanup")), "Replaced."))))
+            agent, Reasoner(*install(plan(step("cleanup")), "Replaced."))))
 
     def test_cancel_before_the_dispatch_boundary_means_the_call_never_happens(self):
         for stop in (self.cancel, self.replace_plan):
@@ -510,8 +522,8 @@ class ResultIdentityTests(PlanHarness):
         (job,) = agent.advance_due_plans()
         reasoner = Reasoner(
             SELECT,
-            AgentDecision(call=CapabilityCall("direct", "cleanup", {}), goal_id="goal"),
-            AgentDecision(response="It is still running.", goal_id="goal"),
+            AgentDecision(call=CapabilityCall("direct", "cleanup", {})),
+            AgentDecision(response="It is still running."),
         )
         self.person(self.same_process(agent, reasoner))
         self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"], "plan_step_in_flight")
@@ -530,15 +542,14 @@ class ResultIdentityTests(PlanHarness):
         from alx.tools.coding import STOP_DEFINITION
 
         agent = self.installed(step("coding"), agent=self.agent(
-            Reasoner(install(plan(step("coding")))),
+            Reasoner(*install(plan(step("coding")))),
             definitions=(*DEFINITIONS, STOP_DEFINITION),
         ))
         (job,) = agent.advance_due_plans()
         reasoner = Reasoner(
             SELECT,
-            AgentDecision(call=CapabilityCall("stop", "stop_coding_job", {}),
-                          goal_id="goal"),
-            AgentDecision(response="Stopped.", goal_id="goal"),
+            AgentDecision(call=CapabilityCall("stop", "stop_coding_job", {})),
+            AgentDecision(response="Stopped."),
         )
         self.person(self.same_process(agent, reasoner))
         self.assertIn("stop_coding_job", self.names())
@@ -629,7 +640,7 @@ class FailureContractTests(PlanHarness):
             ExecutionStep(CapabilityCall("read", "read_pull_request_checks",
                                          {"pull_request_number": 95, "head_sha": HEAD}),
                           (), 60, 3600),
-            agent=self.agent(Reasoner(install(plan(ExecutionStep(
+            agent=self.agent(Reasoner(*install(plan(ExecutionStep(
                 CapabilityCall("read", "read_pull_request_checks",
                                {"pull_request_number": 95, "head_sha": HEAD}),
                 (), 60, 3600)))), definitions=definitions),
@@ -785,7 +796,7 @@ class RestartTests(PlanHarness):
         self.outputs["review"] = [JUDGE, JUDGE]
         self.work(agent)
         self.restart()
-        reasoner = Reasoner(AgentDecision(response="Reading it.", goal_id="goal"))
+        reasoner = Reasoner(AgentDecision(response="Reading it."))
         agent = self.agent(reasoner)
         # Not offered over metadata alone: the read must come first.
         self.assertFalse(agent.plan_evidence_ready("goal"))
@@ -806,7 +817,7 @@ class ReplacedPlanRestartTests(PlanHarness):
         agent = self.installed(step("coding"))
         agent.advance_due_plans()
         self.person(self.same_process(
-            agent, Reasoner(SELECT, install(plan(step("cleanup")), "Replaced."))))
+            agent, Reasoner(*install(plan(step("cleanup")), "Replaced."))))
         self.restart()
         self.work(self.agent())
         self.assertEqual(self.names(), ["cleanup"])
@@ -835,8 +846,8 @@ class RestartEvidenceTests(PlanHarness):
             CapabilityResultState.FAILED, failure={"code": "failed", "log": text})
         self.work(agent)
         reasoner = Reasoner(
-            AgentDecision(response="Examining the failure.", goal_id="goal"),
-            AgentDecision(response="Still examining it.", goal_id="goal"),
+            AgentDecision(response="Examining the failure."),
+            AgentDecision(response="Still examining it."),
         )
         self.same_process(agent, reasoner)
         self.occasion(agent)
@@ -852,8 +863,8 @@ class RestartEvidenceTests(PlanHarness):
             values={"findings": "x" * 500_000}, result_outcome=ExecutionOutcome.AMBIGUOUS)
         self.work(agent)
         reasoner = Reasoner(
-            AgentDecision(response="Examining the findings.", goal_id="goal"),
-            AgentDecision(response="Still examining them.", goal_id="goal"),
+            AgentDecision(response="Examining the findings."),
+            AgentDecision(response="Still examining them."),
         )
         self.same_process(agent, reasoner)
         self.occasion(agent)
@@ -869,7 +880,7 @@ class RestartEvidenceTests(PlanHarness):
         self.outputs["coding"] = FAILED
         self.work(agent)
         self.restart()
-        reasoner = Reasoner(AgentDecision(response="It failed.", goal_id="goal"))
+        reasoner = Reasoner(AgentDecision(response="It failed."))
         self.occasion(self.agent(reasoner))
         (evidence,) = reasoner.contexts[0].transient_attempts
         self.assertEqual(evidence.result.failure, {"code": "failed"})
@@ -943,7 +954,7 @@ class AttentionTests(PlanHarness):
             self.plan_of().attention, offers=3, paid_offers=3, blocked=True)))
         for index in range(12):
             self.store.create(new_goal(f"newer-{index}"), "other-thread", RETENTION)
-        reasoner = Reasoner(SELECT, resolve(PlanOperation.RESUME, "Trying again."))
+        reasoner = Reasoner(SELECT, *resolve(PlanOperation.RESUME, "Trying again."))
         self.person(self.agent(reasoner))
         summary = next(item for item in reasoner.contexts[0].unfinished_goals
                        if item.goal_id == "goal")
@@ -1198,10 +1209,11 @@ class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
     async def test_direct_coding_is_refused_and_planned_coding_leaves_turns_free(self):
         coding = CapabilityDefinition("run_coding_task", "code", SCHEMA, SCHEMA,
                                       SideEffect.EFFECTFUL)
-        direct = AgentDecision(goal_id="goal", call=CapabilityCall(
-            "call-direct", "run_coding_task", {}))
+        direct = AgentDecision(call=CapabilityCall("call-direct", "run_coding_task", {}))
         chat = AgentDecision(response="Quiet so far.")
-        reasoner = Reasoner(direct, install(plan(step("run_coding_task"), step("merge"))),
+        reasoner = Reasoner(SELECT, direct,
+                            *install(plan(step("run_coding_task"), step("merge")),
+                                     select=False),
                             chat)
         agent = self.agent(reasoner, definitions=(*DEFINITIONS, coding))
         lock = asyncio.Lock()
@@ -1231,7 +1243,7 @@ class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         self.assertEqual(first.state, CoreState.RESPONDED, first.reason)
         # Refused before dispatch, returned to her once, and corrected by her.
         self.assertEqual(self.calls, [])
-        self.assertEqual(reasoner.contexts[1].refused_calls, ({
+        self.assertEqual(reasoner.contexts[2].refused_calls, ({
             "call_id": "call-direct", "capability_id": "run_coding_task",
             "reason": "coding_requires_execution_plan", "subject": "run_coding_task",
         },))
@@ -1257,8 +1269,9 @@ class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         self.assertEqual([(item.call.call_id, item.disposition) for item in recorded],
                          [(self.calls[0].call_id, CapabilityAttemptDisposition.EXECUTED)])
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
-        # One reasoning call per new piece of evidence, none while it ran.
-        self.assertEqual(reasoner.calls, 3)
+        # One reasoning call per step: four in the first turn, one in the
+        # second, none while it ran.
+        self.assertEqual(reasoner.calls, 5)
 
 
 class DueTickTests(unittest.IsolatedAsyncioTestCase):
@@ -1284,8 +1297,7 @@ class AcceptSafetyTests(PlanHarness):
     """`accept` moves past a step only when it happened and only judgment remains."""
 
     def accept_after(self, *steps, outputs, setup=None):
-        reasoner = Reasoner(install(plan(*steps)), resolve(PlanOperation.ACCEPT),
-                            AgentDecision(response="Understood.", goal_id="goal"))
+        reasoner = Reasoner(*install(plan(*steps)), *resolve(PlanOperation.ACCEPT))
         agent = self.agent(reasoner)
         self.outputs.update(outputs)
         self.person(agent)
@@ -1298,7 +1310,8 @@ class AcceptSafetyTests(PlanHarness):
         return reasoner, before
 
     def assert_refused(self, reasoner, before, reason):
-        self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"],
+        # Contexts 0-2 are the install turn; 3 gave the accept, 4 heard its refusal.
+        self.assertEqual(reasoner.contexts[4].refused_calls[0]["reason"],
                          "plan_step_not_acceptable")
         after = self.plan_of()
         self.assertEqual((after.status, after.cursor, after.attention.reason),
@@ -1337,7 +1350,7 @@ class AcceptSafetyTests(PlanHarness):
                 self.calls.clear()
                 reasoner, before = self.accept_after(
                     step("merge"), step("cleanup"), outputs={"merge": result})
-                self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"],
+                self.assertEqual(reasoner.contexts[4].refused_calls[0]["reason"],
                                  "plan_step_not_acceptable")
                 self.work(self.agent())
                 self.assertNotIn("cleanup", self.names())
@@ -1347,8 +1360,7 @@ class AcceptSafetyTests(PlanHarness):
             (job,) = agent.advance_due_plans()
             agent.begin_planned_dispatch(job)
             self.restart()
-            fresh = self.agent(Reasoner(resolve(PlanOperation.ACCEPT),
-                                        AgentDecision(response="Checking.", goal_id="goal")))
+            fresh = self.agent(Reasoner(*resolve(PlanOperation.ACCEPT, "Checking.")))
             self.work(fresh)
             return fresh
         reasoner = None
@@ -1402,7 +1414,7 @@ class ContextIsolationTests(PlanHarness):
                                      CapabilityResult(call.call_id, call.capability_id,
                                                       CapabilityResultState.SUCCEEDED))
         self.outputs["coding"] = planned
-        agent = self.agent(Reasoner(install(plan(step("coding")))),
+        agent = self.agent(Reasoner(*install(plan(step("coding")))),
                            bind_dispatch=conversation_var.set,
                            budget_check=conversation_var.set)
         self.person(agent)
@@ -1832,7 +1844,7 @@ class EvidenceConcurrencyTests(PlanHarness):
 
     def test_a_person_turn_never_waits_on_an_evidence_read(self):
         self.needing_judgment_after_restart()
-        reasoner = Reasoner(SELECT, AgentDecision(response="Still reading.", goal_id="goal"))
+        reasoner = Reasoner(SELECT, AgentDecision(response="Still reading."))
         agent = self.agent(reasoner)
         (job,) = agent.advance_due_plans()            # scheduled, not yet run
         self.person(self.same_process(agent, reasoner))
@@ -2014,7 +2026,7 @@ class ReplyDurabilityTests(PlanHarness):
                 if item.origin is ConversationOrigin.ALX_RESPONSE]
 
     def finishing(self):
-        return Reasoner(SELECT, resolve(PlanOperation.FINISH, "It is merged and done."))
+        return Reasoner(SELECT, *resolve(PlanOperation.FINISH, "It is merged and done."))
 
     def test_a_native_finish_waits_for_the_reply_and_is_written_with_it(self):
         """D-065: a finish given as its own step closes where the turn ends."""
@@ -2221,22 +2233,24 @@ class ReplyDurabilityTests(PlanHarness):
     def test_a_reply_she_did_not_deliver_is_never_announced(self):
         self.finish_ready()
         # Remaining work is immediately executable, so the first answer is
-        # deferred; her second step answers without closing the plan.
+        # deferred and never delivered. The held finish is written with the
+        # words that do end the turn (D-065), and only those are stored.
         self.set_goal(outstanding_work=(WorkItem("notes", "write release notes"),))
-        reasoner = Reasoner(SELECT, resolve(PlanOperation.FINISH, "All done."),
-                            AgentDecision(response="Writing the release notes next.",
-                                          goal_id="goal"))
+        reasoner = Reasoner(SELECT, *resolve(PlanOperation.FINISH, "All done."),
+                            AgentDecision(response="Writing the release notes next."))
         gateway = self.gateway(reasoner)
         self.finish_turn(gateway)
+        self.assertEqual(reasoner.contexts[3].continuation_notices[0]["reason"],
+                         "remaining_work_still_executable")
         self.assertEqual([item.content for item in self.replies()],
                          ["Writing the release notes next."])
-        self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
         self.assertEqual(self.plan_of().announcements, ())
         self.assertEqual(gateway.reconcile_plan_announcements(), 0)
 
     def test_cancel_follows_the_same_rule(self):
         self.finish_ready()
-        gateway = self.gateway(Reasoner(SELECT, resolve(PlanOperation.CANCEL, "Stopped it.")))
+        gateway = self.gateway(Reasoner(SELECT, *resolve(PlanOperation.CANCEL, "Stopped it.")))
         original = self.conversations.append
         calls = {"n": 0}
 
@@ -2267,12 +2281,12 @@ class ReplyDurabilityTests(PlanHarness):
             self.finish_turn(self.gateway(self.finishing()))
         self.now += timedelta(seconds=1)
         self.finish_turn(self.gateway(Reasoner(            # plan B replaces it
-            SELECT, install(plan(step("cleanup")), "Starting the cleanup."))))
+            *install(plan(step("cleanup")), "Starting the cleanup."))))
         self.work(self.agent())
         self.now += timedelta(seconds=1)
         with self.assertRaises(OSError):                      # plan B's reply
             self.finish_turn(self.gateway(Reasoner(
-                SELECT, resolve(PlanOperation.CANCEL, "Cleanup stopped."))))
+                SELECT, *resolve(PlanOperation.CANCEL, "Cleanup stopped."))))
         self.assertEqual(len(self.plan_of().announcements), 2)
         storage["down"] = False
         gateway = self.gateway(Reasoner())
@@ -2299,10 +2313,11 @@ class RejectedDecisionCorrectionTests(PlanHarness):
         return DecisionValidationError(f"plan condition path is unusable: {path!r}")
 
     def test_a_corrected_decision_installs_normally_after_one_rejection(self):
-        reasoner = self.Rejecting(self.rejected(), install(plan(step("coding", completion=(
+        reasoner = self.Rejecting(self.rejected(), *install(plan(step("coding", completion=(
             PlanCondition("state", "succeeded"),))), "Started; I will report back."))
         outcome = self.person(self.agent(reasoner))
-        self.assertEqual(reasoner.calls, 2)
+        # The rejection, then select, install and words.
+        self.assertEqual(reasoner.calls, 4)
         (refusal,) = reasoner.contexts[1].refused_calls
         self.assertEqual(refusal, {"reason": "decision_rejected",
                                    "subject": "plan condition path is unusable: 'succeeded'"})
@@ -2379,7 +2394,7 @@ class PlannedCallIdentityTests(PlanHarness):
             "repair_branch": "acceptance/pr95-marker",
             "commit_message": "docs: add throwaway acceptance run marker for PR #95",
         }), ()))
-        agent = CoreAgent(self.store, Reasoner(install(workflow)), dispatch,
+        agent = CoreAgent(self.store, Reasoner(*install(workflow)), dispatch,
                           (*DEFINITIONS, CODING), clock=lambda: self.now,
                           budget_check=self.budget, plan_continuation=True)
         self.person(agent)
@@ -2455,7 +2470,7 @@ class LatestReviewRegressionTests(PlanHarness):
         finished = replace(self.plan_of(), status=PlanStatus.COMPLETED, attention=None,
                            announcements=(PlanAnnouncement("alx-plan-reply:1", "Done."),))
         self.set_goal(execution_plan=finished)
-        self.person(self.same_process(agent, Reasoner(install(plan(step("cleanup")),
+        self.person(self.same_process(agent, Reasoner(*install(plan(step("cleanup")),
                                                               "Next job started."))))
         replacement = self.plan_of()
         self.assertEqual(replacement.status, PlanStatus.RUNNING)
@@ -2535,40 +2550,21 @@ class GateTests(PlanHarness):
         for name, (workflow, options, reason) in cases.items():
             with self.subTest(case=name):
                 self.set_goal(execution_plan=None)
-                reasoner = Reasoner(install(workflow),
-                                    AgentDecision(response="I cannot plan that.",
-                                                  goal_id="goal"))
+                # Selected, the install refused, then her words about it.
+                reasoner = Reasoner(*install(workflow, "I cannot plan that."))
                 self.person(self.agent(reasoner, **options))
-                self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"], reason)
+                self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"], reason)
                 self.assertIsNone(self.plan_of())
 
     def test_a_repeated_identical_refusal_answers_the_person_once_and_stops(self):
-        reasoner = Reasoner(install(plan(step("coding", wait=10))),
-                            install(plan(step("coding", wait=10))),
-                            AgentDecision(response="I cannot wait on that.", goal_id="goal"))
+        unsafe = AgentDecision(plan_update=PlanUpdate(
+            PlanOperation.INSTALL, plan(step("coding", wait=10))))
+        reasoner = Reasoner(SELECT, unsafe, unsafe,
+                            AgentDecision(response="I cannot wait on that."))
         outcome_ = self.person(self.agent(reasoner), budget=6)
         self.assertEqual(outcome_.state, CoreState.RESPONDED)
-        self.assertEqual(reasoner.contexts[2].response_only_reason, "plan_wait_unsafe")
+        self.assertEqual(reasoner.contexts[3].response_only_reason, "plan_wait_unsafe")
         self.assertIsNone(self.plan_of())
-
-    def test_resolving_an_attention_needs_the_step_to_have_seen_it(self):
-        self.installed(step("coding"))
-        self.outputs["coding"] = FAILED
-        self.work(self.agent())
-        # Selected and resolved in one decision: she never saw the attention.
-        reasoner = Reasoner(resolve(PlanOperation.RESUME),
-                            resolve(PlanOperation.RESUME, "Retrying."))
-        self.person(self.agent(reasoner))
-        self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"], "plan_not_current")
-        self.assertEqual(self.plan_of().status, PlanStatus.RUNNING)
-
-    def test_a_replacement_needs_the_plan_it_replaces_to_have_been_seen(self):
-        self.installed(step("coding"))
-        reasoner = Reasoner(install(plan(step("merge"))),
-                            AgentDecision(response="Let me look first.", goal_id="goal"))
-        self.person(self.agent(reasoner))
-        self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"],
-                         "plan_replaces_unseen_plan")
 
     def test_the_runtime_owns_what_the_plan_serves_and_answers(self):
         self.installed(step("coding"), source_turn_id="invented",
@@ -2579,12 +2575,14 @@ class GateTests(PlanHarness):
                          ("turn:person-1", "Do the work", "person-1"))
         self.assertTrue(installed.plan_id.startswith("plan:"))
 
-    def test_a_plan_update_travels_only_with_words_silence_or_alone(self):
-        # Alone it is one of the Core's native steps (D-065); never with a call.
+    def test_a_plan_update_is_a_step_of_its_own(self):
+        # One of the Core's native steps (D-065): never with a call or words.
         AgentDecision(plan_update=PlanUpdate(PlanOperation.RESUME))
-        with self.assertRaisesRegex(ValueError, "response, silence, or alone"):
-            AgentDecision(call=CapabilityCall("c", "coding", {}),
-                          plan_update=PlanUpdate(PlanOperation.RESUME))
+        for other in ({"call": CapabilityCall("c", "coding", {})}, {"response": "Done."},
+                      {"finish_silently": True}, {"goal_id": "goal"}):
+            with self.subTest(other=next(iter(other))), self.assertRaisesRegex(
+                    ValueError, "exactly one step"):
+                AgentDecision(plan_update=PlanUpdate(PlanOperation.RESUME), **other)
 
 
 class RecordTests(unittest.TestCase):

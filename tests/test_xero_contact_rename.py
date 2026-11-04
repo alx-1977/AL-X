@@ -426,11 +426,12 @@ class ContinuationTests(unittest.TestCase):
             outcome = CoreAgent(
                 store,
                 Queued(
-                    AgentDecision(call=capture, goal_id="goal-1"),
-                    AgentDecision(call=search, goal_id="goal-1"),
-                    AgentDecision(call=rename, goal_id="goal-1"),
-                    AgentDecision(call=retry, goal_id="goal-1"),
-                    AgentDecision(response="Izwi's bill is posted.", goal_id="goal-1"),
+                    AgentDecision(goal_id="goal-1"),
+                    AgentDecision(call=capture),
+                    AgentDecision(call=search),
+                    AgentDecision(call=rename),
+                    AgentDecision(call=retry),
+                    AgentDecision(response="Izwi's bill is posted."),
                 ),
                 dispatch,
                 XERO_DEFINITIONS,

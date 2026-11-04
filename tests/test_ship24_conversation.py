@@ -89,25 +89,25 @@ class Ship24ConversationTests(unittest.TestCase):
             with self.subTest(wording=wording):
                 self.store.close()
                 self.store = SQLiteGoalStore(Path(self.directory.name) / f"paraphrase-{index}.sqlite3")
-                reasoner = Queued(AgentDecision(call=self.call(), goal_proposal=goal()),
+                reasoner = Queued(AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
                                   AgentDecision(response="Ship24 reports delivery."))
                 with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)):
-                    outcome = self.agent(reasoner).process(conversation(wording), RETENTION, 3)
+                    outcome = self.agent(reasoner).process(conversation(wording), RETENTION, 4)
                 self.assertEqual(outcome.state, CoreState.RESPONDED)
                 self.assertEqual(reasoner.contexts[-1].active_goal.attempts[-1].result.values["status_milestone"], "delivered")
 
     def test_follow_up_correction_and_restart_use_durable_goal(self):
-        reasoner = Queued(AgentDecision(call=self.call(), goal_proposal=goal()),
+        reasoner = Queued(AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
                           AgentDecision(response="Ship24 reports delivery."))
         with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)):
-            self.agent(reasoner).process(conversation("Check parcel 1Z999AA10123456784"), RETENTION, 3)
+            self.agent(reasoner).process(conversation("Check parcel 1Z999AA10123456784"), RETENTION, 4)
         self.store.close()
         self.runtime = build_ship24_runtime(lambda: self.call_id, {"SHIP24_API_KEY": "example-token"})
         reopened = SQLiteGoalStore(self.path)
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.load("goal-1").state.attempts[-1].call.capability_id, TRACK_SHIPMENT)
         follow_up = Queued(AgentDecision(goal_id="goal-1"),
-                           AgentDecision(response="That was delivered.", goal_id="goal-1"))
+                           AgentDecision(response="That was delivered."))
         with patch("alx.providers.ship24.httpx.post") as post:
             follow_up_outcome = self.agent(follow_up, reopened).process(
                 conversation("And where is it?", "turn-2"), RETENTION, 3)
@@ -115,10 +115,11 @@ class Ship24ConversationTests(unittest.TestCase):
         self.assertEqual(follow_up.contexts[-1].active_goal.attempts[-1].result.durable_values["status_milestone"],
                          "delivered")
         post.assert_not_called()
-        correction = Queued(AgentDecision(call=self.call("CORRECTED", "call-2"), goal_id="goal-1"),
+        correction = Queued(AgentDecision(goal_id="goal-1"),
+                            AgentDecision(call=self.call("CORRECTED", "call-2")),
                             AgentDecision(response="I checked the corrected number."))
         with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
-            self.agent(correction, reopened).process(conversation("Sorry, use CORRECTED", "turn-3"), RETENTION, 3)
+            self.agent(correction, reopened).process(conversation("Sorry, use CORRECTED", "turn-3"), RETENTION, 4)
         self.assertEqual(post.call_args.kwargs["json"]["trackingNumber"], "CORRECTED")
         self.assertEqual(len(reopened.list_goals()), 1)
         self.assertEqual([attempt.call.arguments["tracking_number"]
@@ -126,14 +127,14 @@ class Ship24ConversationTests(unittest.TestCase):
                          ["1Z999AA10123456784", "CORRECTED"])
 
     def test_interruption_then_resumption_uses_the_same_shipment_attempt(self):
-        first = Queued(AgentDecision(call=self.call(), goal_proposal=goal()),
+        first = Queued(AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
                        AgentDecision(response="The parcel is delivered."))
         with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
-            self.agent(first).process(conversation("Track my parcel 1Z999AA10123456784"), RETENTION, 3)
+            self.agent(first).process(conversation("Track my parcel 1Z999AA10123456784"), RETENTION, 4)
             interruption = Queued(AgentDecision(response="It is four o'clock."))
             self.agent(interruption).process(conversation("What time is it?", "turn-2"), RETENTION, 2)
             resumed = Queued(AgentDecision(goal_id="goal-1"),
-                             AgentDecision(response="Back to the parcel: delivered.", goal_id="goal-1"))
+                             AgentDecision(response="Back to the parcel: delivered."))
             outcome = self.agent(resumed).process(conversation("Back to that parcel", "turn-3"), RETENTION, 3)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertIsNone(interruption.contexts[0].active_goal)
@@ -144,14 +145,14 @@ class Ship24ConversationTests(unittest.TestCase):
     def test_shipment_and_courier_page_compose_inside_one_goal(self):
         fetcher = StubFetcher()
         reasoner = Queued(
-            AgentDecision(call=self.call(), goal_proposal=goal()),
+            AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
             AgentDecision(call=CapabilityCall("call-web-1", ASK_WEB_PAGE,
                                               {"page_id": "courier", "url": fetcher.page().requested_url})),
             AgentDecision(response="The parcel was delivered; I checked the courier page too."),
         )
         with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
             outcome = self.agent(reasoner, fetcher=fetcher).process(
-                conversation("Track my parcel and check the courier's service bulletin"), RETENTION, 4)
+                conversation("Track my parcel and check the courier's service bulletin"), RETENTION, 5)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual([attempt.call.capability_id for attempt in self.store.load("goal-1").state.attempts],
                          [TRACK_SHIPMENT, ASK_WEB_PAGE])
@@ -160,18 +161,19 @@ class Ship24ConversationTests(unittest.TestCase):
 
     def test_success_is_verified_before_completion_and_cites_ship24(self):
         reasoner = Queued(
-            AgentDecision(call=self.call(), goal_proposal=goal()),
-            AgentDecision(response="Ship24 reports delivery.", goal_proposal=GoalProposal(
+            AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
+            AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.REQUEST_COMPLETION,
                 new_evidence=(Evidence("evidence-1", "shipment_tracking",
                                        {"status_milestone": "delivered"},
                                        supports=("criterion-1",),
                                        source_references=("attempt:call-1",)),),
-            ), response_requires_goal_commit=True),
+            )),
+            AgentDecision(response="Ship24 reports delivery."),
         )
         with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
             outcome = self.agent(reasoner).process(
-                conversation("Check whether my parcel has arrived"), RETENTION, 3)
+                conversation("Check whether my parcel has arrived"), RETENTION, 4)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(reasoner.contexts[-1].active_goal.attempts[-1].result.values["status_milestone"],
                          "delivered")
@@ -182,35 +184,35 @@ class Ship24ConversationTests(unittest.TestCase):
 
     def test_standing_authority_needs_no_per_call_approval(self):
         self.assertFalse(self.runtime.policies[TRACK_SHIPMENT].approval_required)
-        reasoner = Queued(AgentDecision(call=self.call(), goal_proposal=goal()),
+        reasoner = Queued(AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
                           AgentDecision(response="The parcel is delivered."))
         with patch("alx.providers.ship24.httpx.post", return_value=response(200, TRACKED)) as post:
-            outcome = self.agent(reasoner).process(conversation("Track my parcel"), RETENTION, 3)
+            outcome = self.agent(reasoner).process(conversation("Track my parcel"), RETENTION, 4)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertFalse(self.store.load("goal-1").state.approvals)
         post.assert_called_once()
 
     def test_failure_returns_to_core_for_replanning(self):
-        reasoner = Queued(AgentDecision(call=self.call(), goal_proposal=goal()),
+        reasoner = Queued(AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
                           AgentDecision(call=self.call("CORRECTED", "call-2")),
                           AgentDecision(response="The corrected parcel was delivered."))
         with patch("alx.providers.ship24.httpx.post", side_effect=[
                 response(404, {"errors": [{"code": "parcel_not_found"}]}),
                 response(200, TRACKED)]) as post:
             outcome = self.agent(reasoner).process(
-                conversation("Check parcel 1Z999AA10123456784"), RETENTION, 4)
+                conversation("Check parcel 1Z999AA10123456784"), RETENTION, 5)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(post.call_count, 2)
-        self.assertEqual(reasoner.contexts[1].active_goal.attempts[-1].result.failure["code"], "tracking_not_found")
+        self.assertEqual(reasoner.contexts[2].active_goal.attempts[-1].result.failure["code"], "tracking_not_found")
         self.assertIs(reasoner.contexts[-1].active_goal.attempts[-1].result.state, CapabilityResultState.SUCCEEDED)
 
     def test_exhausted_allowance_reaches_core_and_repeated_plan_stops_http(self):
-        reasoner = Queued(AgentDecision(call=self.call(), goal_proposal=goal()),
+        reasoner = Queued(AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
                           AgentDecision(call=self.call("ANOTHER", "call-2")),
                           AgentDecision(response="The tracking allowance is used up."))
         with patch("alx.providers.ship24.httpx.post", return_value=response(
                 429, {"errors": [{"code": "plan_limit_exceeded"}]})) as post:
-            outcome = self.agent(reasoner).process(conversation("Track both parcels"), RETENTION, 4)
+            outcome = self.agent(reasoner).process(conversation("Track both parcels"), RETENTION, 5)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(post.call_count, 1)
         self.assertEqual(reasoner.contexts[-1].active_goal.attempts[-1].result.failure["code"],

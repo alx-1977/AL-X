@@ -48,6 +48,14 @@ class OneDecision:
         return self.decision
 
 
+class Decisions:
+    def __init__(self, *decisions: AgentDecision) -> None:
+        self.decisions = list(decisions)
+
+    def decide(self, context):
+        return self.decisions.pop(0)
+
+
 def _goal(identifier: str = "goal-1") -> GoalState:
     return GoalState(
         identifier,
@@ -80,12 +88,10 @@ class AuthoritativePathTests(unittest.TestCase):
                 ("event:mail:777:42",),
                 CORE_TIME,
             )
-            reasoner = OneDecision(
-                AgentDecision(
-                    response="The supplier sent a quote.",
-                    goal_proposal=goal_proposal,
-                    memory_proposals=(memory,),
-                )
+            reasoner = Decisions(
+                AgentDecision(goal_proposal=goal_proposal),
+                AgentDecision(memory_proposals=(memory,)),
+                AgentDecision(response="The supplier sent a quote."),
             )
             core = CoreAgent(
                 goals,
@@ -127,7 +133,7 @@ class AuthoritativePathTests(unittest.TestCase):
                     references=("mail_observation:mail:777:42",),
                     provenance=source,
                 ),
-                1,
+                3,
                 CONTAINER_RETENTION,
             )
             self.assertEqual(outcome.state, CoreState.RESPONDED)

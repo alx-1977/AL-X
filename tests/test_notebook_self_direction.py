@@ -156,14 +156,15 @@ class UserDirectedResearchTests(NotebookTestCase):
 
     def test_she_can_search_and_read_to_answer_him(self) -> None:
         reasoner = Queued(
-            AgentDecision(call=self.search_call(), goal_proposal=GoalProposal(
+            AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.CREATE, "Answer the version question",
                 (SuccessCriterion("criterion-1", "answered"),))),
+            AgentDecision(call=self.search_call()),
             AgentDecision(call=self.page_call()),
             AgentDecision(response="It is 6.5.0."),
         )
         outcome = self.agent(reasoner).process(
-            conversation("what is the latest Device OS release?"), RETENTION, 4
+            conversation("what is the latest Device OS release?"), RETENTION, 5
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(self.recorded, [ASK_WEB_SEARCH, ASK_WEB_PAGE])
@@ -171,13 +172,14 @@ class UserDirectedResearchTests(NotebookTestCase):
     def test_answering_writes_nothing_to_the_notebook(self) -> None:
         """The acceptance criterion: research is not notebook material."""
         reasoner = Queued(
-            AgentDecision(call=self.search_call(), goal_proposal=GoalProposal(
+            AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.CREATE, "Answer the version question",
                 (SuccessCriterion("criterion-1", "answered"),))),
+            AgentDecision(call=self.search_call()),
             AgentDecision(response="It is 6.5.0."),
         )
         self.agent(reasoner).process(
-            conversation("what is the latest Device OS release?"), RETENTION, 3
+            conversation("what is the latest Device OS release?"), RETENTION, 4
         )
         self.assertEqual(self.notebook.open_threads(), ())
         for capability in self.recorded:
@@ -227,24 +229,22 @@ class SelfDirectedInterestTests(NotebookTestCase):
 
         Every effectful capability requires an active goal — a pre-existing
         invariant, because an attempt has to hang on something durable. That
-        is a goal she can create for herself in the same decision, so it does
+        is a goal she can create for herself in the same turn, so it does
         not require a request from Friedl; it requires her to say what she is
         doing.
         """
         reasoner = Queued(
-            AgentDecision(
-                call=CapabilityCall(
-                    "call-n1", "open_research_thread",
-                    {"thread_id": "t-mine", "question": "How does X work?",
-                     "interest": "I want to understand it."}),
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.CREATE, "Understand X for myself",
-                    (SuccessCriterion("criterion-1", "I understand it"),)),
-            ),
+            AgentDecision(goal_proposal=GoalProposal(
+                GoalMutationKind.CREATE, "Understand X for myself",
+                (SuccessCriterion("criterion-1", "I understand it"),))),
+            AgentDecision(call=CapabilityCall(
+                "call-n1", "open_research_thread",
+                {"thread_id": "t-mine", "question": "How does X work?",
+                 "interest": "I want to understand it."})),
             AgentDecision(finish_silently=True),
         )
         self.agent(reasoner).process(
-            conversation("(an occasion nobody asked for)"), RETENTION, 3
+            conversation("(an occasion nobody asked for)"), RETENTION, 4
         )
         self.assertEqual(self.recorded, ["open_research_thread"])
 
@@ -272,13 +272,11 @@ class SelfDirectedInterestTests(NotebookTestCase):
     def test_she_may_search_and_read_while_pursuing_her_own_enquiry(self) -> None:
         self.thread("t-mine", "How does X work?", "I want to understand it.")
         reasoner = Queued(
-            AgentDecision(
-                call=CapabilityCall(
-                    "call-s1", ASK_WEB_SEARCH, {"search_id": "s", "subject": "x"}),
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.CREATE, "Understand X for myself",
-                    (SuccessCriterion("criterion-1", "I understand it"),)),
-            ),
+            AgentDecision(goal_proposal=GoalProposal(
+                GoalMutationKind.CREATE, "Understand X for myself",
+                (SuccessCriterion("criterion-1", "I understand it"),))),
+            AgentDecision(call=CapabilityCall(
+                "call-s1", ASK_WEB_SEARCH, {"search_id": "s", "subject": "x"})),
             AgentDecision(call=CapabilityCall(
                 "call-p1", ASK_WEB_PAGE,
                 {"page_id": "p", "url": "https://example.com/x"})),
@@ -290,7 +288,7 @@ class SelfDirectedInterestTests(NotebookTestCase):
             AgentDecision(finish_silently=True),
         )
         self.agent(reasoner).process(
-            conversation("(her own occasion)"), RETENTION, 5
+            conversation("(her own occasion)"), RETENTION, 6
         )
         self.assertEqual(
             self.recorded,

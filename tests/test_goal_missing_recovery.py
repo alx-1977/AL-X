@@ -131,17 +131,19 @@ class TheLiveComplaintTrace(Harness):
     def test_an_update_with_no_goal_is_refused_as_goal_missing(self) -> None:
         """Steps 1-3 of the trace: the specific reason now reaches the Core."""
         reasoner = Queued(
-            # The live step 2: effectful call carrying an update mutation,
-            # with no goal in the conversation.
-            AgentDecision(
-                call=call(),
-                goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
-            ),
+            # The live step 2: an update mutation with no goal in the
+            # conversation, then the effectful call (one step each, D-065).
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE)),
+            AgentDecision(call=call()),
             AgentDecision(response="I cannot do that right now."),
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
 
-        refusals = reasoner.contexts[1].refused_calls
+        self.assertEqual(
+            {item["reason"] for item in reasoner.contexts[1].refused_calls},
+            {"goal_missing"},
+        )
+        refusals = reasoner.contexts[2].refused_calls
         reasons = {item["reason"] for item in refusals}
         # The mutation fault is named, not only the dispatch prerequisite.
         self.assertIn("goal_missing", reasons)
@@ -156,15 +158,13 @@ class TheLiveComplaintTrace(Harness):
     def test_the_core_can_correct_to_create_and_the_call_proceeds(self) -> None:
         """Steps 4-5: correction inside the same turn, on the existing path."""
         reasoner = Queued(
-            AgentDecision(
-                call=call(),
-                goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
-            ),
-            # Corrected: the mutation that starts work, with the same call.
-            AgentDecision(call=call(), goal_proposal=create_proposal()),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE)),
+            # Corrected: the mutation that starts work, then the same call.
+            AgentDecision(goal_proposal=create_proposal()),
+            AgentDecision(call=call()),
             AgentDecision(response="Both are in Trash now."),
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
 
         # The call ran through the ordinary create-goal-and-dispatch path.
         self.assertEqual(len(self.dispatched), 1)
@@ -180,22 +180,20 @@ class TheLiveComplaintTrace(Harness):
         )
 
     def test_the_live_failure_is_recoverable_within_the_step_budget(self) -> None:
-        """The turn that died had two steps. Two steps are now enough.
+        """The wrong mutation costs one step, and the correction then runs.
 
-        The runtime could always dispatch on step 2; what it could not do was
-        tell the Core why step 1 failed. So the load-bearing assertion is that
-        the correcting step is *given* goal_missing and the mutation kind --
-        without that the second step is only a guess, which is what the live
-        turn made and got wrong.
+        The runtime could always dispatch once the goal existed; what it could
+        not do was tell the Core why the first mutation failed. So the
+        load-bearing assertion is that the correcting step is *given*
+        goal_missing and the mutation kind -- without that the correction is
+        only a guess, which is what the live turn made and got wrong.
         """
         reasoner = Queued(
-            AgentDecision(
-                call=call(),
-                goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
-            ),
-            AgentDecision(call=call(), goal_proposal=create_proposal()),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE)),
+            AgentDecision(goal_proposal=create_proposal()),
+            AgentDecision(call=call()),
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
 
         correcting_step = reasoner.contexts[1]
         entry = next(
@@ -213,14 +211,8 @@ class TheLiveComplaintTrace(Harness):
         other. It adds no retries to the step loop.
         """
         reasoner = Queued(
-            AgentDecision(
-                call=call(),
-                goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
-            ),
-            AgentDecision(
-                call=call(),
-                goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
-            ),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE)),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE)),
             AgentDecision(response="I could not start that."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
@@ -234,17 +226,18 @@ class TheLiveComplaintTrace(Harness):
 class OrdinaryGoalBehaviourIsUnchanged(Harness):
     """The working paths must not move."""
 
-    def test_create_with_a_call_still_dispatches_in_one_step(self) -> None:
-        """The path 49 live goals already take."""
+    def test_create_then_a_call_still_dispatches(self) -> None:
+        """The path 49 live goals already take, one step at a time."""
         reasoner = Queued(
-            AgentDecision(call=call(), goal_proposal=create_proposal()),
+            AgentDecision(goal_proposal=create_proposal()),
+            AgentDecision(call=call()),
             AgentDecision(response="Done."),
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(len(self.dispatched), 1)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         # Nothing was refused: an accepted proposal never enters that code.
-        self.assertEqual(reasoner.contexts[1].refused_calls, ())
+        self.assertEqual(reasoner.contexts[2].refused_calls, ())
 
     def test_update_against_an_existing_goal_is_unaffected(self) -> None:
         self.store.create(
@@ -255,20 +248,20 @@ class OrdinaryGoalBehaviourIsUnchanged(Harness):
             "conversation-1", RETENTION,
         )
         reasoner = Queued(
+            AgentDecision(goal_id="goal-1"),
             AgentDecision(
-                goal_id="goal-1",
-                call=call(),
                 goal_proposal=GoalProposal(
                     GoalMutationKind.UPDATE,
                     objective_summary="Delete the two emails, revised",
                 ),
             ),
-            AgentDecision(goal_id="goal-1", response="Done."),
+            AgentDecision(call=call()),
+            AgentDecision(response="Done."),
         )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 4)
         self.assertEqual(len(self.dispatched), 1)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(reasoner.contexts[1].refused_calls, ())
+        self.assertEqual(reasoner.contexts[3].refused_calls, ())
         self.assertEqual(
             self.store.load("goal-1").state.objective.summary,
             "Delete the two emails, revised",
@@ -280,25 +273,6 @@ class OrdinaryGoalBehaviourIsUnchanged(Harness):
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "The part arrives Thursday.")
         self.assertEqual(self.dispatched, [])
-
-    def test_a_response_depending_on_the_rejected_commit_is_suppressed(self) -> None:
-        """The refusal reaches the Core and the claimed answer does not."""
-        reasoner = Queued(
-            AgentDecision(
-                response="Recorded.",
-                response_requires_goal_commit=True,
-                goal_proposal=GoalProposal(GoalMutationKind.UPDATE),
-            ),
-            AgentDecision(response="Nothing was recorded."),
-        )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 2)
-        self.assertNotEqual(outcome.state, CoreState.ERROR)
-        self.assertEqual(outcome.response, "Nothing was recorded.")
-        entry = next(
-            item for item in reasoner.contexts[1].refused_calls
-            if item["reason"] == "goal_missing"
-        )
-        self.assertEqual(entry["mutation_kind"], "update")
 
 
 class TheProtocolExplainsTheReason(unittest.TestCase):

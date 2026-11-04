@@ -739,11 +739,10 @@ class VoiceSession:
         for event in () if feed is None else feed.take():
             yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=event)
         LOGGER.info(
-            "Authoritative Core turn finished: state=%s reason=%s response=%s memory=%s",
+            "Authoritative Core turn finished: state=%s reason=%s response=%s",
             outcome.state.value,
             outcome.reason,
             outcome.response is not None,
-            outcome.memory_state or "ok",
         )
         if outcome.state.value == "finished_silently":
             # Silence is an explicit authoritative Core result, not a missing

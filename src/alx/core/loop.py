@@ -134,11 +134,6 @@ class CoreOutcome:
     response: str | None = None
     reason: str | None = None
     response_provenance: ContentProvenance | None = None
-    # Whether the memories this turn proposed actually persisted. A response
-    # is no longer discarded because a supporting memory clashed, so the
-    # durable record has to say plainly that the write did not happen.
-    # None means nothing was proposed or everything proposed was stored.
-    memory_state: str | None = None
     # The fixed turn id of a reply that announces a finish or cancel, held
     # on the plan until it is stored. None: an ordinary reply, any id.
     response_turn_id: str | None = None
@@ -603,14 +598,6 @@ class CoreAgent:
         # It is deliberately local: durable state outlives the instruction, and
         # a check against it would refuse the next turn's legitimate request.
         approved_dispatches: set[str] = set()
-        # An answer she had already finished when a memory identifier clashed.
-        # Held so that running out of steps mid-resolution delivers her words
-        # instead of discarding them; memory_state stays truthful that the
-        # supporting memory did not persist.
-        conflict_response: str | None = None
-        conflict_provenance: ContentProvenance | None = None
-        conflict_raised_mail: tuple[MailReference, ...] = ()
-        conflict_silent = False
         transient_attempts: tuple[CapabilityAttempt, ...] = plan_evidence
         memory_query_ids: set[str] = set()
         # Loading a goal's full state is one useful inspection this turn.
@@ -651,23 +638,6 @@ class CoreAgent:
                     park=False,
                 )
             return CoreOutcome(state, snapshot, reason=reason)
-
-        def held_answer() -> CoreOutcome:
-            """Words she finished before a memory identifier clashed.
-
-            Discarding the answer to report a memory problem would lose the
-            part that mattered to the person, so it is delivered and the
-            memory failure is stated separately.
-            """
-            return CoreOutcome(
-                CoreState.FINISHED_SILENTLY if conflict_silent else CoreState.RESPONDED,
-                snapshot,
-                response=None if conflict_silent else conflict_response,
-                reason="core_selected_silence" if conflict_silent else None,
-                response_provenance=None if conflict_silent else conflict_provenance,
-                raised_mail_observations=() if conflict_silent else conflict_raised_mail,
-                memory_state="unresolved_identity_conflict",
-            )
 
         for step_index in range(step_budget):
             try:
@@ -806,36 +776,25 @@ class CoreAgent:
                     snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
                 return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=mechanical_blocker)
             continuation_notices = ()
-            deferred_selection: str | None = None
             if decision.goal_id is not None:
                 selection_error = self._goal_selection_error(
                     decision, snapshot, summaries, selected_goals
                 )
                 if selection_error is not None:
                     LOGGER.info(
-                        "Goal selection rejected: %s current=%s requested=%s "
-                        "selected=%s response_present=%s response_requires_goal_commit=%s",
+                        "Goal selection rejected: %s current=%s requested=%s selected=%s",
                         selection_error,
                         None if snapshot is None else snapshot.state.goal_id,
                         decision.goal_id, tuple(selected_goals),
-                        decision.response is not None, decision.response_requires_goal_commit,
                     )
-                    # Selecting a goal this conversation does not offer is a
+                    # Selecting a goal this conversation does not offer, one
+                    # already selected or one already inspected is a
                     # correctable slip, not the end of the conversation. It
                     # read nothing, changed nothing and dispatched nothing, so
-                    # the state she would reason from next is the state she
-                    # reasoned from just now, plus the fact that the identifier
-                    # is unavailable. Killing the turn instead cost a person
-                    # their whole voice session for a wrong identifier on
-                    # 2026-09-10, with their actual request never attempted.
-                    #
-                    # An unknown identifier is corrected once. So is any
-                    # selection a native select_goal step refused (D-065): it
-                    # wrote nothing, and she continues from the refusal. The
-                    # other selection errors on a decision with words are
-                    # budget rules whose state a further step cannot change.
-                    if ((selection_error == "goal_selection_unknown" or decision.intermediate)
-                            and not refused_goal_selections):
+                    # she continues from the refusal. Killing the turn instead
+                    # cost a person their whole voice session for a wrong
+                    # identifier on 2026-09-10.
+                    if not refused_goal_selections:
                         refused_goal_selections = (*refused_goal_selections, {
                             "goal_id": decision.goal_id,
                             "reason": selection_error,
@@ -844,21 +803,12 @@ class CoreAgent:
                             ],
                         })
                         continue
-                    # Told once and selected an unavailable goal again, or an
-                    # error correction cannot help: reasoning further against
+                    # Told once and refused again: reasoning further against
                     # an unchanged list is the runaway this stops.
-                    if selection_error == "goal_selection_unknown":
-                        return stopped(CoreState.ERROR, selection_error)
-                    if decision.response is None or decision.response_requires_goal_commit:
-                        return stopped(CoreState.CHECKPOINTED, selection_error)
-                    # The refused selection authorises no mutation or action.
-                    # An independent answer still uses canonical memory checks
-                    # and delivery, without stale-work continuation buying a retry.
-                    deferred_selection = selection_error
-                    decision = replace(decision, goal_id=None, goal_proposal=None)
-                if decision.goal_id is not None and (
-                    snapshot is None or snapshot.state.goal_id != decision.goal_id
-                ):
+                    return stopped(
+                        CoreState.ERROR if selection_error == "goal_selection_unknown"
+                        else CoreState.CHECKPOINTED, selection_error)
+                if snapshot is None or snapshot.state.goal_id != decision.goal_id:
                     if snapshot is not None and snapshot.provenance is not None:
                         prior_goal_provenance = (*prior_goal_provenance, snapshot.provenance)
                     snapshot = self._store.load(decision.goal_id)
@@ -889,19 +839,8 @@ class CoreAgent:
                         (*retrieved_memories, *relationship_memories),
                         transient_attempts, prior_goal_provenance,
                     )
-                if decision.intermediate:
-                    # Reading a goal before acting is a step, not a mutation.
-                    # Anything the Core proposes alongside it is reduced,
-                    # grounded and persisted by the one canonical block below,
-                    # exactly as it is for every other decision. A second path
-                    # here persisted an objective change before memory
-                    # grounding could reject the turn.
-                    if (
-                        decision.goal_proposal is None
-                        and not decision.memory_proposals
-                        and decision.plan_update is None
-                    ):
-                        continue
+                # Reading a goal is a step, not a mutation.
+                continue
             decision = self._without_redundant_approval(decision)
             decision = replace(
                 decision,
@@ -952,21 +891,11 @@ class CoreAgent:
                 if self._already_refused(
                     refused_calls, "memory_identity_conflict", conflict_subject
                 ):
-                    # The same clash again. Words she had already finished are
-                    # delivered, with the record saying the memory was not
-                    # stored, as when the steps run out mid-resolution.
-                    if conflict_response is not None or conflict_silent:
-                        return held_answer()
                     return stopped(CoreState.ERROR, "memory_identity_conflict")
                 refused_calls = (*refused_calls, {
                     "reason": "memory_identity_conflict",
                     "subject": conflict_subject,
                 })
-                if decision.call is None:
-                    conflict_response = decision.response
-                    conflict_provenance = decision_provenance
-                    conflict_raised_mail = decision.raised_mail_observations
-                    conflict_silent = decision.finish_silently
                 continue
             if proposal_error is not None:
                 LOGGER.info("Goal proposal rejected: %s", proposal_error)
@@ -989,88 +918,33 @@ class CoreAgent:
                         candidate, previous, conversation, retention_until,
                         decision_provenance,
                     )
-                # A refused mutation is never fatal. An answer that depends on
-                # the commit (or a silence chosen on the strength of it) claims
-                # a state that does not exist, so it is suppressed, but the
-                # conversation, the unfinished goal and the Core all remain
-                # operational. The refusal goes back to her as evidence below
-                # and she reasons again from the truthful state. The same
-                # refusal twice checkpoints instead: nothing about the state
-                # changed, so a further step would only buy the same mutation.
-                commit_dependent = (
-                    decision.response_requires_goal_commit or decision.finish_silently
-                )
-                # The reason reaches the Core, exactly as an approval or memory
-                # rejection already does. It used to go only to the log and the
-                # rejection record, so a proposal refused here was invisible to
-                # the next step: on 2026-09-11 an update mutation offered with
-                # no goal was rejected as goal_missing, the Core was told only
-                # that dispatch required an active goal, and it proposed the
-                # same update again. Both steps were spent and the session
-                # ended without the deletion it had decided to make.
-                #
-                # Subject is the mutation kind rather than the capability: the
-                # fault is which mutation was offered, and a later call for the
-                # same capability is a different refusal.
-                if (
-                    (commit_dependent or decision.response is None)
-                    and self._already_refused(
-                        refused_calls, proposal_error, decision.goal_proposal.kind.value
-                    )
-                ) or (commit_dependent and step_index + 1 >= step_budget):
-                    # Also when no step remains to reason again in: the turn
-                    # ends on the refusal itself rather than a budget reason
-                    # that would hide it.
+                # A refused mutation is never fatal. The reason reaches the
+                # Core as evidence and she reasons again from the truthful
+                # state: on 2026-09-11 a refusal that went only to the log was
+                # proposed again unchanged. The same refusal twice ends the
+                # turn: nothing about the state changed. Subject is the
+                # mutation kind: the fault is which mutation was offered.
+                kind = decision.goal_proposal.kind.value
+                if self._already_refused(refused_calls, proposal_error, kind):
                     if answering_plan is not None:
                         # She is answering a plan, whose reply is owed to the
-                        # person whatever happens to this mutation. She was
-                        # told once and reconsidered once; the state has not
-                        # changed, so a further step, or a further offer of
-                        # the attention, would buy the same refusal. Her words
-                        # claimed a commit that did not happen, so one
-                        # response-only step, which knows the refusal, says
-                        # what is actually true.
+                        # person whatever happens to this mutation. A further
+                        # offer of the attention would buy the same refusal,
+                        # so it is held, and one response-only step, which
+                        # knows the refusal, says what is actually true.
                         self._hold_plan_attention(answering_plan)
-                        kind = decision.goal_proposal.kind.value
                         return self._respond_to_terminal_blocker(
                             conversation_id, conversation, snapshot, reasoning_context,
                             transient_attempts, "goal_proposal_invalid", decision_provenance,
-                            (*refused_calls, {"reason": proposal_error, "subject": kind,
-                                              "mutation_kind": kind}),
-                            park=False,
+                            refused_calls, park=False,
                         )
-                    if origin is CognitionOrigin.PERSON_TURN:
-                        # Friedl asked something and is waiting. Ending here
-                        # left him with silence on 2026-10-06, after two
-                        # refused completions of an already-deleted email. The
-                        # goal is unchanged, so nothing is parked: one
-                        # response-only step, which knows the refusal, says
-                        # what actually happened.
-                        kind = decision.goal_proposal.kind.value
-                        return self._respond_to_terminal_blocker(
-                            conversation_id, conversation, snapshot, reasoning_context,
-                            transient_attempts, "goal_proposal_invalid", decision_provenance,
-                            (*refused_calls, {"reason": proposal_error, "subject": kind,
-                                              "mutation_kind": kind}),
-                            park=False,
-                        )
-                    return CoreOutcome(
-                        CoreState.CHECKPOINTED, snapshot, reason="goal_proposal_invalid",
-                    )
+                    return stopped(CoreState.CHECKPOINTED, "goal_proposal_invalid")
                 refused_calls = (*refused_calls, {
-                    "reason": proposal_error,
-                    "subject": decision.goal_proposal.kind.value,
-                    "mutation_kind": decision.goal_proposal.kind.value,
+                    "reason": proposal_error, "subject": kind, "mutation_kind": kind,
                 })
-                if commit_dependent:
-                    continue
-            # The goal a call would run under: the reduced proposal when it was
-            # accepted, or the evidence-only state when its requested mutation
-            # was refused.
-            effective = (
-                candidate if candidate is not None
-                else (None if snapshot is None else snapshot.state)
-            )
+                continue
+            # The goal a call would run under.
+            effective = None if snapshot is None else snapshot.state
             if decision.call is not None:
                 if (self._plan_continuation
                         and decision.call.capability_id == _RUN_CODING_TASK):
@@ -1228,16 +1102,7 @@ class CoreAgent:
                     continue
                 if not self._memory_query_is_authorized(conversation, decision.memory_query):
                     return stopped(CoreState.ERROR, "memory_query_unauthorized")
-                try:
-                    snapshot, committed = self._commit_memories(
-                        snapshot, decision.memory_proposals, retention_until)
-                except MemoryIdentityConflict:
-                    memory_conflicts = self._conflicting_memories(
-                        decision.memory_proposals, retention_until)
-                    continue
                 memory_conflicts = ()
-                if not committed:
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 if self._memory_store is None:
                     return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_store_unavailable")
                 try:
@@ -1261,12 +1126,87 @@ class CoreAgent:
                 memory_query_ids.add(decision.memory_query.query_id)
                 continue
 
+            if decision.plan_update is not None:
+                plan_refusal = self._plan_update_refusal(
+                    decision.plan_update, snapshot, rendered_plan,
+                    None, mechanical_blocker, summaries, conversation,
+                )
+                if plan_refusal is not None:
+                    LOGGER.info("Plan update refused: %s", plan_refusal)
+                    self._emit(TraceSubsystem.PLAN, TraceStatus.REFUSED,
+                               "Plan update refused", conversation_id,
+                               reason_code=plan_refusal)
+                    subject = f"{decision.plan_update.operation.value}:{plan_refusal}"
+                    if self._already_refused(refused_calls, plan_refusal, subject):
+                        return stopped(CoreState.CHECKPOINTED, plan_refusal)
+                    refused_calls = (*refused_calls, {
+                        "reason": plan_refusal, "subject": subject,
+                    })
+                    continue
+                assert snapshot is not None and decision_provenance is not None
+                if decision.plan_update.operation in (PlanOperation.FINISH,
+                                                      PlanOperation.CANCEL):
+                    # Accepted now, for this goal's plan as she was shown it,
+                    # and written with the words or silence that end the turn
+                    # (see `process`).
+                    held[:] = [_HeldClose(decision.plan_update, snapshot.state.goal_id,
+                                          rendered_plan, decision_provenance)]
+                    continue
+                if held and held[0].goal_id == snapshot.state.goal_id:
+                    # A plan that runs on replaces the one she had closed.
+                    held.clear()
+                snapshot, _ = self._apply_plan_update(
+                    snapshot, decision.plan_update, conversation, decision_provenance,
+                )
+                snapshot = self._run_planned_mutations(snapshot)
+                if (snapshot.state.execution_plan.status is PlanStatus.NEEDS_CORE
+                        and step_index + 1 < step_budget):
+                    # The decided work already ran, or stopped for her: she
+                    # answers it from the plan's attention, in this same turn.
+                    snapshot, evidence = self._plan_evidence(snapshot)
+                    transient_attempts = (*transient_attempts, *(
+                        item for item in evidence if item not in transient_attempts))
+                    continuation_notice_issued = False
+                    answering_plan = snapshot.state.goal_id
+                continue
+
+            if decision.memory_proposals:
+                try:
+                    snapshot, committed = self._commit_memories(
+                        snapshot, decision.memory_proposals, retention_until)
+                except MemoryIdentityConflict:
+                    # She reused an identifier that already means something
+                    # else. That is hers to resolve, so the conflict goes back
+                    # with the facts and the turn continues.
+                    memory_conflicts = self._conflicting_memories(
+                        decision.memory_proposals, retention_until)
+                    continue
+                memory_conflicts = ()
+                if not committed:
+                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
+                continue
+
+            if decision.goal_proposal is not None:
+                # Accepted, and written by the canonical persistence above.
+                if (previous is not None and snapshot is not None
+                        and snapshot.state == previous.state):
+                    # A mutation that changed nothing. Told once; the same
+                    # again would buy the same nothing.
+                    kind = decision.goal_proposal.kind.value
+                    if self._already_refused(refused_calls, "goal_update_no_change", kind):
+                        return stopped(CoreState.CHECKPOINTED, "goal_selection_no_progress")
+                    refused_calls = (*refused_calls, {
+                        "reason": "goal_update_no_change", "subject": kind,
+                        "mutation_kind": kind,
+                    })
+                continue
+
             if decision.call is None:
-                if held and not decision.intermediate:
-                    # Her words or silence would end the turn and carry the
-                    # close she gave earlier. If its plan has changed since,
-                    # the words claim a close that cannot happen: they are not
-                    # delivered, and she reasons again with the refusal.
+                # Her words or silence, which end the turn.
+                if held:
+                    # They carry the close she gave earlier. If its plan has
+                    # changed since, they claim a close that cannot happen:
+                    # they are not delivered, and she reasons again.
                     close = held[0]
                     close_refusal = self._plan_update_refusal(
                         close.update, self._store.load(close.goal_id), close.rendered,
@@ -1280,103 +1220,7 @@ class CoreAgent:
                             "reason": close_refusal, "subject": subject,
                         })
                         continue
-                if decision.plan_update is not None:
-                    plan_refusal = self._plan_update_refusal(
-                        decision.plan_update, snapshot, rendered_plan,
-                        proposal_error, mechanical_blocker, summaries, conversation,
-                    )
-                    if plan_refusal is not None:
-                        # Refused before anything else in the decision is
-                        # written. Her words or silence claimed the plan
-                        # change, so they are not delivered; she reasons again
-                        # with the refusal, once.
-                        LOGGER.info("Plan update refused: %s", plan_refusal)
-                        self._emit(TraceSubsystem.PLAN, TraceStatus.REFUSED,
-                                   "Plan update refused", conversation_id,
-                                   reason_code=plan_refusal)
-                        subject = f"{decision.plan_update.operation.value}:{plan_refusal}"
-                        if self._already_refused(refused_calls, plan_refusal, subject):
-                            return stopped(CoreState.CHECKPOINTED, plan_refusal)
-                        refused_calls = (*refused_calls, {
-                            "reason": plan_refusal, "subject": subject,
-                        })
-                        continue
-                try:
-                    snapshot, committed = self._commit_memories(
-                        snapshot, decision.memory_proposals, retention_until)
-                except MemoryIdentityConflict:
-                    # She reused an identifier that already means something
-                    # else. That is hers to resolve, so the conflict goes back
-                    # with the facts and the turn continues. If no step remains
-                    # the answer is still delivered below, and memory_state
-                    # records that nothing was stored.
-                    memory_conflicts = self._conflicting_memories(
-                        decision.memory_proposals, retention_until)
-                    conflict_response = decision.response
-                    conflict_provenance = decision_provenance
-                    conflict_raised_mail = decision.raised_mail_observations
-                    conflict_silent = decision.finish_silently
-                    continue
-                memory_conflicts = ()
-                if not committed:
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
-                # A plan that runs on is applied now, before anything below
-                # can park the goal. A finish or cancel is applied only where
-                # this decision actually ends, in one write with her reply.
-                closing = (decision.plan_update is not None and decision.plan_update.operation
-                           in (PlanOperation.FINISH, PlanOperation.CANCEL))
-                if closing and decision.intermediate:
-                    # Accepted now, for this goal's plan as she was shown it,
-                    # and written where the turn ends (see `process`).
-                    assert snapshot is not None and decision_provenance is not None
-                    held[:] = [_HeldClose(decision.plan_update, snapshot.state.goal_id,
-                                          rendered_plan, decision_provenance)]
-                    continue
-                if decision.plan_update is not None and not closing:
-                    assert snapshot is not None
-                    if held and held[0].goal_id == snapshot.state.goal_id:
-                        # A plan that runs on replaces the one she had closed.
-                        held.clear()
-                    snapshot, _ = self._apply_plan_update(
-                        snapshot, decision.plan_update, conversation, decision_provenance,
-                    )
-                    snapshot = self._run_planned_mutations(snapshot)
-                    if (snapshot.state.execution_plan.status is PlanStatus.NEEDS_CORE
-                            and step_index + 1 < step_budget):
-                        # The decided work already ran, or stopped for her.
-                        # The words that installed it were written before
-                        # either, so they are not delivered: she answers once,
-                        # from the plan's attention, in this same turn.
-                        snapshot, evidence = self._plan_evidence(snapshot)
-                        transient_attempts = (*transient_attempts, *(
-                            item for item in evidence if item not in transient_attempts))
-                        continuation_notice_issued = False
-                        answering_plan = snapshot.state.goal_id
-                        continue
-                if decision.intermediate:
-                    # A selection or a write ends nothing. Its writes have used
-                    # the canonical persistence path above; the turn goes on
-                    # within its existing budget and attempts.
-                    if (proposal_error is None and decision.goal_proposal is not None
-                            and previous is not None
-                            and snapshot is not None and snapshot.state == previous.state):
-                        # A mutation that changed nothing. Told once; the same
-                        # again would buy the same nothing.
-                        kind = decision.goal_proposal.kind.value
-                        if self._already_refused(refused_calls, "goal_update_no_change", kind):
-                            return stopped(CoreState.CHECKPOINTED, "goal_selection_no_progress")
-                        refused_calls = (*refused_calls, {
-                            "reason": "goal_update_no_change", "subject": kind,
-                            "mutation_kind": kind,
-                        })
-                    continue
                 if mechanical_blocker is not None:
-                    reply_turn = None
-                    if closing:
-                        snapshot, reply_turn = self._apply_plan_update(
-                            snapshot, decision.plan_update, conversation,
-                            decision_provenance, decision.response,
-                        )
                     if snapshot is not None:
                         snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
                     return CoreOutcome(
@@ -1384,34 +1228,19 @@ class CoreAgent:
                         snapshot, response=decision.response, reason=mechanical_blocker,
                         raised_mail_observations=decision.raised_mail_observations,
                         response_provenance=decision_provenance,
-                        response_turn_id=reply_turn,
                     )
-                # A rejected optional mutation must not let old outstanding
-                # work suppress an independent answer. Dependent responses and
-                # silence have already failed above; selection-only decisions
-                # have continued, and memory checks still run before this point.
-                if deferred_selection is not None:
-                    if snapshot is not None:
-                        snapshot = self._park_unfinished_goal(snapshot, decision_provenance)
-                elif proposal_error is None:
-                    snapshot, deferred = self._defer_or_park_premature_end(
-                        snapshot,
-                        approved_dispatches,
-                        continuation_notice_issued,
-                        step_index,
-                        step_budget,
-                        decision_provenance,
-                    )
-                    if deferred is not None:
-                        continuation_notice_issued = True
-                        continuation_notices = deferred
-                        continue
-                reply_turn = None
-                if closing:
-                    snapshot, reply_turn = self._apply_plan_update(
-                        snapshot, decision.plan_update, conversation,
-                        decision_provenance, decision.response,
-                    )
+                snapshot, deferred = self._defer_or_park_premature_end(
+                    snapshot,
+                    approved_dispatches,
+                    continuation_notice_issued,
+                    step_index,
+                    step_budget,
+                    decision_provenance,
+                )
+                if deferred is not None:
+                    continuation_notice_issued = True
+                    continuation_notices = deferred
+                    continue
                 if decision.finish_silently:
                     return CoreOutcome(
                         CoreState.FINISHED_SILENTLY,
@@ -1423,9 +1252,7 @@ class CoreAgent:
                     snapshot,
                     response=decision.response,
                     raised_mail_observations=decision.raised_mail_observations,
-                    reason="goal_proposal_rejected" if proposal_error else deferred_selection,
                     response_provenance=decision_provenance,
-                    response_turn_id=reply_turn,
                 )
 
             if (snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE
@@ -1451,16 +1278,7 @@ class CoreAgent:
                         "subject": decision.call.call_id,
                     })
                     continue
-                try:
-                    snapshot, committed = self._commit_memories(
-                        snapshot, decision.memory_proposals, retention_until)
-                except MemoryIdentityConflict:
-                    memory_conflicts = self._conflicting_memories(
-                        decision.memory_proposals, retention_until)
-                    continue
                 memory_conflicts = ()
-                if not committed:
-                    return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
                 dispatched.append(decision.call.capability_id)
                 turn_call_ids.append(decision.call.call_id)
                 try:
@@ -1603,16 +1421,7 @@ class CoreAgent:
                                  approvals=approvals)
             snapshot = self._store.replace(checkpoint, snapshot.retention_until,
                                            snapshot.revision, decision_provenance)
-            try:
-                snapshot, committed = self._commit_memories(
-                    snapshot, decision.memory_proposals, retention_until)
-            except MemoryIdentityConflict:
-                memory_conflicts = self._conflicting_memories(
-                    decision.memory_proposals, retention_until)
-                continue
             memory_conflicts = ()
-            if not committed:
-                return CoreOutcome(CoreState.ERROR, snapshot, reason="memory_persistence_error")
             try:
                 # The durable checkpoint claims the approval before external work
                 # begins, preventing a restart from dispatching it twice. The safety
@@ -1667,8 +1476,6 @@ class CoreAgent:
                 )
             except Exception:
                 LOGGER.info("Unfinished goal could not be parked after step budget")
-        if conflict_response is not None or conflict_silent:
-            return held_answer()
         if (origin is CognitionOrigin.PERSON_TURN
                 and any(item.get("reason") == "approval_covers_unheard_text"
                         for item in refused_calls)):
@@ -1733,20 +1540,9 @@ class CoreAgent:
             LOGGER.info("Reasoner decision rejected: %s: %s", type(error).__name__, error)
             return CoreOutcome(CoreState.ERROR, snapshot, reason="reasoner_error")
         # A test double or a nonconforming provider can bypass the structured
-        # schema. The already selected goal ID is only referential metadata;
-        # any different ID would navigate to another goal. Reject that and all
-        # work before any mutation, memory write or call.
-        if (
-            decision.response is None
-            or decision.call is not None
-            or decision.memory_query is not None
-            or decision.goal_id not in (None, None if state is None else state.goal_id)
-            or decision.goal_proposal is not None
-            or decision.memory_proposals
-            or decision.approval_proposal is not None
-            or decision.response_requires_goal_commit
-            or decision.finish_silently
-        ):
+        # schema. A step is one thing, so words are only words: anything
+        # else is rejected before any mutation, memory write or call.
+        if decision.response is None:
             LOGGER.info("Terminal checkpoint response rejected: not response only")
             return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
         return CoreOutcome(
@@ -3416,22 +3212,21 @@ class CoreAgent:
 
     @property
     def last_goal_rejection(self) -> Mapping[str, Any] | None:
-        """Inspect the last refused response in memory, respecting source expiry.
+        """Inspect the last refused goal mutation's metadata.
 
         This is debug state, never a reasoning input or delivered response.
-        Restart discards it; persistent logs contain only content-free metadata.
+        Restart discards it; persistent logs contain the same content-free
+        metadata.
         """
         if self._last_goal_rejection is None:
             return None
-        record, provenance = self._last_goal_rejection
-        if provenance.is_expired(self._clock()):
-            record.pop("proposed_response", None)
+        record, _provenance = self._last_goal_rejection
         return dict(record)
 
     def _record_rejection(self, conversation: ConversationSnapshot,
                           decision: AgentDecision, reason: str,
                           now: datetime, provenance: ContentProvenance) -> None:
-        """Capture the answer transiently; persist only rejection metadata.
+        """Record a refused goal mutation's metadata, never its prose.
 
         Objective and criteria prose and hidden reasoning remain excluded.
         """
@@ -3457,17 +3252,13 @@ class CoreAgent:
             "history_evidence_references": history_references,
             "evidence_ids": [item.evidence_id for item in proposal.new_evidence],
             "mutation_kind": proposal.kind.value,
-            "proposed_response_present": decision.response is not None,
-            "response_requires_goal_commit": decision.response_requires_goal_commit,
             "recorded_at": now.isoformat(),
             "response_content_expires_at": (
                 None if provenance.content_expires_at is None
                 else provenance.content_expires_at.isoformat()
             ),
         }
-        self._last_goal_rejection = (
-            {**record, "proposed_response": decision.response}, provenance,
-        )
+        self._last_goal_rejection = (dict(record), provenance)
         try:
             self._record_goal_rejection(record)
         except Exception:

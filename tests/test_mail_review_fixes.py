@@ -94,11 +94,11 @@ class ApprovalReleaseTests(unittest.TestCase):
     def first_turn(self, executor):
         broker = self.broker_for(executor)
         reasoner = Queued(
+            AgentDecision(goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE,
+                objective_summary="Move the reminder to Trash",
+                success_criteria=(SuccessCriterion("criterion-1", "moved"),))),
             AgentDecision(
-                goal_proposal=GoalProposal(
-                    kind=GoalMutationKind.CREATE,
-                    objective_summary="Move the reminder to Trash",
-                    success_criteria=(SuccessCriterion("criterion-1", "moved"),)),
                 call=CapabilityCall("call-1", TRASH, ARGS, "approval-1"),
                 approval_proposal=ApprovalProposal(
                     "approval-1", ApprovalScope(TRASH, ARGS), "turn:turn-1"),
@@ -107,7 +107,7 @@ class ApprovalReleaseTests(unittest.TestCase):
         )
         agent = CoreAgent(self.store, reasoner, self.dispatcher(broker), (DEFINITION,),
                           clock=lambda: NOW, identifier_factory=lambda: "goal-1")
-        return agent.process(conversation(), RETENTION, 4)
+        return agent.process(conversation(), RETENTION, 5)
 
     def test_a_failed_move_returns_the_approval_for_a_retry(self) -> None:
         """The defect that produced five rejected Trash attempts in real state."""
@@ -132,13 +132,13 @@ class ApprovalReleaseTests(unittest.TestCase):
         self.first_turn(flaky)
         broker = self.broker_for(flaky)
         reasoner = Queued(
-            AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "approval-1"),
-                          goal_id="goal-1"),
-            AgentDecision(response="Moved to Trash.", goal_id="goal-1"),
+            AgentDecision(goal_id="goal-1"),
+            AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "approval-1")),
+            AgentDecision(response="Moved to Trash."),
         )
         agent = CoreAgent(self.store, reasoner, self.dispatcher(broker), (DEFINITION,),
                           clock=lambda: NOW, identifier_factory=lambda: "goal-1")
-        outcome = agent.process(conversation("trash it", "try again"), RETENTION, 4)
+        outcome = agent.process(conversation("trash it", "try again"), RETENTION, 5)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(attempts["count"], 2, "the retry must reach the executor")
         approvals = self.store.load("goal-1").state.approvals
@@ -164,18 +164,17 @@ class ApprovalReleaseTests(unittest.TestCase):
                                      False, reason_code="approval_invalid")
 
         reasoner = Queued(
-            AgentDecision(
-                goal_proposal=GoalProposal(
-                    kind=GoalMutationKind.CREATE,
-                    objective_summary="Move the reminder to Trash",
-                    success_criteria=(SuccessCriterion("criterion-1", "moved"),)),
-                call=CapabilityCall("call-1", TRASH, ARGS, "approval-1")),
+            AgentDecision(goal_proposal=GoalProposal(
+                kind=GoalMutationKind.CREATE,
+                objective_summary="Move the reminder to Trash",
+                success_criteria=(SuccessCriterion("criterion-1", "moved"),))),
+            AgentDecision(call=CapabilityCall("call-1", TRASH, ARGS, "approval-1")),
             AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "approval-2")),
             AgentDecision(response="unreachable"),
         )
         agent = CoreAgent(self.store, reasoner, dispatch, (DEFINITION,),
                           clock=lambda: NOW, identifier_factory=lambda: "goal-1")
-        outcome = agent.process(conversation(), RETENTION, 4)
+        outcome = agent.process(conversation(), RETENTION, 5)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 1, "the refused action must not repeat")
 
@@ -203,13 +202,14 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
 
     @staticmethod
     def _create(call):
-        return AgentDecision(
-            goal_proposal=GoalProposal(
+        """Create the goal, then make the call under it: two steps."""
+        return (
+            AgentDecision(goal_proposal=GoalProposal(
                 kind=GoalMutationKind.CREATE,
                 objective_summary="Move the reminder to Trash",
                 success_criteria=(SuccessCriterion("criterion-1", "moved"),),
-            ),
-            call=call,
+            )),
+            AgentDecision(call=call),
         )
 
     @staticmethod
@@ -248,14 +248,14 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
         """1 and 6: the corrected retry runs, and the turn still answers."""
         dispatch, dispatched = self._recording_dispatch()
         reasoner = Queued(
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             AgentDecision(
                 call=CapabilityCall("call-2", TRASH, ARGS, "appr-retry"),
                 approval_proposal=self._proposal("appr-retry"),
             ),
             AgentDecision(response="Moved it to Trash."),
         )
-        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Moved it to Trash.")
         self.assertEqual(
@@ -266,14 +266,14 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
         """5: the refused attempt is preserved, not rewritten by the retry."""
         dispatch, _ = self._recording_dispatch()
         reasoner = Queued(
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             AgentDecision(
                 call=CapabilityCall("call-2", TRASH, ARGS, "appr-retry"),
                 approval_proposal=self._proposal("appr-retry"),
             ),
             AgentDecision(response="Done."),
         )
-        self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
         attempts = self.store.load("goal-1").state.attempts
         rejected = [
             item for item in attempts
@@ -291,11 +291,11 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
         """2: nothing about the authority changed, so it is still a loop."""
         dispatch, dispatched = self._recording_dispatch()
         reasoner = Queued(
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "appr-missing")),
             AgentDecision(response="unreachable"),
         )
-        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 1)
 
@@ -303,11 +303,11 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
         """3: a new approval id that authorises nothing does not repair it."""
         dispatch, dispatched = self._recording_dispatch()
         reasoner = Queued(
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS, "appr-invented")),
             AgentDecision(response="unreachable"),
         )
-        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 1)
 
@@ -315,11 +315,11 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
         """3, the other shape: dropping the approval entirely repairs nothing."""
         dispatch, dispatched = self._recording_dispatch()
         reasoner = Queued(
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             AgentDecision(call=CapabilityCall("call-2", TRASH, ARGS)),
             AgentDecision(response="unreachable"),
         )
-        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
         self.assertIn(
             outcome.reason, ("repeated_rejected_call", "approval_required"),
         )
@@ -356,7 +356,7 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
 
         reasoner = Queued(
             # 1. gate refuses: the named approval does not exist.
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             # 2. proposal refused: cites a turn that is not the latest person turn.
             AgentDecision(
                 call=CapabilityCall("call-2", TRASH, ARGS, "appr-stale"),
@@ -371,7 +371,7 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
             ),
             AgentDecision(response="Moved it to Trash."),
         )
-        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 7)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Moved it to Trash.")
         # The second never reached dispatch; the third executed.
@@ -395,7 +395,7 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
             )
 
         reasoner = Queued(
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             AgentDecision(
                 call=CapabilityCall("call-2", TRASH, ARGS, "appr-second"),
                 approval_proposal=self._proposal("appr-second"),
@@ -407,7 +407,7 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
             ),
             AgentDecision(response="unreachable"),
         )
-        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 7)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 2)
@@ -416,14 +416,14 @@ class CorrectedApprovalRetryTests(unittest.TestCase):
         """4: input_invalid is not repaired by an approval, so it still stops."""
         dispatch, dispatched = self._recording_dispatch(reject_reason="input_invalid")
         reasoner = Queued(
-            self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
+            *self._create(CapabilityCall("call-1", TRASH, ARGS, "appr-missing")),
             AgentDecision(
                 call=CapabilityCall("call-2", TRASH, ARGS, "appr-retry"),
                 approval_proposal=self._proposal("appr-retry"),
             ),
             AgentDecision(response="unreachable"),
         )
-        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 5)
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 6)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
         self.assertEqual(len(dispatched), 1)
 
@@ -813,16 +813,16 @@ class EventDrivenGoalTests(unittest.TestCase):
         snapshot = ConversationSnapshot(
             "conversation-1", (earlier,), 1, RETENTION, (event,)
         )
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
+        reasoner = Queued(
+            AgentDecision(goal_proposal=GoalProposal(
                 kind=GoalMutationKind.CREATE, objective_summary="Handle the mail",
-                success_criteria=(SuccessCriterion("criterion-1", "handled"),)),
-            response="New mail arrived.", response_requires_goal_commit=True,
-        ))
+                success_criteria=(SuccessCriterion("criterion-1", "handled"),))),
+            AgentDecision(response="New mail arrived."),
+        )
         outcome = CoreAgent(
             store, reasoner, lambda call, state: None, (),
             clock=lambda: NOW, identifier_factory=lambda: "goal-1",
-        ).process(snapshot, RETENTION, 2, trigger_event_id="event-1")
+        ).process(snapshot, RETENTION, 3, trigger_event_id="event-1")
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(
             store.load("goal-1").state.objective.source_reference, "event:event-1"
@@ -840,16 +840,16 @@ class EventDrivenGoalTests(unittest.TestCase):
         store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
         event = BackgroundEvent("event-1", "mail.observed", NOW, data={"uid": "1"})
         snapshot = ConversationSnapshot("conversation-1", (), 1, RETENTION, (event,))
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
+        reasoner = Queued(
+            AgentDecision(goal_proposal=GoalProposal(
                 kind=GoalMutationKind.CREATE, objective_summary="Handle the mail",
-                success_criteria=(SuccessCriterion("criterion-1", "handled"),)),
-            response="New mail arrived.", response_requires_goal_commit=True,
-        ))
+                success_criteria=(SuccessCriterion("criterion-1", "handled"),))),
+            AgentDecision(response="New mail arrived."),
+        )
         outcome = CoreAgent(
             store, reasoner, lambda call, state: None, (),
             clock=lambda: NOW, identifier_factory=lambda: "goal-1",
-        ).process(snapshot, RETENTION, 2)
+        ).process(snapshot, RETENTION, 3)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(
             store.load("goal-1").state.objective.source_reference, "event:event-1"

@@ -350,14 +350,14 @@ class CoreOwnsTheTransition(unittest.TestCase):
             )
 
         script = [
+            AgentDecision(goal_id="goal-a"),
             AgentDecision(call=CapabilityCall("replay", "run_coding_task",
-                                              {"resume_job_id": "resume-05"}),
-                          goal_id="goal-a"),
+                                              {"resume_job_id": "resume-05"})),
             AgentDecision(call=CapabilityCall("repair", "run_coding_task", {
                 "resume_job_id": "resume-05",
                 "corrective_action": "Both provider stubs lack the new method; add it.",
-            }), goal_id="goal-a"),
-            AgentDecision(response="Repaired.", goal_id="goal-a"),
+            })),
+            AgentDecision(response="Repaired."),
         ]
         outcome, store = self.process(recorded_case(), lambda _: script.pop(0), dispatch)
         self.assertEqual([call.call_id for call in dispatched], ["replay", "repair"])
@@ -370,10 +370,11 @@ class CoreOwnsTheTransition(unittest.TestCase):
     def test_a_correction_after_four_failures_in_a_row_is_refused(self):
         state = goal(*(verification_failed(f"f{n}", {"task": "a"}) for n in range(4)))
         script = [
+            AgentDecision(goal_id="goal-a"),
             AgentDecision(call=CapabilityCall("repair", "run_coding_task", {
                 "resume_job_id": "f3", "corrective_action": "a new diagnosis",
-            }), goal_id="goal-a"),
-            AgentDecision(response="Four in a row failed.", goal_id="goal-a"),
+            })),
+            AgentDecision(response="Four in a row failed."),
         ]
         outcome, store = self.process(
             state, lambda _: script.pop(0),
@@ -398,7 +399,9 @@ class CoreOwnsTheTransition(unittest.TestCase):
         def decisions(context):
             # A model that never stops: corrections alternating with retries
             # of the latest failure. The first step selects the goal.
-            attempts = context.active_goal.attempts if context.active_goal else ()
+            if context.active_goal is None:
+                return AgentDecision(goal_id="goal-a")
+            attempts = context.active_goal.attempts
             latest = ([item.call.call_id for item in attempts
                        if item.result is not None
                        and item.result.state is CapabilityResultState.FAILED]
@@ -409,7 +412,6 @@ class CoreOwnsTheTransition(unittest.TestCase):
                 arguments["corrective_action"] = f"diagnosis {number}"
             return AgentDecision(
                 call=CapabilityCall(f"call-{number}", "run_coding_task", arguments),
-                goal_id="goal-a",
             )
 
         outcome, store = self.process(

@@ -6,9 +6,9 @@ depended on that commit, so the Core discarded it and returned an ERROR outcome
 named `goal_proposal_invalid`; the voice server treated that reason as fatal and
 closed the exchange while the process itself was healthy.
 
-The mutation may fail, the dependent answer is suppressed and the goal stays
-unresolved, but Core and voice remain operational. The evidence and goal
-validators are untouched.
+The mutation may fail and the goal stays unresolved, but Core and voice remain
+operational: the refusal reaches the Core, and the words that end the turn are
+a step of their own (D-065). The evidence and goal validators are untouched.
 """
 
 from __future__ import annotations
@@ -113,89 +113,44 @@ class Harness(unittest.TestCase):
             self.store, reasoner, dispatch, (INSPECT,), clock=lambda: NOW,
         )
 
-    def dependent(self, response: str = "It is complete.") -> AgentDecision:
-        return AgentDecision(
-            goal_id="goal-1", response=response,
-            goal_proposal=unsupported_completion(), response_requires_goal_commit=True,
-        )
+    def select(self) -> AgentDecision:
+        return AgentDecision(goal_id="goal-1")
+
+    def refused(self) -> AgentDecision:
+        """A completion request the goal validator refuses."""
+        return AgentDecision(goal_proposal=unsupported_completion())
 
 
-class DependentAnswerIsSuppressed(Harness):
-    def test_answer_suppressed_goal_unchanged_outcome_recoverable(self) -> None:
-        """The claim that depended on the refused commit is never delivered.
-
-        Friedl is still answered: one response-only step, told of the refusal,
-        says what is actually true instead of leaving him with silence.
-        """
-        reasoner = Queued(
-            self.dependent("It is complete."),
-            AgentDecision(response="I could not close it."),
-        )
-        outcome = self.core(reasoner).process(conversation(), RETENTION, 1)
-
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(outcome.response, "I could not close it.")
-        self.assertEqual(reasoner.contexts[1].response_only_reason, "goal_proposal_invalid")
-        stored = self.store.load("goal-1").state
-        self.assertIs(stored.status, GoalStatus.ACTIVE)
-        self.assertEqual(stored.success_criteria, goal().success_criteria)
-        self.assertEqual(reasoner.contexts[0].refused_calls, ())
-
+class RefusedMutationIsRecoverable(Harness):
     def test_the_reason_reaches_the_core_when_a_step_remains(self) -> None:
         reasoner = Queued(
-            self.dependent(),
-            AgentDecision(goal_id="goal-1", response="I could not close it."),
+            self.select(), self.refused(),
+            AgentDecision(response="I could not close it."),
         )
         outcome = self.core(reasoner).process(conversation(), RETENTION, 3)
 
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "I could not close it.")
-        refusal = reasoner.contexts[1].refused_calls[0]
+        self.assertEqual(reasoner.contexts[1].refused_calls, ())
+        refusal = reasoner.contexts[2].refused_calls[0]
         self.assertEqual(refusal["reason"], "completion_lacks_sourced_evidence")
         self.assertEqual(refusal["mutation_kind"], "request_completion")
         self.assertIs(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
 
-    def test_silence_chosen_on_a_refused_mutation_is_recoverable_too(self) -> None:
-        outcome = self.core(Queued(
-            AgentDecision(
-                goal_id="goal-1", finish_silently=True,
-                goal_proposal=unsupported_completion(),
-            ),
-            AgentDecision(response="That did not go through."),
-        )).process(conversation(), RETENTION, 1)
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
-
-
-class IndependentAnswerIsKept(Harness):
-    def test_optional_mutation_rejection_keeps_the_answer(self) -> None:
-        reasoner = Queued(AgentDecision(
-            goal_id="goal-1", response="Independent answer.",
-            goal_proposal=unsupported_completion(),
-        ))
-        outcome = self.core(reasoner).process(conversation(), RETENTION, 1)
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.response, "Independent answer.")
-        self.assertEqual(outcome.reason, "goal_proposal_rejected")
-        self.assertIs(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
-
-
 class NoRetryLoop(Harness):
     def test_the_same_refusal_twice_buys_only_a_response_only_step(self) -> None:
         reasoner = Queued(
-            self.dependent("First claim."),
-            self.dependent("Second claim."),
+            self.select(), self.refused(), self.refused(),
             AgentDecision(response="It is still open."),
-            AssertionError("a fourth step was bought for an unchanged refusal"),
+            AssertionError("a further step was bought for an unchanged refusal"),
         )
         outcome = self.core(reasoner).process(conversation(), RETENTION, 10)
 
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
         self.assertEqual(outcome.response, "It is still open.")
-        self.assertEqual(len(reasoner.contexts), 3)
-        self.assertEqual(reasoner.contexts[2].response_only_reason, "goal_proposal_invalid")
+        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual(reasoner.contexts[3].response_only_reason, "goal_proposal_invalid")
         self.assertIs(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
 
     def test_an_unprompted_turn_still_ends_quietly_on_the_refusal(self) -> None:
@@ -203,8 +158,7 @@ class NoRetryLoop(Harness):
         from alx.contracts.cognition import CognitionOrigin
 
         reasoner = Queued(
-            self.dependent("First claim."),
-            self.dependent("Second claim."),
+            self.select(), self.refused(), self.refused(),
             AssertionError("no response-only step is owed to nobody"),
         )
         outcome = self.core(reasoner).process(
@@ -212,52 +166,46 @@ class NoRetryLoop(Harness):
         )
         self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
 
     def test_a_repeated_refused_mutation_without_an_answer_checkpoints(self) -> None:
-        bare = AgentDecision(
-            goal_id="goal-1", call=CapabilityCall("call-1", "inspect", {}),
-            goal_proposal=unsupported_completion(),
-        )
-        again = AgentDecision(
-            goal_id="goal-1", call=CapabilityCall("call-2", "inspect", {}),
-            goal_proposal=unsupported_completion(),
-        )
+        # A successful call between the two refusals changes nothing about
+        # the refused mutation, so its repetition still ends the turn.
         reasoner = Queued(
-            bare, again, AgentDecision(response="I could not record that."),
+            self.select(), self.refused(),
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            self.refused(),
+            AgentDecision(response="I could not record that."),
             AssertionError("unbounded retry"),
         )
         outcome = self.core(reasoner, executed).process(conversation(), RETENTION, 10)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(len(reasoner.contexts), 5)
 
 
 class ValidatorsAreUnchanged(Harness):
     def test_completion_still_requires_sourced_evidence(self) -> None:
         reasoner = Queued(
-            self.dependent(),
-            AgentDecision(goal_id="goal-1", response="Not closed."),
+            self.select(), self.refused(),
+            AgentDecision(response="Not closed."),
         )
         self.core(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(
-            reasoner.contexts[1].refused_calls[0]["reason"],
+            reasoner.contexts[2].refused_calls[0]["reason"],
             "completion_lacks_sourced_evidence",
         )
         self.assertIs(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
 
     def test_evidence_that_cites_nothing_real_is_still_refused(self) -> None:
         reasoner = Queued(
-            AgentDecision(
-                goal_id="goal-1", response="Done.",
-                goal_proposal=unsourced_completion(),
-                response_requires_goal_commit=True,
-            ),
-            AgentDecision(goal_id="goal-1", response="Not closed."),
+            self.select(),
+            AgentDecision(goal_proposal=unsourced_completion()),
+            AgentDecision(response="Not closed."),
         )
         self.core(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(
-            reasoner.contexts[1].refused_calls[0]["reason"], "evidence_source_unknown",
+            reasoner.contexts[2].refused_calls[0]["reason"], "evidence_source_unknown",
         )
         self.assertIs(self.store.load("goal-1").state.status, GoalStatus.ACTIVE)
 

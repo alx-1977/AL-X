@@ -1074,44 +1074,51 @@ class Reasoner:
 
     def __init__(self) -> None:
         self.contexts = []
+        self.created = False
+        self.unblocked = False
         self.read = False
 
     def decide(self, context):
         self.contexts.append(context)
         if context.origin is CognitionOrigin.PERSON_TURN:
+            if not self.created:
+                self.created = True
+                return AgentDecision(
+                    goal_proposal=GoalProposal(
+                        GoalMutationKind.CREATE,
+                        "Land PR 42 once its external review is judged",
+                        (SuccessCriterion("review-judged", "the review is judged"),),
+                        blockers=(WorkItem("external-review", "awaiting review of PR 42"),),
+                        outstanding_work=(
+                            WorkItem("judge-review", "judge the external review findings"),
+                        ),
+                    ),
+                )
             return AgentDecision(
                 response="PR 42 is open; I'll judge the review when it lands.",
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.CREATE,
-                    "Land PR 42 once its external review is judged",
-                    (SuccessCriterion("review-judged", "the review is judged"),),
-                    blockers=(WorkItem("external-review", "awaiting review of PR 42"),),
-                    outstanding_work=(
-                        WorkItem("judge-review", "judge the external review findings"),
-                    ),
-                ),
             )
         if context.active_goal is None:
             # She chooses which unfinished goal the occasion belongs to. The
             # script stands in for that judgement; the Core only offers them.
             return AgentDecision(goal_id=context.unfinished_goals[0].goal_id)
-        if not self.read:
-            self.read = True
+        if not self.unblocked:
+            self.unblocked = True
             # The review it was blocked on has arrived, so she resumes the goal
             # at its recorded stage — the blocker clears, the outstanding
-            # judgement stays — and reads what the reviewer said.
+            # judgement stays.
+            return AgentDecision(
+                goal_proposal=GoalProposal(GoalMutationKind.UPDATE, blockers=()),
+            )
+        if not self.read:
+            self.read = True
+            # ...and reads what the reviewer said.
             return AgentDecision(
                 call=CapabilityCall(
                     "read-1", READ_EXTERNAL_REVIEW,
                     {"pull_request_number": NUMBER, "head_sha": HEAD},
                 ),
-                goal_id=context.active_goal.goal_id,
-                goal_proposal=GoalProposal(GoalMutationKind.UPDATE, blockers=()),
             )
-        return AgentDecision(
-            response="The review has one finding to judge.",
-            goal_id=context.active_goal.goal_id,
-        )
+        return AgentDecision(response="The review has one finding to judge.")
 
 
 class DurableReviewContinuationTests(Harness):

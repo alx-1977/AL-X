@@ -183,9 +183,9 @@ class IndependentGoalTests(Fixture):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         before = self.store.load("goal-a")
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_proposal=new_goal(),
-                          approval_proposal=approval()),
-            AgentDecision(response="Removed.", goal_id="goal-b"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(response="Removed."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -203,13 +203,13 @@ class IndependentGoalTests(Fixture):
         study = CapabilityCall("call-1", "study_question", {"question_id": "q-1"})
         reasoner = Queued(
             AgentDecision(
-                call=study,
                 goal_proposal=GoalProposal(
                     GoalMutationKind.CREATE, "Answer the bounded question",
                     (SuccessCriterion("c-1", "the question is answered"),),
                 ),
             ),
-            AgentDecision(response="Answered.", goal_id="goal-b"),
+            AgentDecision(call=study),
+            AgentDecision(response="Answered."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -224,9 +224,9 @@ class IndependentGoalTests(Fixture):
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         before = self.store.load("goal-a")
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_proposal=new_goal(),
-                          approval_proposal=approval()),
-            AgentDecision(response="Removed.", goal_id="goal-b"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(response="Removed."),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(self.store.load("goal-a"), before)
@@ -239,14 +239,14 @@ class IndependentGoalTests(Fixture):
         """A follow-up that belongs to unfinished work continues it."""
         self.store.create(active_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
+            AgentDecision(goal_id="goal-a"),
             AgentDecision(
-                goal_id="goal-a",
                 goal_proposal=GoalProposal(
                     GoalMutationKind.UPDATE,
                     objective_summary="The longer piece of work, refined",
                 ),
             ),
-            AgentDecision(response="Carrying on with that.", goal_id="goal-a"),
+            AgentDecision(response="Carrying on with that."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -312,7 +312,7 @@ class GoalSummaryTests(Fixture):
         self.store.create(active_goal("goal-x"), "conversation-1", RETENTION)
         reasoner = Queued(
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(response="Carrying on.", goal_id="goal-a"),
+            AgentDecision(response="Carrying on."),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
         # Before selection: summaries only.
@@ -346,20 +346,22 @@ class GoalSummaryTests(Fixture):
         """A wrong identifier cost a whole voice session on 2026-09-10."""
         self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
         reasoner = Queued(
-            AgentDecision(response="Working on it.", goal_id="goal-invented"),
-            AgentDecision(response="Here is the answer.", goal_id="goal-a"),
+            AgentDecision(goal_id="goal-invented"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(response="Here is the answer."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Here is the answer.")
         # She reasoned again rather than losing the turn.
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
 
     def test_the_refused_selection_names_what_is_available(self) -> None:
         self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
         reasoner = Queued(
-            AgentDecision(response="Working on it.", goal_id="goal-invented"),
-            AgentDecision(response="Corrected.", goal_id="goal-a"),
+            AgentDecision(goal_id="goal-invented"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(response="Corrected."),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
         refused = reasoner.contexts[1].refused_goal_selections
@@ -375,7 +377,7 @@ class GoalSummaryTests(Fixture):
         self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
         before = self.store.load("goal-a")
         reasoner = Queued(
-            AgentDecision(response="Working on it.", goal_id="goal-invented"),
+            AgentDecision(goal_id="goal-invented"),
             AgentDecision(response="Corrected."),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
@@ -389,15 +391,15 @@ class GoalSummaryTests(Fixture):
     def test_with_no_goals_offered_core_can_create_one(self) -> None:
         """The live failure: an empty list, and the request still gets served."""
         reasoner = Queued(
-            AgentDecision(response="Working on it.", goal_id="goal-remembered"),
+            AgentDecision(goal_id="goal-remembered"),
             AgentDecision(
-                response="Deleting those now.",
                 goal_proposal=GoalProposal(
                     GoalMutationKind.CREATE,
                     "Delete the four GitHub notification emails",
                     (SuccessCriterion("criterion-1", "all four are removed"),),
                 ),
             ),
+            AgentDecision(response="Deleting those now."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -412,8 +414,8 @@ class GoalSummaryTests(Fixture):
         """Told once and asked again unchanged: bounded, not a loop."""
         self.store.create(active_goal("goal-a"), "conversation-1", RETENTION)
         reasoner = Queued(
-            AgentDecision(response="One.", goal_id="goal-invented"),
-            AgentDecision(response="Two.", goal_id="goal-still-invented"),
+            AgentDecision(goal_id="goal-invented"),
+            AgentDecision(goal_id="goal-still-invented"),
             AgentDecision(response="I can't find that piece of work."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
@@ -428,7 +430,7 @@ class GoalSummaryTests(Fixture):
         self.store.create(active_goal("goal-z"), "another-conversation", RETENTION)
         reasoner = Queued(
             AgentDecision(goal_id="goal-z"),
-            AgentDecision(response="Picking that back up.", goal_id="goal-z"),
+            AgentDecision(response="Picking that back up."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -452,8 +454,8 @@ class GoalSummaryTests(Fixture):
                 active_goal(f"filler-{index}"), "conversation-1", RETENTION,
             )
         reasoner = Queued(
-            AgentDecision(response="One.", goal_id="goal-a"),
-            AgentDecision(response="Two.", goal_id="goal-a"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(goal_id="goal-a"),
             AgentDecision(response="I can't reach that piece of work."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
@@ -491,33 +493,6 @@ class SelectionUsesTheCanonicalPathTests(Fixture):
     then failed, and a mail-derived goal could raise on provenance.
     """
 
-    def test_a_failing_memory_proposal_leaves_the_objective_unchanged(self) -> None:
-        """The adversarial case: persisted mutation, then a failed turn."""
-        self.store.create(active_goal(), "conversation-1", RETENTION)
-        before = self.store.load("goal-a")
-        ungrounded = MemoryProposal(
-            "memory-1", MemoryKind.FACTUAL, "unsupported", ("turn:not-real",), NOW,
-        )
-        reasoner = Queued(
-            AgentDecision(
-                goal_id="goal-a",
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.UPDATE, objective_summary="a changed objective",
-                ),
-                memory_proposals=(ungrounded,),
-            ),
-            # Corrected: the ungrounded memory is dropped, nothing else changes.
-            AgentDecision(response="Noted."),
-        )
-        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        # The adversarial part is unchanged: the rejected turn committed nothing.
-        self.assertEqual(self.store.load("goal-a"), before)
-        self.assertEqual(
-            self.store.load("goal-a").state.objective.summary,
-            "The longer piece of work",
-        )
-
     def test_the_selected_goal_is_inside_the_provenance_it_is_persisted_with(self) -> None:
         """A goal carrying external provenance must not be dropped from the union."""
         mail_provenance = RetentionPolicy().non_mail(ContentOrigin.EXTERNAL, NOW)
@@ -525,18 +500,18 @@ class SelectionUsesTheCanonicalPathTests(Fixture):
             active_goal(), "conversation-1", RETENTION, mail_provenance,
         )
         reasoner = Queued(
+            AgentDecision(goal_id="goal-a"),
             AgentDecision(
-                goal_id="goal-a",
                 goal_proposal=GoalProposal(
                     GoalMutationKind.UPDATE, objective_summary="refined objective",
                 ),
             ),
-            AgentDecision(response="Carrying on.", goal_id="goal-a"),
+            AgentDecision(response="Carrying on."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Carrying on.")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         stored = self.store.load("goal-a")
         self.assertEqual(stored.revision, 2)
         self.assertEqual(stored.state.objective.summary, "refined objective")
@@ -548,7 +523,7 @@ class SelectionUsesTheCanonicalPathTests(Fixture):
         before = self.store.load("goal-a")
         reasoner = Queued(
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(response="Carrying on.", goal_id="goal-a"),
+            AgentDecision(response="Carrying on."),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(self.store.load("goal-a").revision, before.revision)
@@ -605,8 +580,8 @@ class SelectionCannotBuyReasoningTests(Fixture):
         call = CapabilityCall("call-1", "study_question", {"question_id": "q-1"})
         reasoner = Queued(
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(call=call, goal_id="goal-a"),
-            AgentDecision(response="Answered.", goal_id="goal-a"),
+            AgentDecision(call=call),
+            AgentDecision(response="Answered."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -618,9 +593,9 @@ class SelectionCannotBuyReasoningTests(Fixture):
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(call=removal(), goal_proposal=new_goal(),
-                          approval_proposal=approval()),
-            AgentDecision(response="Removed.", goal_id="goal-b"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(response="Removed."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -638,29 +613,32 @@ class BlockedDispatchTests(Fixture):
     before, so a runaway still cannot spend the step budget.
     """
 
-    def assert_one_explanation_then_checkpoint(self, reasoner) -> None:
+    def assert_one_explanation_then_checkpoint(self, reasoner, selected: bool = False) -> None:
         # The person is answered by one response-only step (2026-11-04).
+        # A goal selected first is one more step before the call.
+        offset = int(selected)
         reasoner.decisions.append(AgentDecision(response="That can't run yet."))
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED, outcome.reason)
         self.assertEqual(outcome.reason, "active_goal_required")
         self.assertEqual(
-            len(reasoner.contexts), 3,
+            len(reasoner.contexts), 3 + offset,
             "one decision, one chance to correct it, then words -- never more",
         )
-        self.assertEqual(reasoner.contexts[2].response_only_reason, "active_goal_required")
-        self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"],
+        self.assertEqual(reasoner.contexts[2 + offset].response_only_reason,
+                         "active_goal_required")
+        self.assertEqual(reasoner.contexts[1 + offset].refused_calls[0]["reason"],
                          "active_goal_required")
         self.assertEqual(self.broker.calls, [])
 
     def test_effectful_call_against_a_selected_paused_goal_is_one_decision(self) -> None:
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_id="goal-a",
-                          approval_proposal=approval()),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=removal(), approval_proposal=approval()),
             AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
         )
-        self.assert_one_explanation_then_checkpoint(reasoner)
+        self.assert_one_explanation_then_checkpoint(reasoner, selected=True)
 
     def test_effectful_call_without_any_goal_is_one_decision(self) -> None:
         reasoner = Queued(
@@ -670,31 +648,6 @@ class BlockedDispatchTests(Fixture):
         self.assert_one_explanation_then_checkpoint(reasoner)
         self.assertEqual(self.store.list_goals(), ())
 
-    def test_a_mutation_that_pauses_the_goal_cannot_carry_an_effectful_call(self) -> None:
-        self.store.create(active_goal(), "conversation-1", RETENTION)
-        reasoner = Queued(
-            AgentDecision(
-                call=removal(), goal_id="goal-a",
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.AWAIT_INPUT,
-                    outstanding_work=(WorkItem("w-1", "waiting"),),
-                ),
-                approval_proposal=approval(),
-            ),
-            # Told the reason, she repeats the same pausing mutation: the
-            # state is unchanged, so the turn stops there.
-            AgentDecision(
-                call=removal(), goal_id="goal-a",
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.AWAIT_INPUT,
-                    outstanding_work=(WorkItem("w-2", "waiting"),),
-                ),
-                approval_proposal=approval(),
-            ),
-        )
-        self.assert_one_explanation_then_checkpoint(reasoner)
-        self.assertEqual(self.store.load("goal-a").state.status, GoalStatus.ACTIVE)
-
     def test_the_step_budget_is_not_the_protection(self) -> None:
         """Twenty-five steps were available; two were used.
 
@@ -703,15 +656,14 @@ class BlockedDispatchTests(Fixture):
         """
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_id="goal-a",
-                          approval_proposal=approval()),
-            *([AgentDecision(call=removal(), goal_id="goal-a",
-                             approval_proposal=approval())] * 24),
+            AgentDecision(goal_id="goal-a"),
+            *([AgentDecision(call=removal(), approval_proposal=approval())] * 24),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
-        # The third is the response-only step that answers the person.
-        self.assertEqual(len(reasoner.contexts), 3)
-        self.assertEqual(reasoner.contexts[2].response_only_reason, "active_goal_required")
+        # After the selection, the third is the response-only step that
+        # answers the person.
+        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual(reasoner.contexts[3].response_only_reason, "active_goal_required")
 
     def test_a_blocked_dispatch_checkpoint_does_not_need_reason_recovery(self) -> None:
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS
@@ -764,14 +716,14 @@ class MemoryFaultDoesNotEndTheConversationTests(Fixture):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         before = self.store.load("goal-a")
         reasoner = Queued(
-            AgentDecision(response="Noted.", goal_id="goal-a",
-                          memory_proposals=(self.memory(),)),
-            AgentDecision(call=removal(), approval_proposal=approval()),  # refused again -> stops
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(memory_proposals=(self.memory(),)),
+            AgentDecision(call=removal(), approval_proposal=approval()),
         )
         outcome = self.failing_agent(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.ERROR)
         self.assertEqual(outcome.reason, "memory_persistence_error")
-        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(len(reasoner.contexts), 2)
         self.assertEqual(self.broker.calls, [], "nothing external may act")
         self.assertEqual(self.store.load("goal-a").state, before.state)
 
@@ -787,48 +739,19 @@ class MemoryFaultDoesNotEndTheConversationTests(Fixture):
         """The conversation survives the fault rather than ending on it."""
         self.store.create(active_goal(), "conversation-1", RETENTION)
         failed = Queued(
-            AgentDecision(response="Noted.", goal_id="goal-a",
-                          memory_proposals=(self.memory(),)),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(memory_proposals=(self.memory(),)),
         )
         self.failing_agent(failed).process(conversation(), RETENTION, 25)
 
         recovered = Queued(
-            AgentDecision(response="Still here.", goal_id="goal-a",
-                          memory_proposals=(self.memory(),)),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(memory_proposals=(self.memory(),)),
+            AgentDecision(response="Still here."),
         )
         outcome = self.agent(recovered).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Still here.")
-
-    def test_a_checkpointed_dispatch_is_never_repeated_after_the_fault(self) -> None:
-        """The one site that fails after a durable checkpoint.
-
-        The approval is claimed and the attempt recorded PENDING just before
-        dispatch. If the memory write fails there, nothing was sent, and the
-        next turn must close that attempt as an unknown outcome rather than
-        dispatching it a second time.
-        """
-        self.store.create(active_goal(), "conversation-1", RETENTION)
-        call = CapabilityCall("call-1", "study_question", {"question_id": "q-1"})
-        reasoner = Queued(
-            AgentDecision(call=call, goal_id="goal-a",
-                          memory_proposals=(self.memory(),)),
-        )
-        outcome = self.failing_agent(reasoner).process(conversation(), RETENTION, 25)
-        self.assertEqual(outcome.reason, "memory_persistence_error")
-        self.assertEqual(self.broker.executed, 0, "nothing was dispatched")
-
-        # The next turn, with storage working again.
-        resumed = Queued(AgentDecision(response="I could not confirm that.",
-                                       goal_id="goal-a"))
-        self.agent(resumed).process(conversation(), RETENTION, 25)
-        self.assertEqual(self.broker.executed, 0, "the action must not be repeated")
-        attempts = self.store.load("goal-a").state.attempts
-        self.assertFalse(
-            any(item.disposition is CapabilityAttemptDisposition.PENDING
-                for item in attempts),
-            "the interrupted dispatch must be resolved, not left pending",
-        )
 
 
 class ApprovalOrderingTests(Fixture):
@@ -838,8 +761,8 @@ class ApprovalOrderingTests(Fixture):
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         before = self.store.load("goal-a")
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_id="goal-a",
-                          approval_proposal=approval()),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=removal(), approval_proposal=approval()),
             AssertionError("retry"),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 25)
@@ -851,15 +774,15 @@ class ApprovalOrderingTests(Fixture):
         """The same approval, from the same turn, on the next reasoning pass."""
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         blocked = Queued(
-            AgentDecision(call=removal(), goal_id="goal-a",
-                          approval_proposal=approval())
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=removal(), approval_proposal=approval()),
         )
         self.agent(blocked).process(conversation(), RETENTION, 25)
 
         corrected = Queued(
-            AgentDecision(call=removal(), goal_proposal=new_goal(),
-                          approval_proposal=approval()),
-            AgentDecision(response="Removed.", goal_id="goal-b"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(response="Removed."),
         )
         outcome = self.agent(corrected).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -875,16 +798,17 @@ class ApprovalOrderingTests(Fixture):
     def test_one_successful_action_still_cannot_reuse_the_approval(self) -> None:
         self.store.create(paused_goal(), "conversation-1", RETENTION)
         first = Queued(
-            AgentDecision(call=removal(), goal_proposal=new_goal(),
-                          approval_proposal=approval()),
-            AgentDecision(response="Removed.", goal_id="goal-b"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(response="Removed."),
         )
         self.agent(first).process(conversation(), RETENTION, 25)
         self.assertEqual(self.broker.executed, 1)
 
         again = Queued(
-            AgentDecision(call=removal("call-2"), goal_id="goal-b"),
-            AgentDecision(response="No.", goal_id="goal-b"),
+            AgentDecision(goal_id="goal-b"),
+            AgentDecision(call=removal("call-2")),
+            AgentDecision(response="No."),
         )
         outcome = self.agent(again).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -974,9 +898,9 @@ class RunawayScenarioTests(unittest.TestCase):
     def test_a_correct_context_dispatches_exactly_once(self) -> None:
         before = self.goals.load("goal-a")
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_proposal=new_goal(),
-                          approval_proposal=approval()),
-            AgentDecision(response="Removed.", goal_id="goal-b"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(response="Removed."),
         )
         outcome = self.gateway(reasoner).receive_conversation_turn(TURNS[2], 25, RETENTION)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
@@ -985,7 +909,7 @@ class RunawayScenarioTests(unittest.TestCase):
         self.assertEqual(
             [item.goal_id for item in reasoner.contexts[0].unfinished_goals], ["goal-a"]
         )
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.broker.executed, 1)
         self.assertEqual(len(self.broker.calls), 1)
         self.assertEqual(self.goals.load("goal-a"), before)
@@ -1003,17 +927,16 @@ class RunawayScenarioTests(unittest.TestCase):
         """
         before = self.goals.load("goal-a")
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_id="goal-a",
-                          approval_proposal=approval()),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=removal(), approval_proposal=approval()),
             # One explanation is offered; asking again ends the turn.
-            *([AgentDecision(call=removal(), goal_id="goal-a",
-                             approval_proposal=approval())] * 24),
+            *([AgentDecision(call=removal(), approval_proposal=approval())] * 24),
         )
         outcome = self.gateway(reasoner).receive_conversation_turn(TURNS[2], 25, RETENTION)
         # The response-only step got a call, not words, so it checkpoints.
         self.assertEqual(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "active_goal_required")
-        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(len(reasoner.contexts), 4)
         self.assertEqual(self.broker.calls, [])
         self.assertEqual(self.goals.load("goal-a"), before)
         self.assertTrue(
@@ -1027,9 +950,9 @@ class RunawayScenarioTests(unittest.TestCase):
     def test_restart_preserves_every_unfinished_goal_and_their_independence(self) -> None:
         """Two independent goals, a restart, and both still resumable."""
         first = Queued(
-            AgentDecision(call=removal(), goal_proposal=new_goal(),
-                          approval_proposal=approval()),
-            AgentDecision(response="Removed.", goal_id="goal-b"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(response="Removed."),
         )
         self.gateway(first).receive_conversation_turn(TURNS[2], 25, RETENTION)
         self.goals.close()

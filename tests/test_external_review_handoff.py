@@ -77,15 +77,18 @@ class Decisions:
         self.contexts.append(context)
         if len(self.contexts) == 1:
             return AgentDecision(
-                call=CapabilityCall(
-                    "read-1",
-                    READ_EXTERNAL_REVIEW,
-                    {"pull_request_number": 21, "head_sha": HEAD},
-                ),
                 goal_proposal=GoalProposal(
                     GoalMutationKind.CREATE,
                     "Evaluate the completed external review",
                     (SuccessCriterion("review-read", "the review is read"),),
+                ),
+            )
+        if len(self.contexts) == 2:
+            return AgentDecision(
+                call=CapabilityCall(
+                    "read-1",
+                    READ_EXTERNAL_REVIEW,
+                    {"pull_request_number": 21, "head_sha": HEAD},
                 ),
             )
         return AgentDecision(response="I read the completed review.")
