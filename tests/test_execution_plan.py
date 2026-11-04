@@ -1909,6 +1909,36 @@ class ReplyDurabilityTests(PlanHarness):
         self.assertIsNotNone(outcome_.response_turn_id)
         self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
 
+    def test_a_native_finish_closes_its_own_plan_after_a_goal_switch(self):
+        """Review of #200: switching goals before the reply must not move the close."""
+        self.finish_ready()
+        self.store.create(new_goal("other"), "thread", RETENTION)
+        self.set_goal("other", execution_plan=replace(self.plan_of(), plan_id="plan:other"))
+        reasoner = Reasoner(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                            AgentDecision(goal_id="other"),
+                            AgentDecision(response="It is merged and done."))
+        self.finish_turn(self.gateway(reasoner))
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+        self.assertEqual(self.plan_of("other").status, PlanStatus.NEEDS_CORE)
+        self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertEqual(self.plan_of().announcements, ())
+
+    def test_a_native_finish_is_written_when_a_refusal_ends_the_turn(self):
+        """Review of #200: the accepted close survives an ending by refusal."""
+        from alx.contracts import MemoryKind, MemoryProposal
+        self.finish_ready()
+        ungrounded = AgentDecision(memory_proposals=(MemoryProposal(
+            "m-1", MemoryKind.FACTUAL, "unsupported", ("turn:not-real",), NOW),))
+        reasoner = Reasoner(SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.FINISH)),
+                            ungrounded, ungrounded,
+                            AgentDecision(response="It is merged and done."))
+        self.finish_turn(self.gateway(reasoner))
+        # The last step was response-only, and its words carry the close.
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "memory_proposal_invalid")
+        self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
+        self.assertEqual([item.content for item in self.replies()], ["It is merged and done."])
+        self.assertEqual(self.plan_of().announcements, ())
+
     def test_the_ordinary_path_stores_the_reply_once_and_clears_it(self):
         self.finish_ready()
         gateway = self.gateway(self.finishing())

@@ -152,6 +152,17 @@ class CoreOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class _HeldClose:
+    """A plan finish or cancel given as a native step, until the turn ends."""
+
+    update: PlanUpdate
+    goal_id: str
+    # The plan and attention she was shown when she gave it.
+    rendered: tuple[str, int] | None
+    provenance: ContentProvenance
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedDispatch:
     """One checkpointed planned step, handed to a background worker."""
 
@@ -461,6 +472,54 @@ class CoreAgent:
                 step_budget: int, trigger_event_id: str | None = None,
                 origin: CognitionOrigin = CognitionOrigin.PERSON_TURN,
                 resume_plan_goal_id: str | None = None) -> CoreOutcome:
+        """Reason over one turn, then settle any plan close she gave as a step.
+
+        A finish or cancel she gives as a native step (D-065) is accepted when
+        she gives it and written where the turn ends, however it ends, in one
+        write with the words that end it: the same pairing a close given with
+        her reply always had. It closes the plan it was given for, whichever
+        goal she is working under by then.
+        """
+        held: list[_HeldClose] = []
+        outcome = self._process(conversation, retention_until, step_budget,
+                                trigger_event_id, origin, resume_plan_goal_id, held)
+        return self._settle_held_close(outcome, held, conversation)
+
+    def _settle_held_close(self, outcome: CoreOutcome, held: list["_HeldClose"],
+                           conversation: ConversationSnapshot) -> CoreOutcome:
+        if not held:
+            return outcome
+        close = held[0]
+        # One reply per turn: words that already announce a close of their
+        # own are not stored a second time with this one.
+        reply = (outcome.response if outcome.state is CoreState.RESPONDED
+                 and outcome.response_turn_id is None else None)
+        try:
+            target = self._store.load(close.goal_id)
+            refusal = self._plan_update_refusal(close.update, target, close.rendered, None, None)
+            if refusal is not None:
+                # The plan changed under it since she gave it; nothing closes.
+                LOGGER.info("Held plan %s not applied: %s", close.update.operation.value, refusal)
+                return outcome
+            target, reply_turn = self._apply_plan_update(
+                target, close.update, conversation, close.provenance, reply)
+        except Exception as error:  # noqa: BLE001 - the turn's outcome stands
+            LOGGER.warning("Held plan close could not be written: %s", type(error).__name__)
+            return outcome
+        same_goal = (outcome.snapshot is not None
+                     and outcome.snapshot.state.goal_id == close.goal_id)
+        # Words that carry the close are stored from that plan, under its
+        # goal, even when she ended the turn working under another one.
+        return replace(
+            outcome,
+            snapshot=target if same_goal or reply is not None else outcome.snapshot,
+            response_turn_id=reply_turn if reply is not None else outcome.response_turn_id,
+        )
+
+    def _process(self, conversation: ConversationSnapshot, retention_until: datetime,
+                 step_budget: int, trigger_event_id: str | None,
+                 origin: CognitionOrigin, resume_plan_goal_id: str | None,
+                 held: list["_HeldClose"]) -> CoreOutcome:
         """Reason over one durable conversation and whichever of its goals AL/X selects.
 
         No goal is attached in advance. Every unfinished goal of the
@@ -557,10 +616,6 @@ class CoreAgent:
         # The same dispatches by call id: their results are shown whole on the
         # goal for the rest of this turn (D-057a).
         turn_call_ids: list[str] = []
-        # A finish or cancel of a plan she gave as a native step (D-065). It
-        # closes where the turn ends, in one write with her reply, exactly as
-        # a close given with the reply itself does.
-        held_close: PlanUpdate | None = None
         # This turn's identity for the reasoner, so a session it paused on one
         # step is continued only by this turn's next step (D-065).
         turn_key = uuid4().hex
@@ -1194,14 +1249,6 @@ class CoreAgent:
                 continue
 
             if decision.call is None:
-                if (not decision.intermediate and decision.plan_update is None
-                        and held_close is not None):
-                    # The close she gave as a native step travels with the
-                    # words or silence that end the turn, and is checked
-                    # again against the plan as it is now. It stays held
-                    # until it is written or refused, so words that turn out
-                    # not to end the turn leave it for the words that do.
-                    decision = replace(decision, plan_update=held_close)
                 if decision.plan_update is not None:
                     plan_refusal = self._plan_update_refusal(
                         decision.plan_update, snapshot, rendered_plan,
@@ -1217,7 +1264,6 @@ class CoreAgent:
                                    "Plan update refused", conversation_id,
                                    reason_code=plan_refusal)
                         subject = f"{decision.plan_update.operation.value}:{plan_refusal}"
-                        held_close = None
                         if self._already_refused(refused_calls, plan_refusal, subject):
                             return stopped(CoreState.CHECKPOINTED, plan_refusal)
                         refused_calls = (*refused_calls, {
@@ -1249,12 +1295,17 @@ class CoreAgent:
                 closing = (decision.plan_update is not None and decision.plan_update.operation
                            in (PlanOperation.FINISH, PlanOperation.CANCEL))
                 if closing and decision.intermediate:
-                    # Accepted now, written with the reply that ends the turn.
-                    held_close = decision.plan_update
+                    # Accepted now, for this goal's plan as she was shown it,
+                    # and written where the turn ends (see `process`).
+                    assert snapshot is not None and decision_provenance is not None
+                    held[:] = [_HeldClose(decision.plan_update, snapshot.state.goal_id,
+                                          rendered_plan, decision_provenance)]
                     continue
                 if decision.plan_update is not None and not closing:
                     assert snapshot is not None
-                    held_close = None
+                    if held and held[0].goal_id == snapshot.state.goal_id:
+                        # A plan that runs on replaces the one she had closed.
+                        held.clear()
                     snapshot, _ = self._apply_plan_update(
                         snapshot, decision.plan_update, conversation, decision_provenance,
                     )
