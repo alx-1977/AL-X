@@ -38,7 +38,6 @@ class VoiceDiagnosticFeed:
     # newest report replaces the last; settled states are released.
     _STATE_KEYS = {
         "task.status": ("task_id",),
-        "plan.attention": ("goal_id", "plan_id", "attention_seq"),
         "coding.status": ("job_id",),
     }
     _SETTLED_TASK_STATES = frozenset({"completed", "failed", "observer_unavailable"})

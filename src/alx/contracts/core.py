@@ -11,6 +11,7 @@ from alx.contracts.capabilities import CapabilityDefinition
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CarriedThought, FutureCognitionRequest
 from alx.contracts.records import (
+    PlanStopNote,
     ApprovalProposal,
     BackgroundEvent,
     CapabilityAttempt,
@@ -525,6 +526,10 @@ class DurableGoalStore(Protocol):
         provenance: ContentProvenance | None = None,
     ) -> GoalSnapshot: ...
 
+    def pending_plan_stop_notes(self) -> tuple[PlanStopNote, ...]: ...
+
+    def acknowledge_plan_stop_note(self, note: PlanStopNote) -> None: ...
+
     def pending_memory_batches(
         self,
         goal_id: str,
@@ -555,6 +560,8 @@ class DurableConversationStore(Protocol):
 
     def record_response_delivery(self, conversation_id: str, turn_id: str,
                                  delivered_at: datetime) -> bool: ...
+
+    def pending_plan_stop_notes(self) -> tuple[ConversationTurn, ...]: ...
 
     def mail_observation_raised_at(self, reference: MailReference) -> datetime | None: ...
 

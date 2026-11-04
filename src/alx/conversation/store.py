@@ -13,7 +13,7 @@ from alx.contracts.provenance import provenance_from_storage, provenance_to_stor
 from alx.contracts.storage import serialized_store
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 PROVENANCE_COLUMNS = (
     "content_origins",
     "content_recorded_at",
@@ -135,6 +135,12 @@ class SQLiteConversationStore:
                 "uid_validity TEXT NOT NULL, uid TEXT NOT NULL, raised_at TEXT NOT NULL, "
                 "PRIMARY KEY(response_conversation_id, response_turn_id, mailbox_id, uid_validity, uid))"
             )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS response_receipts ("
+                "conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) "
+                "ON DELETE CASCADE, turn_id TEXT NOT NULL, delivered_at TEXT NOT NULL, "
+                "PRIMARY KEY(conversation_id, turn_id))"
+            )
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -235,12 +241,30 @@ class SQLiteConversationStore:
             turn = _turn_from_json(row[0])
             if turn.origin is not ConversationOrigin.ALX_RESPONSE:
                 return False
+            self._connection.execute(
+                "INSERT OR IGNORE INTO response_receipts VALUES (?, ?, ?)",
+                (conversation_id, turn_id, delivered_at.isoformat()),
+            )
             self._connection.executemany(
                 "INSERT OR IGNORE INTO mail_observation_receipts VALUES (?, ?, ?, ?, ?, ?)",
                 ((conversation_id, turn_id, ref.mailbox_id, ref.uid_validity, ref.uid,
                   delivered_at.isoformat()) for ref in turn.raised_mail_observations),
             )
         return True
+
+    def pending_plan_stop_notes(self) -> tuple[ConversationTurn, ...]:
+        """Return stop notes without TEXT receipts, in insertion order.
+
+        The turn itself is the outbox record: there is no append/enqueue gap.
+        Receipts remain after delivery so rescanning an attention cannot resend.
+        """
+        return tuple(_turn_from_row(row) for row in self._connection.execute(
+            "SELECT t.turn_json, t.content_origins, t.content_recorded_at, "
+            "t.content_expires_at, t.mail_references FROM conversation_turns t "
+            "LEFT JOIN response_receipts r ON t.conversation_id = r.conversation_id "
+            "AND t.turn_id = r.turn_id WHERE t.turn_id LIKE 'plan-stop:%' "
+            "AND r.turn_id IS NULL ORDER BY t.rowid"
+        ))
 
     def mail_observation_raised_at(self, reference: MailReference) -> datetime | None:
         rows = self._connection.execute(

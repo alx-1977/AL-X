@@ -25,7 +25,7 @@ from alx.contracts.provenance import ContentOrigin, RetentionPolicy  # noqa: E40
 from alx.conversation.gateway import ConversationGateway  # noqa: E402
 from alx.conversation.store import SQLiteConversationStore  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
-from alx.interfaces.live_voice import VoiceActivityStatus, VoiceEventKind, VoiceSession  # noqa: E402
+from alx.interfaces.live_voice import StoredResponse, VoiceActivityStatus, VoiceEventKind, VoiceSession  # noqa: E402
 
 NOW = datetime(2026, 10, 8, 11, 53, tzinfo=UTC)
 MAIL = "mail-thread:<jlcpcb-123@mail>"
@@ -122,6 +122,52 @@ class RoutingTests(unittest.TestCase):
     def test_with_no_session_the_reply_is_undeliverable(self) -> None:
         self.assertIs(_server().deliver(MAIL, "stale words"),
                       ResponseDelivery.UNDELIVERABLE)
+
+
+class PlanStopDeliveryTests(unittest.TestCase):
+    def test_pending_note_uses_normal_text_ack_and_deduplicates_live_queue(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as directory:
+                store = SQLiteConversationStore(Path(directory) / "conversation.sqlite3")
+                self.addCleanup(store.close)
+                store.create(MAIL, NOW + timedelta(days=30))
+                gateway = ConversationGateway(None, store, clock=lambda: NOW)
+                from alx.contracts.records import PlanStopNote
+                pending = PlanStopNote("goal", "plan", 1, "Fix the reader", MAIL,
+                                       NOW + timedelta(days=30))
+                gateway.retain_plan_stop_note(pending)
+                (note,) = store.pending_plan_stop_notes()
+                words = StoredResponse(note.content, note.turn_id, MAIL)
+                server = _server(relay=gateway.relay_response)
+                # Away, then connected but marked away: both retain the note,
+                # including when a phone would otherwise carry her responses.
+                self.assertEqual(server.deliver(MAIL, words), ResponseDelivery.UNDELIVERABLE)
+                listener = _connect(server, FRIEDL, asyncio.get_running_loop())
+                server._presence = lambda: ("away", NOW)
+                self.assertEqual(await asyncio.to_thread(server.deliver, MAIL, words),
+                                 ResponseDelivery.UNDELIVERABLE)
+                server._presence = lambda: ("here", NOW)
+                for _ in range(2):
+                    self.assertEqual(await asyncio.to_thread(server.deliver, MAIL, words),
+                                     ResponseDelivery.DELIVERED)
+                self.assertEqual(listener.qsize(), 1)
+                self.assertEqual(store.pending_plan_stop_notes(), (note,))
+                # A dropped listener releases the claim. A new listener hears
+                # the still-pending turn, carrying its original identity.
+                server._delivery_queues[FRIEDL].remove(listener)
+                server._queued_stop_notes.pop(listener)
+                listener = _connect(server, FRIEDL, asyncio.get_running_loop())
+                await asyncio.to_thread(server.deliver, MAIL, words)
+                delivered = listener.get_nowait()
+                session = VoiceSession(gateway, None, None, "friedl", 3, 30)
+                events = [event async for event in session._deliver_response(FRIEDL, delivered)]
+                self.assertEqual(events[0].kind, VoiceEventKind.TEXT)
+                self.assertEqual(events[0].text, note.content)
+                self.assertEqual(store.pending_plan_stop_notes(), ())
+                gateway.retain_plan_stop_note(pending)
+                self.assertEqual(store.pending_plan_stop_notes(), ())
+
+        asyncio.run(scenario())
 
 
 class SessionOpenTests(unittest.TestCase):

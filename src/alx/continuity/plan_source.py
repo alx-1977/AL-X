@@ -9,8 +9,8 @@ Two small parts, and nothing else owns a plan:
 - `PlanAttentionSource` offers a plan that needs AL/X to the one occasion
   runner. Whether she is needed is read from the plan's own attention; the
   offer counts, the backoff and the cap live there too. Once automatic paid
-  offers are exhausted the attention is blocked, one structural notice is
-  published, and the plan stays where every Core turn shows it until she
+  offers are exhausted the attention is blocked, one durable conversation note is
+  stored, and the plan stays where every Core turn shows it until she
   resolves it.
 """
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -27,7 +27,7 @@ from typing import Any
 from alx.contracts import run_core_worker
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
-from alx.contracts.records import GoalStatus
+from alx.contracts.records import GoalStatus, PlanStopNote
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class PlanAttentionSource:
         goals: Any,
         ledger: Any,
         enabled: bool = False,
-        notify: Callable[[str, Mapping[str, Any]], None] | None = None,
+        notify: Callable[[PlanStopNote], None] | None = None,
         clock: Callable[[], datetime] | None = None,
         # The autonomous spend ledger. Its durable record that an occasion
         # reached the provider is the only thing that makes an offer paid.
@@ -63,16 +63,12 @@ class PlanAttentionSource:
         # as for every occasion. It decides nothing about the plan.
         self._ledger = ledger
         self._enabled = enabled
-        # Structural, content-free notice for the person's console: identifiers
-        # and a state, never words in AL/X's voice.
-        self._notify = notify or (lambda _conversation_id, _values: None)
+        self._notify = notify
         self._clock = clock or (lambda: datetime.now(UTC))
         self._spend = spend
         self._ready = ready or (lambda _goal_id: True)
         self._max_paid_offers = max_paid_offers
         self._backoff = timedelta(seconds=backoff_seconds)
-        # Blocked attentions already shown in this process, and where.
-        self._notified: dict[tuple[str, str, int], str] = {}
 
     @property
     def enabled(self) -> bool:
@@ -182,15 +178,12 @@ class PlanAttentionSource:
         return snapshot if expected == opportunity.opportunity_id else None
 
     def settle(self) -> tuple[str, ...]:
-        """Block exhausted attentions and keep each blocked one visible.
+        """Block exhausted attentions and idempotently retain their conversation note.
 
-        Runs under the Core lock at the start of each tick. An attention whose
-        paid offers reached the cap is blocked durably; every blocked one is
-        announced once per process, so a restart shows it again, and one
-        announced earlier and since resolved is announced as resolved. No
-        reasoning call is involved in any of it.
+        The conversation turn is the durable notification identity, not an
+        independently persisted sent flag. Failed storage is retried next tick.
+        Usage-limit refusals do not count as paid offers and never block here.
         """
-        blocked_now: dict[tuple[str, str, int], str] = {}
         changed = []
         for goal_id in self._goals.list_open_plan_goal_ids(needing_core=True):
             try:
@@ -213,22 +206,16 @@ class PlanAttentionSource:
                         LOGGER.warning("Plan attention %s:%d blocked after %d paid offers",
                                        plan.plan_id, attention.seq, attention.paid_offers)
                     changed.append(goal_id)
-                if attention.blocked:
-                    blocked_now[(goal_id, plan.plan_id, attention.seq)] = (
-                        snapshot.plan_conversation_id)
-                    if (goal_id, plan.plan_id, attention.seq) not in self._notified:
-                        self._publish(snapshot.plan_conversation_id, goal_id, plan.plan_id,
-                                      attention.seq, "blocked", attention.reason)
             except Exception as error:  # noqa: BLE001 - one goal must not stop the rest
                 LOGGER.warning("Plan attention could not be settled for goal %s: %s",
                                goal_id, type(error).__name__)
-                # Unknown this tick: keep whatever was shown.
-                blocked_now.update({key: value for key, value in self._notified.items()
-                                    if key[0] == goal_id})
-        for key, conversation_id in self._notified.items():
-            if key not in blocked_now:
-                self._publish(conversation_id, *key, "resolved", None)
-        self._notified = blocked_now
+        if self._notify is not None:
+            for note in self._goals.pending_plan_stop_notes():
+                try:
+                    self._notify(note)
+                    self._goals.acknowledge_plan_stop_note(note)
+                except Exception as error:  # noqa: BLE001 - retained for next tick
+                    LOGGER.warning("Plan stop note not stored: %s", type(error).__name__)
         return tuple(changed)
 
     def _paid_offers(self, goal_id: str, plan: Any) -> int:
@@ -245,15 +232,6 @@ class PlanAttentionSource:
             if self._spend.dispatch_answered(self._opportunity_id(goal_id, plan, offer))
         )
 
-    def _publish(self, conversation_id: str, goal_id: str, plan_id: str, seq: int,
-                 state: str, reason: str | None) -> None:
-        try:
-            self._notify(conversation_id, {
-                "goal_id": goal_id, "plan_id": plan_id, "attention_seq": seq,
-                "state": state, "reason": reason,
-            })
-        except Exception as error:  # noqa: BLE001 - a console must not stop a tick
-            LOGGER.warning("Plan attention notice failed: %s", type(error).__name__)
 
 
 class PlanWorkers:

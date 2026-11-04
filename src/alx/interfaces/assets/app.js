@@ -50,7 +50,6 @@ let lastCodingTransition = "";
 const runningTasks = new Map();
 // Plan attentions whose automatic offers are exhausted, by goal, plan and
 // attention. Structural state: shown until the runtime says it is resolved.
-const blockedPlans = new Map();
 const terminalTaskRetentionMilliseconds = 10_000;
 
 const clockFormat = new Intl.DateTimeFormat(undefined, {
@@ -317,27 +316,7 @@ function paintTasks() {
     task.label.textContent = `${taskStates[task.state] ?? task.state} · ${task.service} · ${task.subject}`;
     task.elapsed.textContent = taskClock(seconds);
   }
-  taskRows.hidden = runningTasks.size === 0 && blockedPlans.size === 0;
-}
-
-function showPlanAttention(message) {
-  const key = `${message.goal_id ?? ""}:${message.plan_id ?? ""}:${message.attention_seq ?? ""}`;
-  const existing = blockedPlans.get(key);
-  if (message.state !== "blocked") {
-    if (existing) existing.remove();
-    blockedPlans.delete(key);
-    paintTasks();
-    return;
-  }
-  const row = existing ?? document.createElement("div");
-  row.className = "diagnostics__task";
-  row.dataset.state = "blocked";
-  row.textContent = `Plan attention blocked · automatic reasoning stopped · ${message.reason ?? "unknown"} · goal ${message.goal_id ?? ""}`;
-  if (!existing) {
-    taskRows.append(row);
-    blockedPlans.set(key, row);
-  }
-  paintTasks();
+  taskRows.hidden = runningTasks.size === 0;
 }
 
 function showTask(message) {
@@ -625,9 +604,7 @@ function handleControl(message) {
       detail(`TTS ${transport} connected · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
     } else if (message.code === "tts.first_audio_byte") {
       detail(`First audio byte received from ElevenLabs · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
-    } else if (message.code === "plan.attention") {
-      // A live row, like a task: work that is waiting for AL/X is a state.
-      showPlanAttention(message);
+
     } else if (message.code === "task.status") {
       // A live row rather than a log line: an outstanding task is a state the
       // console should show, not an event that scrolls away.

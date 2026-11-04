@@ -92,6 +92,7 @@ from alx.bootstrap.readers import (
     reader_monitor,
     reader_poller,
 )
+from alx.interfaces.live_voice import StoredResponse
 from alx.interfaces.reader_tile import tile_source
 from alx.interfaces.phone import PHONE_CONVERSATION_ID, PhoneLink
 from alx.providers.imessage import IMessageChannel
@@ -1426,14 +1427,12 @@ async def run(repository_root: Path) -> None:
     occasion_sources: list[Any] = [cognition_source, program_source]
     # A plan that needs her is offered through the same runner. Its
     # attention, offers and cap live on the plan; when automatic offers are
-    # exhausted it is announced on the console as a structural notice, which
+    # exhausted it is retained as a one-line conversation note, which
     # costs no reasoning call. There is no startup recovery: the first tick
     # reconciles every plan exactly as every later tick does.
     plan_source = PlanAttentionSource(
         goal_store, opportunity_ledger, enabled=plan_continuation,
-        notify=lambda conversation_id, values: diagnostics.publish(
-            conversation_id, {"code": "plan.attention", **values}
-        ),
+        notify=gateway.retain_plan_stop_note,
         # An offer is paid only if the spend ledger recorded that it reached
         # the provider; a budget stop or a disabled reasoner costs nothing.
         spend=autonomous_budget,
@@ -1455,7 +1454,14 @@ async def run(repository_root: Path) -> None:
             None if coding_runtime is None
             else lambda job: coding_runtime.agent.cancel(job.call.call_id)
         ),
-        reconcile_replies=gateway.reconcile_plan_announcements,
+        reconcile_replies=lambda: (
+            gateway.reconcile_plan_announcements(),
+            gateway.deliver_plan_stop_notes(lambda turn: server.deliver(
+                turn.conversation_id,
+                StoredResponse(turn.content, turn.turn_id, turn.conversation_id,
+                               turn.provenance.content_expires_at if turn.provenance else None),
+            )),
+        ),
     )
     # Observed mail joins them for the same reason, and to end the same
     # coupling the due-cognition tick was built to avoid. Mail used to reach

@@ -16,6 +16,7 @@ from alx.contracts import (
 )
 from alx.conversation.store import ConversationNotFound
 from alx.contracts.mail import MailReference
+from alx.contracts.records import PlanStopNote
 from alx.core import CoreAgent, CoreOutcome, CoreState
 
 LOGGER = logging.getLogger(__name__)
@@ -87,6 +88,34 @@ class ConversationGateway:
                              raised_mail_observations=raised_mail_observations),
             retention_until, current.revision,
         )
+
+    def retain_plan_stop_note(self, note: PlanStopNote) -> None:
+        """Retain Friedl's explicitly requested mechanical stop notification.
+
+        The stable turn id is both deduplication identity and durable pending
+        delivery record. No reasoning call or interpretation is involved.
+        """
+        try:
+            conversation = self._conversation_store.load(note.conversation_id)
+        except ConversationNotFound:
+            conversation = self._conversation_store.create(note.conversation_id, note.retention_until)
+        objective = " ".join(note.objective.split())
+        if len(objective) > 120:
+            objective = objective[:119].rstrip() + "…"
+        self._append_reply(
+            note.conversation_id, note.turn_id,
+            f'Work on “{objective}” has stopped and needs you or AL/X to pick it up.',
+            note.provenance, max(conversation.retention_until, note.retention_until), note.goal_id,
+        )
+
+    def deliver_plan_stop_notes(self, deliver: Callable[[ConversationTurn], None]) -> None:
+        """Retry notes through the ordinary response transport.
+
+        Only its TEXT acknowledgement retires a note; accepting a live queue
+        is insufficient. Disconnected listeners leave it pending.
+        """
+        for turn in self._conversation_store.pending_plan_stop_notes():
+            deliver(turn)
 
     def locate_reply(self, conversation_id: str,
                      text: str) -> tuple[str, datetime | None] | None:
