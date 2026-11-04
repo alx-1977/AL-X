@@ -683,7 +683,7 @@ class CoreProjectionTests(unittest.TestCase):
         self.create("yesterday")
         reasoner = Queued(
             AgentDecision(goal_id="yesterday"),
-            AgentDecision(response="Picking that up.", goal_id="yesterday"),
+            AgentDecision(response="Picking that up."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 5)
         self.assertIs(outcome.state, CoreState.RESPONDED)
@@ -704,7 +704,7 @@ class CoreProjectionTests(unittest.TestCase):
         self.create("yesterday", "conv-old")
         reasoner = Queued(
             AgentDecision(goal_id="yesterday"),
-            AgentDecision(response="Back on it.", goal_id="yesterday"),
+            AgentDecision(response="Back on it."),
         )
         outcome = self.agent(reasoner).process(conversation("conv-new"), RETENTION, 5)
 
@@ -727,7 +727,7 @@ class CoreProjectionTests(unittest.TestCase):
         self.create("yesterday")
         reasoner = Queued(
             AgentDecision(goal_id="yesterday"),
-            AgentDecision(response="Now I have it.", goal_id="yesterday"),
+            AgentDecision(response="Now I have it."),
         )
         self.agent(reasoner).process(conversation(), RETENTION, 5)
         self.assertIsNone(reasoner.contexts[0].active_goal)

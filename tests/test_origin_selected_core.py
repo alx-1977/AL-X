@@ -230,10 +230,8 @@ class FirstPassTests(unittest.TestCase):
         for decision in (
             AgentDecision(call=self.call("merge_pull_request")),
             AgentDecision(call=self.call("not_in_catalogue")),
-            AgentDecision(response="done", goal_id="g", goal_proposal=GoalProposal(
-                GoalMutationKind.REQUEST_COMPLETION)),
-            AgentDecision(response="started", goal_id="g",
-                          plan_update=PlanUpdate(PlanOperation.CANCEL)),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION)),
+            AgentDecision(plan_update=PlanUpdate(PlanOperation.CANCEL)),
             AgentDecision(call=self.call("merge_pull_request"),
                           approval_proposal=ApprovalProposal(
                               "a", ApprovalScope("merge_pull_request", {}), "turn:t1")),

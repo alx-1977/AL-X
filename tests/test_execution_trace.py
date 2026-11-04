@@ -368,9 +368,9 @@ class ReasoningPurposeTests(unittest.TestCase):
             ), "conversation-1", RETENTION)
             contexts: list = []
             decisions = [
-                AgentDecision(goal_id="goal-1",
-                              call=CapabilityCall("call-1", "inspect", {})),
-                AgentDecision(goal_id="goal-1", response="Done."),
+                AgentDecision(goal_id="goal-1"),
+                AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+                AgentDecision(response="Done."),
             ]
 
             class Reasoner:
@@ -397,12 +397,14 @@ class ReasoningPurposeTests(unittest.TestCase):
         self.assertIs(outcome.state, CoreState.RESPONDED)
         self.assertEqual(
             [context.purpose for context in contexts],
-            [ReasoningPurpose.INTERPRETING_REQUEST, ReasoningPurpose.REVIEWING_RESULT],
+            [ReasoningPurpose.INTERPRETING_REQUEST, ReasoningPurpose.EVALUATING_GOAL_STATE,
+             ReasoningPurpose.REVIEWING_RESULT],
         )
         core = [item for item in traced if item.subsystem is TraceSubsystem.CORE]
         self.assertEqual(
             [(item.label, item.reference) for item in core],
-            [("Interpreting request", None), ("Reviewing result", "inspect")],
+            [("Interpreting request", None), ("Evaluating goal state", None),
+             ("Reviewing result", "inspect")],
         )
         self.assertTrue(all(item.conversation_id == "conversation-1" for item in core))
 

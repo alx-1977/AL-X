@@ -162,6 +162,31 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(len(recorded), failures)
         self.assertNotIn("abandoned", [item.get("outcome") for item in recorded])
 
+    def test_a_call_that_outlasts_the_reasoning_timeout_keeps_its_session(self) -> None:
+        """2026-11-04: a Greptile wait of 5 min 21 s closed the paused session,
+        and the next step resent her whole context."""
+        import time
+        from alx.providers import claude_subscription
+        cli = Path(self.model._executable)
+        model = ClaudeSubscriptionReasoningModel("claude-sonnet-5-5", 5, executable=str(cli),
+                                                 environment=self.model._environment)
+        self.addCleanup(model.abandon_session)
+        launched = []
+        original = model._launcher
+
+        def launcher(argv, **kwargs):
+            launched.append(kwargs["env"])
+            return original(argv, **kwargs)
+        model._launcher = launcher
+        model.complete(request())
+        time.sleep(6)  # longer than the 5 s reasoning timeout, as a review wait is
+        second = model.complete(request(tool_result="goal one"))
+        self.assertEqual(second.tool_use["name"], "call_capability")
+        self.assertEqual(len(launched), 1, "the paused session was continued, not restarted")
+        self.assertEqual(launched[0]["MCP_TOOL_TIMEOUT"],
+                         str(claude_subscription.PAUSED_SESSION_LIMIT_SECONDS * 1000))
+        self.assertGreaterEqual(claude_subscription.PAUSED_SESSION_LIMIT_SECONDS, 3600)
+
     def test_a_tool_result_requires_a_native_request(self) -> None:
         with self.assertRaises(ValueError):
             request(tools=(), tool_result="x")

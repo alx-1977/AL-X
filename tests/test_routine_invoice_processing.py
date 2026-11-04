@@ -114,7 +114,7 @@ class PlannedCaptureTests(PlanHarness):
                                  replace(result, call_id=call.call_id))
 
     def run_plan(self, *steps, then=()):
-        reasoner = Reasoner(install(plan(*steps)), *then)
+        reasoner = Reasoner(*install(plan(*steps)), *then)
         agent = self.agent(reasoner, definitions=DEFINITIONS)
         self.person(agent)
         self.work(agent)
@@ -124,15 +124,16 @@ class PlannedCaptureTests(PlanHarness):
         agent, reasoner = self.run_plan(
             capture_step("60110"), capture_step("60171"),
             file_step("60110"), file_step("60171"),
-            then=(resolve(PlanOperation.FINISH, "Done."),),
+            then=resolve(PlanOperation.FINISH, "Done."),
         )
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
-        self.assertEqual(reasoner.calls, 1, "a known step returned to the Core")
+        # Select, install and say so: the person turn's three steps.
+        self.assertEqual(reasoner.calls, 3, "a known step returned to the Core")
         self.assertEqual(self.names(), [CAPTURE_SUPPLIER_INVOICE] * 2 + [FILE] * 2)
         self.assertEqual({bill["Status"] for bill in self.xero.bills.values()},
                          {"AUTHORISED"})
         self.occasion(agent)
-        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(reasoner.calls, 5)
         self.assertEqual(self.plan_of().status, PlanStatus.COMPLETED)
 
     def test_an_unresolved_supplier_stops_the_plan_before_filing(self):
@@ -144,7 +145,7 @@ class PlannedCaptureTests(PlanHarness):
         self.assertEqual(attention.reason, "planned_evidence_requires_judgement")
         self.assertEqual(len(attention.evidence_call_ids), 1)
         self.assertEqual(self.names(), [CAPTURE_SUPPLIER_INVOICE])
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 3)
         self.assertEqual(self.xero.bills, {})
 
     def test_an_existing_authorised_bill_stops_the_plan_before_filing(self):

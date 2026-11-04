@@ -46,64 +46,57 @@ class SelectionContinuationTests(Fixture):
         )
 
     def selection(self, *, memory=True, mutation=False):
-        return AgentDecision(
-            goal_id="goal-a",
-            memory_proposals=(self.preference(),) if memory else (),
-            goal_proposal=GoalProposal(
-                GoalMutationKind.UPDATE, objective_summary="refined objective"
-            ) if mutation else None,
-        )
+        """Select goal-a, then each write as its own step (D-065)."""
+        steps = [AgentDecision(goal_id="goal-a")]
+        if mutation:
+            steps.append(AgentDecision(goal_proposal=GoalProposal(
+                GoalMutationKind.UPDATE, objective_summary="refined objective")))
+        if memory:
+            steps.append(AgentDecision(memory_proposals=(self.preference(),)))
+        return steps
 
     def test_memory_selection_persists_once_then_answers(self):
         self.store.create(paused_goal(), "conversation-1", RETENTION)
-        reasoner = Queued(self.selection(), AgentDecision(response="Understood.", goal_id="goal-a"))
+        reasoner = Queued(*self.selection(), AgentDecision(response="Understood."))
         result = self.core(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(result.response, "Understood.")
         self.assertEqual(result.state, CoreState.RESPONDED)
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
         self.assertEqual(self.store.load("goal-a").revision, 2)
         self.assertEqual(self.broker.executed, 0)
 
     def test_combined_selection_persists_each_proposal_once_then_answers(self):
         self.store.create(active_goal(), "conversation-1", RETENTION)
-        reasoner = Queued(self.selection(mutation=True), AgentDecision(response="Updated.", goal_id="goal-a"))
-        result = self.core(reasoner).process(conversation(), RETENTION, 3)
+        reasoner = Queued(*self.selection(mutation=True), AgentDecision(response="Updated."))
+        result = self.core(reasoner).process(conversation(), RETENTION, 4)
         self.assertEqual(result.response, "Updated.")
-        self.assertEqual(len(reasoner.contexts), 2)
-        self.assertEqual(reasoner.contexts[1].active_goal.objective.summary, "refined objective")
+        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual(reasoner.contexts[2].active_goal.objective.summary, "refined objective")
+        self.assertEqual(reasoner.contexts[3].active_goal.objective.summary, "refined objective")
         self.assertEqual(self.store.load("goal-a").revision, 3)
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
 
     def test_rejected_goal_proposal_reaches_next_step_without_false_success(self):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         before = self.store.load("goal-a")
-        rejected = AgentDecision(goal_id="goal-a", goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION))
-        reasoner = Queued(rejected, AgentDecision(response="More evidence is needed.", goal_id="goal-a"))
+        rejected = AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION))
+        reasoner = Queued(AgentDecision(goal_id="goal-a"), rejected,
+                          AgentDecision(response="More evidence is needed."))
         result = self.core(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(result.response, "More evidence is needed.")
-        self.assertTrue(reasoner.contexts[1].refused_calls)
+        self.assertFalse(reasoner.contexts[1].refused_calls)
+        self.assertTrue(reasoner.contexts[2].refused_calls)
         self.assertEqual(self.store.load("goal-a"), before)
-
-    def test_memory_conflict_does_not_commit_accompanying_goal_mutation(self):
-        self.store.create(active_goal(), "conversation-1", RETENTION)
-        before = self.store.load("goal-a")
-        self.memory.remember(self.preference("Original preference."), RETENTION)
-        reasoner = Queued(self.selection(mutation=True), AgentDecision(response="I will keep the original record.", goal_id="goal-a"))
-        result = self.core(reasoner).process(conversation(), RETENTION, 3)
-        self.assertEqual(result.response, "I will keep the original record.")
-        self.assertTrue(reasoner.contexts[1].memory_conflicts)
-        self.assertEqual(self.store.load("goal-a"), before)
-        self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
 
     def test_budget_exhaustion_after_persistence_is_a_checkpoint(self):
         self.store.create(paused_goal(), "conversation-1", RETENTION)
-        reasoner = Queued(self.selection(), AgentDecision(response="Must not be requested."))
-        result = self.core(reasoner).process(conversation(), RETENTION, 1)
+        reasoner = Queued(*self.selection(), AgentDecision(response="Must not be requested."))
+        result = self.core(reasoner).process(conversation(), RETENTION, 2)
         self.assertEqual(result.state, CoreState.CHECKPOINTED)
         self.assertEqual(result.reason, "budget_exhausted")
         self.assertIsNone(result.response)
-        self.assertEqual(len(reasoner.contexts), 1)
+        self.assertEqual(len(reasoner.contexts), 2)
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
         self.assertEqual(self.store.load("goal-a").revision, 2)
 
@@ -111,25 +104,26 @@ class SelectionContinuationTests(Fixture):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         # Re-selecting the selected goal with nothing new is refused once
         # (D-065: she is told); asking again ends the turn with words.
-        reasoner = Queued(self.selection(), self.selection(memory=False),
-                          self.selection(memory=False),
+        reasoner = Queued(*self.selection(), *self.selection(memory=False),
+                          *self.selection(memory=False),
                           AgentDecision(response="That one is already open."))
         result = self.core(reasoner).process(conversation(), RETENTION, 25)
         self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual(result.reason, "goal_selection_redundant")
-        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual(len(reasoner.contexts), 5)
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
 
     def test_prior_successful_effect_is_not_redispatched(self):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         reasoner = Queued(
-            AgentDecision(call=removal(), goal_proposal=new_goal(), approval_proposal=approval()),
-            self.selection(mutation=True),
-            AgentDecision(response="Done.", goal_id="goal-a"),
+            AgentDecision(goal_proposal=new_goal()),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            *self.selection(mutation=True),
+            AgentDecision(response="Done."),
         )
-        result = self.core(reasoner).process(conversation(), RETENTION, 3)
+        result = self.core(reasoner).process(conversation(), RETENTION, 6)
         self.assertEqual(result.response, "Done.")
-        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(len(reasoner.contexts), 6)
         self.assertEqual(self.broker.executed, 1)
         attempts = self.store.load("goal-b").state.attempts
         self.assertEqual(len(attempts), 1)
@@ -143,7 +137,7 @@ class SelectionContinuationTests(Fixture):
         snapshot = conversations.create("conversation-1", RETENTION)
         for turn in TURNS[:2]:
             snapshot = conversations.append(turn, RETENTION, snapshot.revision)
-        reasoner = Queued(self.selection(), AgentDecision(response="Understood.", goal_id="goal-a"))
+        reasoner = Queued(*self.selection(), AgentDecision(response="Understood."))
         gateway = ConversationGateway(self.core(reasoner), conversations,
             identifier_factory=lambda: "answer-1", clock=lambda: self.now)
         synthesizer = FakeSynthesizer()
@@ -165,7 +159,7 @@ class SelectionContinuationTests(Fixture):
         self.assertEqual(len(answers), 1)
         self.assertEqual(answers[0].origin, ConversationOrigin.ALX_RESPONSE)
         self.assertEqual(answers[0].content, "Understood.")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
 
 

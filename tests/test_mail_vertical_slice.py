@@ -927,14 +927,13 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
         )
         reasoner = Queued(
             AgentDecision(
-                call=call,
-                approval_proposal=proposal,
                 goal_proposal=GoalProposal(
                     GoalMutationKind.CREATE,
                     "Handle the referenced mail",
                     (SuccessCriterion("criterion-1", "requested action verified"),),
                 ),
             ),
+            AgentDecision(call=call, approval_proposal=proposal),
             AgentDecision(response="Moved to Trash."),
         )
 
@@ -983,7 +982,7 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             RETENTION,
         )
         try:
-            outcome = core.process(conversation, RETENTION, 3)
+            outcome = core.process(conversation, RETENTION, 4)
             self.assertEqual(outcome.state, CoreState.RESPONDED)
             self.assertEqual(outcome.snapshot.state.approvals[0].lifecycle.value, "consumed")
             self.assertEqual(

@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from test_execution_plan import (  # noqa: E402
-    RETENTION, Ledger, PlanHarness, Reasoner, install, new_goal, plan, resolve, step,
+    RETENTION, SELECT, Ledger, PlanHarness, Reasoner, install, new_goal, plan, resolve, step,
 )
 from test_model_reasoner import (  # noqa: E402
     FakeModel, ModelReasonerTests,
@@ -46,13 +46,16 @@ def mutation(goal_id: str, kind=CANCEL, *, evidence=None, wake=False) -> Executi
         f"close-{goal_id}", goal_id, kind, f"{goal_id} is finished", tuple(evidence)))
 
 
-def silently(workflow, goal_id="goal") -> AgentDecision:
-    return AgentDecision(finish_silently=True, goal_id=goal_id,
-                         plan_update=PlanUpdate(PlanOperation.INSTALL, workflow))
+def installing(workflow) -> tuple[AgentDecision, ...]:
+    """Select the goal and install a plan whose head comes straight back to her."""
+    return (SELECT, AgentDecision(plan_update=PlanUpdate(PlanOperation.INSTALL, workflow)))
 
 
-def finish(text: str, **changes) -> AgentDecision:
-    return replace(resolve(PlanOperation.FINISH, text), **changes)
+def finish(text: str) -> tuple[AgentDecision, ...]:
+    return resolve(PlanOperation.FINISH, text)
+
+
+RESUME = AgentDecision(plan_update=PlanUpdate(PlanOperation.RESUME))
 
 
 class GoalMutationHarness(PlanHarness):
@@ -81,17 +84,16 @@ class DecidedClosuresTests(GoalMutationHarness):
 
     def test_decided_closures_run_in_the_turn_and_she_replies_once(self):
         reasoner = Reasoner(
-            install(plan(mutation("a", COMPLETE), mutation("b"), mutation("c", COMPLETE)),
-                    "I'm closing a, b and c now."),
-            finish("Closed a, b and c. d is unclear, so it stays open."),
+            *installing(plan(mutation("a", COMPLETE), mutation("b"), mutation("c", COMPLETE))),
+            *finish("Closed a, b and c. d is unclear, so it stays open."),
         )
         outcome = self.person(self.agent(reasoner))
-        # The words written before the work are not delivered; the outcome is.
+        # She answers the outcome, once.
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "Closed a, b and c. d is unclear, so it stays open.")
-        self.assertEqual(reasoner.calls, 2)
-        # Every mutation was applied before her second call: none between them.
-        second = reasoner.contexts[1]
+        self.assertEqual(reasoner.calls, 4)
+        # Every mutation was applied before her step after the install: none between them.
+        second = reasoner.contexts[2]
         self.assertEqual(second.active_goal.execution_plan.attention.reason, "plan_steps_done")
         offered = [item.goal_id for item in second.unfinished_goals]
         self.assertTrue({"a", "b", "c"}.isdisjoint(offered))
@@ -108,36 +110,36 @@ class DecidedClosuresTests(GoalMutationHarness):
 
     def test_a_cleanup_goal_she_creates_can_carry_the_plan(self):
         reasoner = Reasoner(
-            AgentDecision(
-                finish_silently=True,
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.CREATE, "Close finished goals",
-                    (SuccessCriterion("closed", "clear goals closed"),)),
-                plan_update=PlanUpdate(PlanOperation.INSTALL,
-                                       plan(mutation("a"), mutation("b"))),
-            ),
-            finish("Closed a and b.", goal_id="cleanup"),
+            AgentDecision(goal_proposal=GoalProposal(
+                GoalMutationKind.CREATE, "Close finished goals",
+                (SuccessCriterion("closed", "clear goals closed"),))),
+            AgentDecision(plan_update=PlanUpdate(PlanOperation.INSTALL,
+                                                 plan(mutation("a"), mutation("b")))),
+            *finish("Closed a and b."),
         )
         agent = self.agent(reasoner, identifier_factory=lambda: "cleanup")
         self.assertEqual(self.person(agent).response, "Closed a and b.")
         self.assertEqual(self.statuses("a", "b"), [GoalStatus.CANCELLED] * 2)
-        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(self.plan_of("cleanup").status, PlanStatus.COMPLETED)
+        self.assertEqual(reasoner.calls, 4)
 
     def test_a_checkpointed_closure_returns_to_her_within_the_turn(self):
         reasoner = Reasoner(
-            silently(plan(mutation("a", wake=True), mutation("b"))),
-            resolve(PlanOperation.RESUME, "Continuing."),
-            finish("Both closed."),
+            *installing(plan(mutation("a", wake=True), mutation("b"))),
+            RESUME,
+            *finish("Both closed."),
         )
-        outcome = self.person(self.agent(reasoner))
-        self.assertEqual(reasoner.contexts[1].active_goal.execution_plan.attention.reason,
+        outcome = self.person(self.agent(reasoner), budget=6)
+        self.assertEqual(reasoner.contexts[2].active_goal.execution_plan.attention.reason,
                          "plan_checkpoint")
+        self.assertEqual(reasoner.contexts[3].active_goal.execution_plan.attention.reason,
+                         "plan_steps_done")
         self.assertEqual(outcome.response, "Both closed.")
         self.assertEqual(self.statuses("a", "b"), [GoalStatus.CANCELLED] * 2)
 
     def test_closures_after_a_capability_step_run_on_the_background_runner(self):
-        reasoner = Reasoner(install(plan(step("other"), mutation("a"), mutation("b"))),
-                            finish("Ran it and closed a and b."))
+        reasoner = Reasoner(*install(plan(step("other"), mutation("a"), mutation("b"))),
+                            *finish("Ran it and closed a and b."))
         agent = self.agent(reasoner)
         # Work remains to run after the turn, so her acknowledgement stands.
         self.assertEqual(self.person(agent).response, "Started.")
@@ -145,9 +147,9 @@ class DecidedClosuresTests(GoalMutationHarness):
         self.work(agent)
         self.assertEqual(self.names(), ["other"])
         self.assertEqual(self.statuses("a", "b"), [GoalStatus.CANCELLED] * 2)
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 3)
         self.assertEqual(self.occasion(agent).response, "Ran it and closed a and b.")
-        self.assertEqual(reasoner.calls, 2)
+        self.assertEqual(reasoner.calls, 5)
 
 
 class ConversationRoutingTests(GoalMutationHarness):
@@ -156,8 +158,8 @@ class ConversationRoutingTests(GoalMutationHarness):
     def test_a_plan_hosted_by_an_older_goal_answers_the_conversation_that_asked(self):
         conversations = SQLiteConversationStore(Path(self.path).with_name("turns.sqlite3"))
         self.addCleanup(conversations.close)
-        reasoner = Reasoner(install(plan(step("other"), mutation("a"), mutation("b"))),
-                            finish("Closed a and b."))
+        reasoner = Reasoner(*install(plan(step("other"), mutation("a"), mutation("b"))),
+                            *finish("Closed a and b."))
         agent = self.agent(reasoner)
         gateway = ConversationGateway(agent, conversations, clock=lambda: self.now)
         gateway.receive_conversation_turn(ConversationTurn(
@@ -196,25 +198,24 @@ class ConversationRoutingTests(GoalMutationHarness):
 class RefusalLoopTests(GoalMutationHarness):
     """Required 4 and 5: an unchanged refusal neither loops nor silences her."""
 
-    def completing(self, text):
-        return finish(text, response_requires_goal_commit=True,
-                      goal_proposal=GoalProposal(COMPLETE))
+    # Completing the host goal comes first; the plan's finish and her words
+    # would follow it, but the refusal means they are never reached.
+    COMPLETING = AgentDecision(goal_proposal=GoalProposal(COMPLETE))
 
     def test_a_refused_host_completion_still_delivers_one_reply_and_stops(self):
         reasoner = Reasoner(
-            silently(plan(mutation("a"), mutation("b"))),
-            self.completing("Done, and the cleanup is complete."),
-            self.completing("Done, and the cleanup is complete."),
+            *installing(plan(mutation("a"), mutation("b"))),
+            self.COMPLETING, self.COMPLETING,
             AgentDecision(response="a and b are closed. The cleanup itself stays open."),
         )
         outcome = self.person(self.agent(reasoner), budget=6)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "a and b are closed. The cleanup itself stays open.")
         # Told once, reconsidered once, then one step that can only speak.
-        self.assertEqual(reasoner.calls, 4)
-        self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"],
+        self.assertEqual(reasoner.calls, 5)
+        self.assertEqual(reasoner.contexts[3].refused_calls[0]["reason"],
                          "completion_lacks_sourced_evidence")
-        self.assertEqual(reasoner.contexts[3].response_only_reason, "goal_proposal_invalid")
+        self.assertEqual(reasoner.contexts[4].response_only_reason, "goal_proposal_invalid")
         # The evidence requirement held, and nothing will offer it again.
         self.assertEqual(self.statuses("goal", "a", "b"),
                          [GoalStatus.ACTIVE, GoalStatus.CANCELLED, GoalStatus.CANCELLED])
@@ -223,8 +224,8 @@ class RefusalLoopTests(GoalMutationHarness):
 
     def test_a_plan_wake_refused_the_same_way_is_not_offered_again(self):
         reasoner = Reasoner(
-            install(plan(step("other"), mutation("a"))),
-            self.completing("All done."), self.completing("All done."),
+            *install(plan(step("other"), mutation("a"))),
+            self.COMPLETING, self.COMPLETING,
             AgentDecision(response="a is closed; the cleanup goal stays open."),
         )
         agent = self.agent(reasoner)
@@ -233,7 +234,8 @@ class RefusalLoopTests(GoalMutationHarness):
         self.assertEqual(len(self.offers()), 1)
         outcome = self.occasion(agent, budget=6)
         self.assertEqual(outcome.response, "a is closed; the cleanup goal stays open.")
-        self.assertEqual(reasoner.calls, 4)
+        self.assertEqual(reasoner.calls, 6)
+        self.assertEqual(reasoner.contexts[5].response_only_reason, "goal_proposal_invalid")
         self.assertEqual(self.offers(), ())
         self.later(86_400)
         self.assertEqual(self.offers(), ())
@@ -243,8 +245,8 @@ class ExactlyOnceTests(GoalMutationHarness):
     """Required behaviour 4 and 5 of the mechanism: once, and resumed."""
 
     def test_each_mutation_is_written_once(self):
-        reasoner = Reasoner(silently(plan(mutation("a"), mutation("b", COMPLETE))),
-                            finish("Closed."))
+        reasoner = Reasoner(*installing(plan(mutation("a"), mutation("b", COMPLETE))),
+                            *finish("Closed."))
         agent = self.agent(reasoner)
         self.person(agent)
         self.work(agent)
@@ -284,7 +286,7 @@ class ExactlyOnceTests(GoalMutationHarness):
         self.work(agent)
         self.assertEqual(self.plan_of().attention.reason, "plan_checkpoint")
         self.restart()
-        resumed = Reasoner(resolve(PlanOperation.RESUME), finish("All three closed."))
+        resumed = Reasoner(RESUME, *finish("All three closed."))
         self.assertEqual(self.occasion(self.agent(resumed)).response, "All three closed.")
         self.assertEqual(self.statuses("a", "b", "c"), [GoalStatus.CANCELLED] * 3)
         self.assertEqual(self.revisions("a", "b", "c"), [2, 2, 2])
@@ -303,9 +305,9 @@ class ReturnsToCoreTests(GoalMutationHarness):
             self.assertEqual(self.revisions(goal_id), [1])
 
     def test_a_changed_goal_revision_returns_to_her(self):
-        reasoner = Reasoner(install(plan(step("other"), mutation("a"), mutation("b"),
-                                         mutation("c"))),
-                            resolve(PlanOperation.CANCEL, "b changed, so I left it open."))
+        reasoner = Reasoner(*install(plan(step("other"), mutation("a"), mutation("b"),
+                                          mutation("c"))),
+                            *resolve(PlanOperation.CANCEL, "b changed, so I left it open."))
         agent = self.agent(reasoner)
         self.person(agent)
         self.set_goal("b", outstanding_work=(WorkItem("new", "Fresh work"),))
@@ -315,8 +317,8 @@ class ReturnsToCoreTests(GoalMutationHarness):
         self.assertEqual(self.revisions("b"), [2])
         self.assertEqual(self.markers("b"), [])
         self.occasion(agent)
-        self.assertEqual(reasoner.calls, 2)
-        self.assertEqual(reasoner.contexts[1].active_goal.execution_plan.attention.reason,
+        self.assertEqual(reasoner.calls, 5)
+        self.assertEqual(reasoner.contexts[3].active_goal.execution_plan.attention.reason,
                          "plan_goal_revision_changed")
 
     def test_changed_evidence_on_the_goal_returns_to_her(self):
@@ -366,8 +368,8 @@ class ReturnsToCoreTests(GoalMutationHarness):
         self.assertEqual(self.revisions("b"), [1])
 
     def test_a_change_within_the_turn_stops_there_and_she_answers_once(self):
-        reasoner = Reasoner(silently(plan(mutation("a"), mutation("b"))),
-                            finish("Closed a; b had changed."))
+        reasoner = Reasoner(*installing(plan(mutation("a"), mutation("b"))),
+                            *finish("Closed a; b had changed."))
         agent = self.agent(reasoner)
         apply = agent._apply_plan_update
 
@@ -380,14 +382,14 @@ class ReturnsToCoreTests(GoalMutationHarness):
         agent._apply_plan_update = then_b_changes
         outcome = self.person(agent)
         self.assertEqual(outcome.response, "Closed a; b had changed.")
-        self.assertEqual(reasoner.contexts[1].active_goal.execution_plan.attention.reason,
+        self.assertEqual(reasoner.contexts[2].active_goal.execution_plan.attention.reason,
                          "plan_goal_revision_changed")
 
     def test_a_mutation_refused_at_install_is_never_installed(self):
-        reasoner = Reasoner(silently(plan(mutation("a"), mutation("b", COMPLETE, evidence=()))),
-                            AgentDecision(response="b has no evidence yet.", goal_id="goal"))
+        reasoner = Reasoner(*installing(plan(mutation("a"), mutation("b", COMPLETE, evidence=()))),
+                            AgentDecision(response="b has no evidence yet."))
         self.person(self.agent(reasoner))
-        refused = reasoner.contexts[1].refused_calls[0]["reason"]
+        refused = reasoner.contexts[2].refused_calls[0]["reason"]
         self.assertEqual(refused,
                          "plan_goal_mutation_refused:b:completion_lacks_sourced_evidence")
         self.assertIsNone(self.plan_of())
@@ -397,10 +399,10 @@ class ReturnsToCoreTests(GoalMutationHarness):
         for target, reason in (("goal", "plan_mutation_targets_own_goal"),
                                ("ghost", "plan_goal_not_offered")):
             with self.subTest(target=target):
-                reasoner = Reasoner(silently(plan(mutation(target))),
-                                    AgentDecision(response="Not possible.", goal_id="goal"))
+                reasoner = Reasoner(*installing(plan(mutation(target))),
+                                    AgentDecision(response="Not possible."))
                 self.person(self.agent(reasoner))
-                self.assertEqual(reasoner.contexts[1].refused_calls[0]["reason"], reason)
+                self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"], reason)
                 self.assertIsNone(self.plan_of())
 
 
@@ -408,20 +410,22 @@ class OrdinaryBehaviourTests(GoalMutationHarness):
     """Required 7: single-goal updates and capability plans are as they were."""
 
     def test_an_ordinary_single_goal_closure_is_unchanged(self):
-        reasoner = Reasoner(AgentDecision(goal_id="a", response="Closed a.",
-                                          goal_proposal=GoalProposal(CANCEL)))
+        reasoner = Reasoner(AgentDecision(goal_id="a"),
+                            AgentDecision(goal_proposal=GoalProposal(CANCEL)),
+                            AgentDecision(response="Closed a."))
         outcome = self.person(self.agent(reasoner))
         self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "Closed a.")
         self.assertEqual(self.statuses("a"), [GoalStatus.CANCELLED])
         self.assertEqual(self.revisions("a"), [2])
         self.assertEqual(self.state("a").decisions, ())
         self.assertIsNone(self.plan_of())
 
     def test_a_coding_plan_still_acknowledges_at_install_and_runs_in_the_background(self):
-        reasoner = Reasoner(install(plan(step("coding"), step("merge"))))
+        reasoner = Reasoner(*install(plan(step("coding"), step("merge"))))
         outcome = self.person(self.agent(reasoner))
         self.assertEqual(outcome.response, "Started.")
-        self.assertEqual(reasoner.calls, 1)
+        self.assertEqual(reasoner.calls, 3)
         self.assertEqual(self.calls, [])
         self.assertEqual((self.plan_of().status, self.plan_of().cursor), (PlanStatus.RUNNING, 0))
 

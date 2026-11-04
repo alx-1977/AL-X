@@ -265,7 +265,9 @@ class PostCodingTests(unittest.TestCase):
         return attempt
 
     def run_core(self, decisions):
-        reasoner = Decisions(decisions)
+        # Her first step selects the completed coding goal; every scripted
+        # decision after it works under that goal.
+        reasoner = Decisions([AgentDecision(goal_id='goal'), *decisions])
         core = CoreAgent(self.goals, reasoner, self.dispatch, self.definitions,
                          approval_free_capabilities=frozenset({'merge_pull_request', 'read_external_review', 'repository_operation'}),
                          turn_bound_capabilities=frozenset({'request_external_review'}))
@@ -277,24 +279,24 @@ class PostCodingTests(unittest.TestCase):
         return outcome, reasoner
 
     def merge_decision(self, identifier='merge'):
-        return AgentDecision(goal_id='goal', call=CapabilityCall(
+        return AgentDecision(call=CapabilityCall(
             identifier, 'merge_pull_request', {'pull_request_number': 72, 'head_sha': self.head}))
 
     def test_real_post_coding_path_waits_merges_syncs_and_finishes(self):
         self.already_reviewed = False
         request = CapabilityCall('request', 'request_external_review', {'pull_request_number': 72}, approval_id='approval')
         outcome, reasoner = self.run_core([
-            AgentDecision(goal_id='goal', call=request,
+            AgentDecision(call=request,
                           approval_proposal=ApprovalProposal('approval', ApprovalScope(request.capability_id, request.arguments), 'turn:turn')),
-            AgentDecision(goal_id='goal', call=CapabilityCall('read', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head})),
+            AgentDecision(call=CapabilityCall('read', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head})),
             self.merge_decision(),
-            AgentDecision(goal_id='goal', response='Merged and main is synced.',
-                          goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION, outstanding_work=(),
-                                                    new_evidence=(Evidence('done-evidence', 'Merged exact reviewed head and synced main', supports=('done',), source_references=('attempt:merge',)),))),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION, outstanding_work=(),
+                                                     new_evidence=(Evidence('done-evidence', 'Merged exact reviewed head and synced main', supports=('done',), source_references=('attempt:merge',)),))),
+            AgentDecision(response='Merged and main is synced.'),
         ])
         self.assertEqual(outcome.response, 'Merged and main is synced.', (outcome, self.attempts))
         self.assertEqual(self.goals.load('goal').state.status, GoalStatus.COMPLETED)
-        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual(len(reasoner.contexts), 6)
         self.assertEqual([a.call.capability_id for a in self.attempts],
                          ['request_external_review', 'read_external_review', 'merge_pull_request'])
         self.assertTrue(all(a.result.state is CapabilityResultState.SUCCEEDED for a in self.attempts), self.attempts)
@@ -311,9 +313,9 @@ class PostCodingTests(unittest.TestCase):
     def test_unknown_refusal_is_explained_once_without_retry(self):
         self.ci_pending = 0
         self.refusal = 'A protection rule requires judgement.'
-        outcome, reasoner = self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='Protection blocks this merge.')])
+        outcome, reasoner = self.run_core([self.merge_decision(), AgentDecision(response='Protection blocks this merge.')])
         self.assertEqual(outcome.response, 'Protection blocks this merge.')
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.merge_count, 1)
         self.assertEqual(self.attempts[0].result.failure['http_status'], 405)
         self.assertEqual(self.attempts[0].result.failure['github_message'], self.refusal)
@@ -323,28 +325,28 @@ class PostCodingTests(unittest.TestCase):
         self.refusal = 'Unknown protection'
         outcome, reasoner = self.run_core([self.merge_decision(), self.merge_decision('retry')])
         self.assertEqual(outcome.reason, 'merge_refused')
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.merge_count, 1)
 
     def test_changed_head_never_merges(self):
         self.live_head = 'f' * 40
-        outcome, reasoner = self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='The new head needs review.')])
+        outcome, reasoner = self.run_core([self.merge_decision(), AgentDecision(response='The new head needs review.')])
         self.assertEqual(self.attempts[0].result.failure['code'], 'head_changed')
         self.assertEqual(self.merge_count, 0)
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
 
     def test_pending_ci_times_out_without_core_polling(self):
         self.ci_pending = 999
-        outcome, reasoner = self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='Checks timed out.')])
+        outcome, reasoner = self.run_core([self.merge_decision(), AgentDecision(response='Checks timed out.')])
         self.assertEqual(self.attempts[0].result.failure['code'], 'checks_timed_out')
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.check_reads, 5)
         self.assertEqual(self.merge_count, 0)
 
     def test_failed_required_check_does_not_merge(self):
         self.ci_pending = 0
         self.check_conclusion = 'failure'
-        self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='Law gates failed.')])
+        self.run_core([self.merge_decision(), AgentDecision(response='Law gates failed.')])
         self.assertEqual(self.attempts[0].result.failure['code'], 'checks_failed')
         self.assertEqual(self.merge_count, 0)
 
@@ -360,7 +362,7 @@ class PostCodingTests(unittest.TestCase):
         self.git('push', 'origin', 'main', root=upstream)
         self.base = self.git('rev-parse', 'HEAD', root=upstream)
         self.behind = 1
-        self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='Merged.')])
+        self.run_core([self.merge_decision(), AgentDecision(response='Merged.')])
         result = self.attempts[0].result
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         self.assertNotEqual(self.live_head, self.head)
@@ -381,7 +383,7 @@ class PostCodingTests(unittest.TestCase):
         self.git('push', 'origin', 'main', root=upstream)
         self.base = self.git('rev-parse', 'HEAD', root=upstream)
         self.behind = 1
-        self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='The rebase conflicts.')])
+        self.run_core([self.merge_decision(), AgentDecision(response='The rebase conflicts.')])
         failure = self.attempts[0].result.failure
         self.assertEqual(failure['code'], 'merge_conflict', failure)
         self.assertEqual(self.merge_count, 0)
@@ -397,11 +399,11 @@ class PostCodingTests(unittest.TestCase):
         self.tasks.poller._maximum_wait = 0.02
         request = CapabilityCall('request', 'request_external_review', {'pull_request_number': 72}, approval_id='approval')
         outcome, reasoner = self.run_core([
-            AgentDecision(goal_id='goal', call=request,
+            AgentDecision(call=request,
                           approval_proposal=ApprovalProposal('approval', ApprovalScope(request.capability_id, request.arguments), 'turn:turn')),
-            AgentDecision(goal_id='goal', response='The review timed out.'),
+            AgentDecision(response='The review timed out.'),
         ])
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.request_count, 1)
         self.assertEqual(self.attempts[0].result.failure['reason'], 'timed_out')
         self.assertEqual(self.tasks.store.outstanding(), ())
@@ -409,12 +411,12 @@ class PostCodingTests(unittest.TestCase):
 
     def test_unpublished_read_is_not_a_core_polling_capability(self):
         self.already_reviewed = False
-        read = AgentDecision(goal_id='goal', call=CapabilityCall(
+        read = AgentDecision(call=CapabilityCall(
             'read', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head}))
-        retry = AgentDecision(goal_id='goal', call=CapabilityCall(
+        retry = AgentDecision(call=CapabilityCall(
             'retry', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head}))
         outcome, reasoner = self.run_core([read, retry])
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(len(self.attempts), 1)
         self.assertEqual(outcome.reason, 'review_unavailable')
 
@@ -429,7 +431,7 @@ class PostCodingTests(unittest.TestCase):
                 response.body['mergeable'] = False
             return response
         with patch('alx.providers.github_merge.httpx.get', lambda url, **kw: conflict('GET', url, **kw)):
-            self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='There is a merge conflict.')])
+            self.run_core([self.merge_decision(), AgentDecision(response='There is a merge conflict.')])
         self.assertEqual(self.attempts[0].result.failure['code'], 'merge_conflict')
         self.assertEqual(self.merge_count, 0)
         self.assertFalse(any('rebase' in op for op in self.operations))
@@ -437,15 +439,15 @@ class PostCodingTests(unittest.TestCase):
     def test_transport_failure_returns_once(self):
         import httpx
         with patch('alx.providers.github_merge.httpx.get', side_effect=httpx.ConnectError('unavailable')):
-            _, reasoner = self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='GitHub is unavailable.')])
+            _, reasoner = self.run_core([self.merge_decision(), AgentDecision(response='GitHub is unavailable.')])
         self.assertEqual(self.attempts[0].result.failure['code'], 'merge_unavailable')
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(self.merge_count, 0)
 
     def test_dirty_checkout_preserves_work_and_reports_merge_already_done(self):
         self.ci_pending = 0
         (self.checkout / 'file.txt').write_text('unrelated local work')
-        self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='Merged; local work blocks synchronization.')])
+        self.run_core([self.merge_decision(), AgentDecision(response='Merged; local work blocks synchronization.')])
         failure = self.attempts[0].result.failure
         self.assertEqual(failure['code'], 'local_sync_failed')
         self.assertTrue(failure['merged'])
@@ -460,7 +462,7 @@ class PostCodingTests(unittest.TestCase):
     def test_refusal_detail_is_bounded(self):
         self.ci_pending = 0
         self.refusal = 'x' * 1000
-        self.run_core([self.merge_decision(), AgentDecision(goal_id='goal', response='GitHub refused.')])
+        self.run_core([self.merge_decision(), AgentDecision(response='GitHub refused.')])
         self.assertEqual(len(self.attempts[0].result.failure['github_message']), 300)
 
     def test_force_push_lease_stays_bound_to_authorised_head(self):

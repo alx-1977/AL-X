@@ -183,10 +183,10 @@ class OneTurnOneReviewTests(unittest.TestCase):
         first = review_call("call-1", "approve-1")
         second = review_call("call-2", "approve-2")
         reasoner = Queued(
+            AgentDecision(goal_proposal=self.goal()),
             AgentDecision(
                 call=first,
                 approval_proposal=approved(first, "turn:turn-2"),
-                goal_proposal=self.goal(),
             ),
             AgentDecision(
                 call=second, approval_proposal=approved(second, "turn:turn-2")
@@ -230,10 +230,10 @@ class OneTurnOneReviewTests(unittest.TestCase):
             )
 
         reasoner = Queued(
+            AgentDecision(goal_proposal=self.goal()),
             AgentDecision(
                 call=first,
                 approval_proposal=approved(first, "turn:turn-2"),
-                goal_proposal=self.goal(),
             ),
             AgentDecision(
                 call=second, approval_proposal=approved(second, "turn:turn-2")
@@ -282,10 +282,10 @@ class OneTurnOneReviewTests(unittest.TestCase):
             )
 
         reasoner = Queued(
+            AgentDecision(goal_proposal=self.goal()),
             AgentDecision(
                 call=first,
                 approval_proposal=approved(first, "turn:turn-2"),
-                goal_proposal=self.goal(),
             ),
             AgentDecision(
                 call=corrected,
@@ -328,10 +328,10 @@ class OneTurnOneReviewTests(unittest.TestCase):
             )
 
         reasoner = Queued(
+            AgentDecision(goal_proposal=self.goal()),
             AgentDecision(
                 call=first,
                 approval_proposal=approved(first, "turn:turn-2"),
-                goal_proposal=self.goal(),
             ),
             AgentDecision(
                 call=second,
@@ -358,10 +358,10 @@ class OneTurnOneReviewTests(unittest.TestCase):
         """The rule spends the turn, so a new turn restores the authority."""
         first = review_call("call-1", "approve-1")
         reasoner = Queued(
+            AgentDecision(goal_proposal=self.goal()),
             AgentDecision(
                 call=first,
                 approval_proposal=approved(first, "turn:turn-2"),
-                goal_proposal=self.goal(),
             ),
             AgentDecision(response="Requested."),
         )
@@ -374,8 +374,8 @@ class OneTurnOneReviewTests(unittest.TestCase):
         second_reasoner = Queued(
             # The same goal, selected rather than created: the authority was
             # spent by the previous turn, not by the goal.
+            AgentDecision(goal_id="goal-1"),
             AgentDecision(
-                goal_id="goal-1",
                 call=again,
                 approval_proposal=approved(again, "turn:turn-4"),
             ),
@@ -428,10 +428,10 @@ class OneTurnOneReviewTests(unittest.TestCase):
             for index in (1, 2, 3)
         ]
         reasoner = Queued(
+            AgentDecision(goal_proposal=self.goal()),
             AgentDecision(
                 call=calls[0],
                 approval_proposal=approved(calls[0], "turn:turn-2"),
-                goal_proposal=self.goal(),
             ),
             *[
                 AgentDecision(
@@ -559,16 +559,16 @@ class BackgroundReadTests(unittest.TestCase):
             approval_id="approve-read-1",
         )
         reasoner = Queued(
+            AgentDecision(goal_proposal=GoalProposal(
+                    GoalMutationKind.CREATE,
+                    "Check for the review",
+                    (SuccessCriterion("criterion-1", "checked"),),
+                )),
             AgentDecision(
                 call=call,
                 # Grounded in a turn that is not Friedl's latest, exactly as
                 # the live run proposed it.
                 approval_proposal=approved(call, "turn:turn-1"),
-                goal_proposal=GoalProposal(
-                    GoalMutationKind.CREATE,
-                    "Check for the review",
-                    (SuccessCriterion("criterion-1", "checked"),),
-                ),
             ),
             AgentDecision(response="No review yet."),
         )
@@ -597,14 +597,14 @@ class BackgroundReadTests(unittest.TestCase):
         """Spending is not made easier by this: only reading is freed."""
         call = review_call("call-1", "approve-1")
         reasoner = Queued(
-            AgentDecision(
-                call=call,
-                approval_proposal=approved(call, "turn:turn-1"),
-                goal_proposal=GoalProposal(
+            AgentDecision(goal_proposal=GoalProposal(
                     GoalMutationKind.CREATE,
                     "Ask for a review",
                     (SuccessCriterion("criterion-1", "requested"),),
-                ),
+                )),
+            AgentDecision(
+                call=call,
+                approval_proposal=approved(call, "turn:turn-1"),
             ),
             AgentDecision(response="Cannot."),
         )

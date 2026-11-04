@@ -116,8 +116,9 @@ class RejectedCallRevalidationTests(unittest.TestCase):
 
         outcome = self.run_core(
             state, Reasoner(
-                AgentDecision(call=call, goal_id="goal-a"),
-                AgentDecision(response="The preserved work is continuing.", goal_id="goal-a"),
+                AgentDecision(goal_id="goal-a"),
+                AgentDecision(call=call),
+                AgentDecision(response="The preserved work is continuing."),
             ), dispatch,
         )
         self.assertIs(outcome.state, CoreState.RESPONDED)
@@ -137,15 +138,14 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         )
         state = goal(*failures, refused("coding_retry_exhausted"))
         reasoner = Reasoner(
-            AgentDecision(call=CapabilityCall("new-resume", "run_coding_task", RESUME),
-                          goal_id="goal-a"),
-            AgentDecision(response="Four implementation failures exhausted this job.",
-                          goal_id="goal-a"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=CapabilityCall("new-resume", "run_coding_task", RESUME)),
+            AgentDecision(response="Four implementation failures exhausted this job."),
         )
         outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))
         self.assertIs(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "coding_retry_exhausted")
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(reasoner.contexts[-1].response_only_reason,
                          "coding_retry_exhausted")
         self.assertEqual(self.store.load("goal-a").state.attempts, state.attempts)
@@ -153,9 +153,9 @@ class RejectedCallRevalidationTests(unittest.TestCase):
     def test_unsafe_repeat_stays_blocked_without_second_dispatch(self):
         state = goal(refused("input_invalid"))
         reasoner = Reasoner(
-            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME),
-                          goal_id="goal-a"),
-            AgentDecision(response="The same input is still invalid.", goal_id="goal-a"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+            AgentDecision(response="The same input is still invalid."),
         )
         outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))
         self.assertIs(outcome.state, CoreState.RESPONDED)
@@ -169,33 +169,49 @@ class RejectedCallRevalidationTests(unittest.TestCase):
     def test_autonomous_repeat_checkpoints_without_dispatch(self):
         state = goal(refused("input_invalid"))
         outcome = self.run_core(
-            state, Reasoner(AgentDecision(
-                call=CapabilityCall("again", "run_coding_task", RESUME),
-                goal_id="goal-a",
-            )), lambda *_: self.fail("dispatched"),
+            state, Reasoner(
+                AgentDecision(goal_id="goal-a"),
+                AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+            ), lambda *_: self.fail("dispatched"),
             origin=CognitionOrigin.EXTERNAL_EVENT,
         )
         self.assertIs(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "repeated_rejected_call")
 
     def test_terminal_response_only_pass_cannot_resume_or_mutate(self):
-        state = goal(refused("input_invalid"))
-        reasoner = Reasoner(
-            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME),
-                          goal_id="goal-a"),
-            AgentDecision(
+        # The response-only pass offers one step. A call or a goal mutation
+        # there is neither dispatched nor written.
+        attempted = {
+            "call": AgentDecision(
                 call=CapabilityCall("unsafe", "run_coding_task", {"task": "new"}),
-                goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION),
-                goal_id="goal-a",
             ),
-        )
-        outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))
-        self.assertIs(outcome.state, CoreState.CHECKPOINTED)
-        self.assertEqual(outcome.reason, "repeated_rejected_call")
-        self.assertEqual(len(reasoner.contexts), 2)
-        stored = self.store.load("goal-a").state.attempts
-        self.assertEqual(stored[:-1], state.attempts)
-        self.assertEqual(stored[-1].reason_code, "repeated_rejected_call")
+            "mutation": AgentDecision(
+                goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION),
+            ),
+        }
+        for kind, terminal in attempted.items():
+            with self.subTest(kind=kind):
+                identifier = f"goal-{kind}"
+                state = replace(goal(refused("input_invalid")), goal_id=identifier)
+                self.store.create(state, "conversation", RETENTION)
+                reasoner = Reasoner(
+                    AgentDecision(goal_id=identifier),
+                    AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+                    terminal,
+                )
+                outcome = CoreAgent(
+                    self.store, reasoner, lambda *_: self.fail("dispatched"),
+                    (DEFINITION,), clock=lambda: NOW,
+                ).process(self.conversation, RETENTION, 3)
+                self.assertIs(outcome.state, CoreState.CHECKPOINTED)
+                self.assertEqual(outcome.reason, "repeated_rejected_call")
+                self.assertEqual(len(reasoner.contexts), 3)
+                self.assertEqual(reasoner.contexts[-1].response_only_reason,
+                                 "repeated_rejected_call")
+                stored = self.store.load(identifier).state
+                self.assertEqual(stored.attempts[:-1], state.attempts)
+                self.assertEqual(stored.attempts[-1].reason_code, "repeated_rejected_call")
+                self.assertEqual(stored.status, state.status)
 
     def test_repeat_provenance_survives_restart_for_both_paths(self):
         earlier_time = NOW - timedelta(hours=2)
@@ -212,8 +228,9 @@ class RejectedCallRevalidationTests(unittest.TestCase):
                     ))
                 self.store.create(state, "conversation", RETENTION)
                 reasoner = Reasoner(
-                    AgentDecision(call=call, goal_id=identifier),
-                    AgentDecision(response="The input remains invalid.", goal_id=identifier),
+                    AgentDecision(goal_id=identifier),
+                    AgentDecision(call=call),
+                    AgentDecision(response="The input remains invalid."),
                 )
                 agent = CoreAgent(
                     self.store, reasoner, lambda *_: self.fail("dispatched"),
@@ -253,10 +270,10 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         self.assertIsNone(legacy.recorded_at)
         with self.assertLogs("alx.core.loop", level="INFO") as captured:
             self.run_core(
-                goal(legacy), Reasoner(AgentDecision(
-                    call=CapabilityCall("again", "run_coding_task", RESUME),
-                    goal_id="goal-a",
-                )), lambda *_: self.fail("dispatched"),
+                goal(legacy), Reasoner(
+                    AgentDecision(goal_id="goal-a"),
+                    AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+                ), lambda *_: self.fail("dispatched"),
                 origin=CognitionOrigin.EXTERNAL_EVENT,
             )
         repeat = self.store.load("goal-a").state.attempts[-1]
@@ -280,8 +297,9 @@ class RejectedCallRevalidationTests(unittest.TestCase):
     def test_new_dispatch_refusal_gets_its_recorded_time(self):
         call = CapabilityCall("first-refusal", "run_coding_task", RESUME)
         self.run_core(goal(), Reasoner(
-            AgentDecision(call=call, goal_id="goal-a"),
-            AgentDecision(response="The input is invalid.", goal_id="goal-a"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=call),
+            AgentDecision(response="The input is invalid."),
         ), lambda proposed, _: CapabilityAttempt(
             proposed, CapabilityAttemptDisposition.REJECTED, False,
             reason_code="input_invalid",
@@ -309,9 +327,9 @@ class RejectedCallRevalidationTests(unittest.TestCase):
             objective=Objective("turn:old-request", "Continue the preserved job"),
         )
         reasoner = Reasoner(
-            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME),
-                          goal_id="goal-a"),
-            AgentDecision(response="The prior input remains invalid.", goal_id="goal-a"),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+            AgentDecision(response="The prior input remains invalid."),
         )
         outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))
         self.assertIs(outcome.state, CoreState.RESPONDED)

@@ -390,22 +390,23 @@ class PlanUpdate:
 
 @dataclass(frozen=True, slots=True)
 class AgentDecision:
+    """One step of a Core turn: exactly one thing (D-065).
+
+    A capability call (which may propose a fresh approval for exactly that
+    call), a goal selection, a goal mutation, a plan change, a memory
+    retrieval, memories to form, or the words or silence that end the turn.
+    """
+
     call: CapabilityCall | None = None
     response: str | None = None
     finish_silently: bool = False
     goal_proposal: GoalProposal | None = None
-    response_requires_goal_commit: bool = False
     memory_proposals: tuple[MemoryProposal, ...] = ()
     memory_query: MemoryQuery | None = None
     approval_proposal: ApprovalProposal | None = None
-    # The unfinished goal this decision works under, chosen by the Core from
-    # the summaries it was shown. None with a create proposal starts a new
-    # goal; None without one is goal-less conversation. A decision that
-    # carries only a goal_id asks for that goal's full state before acting.
+    # The unfinished goal to work under, from the summaries the Core was
+    # shown. The step loads its full state.
     goal_id: str | None = None
-    # A plan change. It travels with the words or silence that end the turn,
-    # or alone as one of the Core's native steps (D-065), never with a call
-    # or a memory retrieval.
     plan_update: PlanUpdate | None = None
     raised_mail_observations: tuple[MailReference, ...] = ()
 
@@ -418,46 +419,26 @@ class AgentDecision:
         object.__setattr__(self, "raised_mail_observations", tuple(dict.fromkeys(refs)))
         if not isinstance(self.finish_silently, bool):
             raise TypeError("finish_silently must be a bool")
-        chosen = sum(item is not None for item in (self.call, self.response, self.memory_query))
-        chosen += int(self.finish_silently)
-        if chosen == 0:
-            # An intermediate step: it selects a goal, or writes a goal
-            # mutation, memories or a plan change, and the turn goes on
-            # (D-065). An approval may not travel alone, because an approval
-            # authorises one exact call and there is none here.
-            if self.approval_proposal is not None or self.response_requires_goal_commit:
-                raise ValueError("an intermediate step carries no approval or commit flag")
-            if (self.goal_id is None and self.goal_proposal is None
-                    and not self.memory_proposals and self.plan_update is None):
-                raise ValueError("a decision contains a call, a response, silence, a "
-                                 "memory query, a goal selection or a write")
-        elif chosen != 1:
-            raise ValueError("a decision contains exactly one call, response, or memory query")
+        object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
+        steps = (self.call is not None, self.response is not None, self.finish_silently,
+                 self.memory_query is not None, self.goal_id is not None,
+                 self.goal_proposal is not None, bool(self.memory_proposals),
+                 self.plan_update is not None)
+        if sum(steps) != 1:
+            raise ValueError("a decision is exactly one step")
         if self.goal_id is not None and not self.goal_id.strip():
             raise ValueError("goal_id must not be blank")
-        if (
-            self.goal_id is not None
-            and self.goal_proposal is not None
-            and self.goal_proposal.kind is GoalMutationKind.CREATE
-        ):
-            raise ValueError("a decision cannot both select a goal and create one")
         if self.response is not None and not self.response.strip():
             raise ValueError("response must not be blank")
-        if self.response_requires_goal_commit and self.response is None:
-            raise ValueError("only a response can depend on a goal commit")
         if self.approval_proposal is not None and self.call is None:
             raise ValueError("an approval proposal requires an exact capability call")
-        if self.plan_update is not None and (self.call is not None
-                                             or self.memory_query is not None):
-            raise ValueError("a plan update travels with a response, silence, or alone")
-        object.__setattr__(self, "memory_proposals", tuple(self.memory_proposals))
         memory_ids = [item.memory_id for item in self.memory_proposals]
         if len(memory_ids) != len(set(memory_ids)):
             raise ValueError("a decision cannot repeat a memory identifier")
 
     @property
     def intermediate(self) -> bool:
-        """A step that ends nothing: no call, words, silence or retrieval."""
+        """A step that ends nothing: a selection or a write."""
         return (
             self.call is None
             and self.response is None

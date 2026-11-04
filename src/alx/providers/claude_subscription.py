@@ -268,6 +268,14 @@ class _ClaudeProtocolError(ValueError):
 # working directory can stand in for it.
 _BRIDGE_SCRIPT = Path(__file__).resolve().with_name("native_tool_bridge.py")
 
+# How long a session may stay paused on one native call. A call can run for
+# minutes (a review request waits for Greptile, often past five), and closing
+# the session meanwhile made the next step resend her whole context. Her
+# prompt cache was observed warm across gaps of up to about an hour on
+# 2026-11-04, so the pause is bounded there; the session still closes when it
+# ends, when the next turn starts afresh, or when the Core abandons it.
+PAUSED_SESSION_LIMIT_SECONDS = 3600
+
 
 class _NativeSession:
     """One Claude CLI run that may pause on native tool calls (D-065).
@@ -397,7 +405,7 @@ class _NativeSession:
 
     def _arm_idle_timer(self) -> None:
         # A paused session nobody continues, because the turn ended, must not
-        # outlive its own timeout.
+        # outlive its bound.
         import threading
         self._idle_timer = threading.Timer(self._idle_seconds, self.close)
         self._idle_timer.daemon = True
@@ -781,7 +789,10 @@ class ClaudeSubscriptionReasoningModel:
             prompt = self._user_prompt(request)
             session = _NativeSession(
                 self._launcher, lambda path, tools: self.native_command(request, path, tools),
-                prompt, self.child_environment(), self._timeout_seconds, request.tools,
+                prompt, {**self.child_environment(),
+                         # The CLI waits on a native call as long as the pause may last.
+                         "MCP_TOOL_TIMEOUT": str(PAUSED_SESSION_LIMIT_SECONDS * 1000)},
+                PAUSED_SESSION_LIMIT_SECONDS, request.tools,
             )
             # Kept for the record of a run that is abandoned rather than finished.
             session.request, session.started_at = request, monotonic()

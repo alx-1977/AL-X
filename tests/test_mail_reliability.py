@@ -110,33 +110,44 @@ class MailGroundingTest(unittest.TestCase):
         self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
 
     def outcome(self, source: str):
-        reasoner = Queued(AgentDecision(
-            goal_proposal=goal_proposal(source), response="Working on it."))
+        self.reasoner = Queued(
+            AgentDecision(goal_proposal=goal_proposal(source)),
+            AgentDecision(response="Working on it."),
+        )
         return CoreAgent(
-            self.store, reasoner, lambda call, state: None, (TRASH,),
+            self.store, self.reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW,
-        ).process(conversation(), RETENTION, 2)
+        ).process(conversation(), RETENTION, 3)
+
+    def assert_accepted(self, outcome) -> None:
+        self.assertEqual(outcome.state, CoreState.RESPONDED, outcome.reason)
+        self.assertIsNone(outcome.reason, "the goal must be accepted")
+        self.assertEqual(self.reasoner.contexts[1].refused_calls, ())
+        self.assertEqual(len(self.store.list_goals()), 1)
+
+    def assert_refused(self, outcome) -> None:
+        refusals = self.reasoner.contexts[1].refused_calls
+        self.assertEqual(len(refusals), 1)
+        self.assertEqual(refusals[0]["mutation_kind"], "create")
+        self.assertEqual(self.store.list_goals(), ())
+        # She is told, and her next words are still delivered.
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
 
     def test_a_mail_event_grounds_a_goal(self) -> None:
         """`event:mail:<validity>:<uid>` is the supplied durable reference."""
-        outcome = self.outcome(f"event:{MAIL_EVENT_ID}")
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertIsNone(outcome.reason, "the goal must be accepted")
+        self.assert_accepted(self.outcome(f"event:{MAIL_EVENT_ID}"))
 
     def test_the_person_turn_also_grounds_a_goal(self) -> None:
-        outcome = self.outcome("turn:t1")
-        self.assertIsNone(outcome.reason)
+        self.assert_accepted(self.outcome("turn:t1"))
 
     def test_a_bare_mail_id_is_refused(self) -> None:
         """No `mail:` grounding form exists, and none is being added."""
-        self.assertEqual(
-            self.outcome(MAIL_EVENT_ID).reason, "goal_proposal_rejected",
-        )
+        self.assert_refused(self.outcome(MAIL_EVENT_ID))
+        self.assertEqual(self.reasoner.contexts[1].refused_calls[0]["reason"],
+                         "evidence_source_unknown")
 
     def test_an_unknown_event_is_refused(self) -> None:
-        self.assertEqual(
-            self.outcome("event:mail:777:99").reason, "goal_proposal_rejected",
-        )
+        self.assert_refused(self.outcome("event:mail:777:99"))
 
     def test_no_mail_specific_routing_decides_any_of_this(self) -> None:
         """Grounding is provenance validation only -- it never reads meaning.
@@ -144,21 +155,22 @@ class MailGroundingTest(unittest.TestCase):
         The same capability, the same evidence shape and an unrelated
         objective ground identically: nothing inspects what the words say.
         """
-        reasoner = Queued(AgentDecision(
-            goal_proposal=GoalProposal(
+        self.reasoner = Queued(
+            AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.CREATE,
                 objective_summary="Something entirely unrelated to mail",
                 success_criteria=(SuccessCriterion("c1", "done"),),
                 new_evidence=(
                     Evidence("e1", "x", {}, ("c1",), (f"event:{MAIL_EVENT_ID}",)),
                 ),
-            ),
-            response="Fine."))
+            )),
+            AgentDecision(response="Fine."),
+        )
         outcome = CoreAgent(
-            self.store, reasoner, lambda call, state: None, (TRASH,),
+            self.store, self.reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW,
-        ).process(conversation(), RETENTION, 2)
-        self.assertIsNone(outcome.reason)
+        ).process(conversation(), RETENTION, 3)
+        self.assert_accepted(outcome)
 
 
 class BlockedDispatchTest(unittest.TestCase):
@@ -170,7 +182,7 @@ class BlockedDispatchTest(unittest.TestCase):
         self.store = SQLiteGoalStore(Path(self.directory.name) / "goals.sqlite3")
         self.dispatched: list = []
 
-    def run_turn(self, *decisions: AgentDecision, budget: int = 3):
+    def run_turn(self, *decisions: AgentDecision, budget: int = 4):
         self.reasoner = Queued(*decisions)
         return CoreAgent(
             self.store, self.reasoner,
@@ -180,17 +192,15 @@ class BlockedDispatchTest(unittest.TestCase):
 
     def test_the_refusal_returns_to_the_core_with_the_reason(self) -> None:
         outcome = self.run_turn(
-            AgentDecision(
-                goal_proposal=goal_proposal(MAIL_EVENT_ID),   # bad prefix
-                call=CapabilityCall("call-1", "move_mail_message_to_trash", {}),
-            ),
+            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),   # bad prefix
+            AgentDecision(call=CapabilityCall("call-1", "move_mail_message_to_trash", {})),
             AgentDecision(response="I cannot ground that safely yet."),
         )
         self.assertGreaterEqual(
-            len(self.reasoner.contexts), 2,
+            len(self.reasoner.contexts), 3,
             "she must be told why the dispatch was impossible",
         )
-        refusals = self.reasoner.contexts[1].refused_calls
+        refusals = self.reasoner.contexts[2].refused_calls
         # Two independent facts, both true and both hers to act on: the
         # proposal's evidence cited a source the runtime does not offer, and
         # nothing was dispatched because that left no goal. She used to be
@@ -208,10 +218,8 @@ class BlockedDispatchTest(unittest.TestCase):
 
     def test_nothing_is_dispatched_behind_the_refusal(self) -> None:
         self.run_turn(
-            AgentDecision(
-                goal_proposal=goal_proposal(MAIL_EVENT_ID),
-                call=CapabilityCall("call-1", "move_mail_message_to_trash", {}),
-            ),
+            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
+            AgentDecision(call=CapabilityCall("call-1", "move_mail_message_to_trash", {})),
             AgentDecision(response="I cannot do that yet."),
         )
         self.assertEqual(self.dispatched, [])
@@ -227,14 +235,9 @@ class BlockedDispatchTest(unittest.TestCase):
         through different impossible capabilities cannot spend the budget.
         """
         outcome = self.run_turn(
-            AgentDecision(
-                goal_proposal=goal_proposal(MAIL_EVENT_ID),
-                call=CapabilityCall("call-1", "move_mail_message_to_trash", {}),
-            ),
-            AgentDecision(
-                goal_proposal=goal_proposal(MAIL_EVENT_ID),
-                call=CapabilityCall("call-2", "move_mail_message_to_trash", {}),
-            ),
+            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
+            AgentDecision(call=CapabilityCall("call-1", "move_mail_message_to_trash", {})),
+            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
             AgentDecision(response="I could not do that."),
             budget=6,
         )
@@ -246,7 +249,7 @@ class BlockedDispatchTest(unittest.TestCase):
         # One response-only step then tells Friedl; it can act on nothing.
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(len(self.reasoner.contexts), 3)
+        self.assertEqual(len(self.reasoner.contexts), 4)
         self.assertEqual(self.dispatched, [])
 
     def test_a_grounded_goal_still_dispatches_normally(self) -> None:
@@ -271,8 +274,8 @@ class BlockedDispatchTest(unittest.TestCase):
             )
 
         reasoner = Queued(
+            AgentDecision(goal_proposal=goal_proposal(f"event:{MAIL_EVENT_ID}")),
             AgentDecision(
-                goal_proposal=goal_proposal(f"event:{MAIL_EVENT_ID}"),
                 call=call,
                 approval_proposal=ApprovalProposal(
                     "approval-1",
@@ -284,13 +287,14 @@ class BlockedDispatchTest(unittest.TestCase):
         )
         outcome = CoreAgent(
             self.store, reasoner, dispatch, (TRASH,), clock=lambda: NOW,
-        ).process(conversation(), RETENTION, 3)
+        ).process(conversation(), RETENTION, 4)
         self.assertEqual(outcome.state, CoreState.RESPONDED, outcome.reason)
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(
             dispatched[0].capability_id, "move_mail_message_to_trash",
         )
         self.assertEqual(reasoner.contexts[1].refused_calls, ())
+        self.assertEqual(reasoner.contexts[2].refused_calls, ())
 
 
 class RejectedProposalObservabilityTest(unittest.TestCase):
@@ -304,13 +308,13 @@ class RejectedProposalObservabilityTest(unittest.TestCase):
     def test_a_rejection_records_its_references_and_reason(self) -> None:
         records: list = []
         reasoner = Queued(
-            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID),
-                          response="Working on it."),
+            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
+            AgentDecision(response="Working on it."),
         )
         CoreAgent(
             self.store, reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW, record_goal_rejection=records.append,
-        ).process(conversation(), RETENTION, 2)
+        ).process(conversation(), RETENTION, 3)
         self.assertEqual(len(records), 1)
         record = records[0]
         self.assertEqual(record["reason"], "evidence_source_unknown")
@@ -318,80 +322,54 @@ class RejectedProposalObservabilityTest(unittest.TestCase):
         self.assertEqual(record["conversation_id"], "c1")
         self.assertEqual(record["recorded_at"], NOW.isoformat())
 
-    def test_response_capture_is_transient_and_not_in_the_log_record(self) -> None:
+    def test_proposal_prose_is_not_in_the_log_record(self) -> None:
         records: list = []
-        reasoner = Queued(AgentDecision(
-            goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Working on it.",
-        ))
+        reasoner = Queued(
+            AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
+            AgentDecision(response="Working on it."),
+        )
         core = CoreAgent(
             self.store, reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW, record_goal_rejection=records.append,
         )
-        core.process(conversation(), RETENTION, 2)
+        core.process(conversation(), RETENTION, 3)
         serialised = repr(records[0])
         self.assertNotIn("Delete the message from Quinton", serialised)
         self.assertNotIn("Working on it", serialised)
-        self.assertEqual(core.last_goal_rejection["proposed_response"], "Working on it.")
-        self.assertTrue(records[0]["proposed_response_present"])
-        self.assertFalse(records[0]["response_requires_goal_commit"])
+        self.assertNotIn("proposed_response", records[0])
         self.assertEqual(records[0]["mutation_kind"], "create")
 
-    def test_dependent_rejected_response_is_captured_without_delivery_or_logging(self) -> None:
-        records: list = []
-        reasoner = Queued(
-            AgentDecision(
-                goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Claimed completion.",
-                response_requires_goal_commit=True,
-            ),
-            AgentDecision(response="That is not done yet."),
-        )
-        core = CoreAgent(
-            self.store, reasoner, lambda call, state: None, (TRASH,),
-            clock=lambda: NOW, record_goal_rejection=records.append,
-        )
-        outcome = core.process(conversation(), RETENTION, 1)
-        # The claim that depended on the refused commit is never delivered.
-        self.assertEqual(outcome.response, "That is not done yet.")
-        self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(outcome.reason, "goal_proposal_invalid")
-        self.assertEqual(core.last_goal_rejection["proposed_response"], "Claimed completion.")
-        self.assertNotIn("proposed_response", records[0])
-        self.assertTrue(records[0]["response_requires_goal_commit"])
-        self.assertEqual(records[0]["reason"], "evidence_source_unknown")
-
-    def test_mail_derived_rejected_response_capture_expires(self) -> None:
+    def test_mail_derived_rejection_records_its_content_expiry(self) -> None:
         records: list = []
         current = [NOW]
         context = conversation()
         provenance = RetentionPolicy().direct_mail(NOW, (MailReference("INBOX", "777", "3"),))
         context = replace(context, events=(replace(context.events[0], provenance=provenance),))
         core = CoreAgent(
-            self.store, Queued(AgentDecision(
-                goal_proposal=goal_proposal(MAIL_EVENT_ID), response="Private mail fact.",
-                response_requires_goal_commit=True,
-            )), lambda call, state: None, (TRASH,),
+            self.store, Queued(
+                AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
+                AgentDecision(response="Private mail fact."),
+            ), lambda call, state: None, (TRASH,),
             clock=lambda: current[0], record_goal_rejection=records.append,
         )
-        core.process(context, RETENTION, 2)
-        self.assertEqual(core.last_goal_rejection["proposed_response"], "Private mail fact.")
+        core.process(context, RETENTION, 3)
         self.assertNotIn("Private mail fact", repr(records))
         self.assertEqual(records[0]["response_content_expires_at"], RETENTION.isoformat())
         current[0] = RETENTION
         self.assertNotIn("proposed_response", core.last_goal_rejection)
         self.assertNotIn("Private mail fact", repr(core._last_goal_rejection))
-        self.assertTrue(core.last_goal_rejection["response_requires_goal_commit"])
         self.assertEqual(core.last_goal_rejection["source_references"], [MAIL_EVENT_ID])
 
     def test_an_accepted_proposal_records_nothing(self) -> None:
         records: list = []
         reasoner = Queued(
-            AgentDecision(goal_proposal=goal_proposal(f"event:{MAIL_EVENT_ID}"),
-                          response="Working on it."),
+            AgentDecision(goal_proposal=goal_proposal(f"event:{MAIL_EVENT_ID}")),
+            AgentDecision(response="Working on it."),
         )
         CoreAgent(
             self.store, reasoner, lambda call, state: None, (TRASH,),
             clock=lambda: NOW, record_goal_rejection=records.append,
-        ).process(conversation(), RETENTION, 2)
+        ).process(conversation(), RETENTION, 3)
         self.assertEqual(records, [])
 
 

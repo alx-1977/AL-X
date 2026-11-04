@@ -12,7 +12,6 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -76,17 +75,19 @@ class Queued:
     """A fake Core model, following the harness the loop tests already use."""
 
     def __init__(self, *decisions, selects: str | None = None) -> None:
-        self.decisions = list(decisions)
+        # `selects` is the follow-up turn's first step: naming the goal the
+        # rest of the turn works under.
+        self.decisions = [
+            *((AgentDecision(goal_id=selects),) if selects is not None else ()),
+            *decisions,
+        ]
         self.contexts = []
-        self._selects = selects
 
     def decide(self, context):
         self.contexts.append(context)
         item = self.decisions.pop(0)
         if isinstance(item, Exception):
             raise item
-        if self._selects is not None and item.goal_id is None:
-            item = replace(item, goal_id=self._selects)
         return item
 
 
@@ -154,23 +155,25 @@ class WebConversationTests(unittest.TestCase):
             with self.subTest(wording=wording):
                 fetcher = StubFetcher()
                 reasoner = Queued(
-                    AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+                    AgentDecision(goal_proposal=a_goal()),
+                    AgentDecision(call=self.read_call()),
                     AgentDecision(response="Sixty percent."),
                 )
                 outcome = self.agent(
                     reasoner, fetcher, identifiers=(f"goal-{index}",)
-                ).process(conversation(wording), RETENTION, 3)
+                ).process(conversation(wording), RETENTION, 4)
                 self.assertEqual(outcome.state, CoreState.RESPONDED)
                 self.assertEqual(fetcher.calls, [URL])
 
     def test_the_page_returns_to_the_core_as_evidence(self) -> None:
         fetcher = StubFetcher()
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="The report says sixty percent."),
         )
         outcome = self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         attempt = outcome.snapshot.state.attempts[-1]
@@ -183,25 +186,29 @@ class WebConversationTests(unittest.TestCase):
         """She reasons over the page rather than answering ahead of it."""
         fetcher = StubFetcher()
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="Sixty percent."),
         )
         self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
-        self.assertEqual(len(reasoner.contexts), 2)
+        # Create the goal, read, answer.
+        self.assertEqual(len(reasoner.contexts), 3)
         self.assertIsNone(reasoner.contexts[0].active_goal)
-        self.assertEqual(len(reasoner.contexts[1].active_goal.attempts), 1)
+        self.assertEqual(len(reasoner.contexts[1].active_goal.attempts), 0)
+        self.assertEqual(len(reasoner.contexts[2].active_goal.attempts), 1)
 
     def test_a_refusal_is_evidence_she_can_replan_from(self) -> None:
         """A blocked page ends the attempt, not the thinking."""
         fetcher = StubFetcher(WebRetrievalError("retrieval_blocked"))
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="That page would not let me read it."),
         )
         outcome = self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
         attempt = reasoner.contexts[-1].active_goal.attempts[-1]
         self.assertIs(attempt.result.state, CapabilityResultState.FAILED)
@@ -215,7 +222,8 @@ class WebConversationTests(unittest.TestCase):
             WebRetrievalError("retrieval_blocked"), StubFetcher.page()
         )
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(
                 call=CapabilityCall(
                     "call-web-2", ASK_WEB_PAGE, {"page_id": "p2", "url": other}
@@ -224,7 +232,7 @@ class WebConversationTests(unittest.TestCase):
             AgentDecision(response="The mirror had it: sixty percent."),
         )
         outcome = self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 4
+            conversation("read the report"), RETENTION, 5
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(fetcher.calls, [URL, other])
@@ -233,11 +241,12 @@ class WebConversationTests(unittest.TestCase):
         """Code reports what happened; she decides what it means."""
         fetcher = StubFetcher(WebRetrievalError("unsupported_dynamic_page"))
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="That page needs a browser to read."),
         )
         outcome = self.agent(reasoner, fetcher).process(
-            conversation("read it"), RETENTION, 3
+            conversation("read it"), RETENTION, 4
         )
         result = outcome.snapshot.state.attempts[-1].result
         self.assertEqual(set(result.failure), {"code"})
@@ -246,11 +255,12 @@ class WebConversationTests(unittest.TestCase):
     def test_a_retrieval_survives_a_restart_and_stays_citable(self) -> None:
         fetcher = StubFetcher()
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="Sixty percent."),
         )
         self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
         self.store.close()
 
@@ -269,11 +279,12 @@ class WebConversationTests(unittest.TestCase):
     def test_the_url_asked_for_survives_a_restart(self) -> None:
         fetcher = StubFetcher()
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="Sixty percent."),
         )
         self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
         self.store.close()
         reopened = SQLiteGoalStore(self.path)
@@ -285,9 +296,9 @@ class WebConversationTests(unittest.TestCase):
         """`attempt:<call_id>` is accepted by the grounding rule unchanged."""
         fetcher = StubFetcher()
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(
-                response="Sixty percent, according to the report.",
                 goal_proposal=GoalProposal(
                     GoalMutationKind.UPDATE,
                     new_evidence=(
@@ -302,9 +313,10 @@ class WebConversationTests(unittest.TestCase):
                     ),
                 ),
             ),
+            AgentDecision(response="Sixty percent, according to the report."),
         )
         outcome = self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         recorded = self.store.load("goal-1").state.evidence
@@ -315,22 +327,24 @@ class WebConversationTests(unittest.TestCase):
         """Retrieval alone creates no evidence and no notebook entry."""
         fetcher = StubFetcher()
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="Sixty percent."),
         )
         outcome = self.agent(reasoner, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
         self.assertEqual(outcome.snapshot.state.evidence, ())
 
     def test_a_follow_up_reuses_the_goal_without_restating_it(self) -> None:
         fetcher = StubFetcher()
         first = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="Sixty percent."),
         )
         self.agent(first, fetcher).process(
-            conversation("read the report"), RETENTION, 3
+            conversation("read the report"), RETENTION, 4
         )
 
         follow_up = Queued(
@@ -338,7 +352,7 @@ class WebConversationTests(unittest.TestCase):
             selects="goal-1",
         )
         self.agent(follow_up, fetcher, identifiers=()).process(
-            conversation("and when was that measured?"), RETENTION, 2
+            conversation("and when was that measured?"), RETENTION, 3
         )
         self.assertEqual(len(self.store.list_goals()), 1)
 
@@ -347,11 +361,12 @@ class WebConversationTests(unittest.TestCase):
         corrected = "https://example.com/2026-report"
         fetcher = StubFetcher(StubFetcher.page(), StubFetcher.page("Ninety percent."))
         first = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="That one says sixty percent."),
         )
         self.agent(first, fetcher).process(
-            conversation("read the reservoir report"), RETENTION, 3
+            conversation("read the reservoir report"), RETENTION, 4
         )
 
         # The correction arrives as ordinary conversation. She reads the page
@@ -367,7 +382,7 @@ class WebConversationTests(unittest.TestCase):
             selects="goal-1",
         )
         outcome = self.agent(after, fetcher, identifiers=()).process(
-            conversation("no, I meant the 2026 one"), RETENTION, 3
+            conversation("no, I meant the 2026 one"), RETENTION, 4
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(fetcher.calls, [URL, corrected])
@@ -384,17 +399,18 @@ class WebConversationTests(unittest.TestCase):
         """Unrelated conversation between two turns loses none of the work."""
         fetcher = StubFetcher()
         first = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             AgentDecision(response="Sixty percent."),
         )
         self.agent(first, fetcher).process(
-            conversation("read the reservoir report"), RETENTION, 3
+            conversation("read the reservoir report"), RETENTION, 4
         )
 
         # An interruption about something else entirely, attaching to no goal.
         interruption = Queued(AgentDecision(response="Twenty past four."))
         self.agent(interruption, fetcher, identifiers=()).process(
-            conversation("hang on, what's the time?"), RETENTION, 2
+            conversation("hang on, what's the time?"), RETENTION, 3
         )
 
         # She picks the work up again: first naming the goal to see its state,
@@ -402,10 +418,9 @@ class WebConversationTests(unittest.TestCase):
         resumed = Queued(
             AgentDecision(goal_id="goal-1"),
             AgentDecision(response="Back to the reservoir: sixty percent."),
-            selects="goal-1",
         )
         outcome = self.agent(resumed, fetcher, identifiers=()).process(
-            conversation("right, back to the reservoir"), RETENTION, 3
+            conversation("right, back to the reservoir"), RETENTION, 4
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(len(self.store.list_goals()), 1)
@@ -422,7 +437,8 @@ class WebConversationTests(unittest.TestCase):
             WebRetrievalError("retrieval_blocked"), StubFetcher.page()
         )
         reasoner = Queued(
-            AgentDecision(call=self.read_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.read_call()),
             # She does not declare completion on the failure. She looks again.
             AgentDecision(
                 call=CapabilityCall(
@@ -431,7 +447,6 @@ class WebConversationTests(unittest.TestCase):
                 )
             ),
             AgentDecision(
-                response="Sixty percent, and I have read the page myself.",
                 goal_proposal=GoalProposal(
                     GoalMutationKind.REQUEST_COMPLETION,
                     new_evidence=(
@@ -445,11 +460,11 @@ class WebConversationTests(unittest.TestCase):
                         ),
                     ),
                 ),
-                response_requires_goal_commit=True,
             ),
+            AgentDecision(response="Sixty percent, and I have read the page myself."),
         )
         outcome = self.agent(reasoner, fetcher).process(
-            conversation("read the reservoir report"), RETENTION, 4
+            conversation("read the reservoir report"), RETENTION, 5
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         state = self.store.load("goal-1").state
@@ -597,14 +612,15 @@ class SearchThenReadTests(unittest.TestCase):
 
     def test_she_searches_then_chooses_what_to_read(self) -> None:
         reasoner = Queued(
-            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.search_call()),
             # The second candidate, not the first. Nothing in code could have
             # made this choice.
             AgentDecision(call=self.page_call("https://two.example/b")),
             AgentDecision(response="The second source says sixty percent."),
         )
         outcome = self.agent(reasoner).process(
-            conversation("what are the current reservoir levels?"), RETENTION, 4
+            conversation("what are the current reservoir levels?"), RETENTION, 5
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(self.searched, ["reservoir levels"])
@@ -612,11 +628,12 @@ class SearchThenReadTests(unittest.TestCase):
 
     def test_searching_alone_reads_nothing(self) -> None:
         reasoner = Queued(
-            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.search_call()),
             AgentDecision(response="Two sources look relevant."),
         )
         self.agent(reasoner).process(
-            conversation("find me something on reservoir levels"), RETENTION, 3
+            conversation("find me something on reservoir levels"), RETENTION, 4
         )
         self.assertEqual(len(self.searched), 1)
         self.assertEqual(self.fetched, [], "no page may be read unasked")
@@ -624,23 +641,24 @@ class SearchThenReadTests(unittest.TestCase):
     def test_she_may_read_nothing_at_all(self) -> None:
         """Deciding no candidate is worth reading is her judgement too."""
         reasoner = Queued(
-            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.search_call()),
             AgentDecision(response="Nothing there looks worth opening."),
         )
         outcome = self.agent(reasoner).process(
-            conversation("anything new on the reservoir?"), RETENTION, 3
+            conversation("anything new on the reservoir?"), RETENTION, 4
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(self.fetched, [])
 
     def test_a_correction_reaches_a_new_search(self) -> None:
         reasoner = Queued(
-            AgentDecision(call=self.search_call(subject="reservoir levels"),
-                          goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.search_call(subject="reservoir levels")),
             AgentDecision(response="Here is what I found."),
         )
         self.agent(reasoner).process(
-            conversation("reservoir levels"), RETENTION, 3
+            conversation("reservoir levels"), RETENTION, 4
         )
         corrected = Queued(
             AgentDecision(
@@ -650,7 +668,7 @@ class SearchThenReadTests(unittest.TestCase):
             selects="goal-1",
         )
         self.agent(corrected, identifiers=()).process(
-            conversation("no, I meant this year's"), RETENTION, 3
+            conversation("no, I meant this year's"), RETENTION, 4
         )
         self.assertEqual(
             self.searched, ["reservoir levels", "2026 reservoir levels"]
@@ -666,26 +684,28 @@ class SearchThenReadTests(unittest.TestCase):
                 raise WebRetrievalError("retrieval_blocked")
 
         reasoner = Queued(
-            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.search_call()),
             AgentDecision(call=self.page_call("https://one.example/a")),
             AgentDecision(response="That one would not open for me."),
         )
         agent = self.agent(reasoner)
         # Swap in a fetcher that refuses, keeping the same search.
         outcome = agent.process(
-            conversation("reservoir levels"), RETENTION, 4
+            conversation("reservoir levels"), RETENTION, 5
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
 
     def test_a_search_and_a_read_are_separately_citable(self) -> None:
         """Two attempts, two anchors: what she found and what she read."""
         reasoner = Queued(
-            AgentDecision(call=self.search_call(), goal_proposal=a_goal()),
+            AgentDecision(goal_proposal=a_goal()),
+            AgentDecision(call=self.search_call()),
             AgentDecision(call=self.page_call("https://one.example/a")),
             AgentDecision(response="Sixty percent."),
         )
         outcome = self.agent(reasoner).process(
-            conversation("reservoir levels"), RETENTION, 4
+            conversation("reservoir levels"), RETENTION, 5
         )
         capabilities = [
             item.call.capability_id for item in outcome.snapshot.state.attempts
