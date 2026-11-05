@@ -127,7 +127,11 @@ class NativeSessionTests(unittest.TestCase):
         self.assertGreater(final.output["prompt_chars"], 0)
 
     def test_every_call_of_a_session_is_logged_and_the_whole_run_kept(self) -> None:
-        """D-069: on 2026-11-05 a 14-call turn left one usage total and nothing else."""
+        """D-069: on 2026-11-05 a 14-call turn left one usage total and nothing else.
+
+        Output comes from the final envelope only: each message's events carry
+        the count taken when it started (7 here), not what it produced.
+        """
         with self.assertLogs("alx.providers.claude_subscription", "INFO") as logs:
             self.model.complete(request(purpose="interpreting_request"))
             self.model.complete(request(tool_result="goal one"))
@@ -136,16 +140,16 @@ class NativeSessionTests(unittest.TestCase):
         calls = [line for line in lines if line.startswith("Reasoning session call")]
         self.assertEqual(calls, [
             "Reasoning session call 1/3: tool=select_goal capability=None input=3 "
-            "cache_read=1000 cache_write=100 output=7 result_chars=%d"
+            "cache_read=1000 cache_write=100 result_chars=%d"
             % len(json.dumps([{"type": "text", "text": "goal one"}])),
             "Reasoning session call 2/3: tool=call_capability capability=read_mail_message "
-            "input=3 cache_read=2000 cache_write=100 output=7 result_chars=%d"
+            "input=3 cache_read=2000 cache_write=100 result_chars=%d"
             % len(json.dumps([{"type": "text", "text": "mail two"}])),
             "Reasoning session call 3/3: tool=StructuredOutput capability=None input=3 "
-            "cache_read=3000 cache_write=100 output=7 result_chars=None",
+            "cache_read=3000 cache_write=100 result_chars=None",
         ])
         (ended,) = [line for line in lines if line.startswith("Reasoning session ended")]
-        self.assertIn("finished, 3 calls, input=9 cache_read=6000 cache_write=300 output=21",
+        self.assertIn("finished, 3 calls, input=9 cache_read=6000 cache_write=300 output=5",
                       ended)
         (record,) = list(self.records.glob("*/*.jsonl"))
         self.assertIn(f"record={record.parent.name}/{record.name}", ended)
@@ -165,6 +169,7 @@ class NativeSessionTests(unittest.TestCase):
         (ended,) = [item.getMessage() for item in logs.records
                     if item.getMessage().startswith("Reasoning session ended")]
         self.assertTrue(ended.startswith("Reasoning session ended: abandoned, 1 calls"), ended)
+        self.assertIn("output=unknown", ended)
         (record,) = list(self.records.glob("*/*.jsonl"))
         self.assertEqual(json.loads(record.read_text().splitlines()[0])["outcome"], "abandoned")
 

@@ -168,3 +168,17 @@ def test_protocol_describes_bounded_stored_and_live_results():
     ):
         assert obsolete not in protocol
         assert obsolete not in DEFINITION.purpose
+
+
+def test_a_long_string_is_kept_whole_when_the_result_fits():
+    """Review of 2026-11-05: a 2,632-character stdout was cut at 2,000 inside a
+    small result, and she read the rest a second time."""
+    stdout = "line\n" * 526  # 2,630 characters
+    kept = bound_result({"stdout": stdout, "exit_code": 0})
+    assert kept == {"stdout": stdout, "exit_code": 0}
+    assert bound_result(kept) == kept
+    too_big = bound_result({"stdout": "x" * 9_000})
+    assert too_big["stdout"]["original_length"] == 9_000
+    assert len(json.dumps(too_big)) <= RESULT_LIMIT
+    # Long lists are still cut even when they would fit.
+    assert bound_result({"items": list(range(100))})["items"][-1] == {"_omitted_items": 51}

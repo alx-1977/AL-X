@@ -436,6 +436,37 @@ def _memory_proposal_from_data(value: str) -> MemoryProposal:
     )
 
 
+def _matching_records(
+    state: Any, literal: str, limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """The smallest stored objects holding a value that contains `literal`, with paths.
+
+    Literal and case-insensitive. The object holding a matching value is
+    returned whole (an evidence entry, an attempt's result), so what the
+    match sits in is never cut away. Nothing is ranked or summarised.
+    """
+    wanted = literal.casefold()
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def walk(value: Any, path: str, holder: tuple[str, Any] | None) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                # A top-level value stands alone, never the whole goal.
+                walk(child, f"{path}.{key}" if path else str(key),
+                     (path, value) if path else (str(key), {key: child}))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, f"{path}[{index}]", holder)
+        elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            if wanted in str(value).casefold() and holder is not None and holder[0] not in seen:
+                seen.add(holder[0])
+                found.append({"path": holder[0], "record": holder[1]})
+
+    walk(state, "", None)
+    return found[:limit], len(found) > limit
+
+
 @serialized_store
 class SQLiteGoalStore:
     """Small transactional store; it persists facts but never reads their meaning."""
@@ -939,6 +970,7 @@ class SQLiteGoalStore:
 
     def read_history(
         self, *, contains: str | None = None, goal_id: str | None = None, limit: int = 10,
+        match: str | None = None,
     ) -> tuple[dict[str, Any], tuple[ContentProvenance, ...]]:
         """Read retained history using the authoritative stored serializer.
 
@@ -946,9 +978,15 @@ class SQLiteGoalStore:
         including nested context, referents, progress, attempts and evidence.
         Search returns bounded identities; exact or unambiguous prefix id
         reads all stored content. Exact ids take precedence over prefixes.
+        With `match`, an id read returns only the stored records whose text
+        contains it literally (case-insensitive), each with its path in the
+        goal, instead of the whole state.
         """
         if (contains is None) == (goal_id is None):
             raise ValueError("provide exactly one of contains or goal_id")
+        if match is not None and (goal_id is None or not isinstance(match, str)
+                                  or not match.strip()):
+            raise ValueError("match needs a goal_id and must not be blank")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
             raise ValueError("limit must be 1 to 50")
         value = contains if contains is not None else goal_id
@@ -989,8 +1027,13 @@ class SQLiteGoalStore:
                     revision=item.revision,
                     retention_until=_time_to_data(item.retention_until),
                     scope=None if item.scope is None else json.loads(scope_to_storage(item.scope)),
-                    state=_goal_to_data(item.state),
                 )
+                state = _goal_to_data(item.state)
+                if match is None:
+                    record["state"] = state
+                else:
+                    record["matches"], record["matches_truncated"] = _matching_records(
+                        state, match, limit)
             records.append(record)
         return (
             {"goals": records, "truncated": goal_id is None and len(ids) > limit},

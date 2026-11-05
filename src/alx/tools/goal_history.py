@@ -20,11 +20,15 @@ DEFINITION = CapabilityDefinition(
     "defaults to 10, maximum 50. Or provide goal_id (exact or unambiguous prefix) "
     "alone to read that goal's stored state with the same bounded attempt result "
     "summaries; ambiguous prefixes return arguments_unusable. "
+    "With goal_id, match (literal, case-insensitive) returns only the stored records "
+    "that contain that text, each whole with its path in the goal, instead of the "
+    "whole goal; limit applies to them. "
     "Exactly one of query and goal_id is required.",
     StructuredSchema(ValueKind.OBJECT, {
         "query": StructuredSchema(ValueKind.STRING),
         "goal_id": StructuredSchema(ValueKind.STRING),
         "limit": StructuredSchema(ValueKind.INTEGER),
+        "match": StructuredSchema(ValueKind.STRING),
     }, extra_properties=False),
     StructuredSchema(ValueKind.OBJECT, {
         "goals": StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.OBJECT)),
@@ -53,7 +57,7 @@ def build_goal_history_executors(
         try:
             values, sources = store.read_history(
                 contains=arguments.get("query"), goal_id=arguments.get("goal_id"),
-                limit=arguments.get("limit", 10),
+                limit=arguments.get("limit", 10), match=arguments.get("match"),
             )
         except (TypeError, ValueError):
             return failed("arguments_unusable")
