@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -439,31 +439,35 @@ def _memory_proposal_from_data(value: str) -> MemoryProposal:
 def _matching_records(
     state: Any, literal: str, limit: int,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """The smallest stored objects holding a value that contains `literal`, with paths.
+    """Whole stored records holding a value that contains `literal`, with paths.
 
-    Literal and case-insensitive. The object holding a matching value is
-    returned whole (an evidence entry, an attempt's result), so what the
-    match sits in is never cut away. Nothing is ranked or summarised.
+    Literal and case-insensitive. A record is one entry of a top-level
+    collection (an evidence item, a progress note, an attempt), one entry of
+    the context, or a top-level field on its own, so a match never comes back
+    as a fragment of its record or as the whole goal. Nothing is ranked or
+    summarised.
     """
     wanted = literal.casefold()
-    found: list[dict[str, Any]] = []
-    seen: set[str] = set()
 
-    def walk(value: Any, path: str, holder: tuple[str, Any] | None) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                # A top-level value stands alone, never the whole goal.
-                walk(child, f"{path}.{key}" if path else str(key),
-                     (path, value) if path else (str(key), {key: child}))
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                walk(child, f"{path}[{index}]", holder)
-        elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
-            if wanted in str(value).casefold() and holder is not None and holder[0] not in seen:
-                seen.add(holder[0])
-                found.append({"path": holder[0], "record": holder[1]})
+    def contains(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            return any(contains(child) for child in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(contains(child) for child in value)
+        if isinstance(value, bool) or value is None:
+            return False
+        return wanted in str(value).casefold()
 
-    walk(state, "", None)
+    records: list[tuple[str, Any]] = []
+    for key, value in state.items():
+        if isinstance(value, Mapping):
+            records.extend((f"{key}.{name}", {name: child}) for name, child in value.items())
+        elif isinstance(value, (list, tuple)) and any(
+                isinstance(child, (Mapping, list, tuple)) for child in value):
+            records.extend((f"{key}[{index}]", child) for index, child in enumerate(value))
+        else:
+            records.append((str(key), {key: value}))
+    found = [{"path": path, "record": record} for path, record in records if contains(record)]
     return found[:limit], len(found) > limit
 
 
