@@ -134,6 +134,10 @@ from alx.tools.self_diagnosis import (
     DEFINITIONS as SELF_DIAGNOSIS_DEFINITIONS,
     build_self_diagnosis_executors,
 )
+from alx.tools.conversation_history import (
+    DEFINITION as CONVERSATION_HISTORY_DEFINITION,
+    build_conversation_history_executors,
+)
 from alx.tools.goal_history import (
     DEFINITION as GOAL_HISTORY_DEFINITION,
     build_goal_history_executors,
@@ -612,6 +616,12 @@ async def run(repository_root: Path) -> None:
     register((GOAL_HISTORY_DEFINITION,), TraceSubsystem.CORE)
     policies[GOAL_HISTORY_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
     executors.update(build_goal_history_executors(goal_store, current_call_id.get))
+    # Her past conversations, read from the same store the gateway writes.
+    register((CONVERSATION_HISTORY_DEFINITION,), TraceSubsystem.CORE)
+    policies[CONVERSATION_HISTORY_DEFINITION.capability_id] = AuthorityPolicy(
+        frozenset({"self.read"}))
+    executors.update(build_conversation_history_executors(
+        conversation_store, current_call_id.get))
 
     # D-024 Phases 2 and 5. The ledgers and the source are constructed here,
     # once, so the paid path is real rather than something that only exists
@@ -1124,6 +1134,7 @@ async def run(repository_root: Path) -> None:
     conversational_reasoner = build_model_reasoner(
         providers.reasoning, CODE_ROOT,
         on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
+        trace=diagnostics.trace,
     )
     reasoner = OriginSelectedReasoner(
         conversational_reasoner,
@@ -1148,6 +1159,7 @@ async def run(repository_root: Path) -> None:
                 occasion_spend.current_opportunity_id,
             ),
             on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
+            trace=diagnostics.trace,
         ),
         # EX-001 as amended 2026-11-03: the lighter model reasons first, with
         # the same bounds and the same per-occasion spend record.
@@ -1165,6 +1177,7 @@ async def run(repository_root: Path) -> None:
                 occasion_spend.current_opportunity_id,
             ),
             on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
+            trace=diagnostics.trace,
         ),
     )
 

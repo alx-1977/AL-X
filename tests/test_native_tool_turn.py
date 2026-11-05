@@ -302,6 +302,26 @@ class NativeTurnTests(unittest.TestCase):
         self.assertIsNone(window["next_offset"])
         self.assertGreater(window["total_length"], len(body))
 
+    def test_lookups_inside_a_step_are_on_the_trace(self) -> None:
+        """A description or full-result read is traced, though no Core step sees it.
+
+        On 2026-11-05 a turn made sixteen model calls and the trace showed
+        eight: the lookups answered inside a step left no line.
+        """
+        events = []
+        transport = PausingTransport(
+            [tool("describe_capabilities", capability_ids=["read_note", "clean_branch"]),
+             native("n1"), tool("read_full_result", call_id="n1", offset=0)],
+            base_output(response="Read."))
+        core = CoreAgent(self.store, ModelReasoner(transport, "laws", "identity",
+                                                   trace=events.append),
+                         self.dispatch, (READ, CLEAN), clock=lambda: NOW)
+        self.assertEqual(core.process(conversation(), RETENTION, 8).state, CoreState.RESPONDED)
+        lookups = [(event.label, event.reference, event.count) for event in events]
+        self.assertEqual(lookups, [("Read capability details", "read_note,clean_branch", 2),
+                                   ("Read full result", "n1", None)])
+        self.assertTrue(all(event.conversation_id == "c1" for event in events))
+
     def test_a_full_transient_result_is_read_before_its_stored_summary(self) -> None:
         """Second review of #203: a returning plan's full result wins."""
         from alx.core.model_reasoner import _full_result_window

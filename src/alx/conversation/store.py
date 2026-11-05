@@ -97,6 +97,10 @@ class SQLiteConversationStore:
         # cannot stall the asyncio voice transport.
         self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.create_function(
+            "casefold", 1, lambda value: None if value is None else str(value).casefold(),
+            deterministic=True,
+        )
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             self._connection.close()
@@ -275,6 +279,42 @@ class SQLiteConversationStore:
             (reference.mailbox_id, reference.uid_validity, reference.uid),
         ).fetchall()
         return min((datetime.fromisoformat(row[0]) for row in rows), default=None)
+
+    def search_turns(
+        self, *, contains: str | None, conversation_id: str | None,
+        start: datetime, end: datetime, limit: int, at: datetime,
+    ) -> tuple[tuple[ConversationTurn, ...], bool]:
+        """Retained turns in a time window, newest first.
+
+        `contains` is a literal case-insensitive substring of the turn's
+        content; it is matched, never interpreted. Turns whose content has
+        expired, or whose conversation is past retention, are not returned.
+        """
+        for value, name in ((start, "start"), (end, "end"), (at, "at")):
+            _aware(value, name)
+        clauses = [
+            "julianday(c.retention_until) > julianday(?)",
+            "(t.content_expires_at IS NULL OR julianday(t.content_expires_at) > julianday(?))",
+            "julianday(json_extract(t.turn_json, '$[4]')) >= julianday(?)",
+            "julianday(json_extract(t.turn_json, '$[4]')) < julianday(?)",
+        ]
+        parameters: list[object] = [at.isoformat(), at.isoformat(),
+                                    start.isoformat(), end.isoformat()]
+        if contains is not None:
+            clauses.append("instr(casefold(json_extract(t.turn_json, '$[3]')), casefold(?)) > 0")
+            parameters.append(contains)
+        if conversation_id is not None:
+            clauses.append("t.conversation_id = ?")
+            parameters.append(conversation_id)
+        rows = self._connection.execute(
+            "SELECT t.turn_json, t.content_origins, t.content_recorded_at, "
+            "t.content_expires_at, t.mail_references FROM conversation_turns t "
+            "JOIN conversations c ON c.conversation_id = t.conversation_id WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY julianday(json_extract(t.turn_json, '$[4]')) DESC, t.rowid DESC LIMIT ?",
+            (*parameters, limit + 1),
+        ).fetchall()
+        return tuple(_turn_from_row(row) for row in rows[:limit]), len(rows) > limit
 
     def list_conversations(self) -> tuple[ConversationSnapshot, ...]:
         identifiers = self._connection.execute(

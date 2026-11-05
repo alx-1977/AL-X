@@ -2804,3 +2804,14 @@ This grants no authority a single goal update lacks: completion still requires s
   2. A capability result seen live in a session is bounded by the same mechanical summary as a stored one; detail beyond it is read on purpose.
   3. A program waits in the foreground for up to two minutes before it moves to the background, so a short one finishes inside the session that started it.
 - **Boundary.** No Law exception. Nothing interprets what she reads; the bounds are mechanical.
+
+## D-068 — AL/X reads her own past conversations
+
+- **Date:** 2026-11-05
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-05** ("yes", to letting her search past conversations and logging every tool call she makes).
+- **Why.** Friedl asked her about results she had given him that morning. They sat in an earlier conversation: the browser had opened a new one, and her inductance reply had never reached his screen. No capability read earlier conversations, so she made fifteen lookups in her goals and trace (about 424,000 input tokens), then said the values were lost. Eight of her sixteen model calls left no trace line, because lookups answered inside a step were not recorded.
+- **Decision.**
+  1. `read_own_conversations` is a read-only primitive over the conversation store: retained turns from every thread, what Friedl said and what she replied, newest first, optionally narrowed by literal text, one conversation or a time window. Content past its retention is not returned. A goal's audit records only which turns were read.
+  2. A `describe_capabilities` or `read_full_result` lookup answered inside a step is written to her trace like every other step, with the capability ids or call id it read.
+- **Boundary.** No Law exception. The search text is matched literally and never interpreted; the turns go to the Core as evidence. No new authority: the capability needs `self.read`, which she already holds.
