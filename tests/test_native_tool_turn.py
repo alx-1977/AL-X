@@ -302,6 +302,22 @@ class NativeTurnTests(unittest.TestCase):
         self.assertIsNone(window["next_offset"])
         self.assertGreater(window["total_length"], len(body))
 
+    def test_a_full_transient_result_is_read_before_its_stored_summary(self) -> None:
+        """Second review of #203: a returning plan's full result wins."""
+        from alx.core.model_reasoner import _full_result_window
+        call = CapabilityCall("p1", "read_note", {}, None)
+
+        def attempt(values):
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult("p1", "read_note",
+                                                      CapabilityResultState.SUCCEEDED, values))
+        stored = GoalState("g1", Objective("turn:t1", "Read"), (SuccessCriterion("r", "r"),),
+                           attempts=(attempt({"detail": "summary"}),))
+        context = ReasoningContext(stored, conversation().turns, (READ,), conversation_id="c1",
+                                   transient_attempts=(attempt({"detail": "the whole text"}),),
+                                   unfinished_goals=(GoalSummary.of(stored),))
+        self.assertIn("the whole text", json.loads(_full_result_window(context, "p1", 0))["text"])
+
     def test_a_paused_session_settles_its_spend_once_when_it_ends(self) -> None:
         """Review of #203: usage after a pause is never left unaccounted."""
         from unittest import mock

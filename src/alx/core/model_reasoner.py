@@ -2115,8 +2115,10 @@ def _full_result_window(context: ReasoningContext, call_id: Any, offset: Any) ->
             or offset < 0:
         return _result_text({"error": "call_id must be a string and offset a whole number >= 0"})
     goal = context.active_goal
-    attempt = next((item for item in reversed((
-        *context.transient_attempts, *(() if goal is None else goal.attempts)))
+    # The full copy first: a background plan's result is whole among the
+    # transient attempts and only a stored summary on the goal.
+    attempt = next((item for item in (
+        *reversed(context.transient_attempts), *reversed(() if goal is None else goal.attempts))
         if item.call is not None and item.call.call_id == call_id), None)
     if attempt is None or attempt.result is None:
         return _result_text({"call_id": call_id, "error": "no result for this call in this turn"})
