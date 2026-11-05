@@ -65,10 +65,19 @@ def inventory(root, *, exclude=frozenset()):
     result = {}
     total = 0
     entries = 0
-    for path in root.rglob('*'):
-        # Only exact transaction-owned paths and their contents, never a filename pattern.
-        if path in exclude or not exclude.isdisjoint(path.parents):
-            continue
+
+    def walk():
+        # Excluded paths are pruned before they are entered, so an excluded
+        # tree costs nothing and cannot hide work from the entry limit
+        # (review of #208). Only exact paths, never a filename pattern.
+        for directory, folders, files in os.walk(root):
+            here = Path(directory)
+            folders[:] = [name for name in folders if here / name not in exclude]
+            for name in (*folders, *files):
+                if here / name not in exclude:
+                    yield here / name
+
+    for path in walk():
         entries += 1
         if entries > MAX_PROJECT_ENTRIES:
             raise KiCadError('project_too_large')
@@ -83,6 +92,27 @@ def inventory(root, *, exclude=frozenset()):
                 raise KiCadError('project_too_large')
             result[path.relative_to(root).as_posix()] = sha(path)
     return result
+
+
+# KiCad keeps its own automatic save history in this folder at the top of a
+# project, as a git repository. It is KiCad's history, not the design, and its
+# `.git` made every saved project look like a credential path: on 2026-11-05
+# Friedl's Quad Coil project was refused outright. Exactly this one folder at
+# the top of a design is skipped; the credential check stays everywhere else.
+KICAD_LOCAL_HISTORY = '.history'
+
+
+def design_inventory(source, *, exclude=frozenset()):
+    """A design folder's inventory without KiCad's own save history."""
+    return inventory(source, exclude={*exclude, source / KICAD_LOCAL_HISTORY})
+
+
+def _without_local_history(source):
+    """A copytree ignore that leaves out only the design's top-level history."""
+    def ignore(directory, names):
+        return [KICAD_LOCAL_HISTORY] if (
+            Path(directory) == source and KICAD_LOCAL_HISTORY in names) else []
+    return ignore
 
 
 def evidence_bytes(folder):
@@ -650,7 +680,10 @@ class KiCadProvider:
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
             relative = Path(arguments['output_dir'])
-            if relative.is_absolute() or not relative.parts or any(p in ('.', '..') for p in relative.parts):
+            if (relative.is_absolute() or not relative.parts
+                    or any(p in ('.', '..') for p in relative.parts)
+                    # KiCad's own history is never part of the design (review of #208).
+                    or relative.parts[0] == KICAD_LOCAL_HISTORY):
                 raise KiCadError('path_denied')
             source = self._source(meta['source'])
             output = source / relative
@@ -942,15 +975,15 @@ class KiCadProvider:
             raise KiCadError('path_denied')
         if not source.is_dir():
             raise KiCadError('unsupported_project')
-        hashes = inventory(source)
+        hashes = design_inventory(source)
         boards = [name for name in hashes if '/' not in name and name.endswith('.kicad_pcb')]
         if len(boards) != 1:
             raise KiCadError('unsupported_project')
         work_id = uuid.uuid4().hex
         root = self.work_root / work_id
         root.mkdir(parents=True)
-        shutil.copytree(source, root / 'project')
-        if inventory(source) != hashes or inventory(root / 'project') != hashes:
+        shutil.copytree(source, root / 'project', ignore=_without_local_history(source))
+        if design_inventory(source) != hashes or inventory(root / 'project') != hashes:
             raise KiCadError('original_changed')
         meta = {'source': str(source), 'hashes': hashes, 'board': boards[0]}
         (root / 'metadata.json').write_text(json.dumps(meta))
@@ -990,7 +1023,7 @@ class KiCadProvider:
             self._source(source)
             if list(source.rglob('~*.lck')):
                 raise KiCadError('board_open')
-            current = inventory(source, exclude=temporary)
+            current = design_inventory(source, exclude=temporary)
             if current != expected:
                 raise KiCadError('original_changed')
         validate()
