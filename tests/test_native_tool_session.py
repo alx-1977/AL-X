@@ -31,6 +31,19 @@ FAKE_CLI = textwrap.dedent('''\
     args = sys.argv[1:]
     config = json.loads(args[args.index("--mcp-config") + 1])
     allowed = args[args.index("--allowedTools") + 1].split(",")
+    # D-069: the run reports every model call as it happens.
+    output = args.index("--output-format")
+    assert args[output + 1:output + 3] == ["stream-json", "--verbose"], args
+    def emit(event):
+        print(json.dumps(event), flush=True)
+    def assistant(message_id, cache_read, block):
+        usage = {{"input_tokens": 3, "cache_read_input_tokens": cache_read,
+                  "cache_creation_input_tokens": 100, "output_tokens": 7}}
+        # The CLI may split one message over events; both carry its usage.
+        emit({{"type": "assistant", "message": {{"id": message_id, "usage": usage,
+                                                "content": [{{"type": "text", "text": "x"}}]}}}})
+        emit({{"type": "assistant", "message": {{"id": message_id, "usage": usage,
+                                                "content": [block]}}}})
     server = config["mcpServers"]["alx"]
     prompt = sys.stdin.read()
     bridge = subprocess.Popen([server["command"], *server["args"]], stdin=subprocess.PIPE,
@@ -52,13 +65,19 @@ FAKE_CLI = textwrap.dedent('''\
             ("call_capability", {{"call_id": "c2", "capability_id": "read_mail_message",
                                  "arguments_json": "{{}}", "approval_id": None,
                                  "approval_source_reference": None}}))):
+        assistant(f"m{{number}}", 1000 * (number + 1),
+                  {{"type": "tool_use", "name": "mcp__alx__" + name, "input": arguments}})
         result = rpc(10 + number, "tools/call", {{"name": name, "arguments": arguments}})
-        seen.append(result["result"]["content"][0]["text"])
-    print(json.dumps({{"type": "result", "subtype": "success", "is_error": False,
+        text = result["result"]["content"][0]["text"]
+        seen.append(text)
+        emit({{"type": "user", "message": {{"content": [
+            {{"type": "tool_result", "content": [{{"type": "text", "text": text}}]}}]}}}})
+    assistant("m-final", 3000, {{"type": "tool_use", "name": "StructuredOutput", "input": {{}}}})
+    emit({{"type": "result", "subtype": "success", "is_error": False,
                       "structured_output": {{"seen": seen, "prompt_chars": len(prompt),
                                             "tools": names}},
                       "usage": {{"input_tokens": 10, "output_tokens": 5}},
-                      "modelUsage": {{"claude-sonnet-5-5": {{"inputTokens": 10}}}}}}))
+                      "modelUsage": {{"claude-sonnet-5-5": {{"inputTokens": 10}}}}}})
 ''')
 
 
@@ -82,8 +101,10 @@ class NativeSessionTests(unittest.TestCase):
         cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("ANTHROPIC", "CLAUDE"))}
+        self.records = Path(directory.name) / "reasoning-sessions"
         self.model = ClaudeSubscriptionReasoningModel(
-            "claude-sonnet-5-5", 30, executable=str(cli), environment=environment)
+            "claude-sonnet-5-5", 30, executable=str(cli), environment=environment,
+            session_record_dir=self.records)
         self.addCleanup(self.model.abandon_session)
 
     def test_the_session_pauses_on_each_call_and_ends_with_the_decision(self) -> None:
@@ -104,6 +125,67 @@ class NativeSessionTests(unittest.TestCase):
                          [item["name"] for item in native_tools()])
         # The prompt went in once, at the start; results continued the same run.
         self.assertGreater(final.output["prompt_chars"], 0)
+
+    def test_every_call_of_a_session_is_logged_and_the_whole_run_kept(self) -> None:
+        """D-069: on 2026-11-05 a 14-call turn left one usage total and nothing else."""
+        with self.assertLogs("alx.providers.claude_subscription", "INFO") as logs:
+            self.model.complete(request(purpose="interpreting_request"))
+            self.model.complete(request(tool_result="goal one"))
+            self.model.complete(request(tool_result="mail two"))
+        lines = [item.getMessage() for item in logs.records]
+        calls = [line for line in lines if line.startswith("Reasoning session call")]
+        self.assertEqual(calls, [
+            "Reasoning session call 1/3: tool=select_goal capability=None input=3 "
+            "cache_read=1000 cache_write=100 output=7 result_chars=%d"
+            % len(json.dumps([{"type": "text", "text": "goal one"}])),
+            "Reasoning session call 2/3: tool=call_capability capability=read_mail_message "
+            "input=3 cache_read=2000 cache_write=100 output=7 result_chars=%d"
+            % len(json.dumps([{"type": "text", "text": "mail two"}])),
+            "Reasoning session call 3/3: tool=StructuredOutput capability=None input=3 "
+            "cache_read=3000 cache_write=100 output=7 result_chars=None",
+        ])
+        (ended,) = [line for line in lines if line.startswith("Reasoning session ended")]
+        self.assertIn("finished, 3 calls, input=9 cache_read=6000 cache_write=300 output=21",
+                      ended)
+        (record,) = list(self.records.glob("*/*.jsonl"))
+        self.assertIn(f"record={record.parent.name}/{record.name}", ended)
+        header, *events = [json.loads(line) for line in record.read_text().splitlines()]
+        self.assertEqual(header["outcome"], "finished")
+        self.assertEqual(header["system_prompt"], "rules")
+        self.assertEqual(header["user_prompt"], "context")
+        self.assertEqual(header["purpose"], "interpreting_request")
+        self.assertEqual(header["tools"], [item["name"] for item in native_tools()])
+        self.assertIn("mail two", json.dumps(events))
+        self.assertEqual(events[-1]["type"], "result")
+
+    def test_an_abandoned_session_is_recorded_too(self) -> None:
+        with self.assertLogs("alx.providers.claude_subscription", "INFO") as logs:
+            self.model.complete(request())
+            self.model.abandon_session()
+        (ended,) = [item.getMessage() for item in logs.records
+                    if item.getMessage().startswith("Reasoning session ended")]
+        self.assertTrue(ended.startswith("Reasoning session ended: abandoned, 1 calls"), ended)
+        (record,) = list(self.records.glob("*/*.jsonl"))
+        self.assertEqual(json.loads(record.read_text().splitlines()[0])["outcome"], "abandoned")
+
+    def test_records_past_a_week_are_removed(self) -> None:
+        old = self.records / "2020-01-01"
+        old.mkdir(parents=True)
+        (old / "000000-aaaaaaaa.jsonl").write_text("{}\n")
+        keep = self.records / "notes"
+        keep.mkdir()
+        self.model.complete(request())
+        self.model.abandon_session()
+        self.assertFalse(old.exists())
+        self.assertTrue(keep.exists())
+        self.assertEqual(len(list(self.records.glob("2*/*.jsonl"))), 1)
+
+    def test_a_record_that_cannot_be_written_never_fails_the_turn(self) -> None:
+        self.records.write_text("a file where the folder should be")
+        self.model.complete(request())
+        self.model.complete(request(tool_result="goal one"))
+        final = self.model.complete(request(tool_result="mail two"))
+        self.assertEqual(list(final.output["seen"]), ["goal one", "mail two"])
 
     def test_a_result_for_a_lost_session_starts_a_fresh_one(self) -> None:
         self.model.complete(request())

@@ -2815,3 +2815,16 @@ This grants no authority a single goal update lacks: completion still requires s
   1. `read_own_conversations` is a read-only primitive over the conversation store: retained turns from every thread, what Friedl said and what she replied, newest first, optionally narrowed by literal text, one conversation or a time window. Content past its retention is not returned. A goal's audit records only which turns were read.
   2. A `describe_capabilities` or `read_full_result` lookup answered inside a step is written to her trace like every other step, with the capability ids or call id it read.
 - **Boundary.** No Law exception. The search text is matched literally and never interpreted; the turns go to the Core as evidence. No new authority: the capability needs `self.read`, which she already holds.
+
+## D-069 — A full record of every Core session
+
+- **Date:** 2026-11-05
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-05** ("Option 1 … please build in all the debug info we need to diagnose issues … Please implement it and get the Greptile review").
+- **Why.** A Core session reported one usage total when it ended, and nothing about the calls inside it. On 2026-11-05 one question took 14 model calls and about 487,000 input tokens, and nobody could see what she asked for at each call, how much each call read, or what came back. Fixes were chosen without that evidence and did not reduce the cost.
+- **Decision.**
+  1. A Core session runs with the CLI's `stream-json` output, which reports every model call as it happens. The final envelope is unchanged.
+  2. When a session ends, finished, failed, timed out or abandoned, her runtime log gets one line per model call (the tool chosen, the capability id where there is one, fresh, cache-read, cache-written and output tokens, and the size of what came back) and one line for the session's totals. These lines carry no content.
+  3. The session's whole record, its system prompt, its turn context and every event, is kept under `.alx/runtime/reasoning-sessions/` for seven days, then deleted. It can quote conversation and mail content; seven days is inside D-013's thirty.
+  A record that cannot be written loses the record, never the turn.
+- **Boundary.** No Law exception. Nothing reads or acts on what is recorded; it is evidence for Friedl, for the implementer and for her.
