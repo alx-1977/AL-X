@@ -42,6 +42,9 @@ DEFINITION = CapabilityDefinition(
     }, ("turns", "truncated"), extra_properties=False),
     SideEffect.NONE,
     ("arguments_unusable", "unavailable"),
+    # The search text can quote what was said, so a goal's audit keeps the
+    # window and thread only, as it keeps only the ids of the turns read.
+    durable_input_fields=("conversation_id", "from", "to", "limit"),
 )
 
 

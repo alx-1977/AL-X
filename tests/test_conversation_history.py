@@ -95,6 +95,39 @@ class ConversationHistoryTests(unittest.TestCase):
         self.assertEqual([turn["turn_id"] for turn in self.read(query="words").values["turns"]],
                          ["kept"])
 
+    def test_a_goal_audit_keeps_no_search_text(self) -> None:
+        """Review of #204: the query can quote what was said, so it is not saved."""
+        import json
+        from alx.contracts import (
+            CapabilityAttempt, CapabilityAttemptDisposition, GoalState, Objective,
+            ReasoningContext, SuccessCriterion,
+        )
+        from alx.core.model_reasoner import _native_call
+        from alx.goals import SQLiteGoalStore
+        context = ReasoningContext(None, (), (DEFINITION,), conversation_id="c")
+        call, _ = _native_call(context, {
+            "call_id": "r1", "capability_id": READ_OWN_CONVERSATIONS,
+            "arguments_json": json.dumps({"query": "the private words", "limit": 5}),
+            "approval_id": None, "approval_source_reference": None})
+        self.assertEqual(call.arguments["query"], "the private words")
+        self.say("c", "t1", ConversationOrigin.TYPED, "the private words", NOW - timedelta(hours=1))
+        result = build_conversation_history_executors(
+            self.store, lambda: "r1", lambda: NOW)[READ_OWN_CONVERSATIONS](call.arguments)
+        goal = GoalState("g1", Objective("turn:t1", "Find it"), (SuccessCriterion("f", "found"),),
+                         attempts=(CapabilityAttempt(
+                             call, CapabilityAttemptDisposition.EXECUTED, True, result),))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        goals = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3", clock=lambda: NOW)
+        self.addCleanup(goals.close)
+        goals.create(goal, "c", KEEP)
+        stored = goals._connection.execute("SELECT state_json FROM goals").fetchone()[0]
+        self.assertNotIn("private words", stored)
+        self.assertIn('"limit":5', stored.replace(" ", ""))
+        reloaded = goals.load("g1").state.attempts[0]
+        self.assertEqual(dict(reloaded.call.arguments), {"limit": 5})
+        self.assertEqual(list(reloaded.result.values.get("turn_ids", ())), ["t1"])
+
     def test_unusable_arguments_return_to_her(self) -> None:
         for arguments in ({"limit": 0}, {"limit": 51}, {"query": " "}, {"unknown": 1},
                           {"from": NOW.isoformat(), "to": (NOW - timedelta(hours=1)).isoformat()},

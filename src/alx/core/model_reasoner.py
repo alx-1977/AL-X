@@ -2013,9 +2013,12 @@ class ModelReasoner:
             else:
                 call_id = asked.get("call_id")
                 answer = _full_result_window(context, call_id, asked.get("offset"))
-                emit_trace(self._trace, TraceSubsystem.CORE, TraceStatus.COMPLETED,
+                read = "error" not in json.loads(answer)
+                emit_trace(self._trace, TraceSubsystem.CORE,
+                           TraceStatus.COMPLETED if read else TraceStatus.FAILED,
                            "Read full result",
                            reference=_trace_reference([call_id] if isinstance(call_id, str) else []),
+                           reason_code=None if read else "result_unavailable",
                            conversation_id=context.conversation_id)
             completion = self._continue(request, answer)
         self._native_pending = None

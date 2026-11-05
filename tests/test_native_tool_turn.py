@@ -317,10 +317,26 @@ class NativeTurnTests(unittest.TestCase):
                                                    trace=events.append),
                          self.dispatch, (READ, CLEAN), clock=lambda: NOW)
         self.assertEqual(core.process(conversation(), RETENTION, 8).state, CoreState.RESPONDED)
-        lookups = [(event.label, event.reference, event.count) for event in events]
-        self.assertEqual(lookups, [("Read capability details", "read_note,clean_branch", 2),
-                                   ("Read full result", "n1", None)])
+        lookups = [(event.label, event.status.value, event.reference, event.count)
+                   for event in events]
+        self.assertEqual(lookups, [
+            ("Read capability details", "completed", "read_note,clean_branch", 2),
+            ("Read full result", "completed", "n1", None)])
         self.assertTrue(all(event.conversation_id == "c1" for event in events))
+
+    def test_a_failed_full_result_read_is_traced_as_failed(self) -> None:
+        """Review of #204: a read that found nothing must not look done."""
+        events = []
+        transport = PausingTransport(
+            [tool("read_full_result", call_id="never-ran", offset=0),
+             tool("read_full_result", call_id="never-ran", offset=-1)],
+            base_output(response="Nothing there."))
+        core = CoreAgent(self.store, ModelReasoner(transport, "laws", "identity",
+                                                   trace=events.append),
+                         self.dispatch, (READ,), clock=lambda: NOW)
+        self.assertEqual(core.process(conversation(), RETENTION, 8).state, CoreState.RESPONDED)
+        self.assertEqual([(event.status.value, event.reason_code) for event in events],
+                         [("failed", "result_unavailable")] * 2)
 
     def test_a_full_transient_result_is_read_before_its_stored_summary(self) -> None:
         """Second review of #203: a returning plan's full result wins."""
