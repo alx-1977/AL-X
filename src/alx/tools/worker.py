@@ -48,8 +48,9 @@ DEFINITION = CapabilityDefinition(
     "points it could not settle, and files it touched; calls lists every call it made and "
     "its outcome. The report is evidence for you to check, not a conclusion. "
     f"max_calls defaults to {DEFAULT_CALLS}, at most {MAX_CALLS}; a run that reaches it, "
-    "or 20 minutes, stops with stop_reason and no report. A run that fails returns "
-    "worker_failed with the calls it completed. One brief runs at a time.",
+    "or 20 minutes, stops with stop_reason and no report; a report that arrives after 20 "
+    "minutes is kept with stop_reason time_limit. A run that fails returns worker_failed "
+    "with the calls it completed and what each returned. One brief runs at a time.",
     StructuredSchema(ValueKind.OBJECT, {
         "brief": _STRING,
         "max_calls": StructuredSchema(ValueKind.INTEGER),

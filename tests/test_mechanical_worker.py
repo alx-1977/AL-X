@@ -113,6 +113,8 @@ class WorkerLoopTests(unittest.TestCase):
             MechanicalWorker(model, self.dispatch, (RUN,)).run("Edit.", "job", 5)
         self.assertEqual(raised.exception.code, "worker_failed")
         self.assertEqual([c["call_id"] for c in raised.exception.calls], ["job-1"])
+        # What the completed call returned comes back too (second review of #207).
+        self.assertEqual(raised.exception.calls[0]["returned"]["values"]["stdout"], "Z = 44 ohm")
         self.assertEqual(model.abandoned, 1)
         result = build_worker_executors(
             MechanicalWorker(FailsSecond([tool("run_program", {})]), self.dispatch, (RUN,)),
@@ -129,6 +131,13 @@ class WorkerLoopTests(unittest.TestCase):
         self.assertEqual(len(self.dispatched), 1)
         self.assertEqual(len(model.requests), 1)
         self.assertEqual(model.abandoned, 1)
+
+    def test_a_report_after_the_time_limit_is_kept_and_marked_late(self) -> None:
+        model = ScriptedModel([])
+        outcome = MechanicalWorker(model, self.dispatch, (RUN,), max_seconds=-1).run(
+            "Quick.", "job", 5)
+        self.assertEqual((outcome["status"], outcome["stop_reason"]), ("done", "time_limit"))
+        self.assertIsNotNone(outcome["report"])
 
     def test_a_malformed_report_is_a_failure_not_a_result(self) -> None:
         model = ScriptedModel([], final={"status": "maybe"})

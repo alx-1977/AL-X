@@ -166,6 +166,9 @@ class MechanicalWorker:
         )
         started = monotonic()
         calls: list[dict[str, Any]] = []
+        # What each completed call returned, kept for a failure so the work
+        # already done is visible to her, not only that it happened.
+        returned: list[dict[str, Any]] = []
         try:
             completion = self._model.complete(request)
             while completion.tool_use is not None:
@@ -173,6 +176,7 @@ class MechanicalWorker:
                     return self._stop("call_limit", calls)
                 answer, summary = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
                 calls.append(summary)
+                returned.append({**summary, "returned": json.loads(answer)})
                 # Checked after every call, so a long one cannot carry the run
                 # past its bound into another model request (review of #207).
                 if monotonic() - started > self._max_seconds:
@@ -182,11 +186,14 @@ class MechanicalWorker:
             raise
         except Exception as error:  # noqa: BLE001 - reported with what was completed
             self._abandon()
-            raise WorkerError("worker_failed", calls) from error
+            raise WorkerError("worker_failed", returned) from error
         output = _plain(completion.output)
         if not isinstance(output, dict) or output.get("status") not in ("done", "stopped", "blocked"):
-            raise WorkerError("report_malformed", calls)
-        return {"status": output["status"], "stop_reason": None, "report": output, "calls": calls}
+            raise WorkerError("report_malformed", returned)
+        # A report that arrives after the bound is kept, and marked as late.
+        late = monotonic() - started > self._max_seconds
+        return {"status": output["status"], "stop_reason": "time_limit" if late else None,
+                "report": output, "calls": calls}
 
     def _stop(self, reason: str, calls: list[dict[str, Any]]) -> dict[str, Any]:
         self._abandon()
