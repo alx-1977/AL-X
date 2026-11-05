@@ -278,6 +278,70 @@ class NativeTurnTests(unittest.TestCase):
         self.assertEqual(described["not_listed"], ["invented"])
         self.assertEqual(transport.abandoned, 0)
 
+    def test_a_long_result_is_bounded_and_read_in_full_inside_the_session(self) -> None:
+        """Review of #203: a long email must stay readable to the end."""
+        body = "x" * 12_000 + "THE END"
+
+        def long_dispatch(call, _state):
+            self.dispatched.append(call.call_id)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(call.call_id, call.capability_id,
+                                 CapabilityResultState.SUCCEEDED, {"body": body}))
+
+        transport = PausingTransport(
+            [native("n1"), tool("read_full_result", call_id="n1", offset=8000)],
+            base_output(response="Read it all."))
+        core = CoreAgent(self.store, ModelReasoner(transport, "laws", "identity"),
+                         long_dispatch, (READ,), clock=lambda: NOW)
+        outcome = core.process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        bounded, window = transport.results()
+        self.assertEqual(bounded["result_values"]["body"]["original_length"], len(body))
+        self.assertIn('THE END', window["text"])
+        self.assertIsNone(window["next_offset"])
+        self.assertGreater(window["total_length"], len(body))
+
+    def test_a_paused_session_settles_its_spend_once_when_it_ends(self) -> None:
+        """Review of #203: usage after a pause is never left unaccounted."""
+        from unittest import mock
+        authority = mock.Mock()
+        authority.reserve.return_value = "reservation-1"
+        transport = PausingTransport(
+            [tool("describe_capabilities", capability_ids=["read_note"])],
+            base_output(response="Done."))
+        final_usage = {"input_tokens": 900, "output_tokens": 40}
+        original = transport.complete
+
+        def with_usage(request):
+            completion = original(request)
+            if completion.tool_use is None:
+                return ModelCompletion("fake", "fake", completion.output, final_usage)
+            return completion
+        transport.complete = with_usage
+        reasoner = ModelReasoner(transport, "laws", "identity", max_output_tokens=1000,
+                                 max_input_tokens=10**7, spend_authority=authority)
+        context = ReasoningContext(None, conversation().turns, (READ,), conversation_id="c1",
+                                   turn_key="t", step_index=0)
+        decision = reasoner.decide(context)
+        self.assertEqual(decision.response, "Done.")
+        authority.reserve.assert_called_once()
+        authority.settle.assert_called_once_with("reservation-1", final_usage)
+
+    def test_an_abandoned_paused_session_settles_with_usage_unknown(self) -> None:
+        from unittest import mock
+        authority = mock.Mock()
+        authority.reserve.return_value = "reservation-1"
+        transport = PausingTransport([native("n1")], base_output(response="Done."))
+        reasoner = ModelReasoner(transport, "laws", "identity", max_output_tokens=1000,
+                                 max_input_tokens=10**7, spend_authority=authority)
+        context = ReasoningContext(None, conversation().turns, (READ,), conversation_id="c1",
+                                   turn_key="t", step_index=0)
+        reasoner.decide(context)
+        authority.settle.assert_not_called()
+        reasoner.abandon()
+        authority.settle.assert_called_once_with("reservation-1", None)
+
     def test_the_catalogue_lists_one_line_per_capability(self) -> None:
         from alx.core.model_reasoner import _catalogue_payload
         long = CapabilityDefinition(
@@ -330,7 +394,7 @@ class OneProductionPathTests(unittest.TestCase):
         self.assertEqual(sorted(names), sorted(set(names)))
         self.assertEqual(set(names), {"call_capability", "select_goal", "update_goal",
                                       "update_plan", "retrieve_memories", "remember",
-                                      "describe_capabilities"})
+                                      "describe_capabilities", "read_full_result"})
 
 
 class ContinuationBoundaryTests(unittest.TestCase):

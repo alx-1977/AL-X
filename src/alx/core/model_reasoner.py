@@ -342,8 +342,8 @@ older ones are listed by id and objective. Every stored attempt result is a mech
 8,000 characters: long strings use head, original_length and sha256; long lists end
 with an _omitted_items count. read_own_goals returns the same bounded summary, and a
 result arriving in your turn is bounded the same way. When you need detail beyond it,
-read it on purpose: a file with read_reference_file or run_program, a long output
-from its full_output_path.
+read it on purpose: read_full_result gives the rest of a result from this turn, a window
+at a time, and a long program output stays at its full_output_path.
 read_own_goals searches retained goals across conversations by text, or reads a
 goal's stored state by exact id or unambiguous id prefix; it includes finished and unfinished work.
 A goal shows its latest decisions, corrections, progress and evidence; older_*_count says how
@@ -1600,8 +1600,12 @@ UPDATE_PLAN = "update_plan"
 RETRIEVE_MEMORIES = "retrieve_memories"
 REMEMBER = "remember"
 DESCRIBE_CAPABILITIES = "describe_capabilities"
-# Description steps one session may take back to back before something else.
+READ_FULL_RESULT = "read_full_result"
+# Steps the reasoner answers from its own context (D-067), back to back,
+# before the session must do something else.
 MAX_DESCRIPTIONS = 8
+# How much of a full result one read_full_result step returns.
+RESULT_WINDOW = 8_000
 
 
 def _tool(name: str, description: str, schema: Mapping[str, Any]) -> dict[str, Any]:
@@ -1672,6 +1676,14 @@ def native_tools() -> tuple[dict[str, Any], ...]:
         ), _strict_object({
             "capability_ids": {"type": "array", "items": string, "minItems": 1,
                                "maxItems": 12},
+        })),
+        _tool(READ_FULL_RESULT, (
+            "Read the full result of a call from this turn, a window at a time, "
+            "when its bounded summary is not enough: a long email body, a report "
+            "or a file. Start at offset 0 and continue from next_offset."
+        ), _strict_object({
+            "call_id": string,
+            "offset": {"type": "integer", "minimum": 0},
         })),
         _tool(REMEMBER, (
             "Form one or more memories you judge worth keeping. The result says "
@@ -1751,6 +1763,8 @@ class ModelReasoner:
         self._on_request_dispatched = on_request_dispatched
         # D-065: the native step this reasoner's paused session is waiting on.
         self._native_pending: _NativePending | None = None
+        # The spend reservation of a paused session, settled when it ends.
+        self._session_reservation: Any = None
 
     def _spend_for(self, request: ModelRequest):
         """Bound, price, reserve, dispatch and settle one exact request.
@@ -1791,9 +1805,38 @@ class ModelReasoner:
             # reservation stands rather than quietly returning to the pool.
             self._spend_authority.settle(reservation, None)
             raise
+        if getattr(completion, "tool_use", None) is not None:
+            # A paused session reports its usage only when it ends, so its
+            # reservation stays open until then (see `_continue`).
+            self._session_reservation = reservation
+            return completion
         usage = getattr(completion, "usage", None)
         self._spend_authority.settle(reservation, usage)
         return completion
+
+    def _continue(self, request: ModelRequest, result: str):
+        """Continue the paused session, settling its reservation when it ends.
+
+        A session that fails or is abandoned settles with its usage unknown, so
+        the full reservation stands rather than quietly returning to the pool.
+        """
+        if self._session_reservation is not None:
+            preflight = getattr(self._model, "ensure_available", None)
+            if callable(preflight):
+                preflight()
+        try:
+            completion = self._model.complete(replace(request, tool_result=result))
+        except Exception:
+            self._settle_session(None)
+            raise
+        if getattr(completion, "tool_use", None) is None:
+            self._settle_session(getattr(completion, "usage", None))
+        return completion
+
+    def _settle_session(self, usage: Any) -> None:
+        reservation, self._session_reservation = self._session_reservation, None
+        if reservation is not None:
+            self._spend_authority.settle(reservation, usage)
 
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
@@ -1845,6 +1888,7 @@ class ModelReasoner:
     def abandon(self) -> None:
         """Give up a paused native session the Core will not continue."""
         self._native_pending = None
+        self._settle_session(None)
         abandon = getattr(self._model, "abandon_session", None)
         if callable(abandon):
             abandon()
@@ -1935,7 +1979,7 @@ class ModelReasoner:
         if result is not None:
             # D-065: continue the paused session with the outcome. Nothing new
             # is reserved: the session's reservation covers the whole run.
-            completion = self._model.complete(replace(request, tool_result=result))
+            completion = self._continue(request, result)
         else:
             if self._native_pending is not None:
                 self.abandon()
@@ -1943,16 +1987,22 @@ class ModelReasoner:
                 completion = self._model.complete(request)
             else:
                 completion = self._spend_for(request)
-        # A description is read from this context, not done: the session is
-        # answered at once and goes on, without a step of the Core (D-067).
+        # A description or a full result is read from this context, not done:
+        # the session is answered at once and goes on, without a step of the
+        # Core (D-067).
         for _ in range(MAX_DESCRIPTIONS):
-            if completion.tool_use is None or completion.tool_use.get("name") != DESCRIBE_CAPABILITIES:
+            name = None if completion.tool_use is None else completion.tool_use.get("name")
+            if name not in (DESCRIBE_CAPABILITIES, READ_FULL_RESULT):
                 break
-            asked = (completion.tool_use.get("input") or {}).get("capability_ids")
-            ids = [item for item in asked if isinstance(item, str)] if isinstance(
-                asked, (list, tuple)) else []
-            completion = self._model.complete(replace(
-                request, tool_result=_capability_details(context.capabilities, ids)))
+            asked = completion.tool_use.get("input") or {}
+            if name == DESCRIBE_CAPABILITIES:
+                ids = asked.get("capability_ids")
+                answer = _capability_details(context.capabilities, [
+                    item for item in ids if isinstance(item, str)
+                ] if isinstance(ids, (list, tuple)) else [])
+            else:
+                answer = _full_result_window(context, asked.get("call_id"), asked.get("offset"))
+            completion = self._continue(request, answer)
         self._native_pending = None
         if completion.tool_use is not None:
             if not request.tools:
@@ -2003,8 +2053,8 @@ class ModelReasoner:
             return AgentDecision(plan_update=_plan_update(arguments, context))
         if name == RETRIEVE_MEMORIES:
             return AgentDecision(memory_query=_memory_query(arguments))
-        if name == DESCRIBE_CAPABILITIES:
-            raise ValueError("describe_capabilities was asked too many times in a row")
+        if name in (DESCRIBE_CAPABILITIES, READ_FULL_RESULT):
+            raise ValueError(f"{name} was asked too many times in a row")
         if name == REMEMBER:
             proposals = _memory_proposals(arguments.get("memories"), context)
             if not proposals:
@@ -2057,6 +2107,27 @@ class _NativePending:
 
 def _result_text(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, default=str)
+
+
+def _full_result_window(context: ReasoningContext, call_id: Any, offset: Any) -> str:
+    """One window of a call's full result from this turn, as JSON text."""
+    if not isinstance(call_id, str) or isinstance(offset, bool) or not isinstance(offset, int) \
+            or offset < 0:
+        return _result_text({"error": "call_id must be a string and offset a whole number >= 0"})
+    goal = context.active_goal
+    attempt = next((item for item in reversed((
+        *context.transient_attempts, *(() if goal is None else goal.attempts)))
+        if item.call is not None and item.call.call_id == call_id), None)
+    if attempt is None or attempt.result is None:
+        return _result_text({"call_id": call_id, "error": "no result for this call in this turn"})
+    text = json.dumps({"values": _plain(attempt.result.values),
+                       "failure": None if attempt.result.failure is None
+                       else _plain(attempt.result.failure)},
+                      ensure_ascii=False, sort_keys=True, default=str)
+    window = text[offset:offset + RESULT_WINDOW]
+    end = offset + len(window)
+    return _result_text({"call_id": call_id, "offset": offset, "total_length": len(text),
+                         "text": window, "next_offset": end if end < len(text) else None})
 
 
 def _goal_view(goal: GoalState) -> dict[str, Any]:
