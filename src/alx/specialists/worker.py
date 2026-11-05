@@ -117,8 +117,10 @@ def _catalogue(definitions: Sequence[CapabilityDefinition]) -> str:
 class WorkerError(Exception):
     """The worker could not run, or ended without a usable report."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, calls: Sequence[Mapping[str, Any]] = ()) -> None:
         self.code = code
+        # The calls completed before the failure, so none of them is hidden.
+        self.calls = list(calls)
         super().__init__(code)
 
 
@@ -164,20 +166,31 @@ class MechanicalWorker:
         )
         started = monotonic()
         calls: list[dict[str, Any]] = []
-        completion = self._model.complete(request)
-        while completion.tool_use is not None:
-            if len(calls) >= max_calls or monotonic() - started > self._max_seconds:
-                self._abandon()
-                return {"status": "stopped",
-                        "stop_reason": "call_limit" if len(calls) >= max_calls else "time_limit",
-                        "report": None, "calls": calls}
-            answer, summary = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
-            calls.append(summary)
-            completion = self._model.complete(replace(request, tool_result=answer))
+        try:
+            completion = self._model.complete(request)
+            while completion.tool_use is not None:
+                if len(calls) >= max_calls:
+                    return self._stop("call_limit", calls)
+                answer, summary = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
+                calls.append(summary)
+                # Checked after every call, so a long one cannot carry the run
+                # past its bound into another model request (review of #207).
+                if monotonic() - started > self._max_seconds:
+                    return self._stop("time_limit", calls)
+                completion = self._model.complete(replace(request, tool_result=answer))
+        except WorkerError:
+            raise
+        except Exception as error:  # noqa: BLE001 - reported with what was completed
+            self._abandon()
+            raise WorkerError("worker_failed", calls) from error
         output = _plain(completion.output)
         if not isinstance(output, dict) or output.get("status") not in ("done", "stopped", "blocked"):
-            raise WorkerError("report_malformed")
+            raise WorkerError("report_malformed", calls)
         return {"status": output["status"], "stop_reason": None, "report": output, "calls": calls}
+
+    def _stop(self, reason: str, calls: list[dict[str, Any]]) -> dict[str, Any]:
+        self._abandon()
+        return {"status": "stopped", "stop_reason": reason, "report": None, "calls": calls}
 
     def _call(self, tool_use: Mapping[str, Any], call_id: str) -> tuple[str, dict[str, Any]]:
         arguments = tool_use.get("input")

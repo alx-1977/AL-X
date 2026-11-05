@@ -15,11 +15,12 @@ DELEGATE_MECHANICAL_WORK = "delegate_mechanical_work"
 DEFAULT_CALLS = 40
 MAX_CALLS = 80
 
-# D-070: the capabilities the worker may call. Reading, running and checking
-# on her own copies; nothing that sends, spends, merges, writes Friedl's files
-# or changes her own attention.
+# D-070: the capabilities the worker may call. Checks, analyses and edits on
+# her own copies, and reads; nothing that sends, spends, merges, writes
+# Friedl's files or changes her own attention. run_program is not here: it
+# runs any command as Friedl's user, which no fixed limit here can bound
+# (review of #207).
 WORKER_CAPABILITIES = (
-    "run_program",
     "check_kicad_board",
     "edit_kicad_work_copy",
     "read_reference_file",
@@ -37,9 +38,9 @@ _OBJECTS = StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.OB
 DEFINITION = CapabilityDefinition(
     DELEGATE_MECHANICAL_WORK,
     "Hand one piece of mechanical work to your worker, a lighter model with its own small "
-    "context, and get one checked report back. Use it for runs, measurements, checks and "
+    "context, and get one checked report back. Use it for checks, analyses, simulations and "
     "edits on your work copies that would otherwise take you many steps; keep judgement for "
-    "yourself. Write the brief as you would for a careful technician: what to run or measure, "
+    "yourself. It cannot run general programs. Write the brief as you would for a careful technician: what to run or measure, "
     "on which of your copies, what counts as a checked result, and when to stop. The worker "
     "can call only " + ", ".join(WORKER_CAPABILITIES) + ", through the same safety gate as "
     "you, with no approvals: it cannot send, spend, merge or change Friedl's files. It "
@@ -47,7 +48,8 @@ DEFINITION = CapabilityDefinition(
     "points it could not settle, and files it touched; calls lists every call it made and "
     "its outcome. The report is evidence for you to check, not a conclusion. "
     f"max_calls defaults to {DEFAULT_CALLS}, at most {MAX_CALLS}; a run that reaches it, "
-    "or 20 minutes, stops with stop_reason and no report. One brief runs at a time.",
+    "or 20 minutes, stops with stop_reason and no report. A run that fails returns "
+    "worker_failed with the calls it completed. One brief runs at a time.",
     StructuredSchema(ValueKind.OBJECT, {
         "brief": _STRING,
         "max_calls": StructuredSchema(ValueKind.INTEGER),
@@ -58,7 +60,7 @@ DEFINITION = CapabilityDefinition(
         "report": StructuredSchema(ValueKind.OBJECT),
         "calls": _OBJECTS,
     }, ("status", "calls"), extra_properties=False),
-    # It can run programs and edit her work copies through the worker.
+    # It edits her work copies through the worker.
     SideEffect.EFFECTFUL,
     ("arguments_unusable", "worker_busy", "worker_failed"),
 )
@@ -71,9 +73,14 @@ def build_worker_executors(
         # Taken before the worker's own calls rebind the current call.
         call_id = call_id_source()
 
-        def failed(code: str) -> CapabilityResult:
+        def failed(code: str, calls: Any = None) -> CapabilityResult:
+            failure: dict[str, Any] = {"code": code}
+            if calls:
+                # What the worker completed before it failed, so she can see
+                # it before deciding what to do next.
+                failure["calls"] = calls
             return CapabilityResult(call_id, DELEGATE_MECHANICAL_WORK,
-                                    CapabilityResultState.FAILED, failure={"code": code})
+                                    CapabilityResultState.FAILED, failure=failure)
 
         brief = arguments.get("brief")
         max_calls = arguments.get("max_calls", DEFAULT_CALLS)
@@ -83,7 +90,8 @@ def build_worker_executors(
         try:
             outcome = worker.run(brief, call_id, max_calls)
         except WorkerError as error:
-            return failed("worker_busy" if error.code == "worker_busy" else "worker_failed")
+            return failed("worker_busy" if error.code == "worker_busy" else "worker_failed",
+                          error.calls)
         except Exception:  # noqa: BLE001 - a provider failure is evidence for the Core
             return failed("worker_failed")
         values = {"status": outcome["status"], "calls": outcome["calls"]}

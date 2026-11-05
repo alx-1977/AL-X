@@ -101,6 +101,35 @@ class WorkerLoopTests(unittest.TestCase):
         self.assertEqual(len(self.dispatched), 2)
         self.assertEqual(model.abandoned, 1)
 
+    def test_a_failure_after_completed_calls_returns_them(self) -> None:
+        """Review of #207: an edit done before a timeout must not be hidden."""
+        class FailsSecond(ScriptedModel):
+            def complete(self, request):
+                if request.tool_result is not None:
+                    raise RuntimeError("reasoning_timeout")
+                return super().complete(request)
+        model = FailsSecond([tool("run_program", {})])
+        with self.assertRaises(WorkerError) as raised:
+            MechanicalWorker(model, self.dispatch, (RUN,)).run("Edit.", "job", 5)
+        self.assertEqual(raised.exception.code, "worker_failed")
+        self.assertEqual([c["call_id"] for c in raised.exception.calls], ["job-1"])
+        self.assertEqual(model.abandoned, 1)
+        result = build_worker_executors(
+            MechanicalWorker(FailsSecond([tool("run_program", {})]), self.dispatch, (RUN,)),
+            lambda: "d")[DELEGATE_MECHANICAL_WORK]({"brief": "Edit."})
+        self.assertEqual(result.failure["code"], "worker_failed")
+        self.assertEqual([c["call_id"] for c in result.failure["calls"]], ["d-1"])
+
+    def test_the_time_limit_is_checked_after_every_call(self) -> None:
+        """Review of #207: a long call must not carry the run into another request."""
+        model = ScriptedModel([tool("run_program", {}), tool("run_program", {})])
+        outcome = MechanicalWorker(model, self.dispatch, (RUN,), max_seconds=-1).run(
+            "Slow.", "job", 5)
+        self.assertEqual((outcome["status"], outcome["stop_reason"]), ("stopped", "time_limit"))
+        self.assertEqual(len(self.dispatched), 1)
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(model.abandoned, 1)
+
     def test_a_malformed_report_is_a_failure_not_a_result(self) -> None:
         model = ScriptedModel([], final={"status": "maybe"})
         with self.assertRaises(WorkerError):
@@ -184,7 +213,9 @@ class DelegateCapabilityTests(unittest.TestCase):
             "export_kicad_manufacturing", "flash_bench_reader_usb", DELEGATE_MECHANICAL_WORK,
         }
         self.assertFalse(forbidden & set(WORKER_CAPABILITIES))
-        self.assertIn(program.RUN_PROGRAM, WORKER_CAPABILITIES)
+        # Review of #207: run_program runs any command as Friedl's user, so
+        # no fixed list could bound what the worker did with it.
+        self.assertNotIn(program.RUN_PROGRAM, WORKER_CAPABILITIES)
 
     def test_the_runtime_builds_one_worker_through_her_broker(self) -> None:
         source = (ROOT / "src/alx/bootstrap/live_voice.py").read_text(encoding="utf-8")
