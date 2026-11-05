@@ -2825,6 +2825,6 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Decision.**
   1. A Core session runs with the CLI's `stream-json` output, which reports every model call as it happens. The final envelope is unchanged.
   2. When a session ends, finished, failed, timed out or abandoned, her runtime log gets one line per model call (the tool chosen, the capability id where there is one, fresh, cache-read, cache-written and output tokens, and the size of what came back) and one line for the session's totals. These lines carry no content.
-  3. The session's whole record, its system prompt, its turn context and every event, is kept under `.alx/runtime/reasoning-sessions/` for seven days, then deleted. It can quote conversation and mail content; seven days is inside D-013's thirty.
+  3. The session's whole record, its system prompt, its turn context and every event, is kept under `.alx/runtime/reasoning-sessions/` for seven days from when it was written, then deleted. Records past their time are removed at startup, hourly while the runtime runs, and before each new record, so a quiet week does not keep them. It can quote conversation and mail content; seven days is inside D-013's thirty.
   A record that cannot be written loses the record, never the turn.
 - **Boundary.** No Law exception. Nothing reads or acts on what is recorded; it is evidence for Friedl, for the implementer and for her.

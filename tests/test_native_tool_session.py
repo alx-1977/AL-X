@@ -168,17 +168,65 @@ class NativeSessionTests(unittest.TestCase):
         (record,) = list(self.records.glob("*/*.jsonl"))
         self.assertEqual(json.loads(record.read_text().splitlines()[0])["outcome"], "abandoned")
 
-    def test_records_past_a_week_are_removed(self) -> None:
+    def test_records_past_a_week_are_removed_by_their_own_time(self) -> None:
+        """Review of #205: judged per file, not by its day's folder."""
+        import time
+        from alx.providers.claude_subscription import (
+            SESSION_RECORD_DAYS, _prune_session_records)
+        day = self.records / "2026-11-05"
+        day.mkdir(parents=True)
+        stale, fresh = day / "000000-aaaaaaaa.jsonl", day / "000001-bbbbbbbb.jsonl"
+        for record in (stale, fresh):
+            record.write_text("{}\n")
+        now = time.time()
+        os.utime(stale, (now, now - SESSION_RECORD_DAYS * 86400 - 60))
+        os.utime(fresh, (now, now - SESSION_RECORD_DAYS * 86400 + 60))
+        _prune_session_records(self.records, now)
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
+        os.utime(fresh, (now, now - SESSION_RECORD_DAYS * 86400 - 60))
+        _prune_session_records(self.records, now)
+        self.assertFalse(day.exists())
+
+    def test_old_records_go_at_startup_without_any_new_session(self) -> None:
+        """Review of #205: a quiet week must not keep them."""
         old = self.records / "2020-01-01"
         old.mkdir(parents=True)
-        (old / "000000-aaaaaaaa.jsonl").write_text("{}\n")
-        keep = self.records / "notes"
-        keep.mkdir()
-        self.model.complete(request())
-        self.model.abandon_session()
+        record = old / "000000-aaaaaaaa.jsonl"
+        record.write_text("{}\n")
+        os.utime(record, (0, 0))
+        ClaudeSubscriptionReasoningModel("claude-sonnet-5-5", 30, session_record_dir=self.records)
         self.assertFalse(old.exists())
-        self.assertTrue(keep.exists())
-        self.assertEqual(len(list(self.records.glob("2*/*.jsonl"))), 1)
+
+    def test_the_sweeper_keeps_removing_while_the_runtime_runs(self) -> None:
+        from unittest import mock
+        from alx.providers import claude_subscription as module
+        with mock.patch.object(module, "SESSION_RECORD_SWEEP_SECONDS", 0.05), \
+                mock.patch.object(module, "_SWEPT", set()):
+            ClaudeSubscriptionReasoningModel("claude-sonnet-5-5", 30,
+                                             session_record_dir=self.records)
+            old = self.records / "2020-01-01"
+            old.mkdir(parents=True)
+            record = old / "000000-aaaaaaaa.jsonl"
+            record.write_text("{}\n")
+            os.utime(record, (0, 0))
+            import time
+            deadline = time.monotonic() + 5
+            while old.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+        self.assertFalse(old.exists())
+
+    def test_a_failed_write_still_removes_old_records(self) -> None:
+        from unittest import mock
+        from alx.providers import claude_subscription as module
+        old = self.records / "2020-01-01"
+        old.mkdir(parents=True)
+        record = old / "000000-aaaaaaaa.jsonl"
+        record.write_text("{}\n")
+        os.utime(record, (0, 0))
+        with mock.patch("builtins.open", side_effect=OSError("disk full")):
+            self.assertIsNone(module._write_session_record(self.records, {}, "{}"))
+        self.assertFalse(old.exists())
 
     def test_a_record_that_cannot_be_written_never_fails_the_turn(self) -> None:
         self.records.write_text("a file where the folder should be")

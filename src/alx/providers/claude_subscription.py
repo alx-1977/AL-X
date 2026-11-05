@@ -357,13 +357,63 @@ def _session_calls(events: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return calls
 
 
+# How often records past their time are looked for while the runtime runs, so
+# a quiet week does not keep them alive.
+SESSION_RECORD_SWEEP_SECONDS = 3600
+
+
+def _prune_session_records(directory: Path, now: float | None = None) -> None:
+    """Delete every record older than SESSION_RECORD_DAYS, by its own time.
+
+    Each file is judged by when it was written, not by its day's folder, and
+    a day's folder goes once it is empty. Best effort, never raised.
+    """
+    import time
+    cutoff = (time.time() if now is None else now) - SESSION_RECORD_DAYS * 86400
+    try:
+        folders = [item for item in directory.iterdir() if item.is_dir()]
+    except OSError:
+        return
+    for folder in folders:
+        try:
+            for record in folder.glob("*.jsonl"):
+                if record.stat().st_mtime < cutoff:
+                    record.unlink()
+            if not any(folder.iterdir()):
+                folder.rmdir()
+        except OSError:
+            continue
+
+
+_SWEPT: set[Path] = set()
+_SWEPT_LOCK = Lock()
+
+
+def _start_record_sweeper(directory: Path) -> None:
+    """Prune now, and start one hourly sweeper per directory per process."""
+    import threading
+    _prune_session_records(directory)
+    with _SWEPT_LOCK:
+        if directory in _SWEPT:
+            return
+        _SWEPT.add(directory)
+
+    def sweep() -> None:
+        stop = threading.Event()
+        while not stop.wait(SESSION_RECORD_SWEEP_SECONDS):
+            _prune_session_records(directory)
+
+    threading.Thread(target=sweep, name="alx-session-record-sweeper", daemon=True).start()
+
+
 def _write_session_record(directory: Path, header: Mapping[str, Any], stdout: str) -> str | None:
-    """Keep a session's whole record, and drop records past their time.
+    """Keep a session's whole record, after dropping records past their time.
 
     Best effort: a record that cannot be written loses the record, never the
-    turn it describes.
+    turn it describes, and never the clean-up.
     """
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
+    _prune_session_records(directory)
     try:
         now = datetime.now(UTC)
         folder = directory / now.strftime("%Y-%m-%d")
@@ -372,10 +422,6 @@ def _write_session_record(directory: Path, header: Mapping[str, Any], stdout: st
         with open(folder / name, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(header, ensure_ascii=False) + "\n")
             handle.write(stdout if stdout.endswith("\n") or not stdout else stdout + "\n")
-        oldest = (now - timedelta(days=SESSION_RECORD_DAYS)).strftime("%Y-%m-%d")
-        for item in directory.iterdir():
-            if item.is_dir() and len(item.name) == 10 and item.name < oldest:
-                shutil.rmtree(item, ignore_errors=True)
         return f"{folder.name}/{name}"
     except OSError as error:
         LOGGER.warning("Reasoning session record not written: %s", type(error).__name__)
@@ -620,6 +666,10 @@ class ClaudeSubscriptionReasoningModel:
         # D-069: where each native session's full record is kept, if anywhere.
         self._session_record_dir = (
             None if session_record_dir is None else Path(session_record_dir))
+        if self._session_record_dir is not None:
+            # At startup, then hourly for as long as the runtime runs, so
+            # records go on time whether or not sessions are being written.
+            _start_record_sweeper(self._session_record_dir)
 
     def child_environment(self) -> dict[str, str]:
         """The environment the CLI is given: the subscription, never a key.
