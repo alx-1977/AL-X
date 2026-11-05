@@ -11,6 +11,7 @@ from typing import Any
 from alx.contracts.continuity import AutonomousSpendAuthority
 from alx.contracts.cognition import AutonomousRequestUnbounded
 from alx.contracts.models import input_token_upper_bound
+from alx.contracts.result_summary import bound_result
 from alx.contracts.mail import MailReference
 from alx.contracts import (
     completion_supported_criteria,
@@ -63,8 +64,9 @@ Interpret the continuous conversation and the optional active goal. You act thro
 your tools, one step after another, as many as the work needs: call_capability calls
 a capability from the catalogue, select_goal works under a goal and shows its full
 state, update_goal proposes a goal mutation or creates a goal, update_plan installs or
-answers an execution plan, retrieve_memories retrieves memories, and remember forms
-them. Each tool's result says what the runtime did with the step, and a refused step
+answers an execution plan, retrieve_memories retrieves memories, remember forms
+them, and describe_capabilities shows a catalogue capability's full input, result
+fields and failure codes: the catalogue lists each in one line. Each tool's result says what the runtime did with the step, and a refused step
 returns the reason. The context below is what you were given at the start of the turn;
 it is not shown again, so what a step changes reaches you in that step's result. End
 the turn with one decision: one authoritative response or one silent completion.
@@ -338,8 +340,10 @@ most recent completion first, bounded by count. The two most recent carry their 
 their latest progress, decisions and evidence, with attempts listed without their results;
 older ones are listed by id and objective. Every stored attempt result is a mechanical summary bounded to
 8,000 characters: long strings use head, original_length and sha256; long lists end
-with an _omitted_items count. read_own_goals returns the same bounded summary.
-A live result is seen whole only on the turn it arrives.
+with an _omitted_items count. read_own_goals returns the same bounded summary, and a
+result arriving in your turn is bounded the same way. When you need detail beyond it,
+read it on purpose: a file with read_reference_file or run_program, a long output
+from its full_output_path.
 read_own_goals searches retained goals across conversations by text, or reads a
 goal's stored state by exact id or unambiguous id prefix; it includes finished and unfinished work.
 A goal shows its latest decisions, corrections, progress and evidence; older_*_count says how
@@ -681,10 +685,8 @@ def _state_payload(
                 "result_state": None if item.result is None else item.result.state.value,
                 # Writes retain live observations for this turn; subsequent
                 # loads contain the store's bounded durable summaries.
-                "result_values": (
-                    None if item.result is None or finished
-                    else _plain(item.result.values)),
-                "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
+                "result_values": None if finished else _live_result(item)[0],
+                "failure": _live_result(item)[1],
             }
             for item in recent_attempts
         ],
@@ -773,6 +775,21 @@ def _result_fields(schema: StructuredSchema) -> Any:
     return schema.kind.value
 
 
+def _live_result(item: Any) -> tuple[Any, Any]:
+    """A result's values and failure, bounded as the goal store bounds them.
+
+    A live result was shown whole for the rest of its turn, and every later
+    step of the session re-read it: a DRC report or a file read was paid for
+    again on every step (D-067). Detail beyond the bound is read on purpose.
+    """
+    if item.result is None:
+        return None, None
+    bounded = bound_result({"values": _plain(item.result.values),
+                            "failure": None if item.result.failure is None
+                            else _plain(item.result.failure)})
+    return bounded.get("values"), bounded.get("failure")
+
+
 def _attempt_is_citable(item: Any) -> bool:
     """Whether this attempt may be offered as an `attempt:<id>` source.
 
@@ -820,27 +837,34 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
                                  else item.repeated_recorded_at.isoformat()),
         "repeated_reason_code": item.repeated_reason_code,
         "result_state": None if item.result is None else item.result.state.value,
-        "result_values": None if item.result is None else _plain(item.result.values),
-        "failure": None if item.result is None or item.result.failure is None else _plain(item.result.failure),
+        "result_values": _live_result(item)[0],
+        "failure": _live_result(item)[1],
     }
 
 
+def _one_line(purpose: str) -> str:
+    """A capability's purpose up to its first sentence, bounded."""
+    text = " ".join(purpose.split())
+    for index, character in enumerate(text):
+        if character in ".;" and (index + 1 == len(text) or text[index + 1].isspace()):
+            text = text[:index + 1]
+            break
+    return text if len(text) <= 200 else text[:197] + "..."
+
+
 def _catalogue_payload(capabilities: Sequence[Any]) -> str:
-    """Serialise the capability catalogue on its own.
+    """Serialise the capability catalogue on its own, one line per capability.
 
-    The catalogue is identical between calls, but it used to sit in the same
-    message as the goal and conversation, which change constantly. A cache only
-    reuses an unchanged prefix, so anything volatile in front of the catalogue
-    stopped it from ever being reused. It is now its own stable message.
+    It is its own stable message, so a cache reuses it between calls. It
+    carries what she needs to choose: the exact id, what it is for, and its
+    effect class. The full input, result and failure codes come from the
+    describe_capabilities step when she wants them (D-067): sent in full on
+    every step, they were over a third of what each step re-read.
 
-    The payload states what it is. It used to arrive as a bare object whose
-    meaning had to be inferred, and on 2026-09-10 the Core told Friedl it could
-    not find the delete capability on a step where that exact id was in this
-    list. Nothing had said that these ids are exact, or that their presence
-    means available. Both facts are now carried by the message itself.
+    The payload states what it is. On 2026-09-10 the Core told Friedl it could
+    not find the delete capability on a step where that exact id was listed,
+    so the message says the ids are exact and that listed means available.
     """
-    shared = _shared_failure_codes(capabilities)
-    code_sets = _failure_code_sets(capabilities, shared)
     return json.dumps(
         {
             "catalogue_semantics": (
@@ -849,28 +873,51 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
                 "Every capability listed here is available now, so none of them "
                 "may be described as missing, unfindable or inaccessible. A "
                 "capability not listed here does not exist and must not be "
-                "invented."
+                "invented. describe_capabilities gives any listed capability's "
+                "full purpose, input, result fields and failure codes."
             ),
             "capabilities": [
                 {
                     "id": item.capability_id,
-                    "purpose": item.purpose,
+                    "purpose": _one_line(item.purpose),
                     "side_effect": item.side_effect.value,
-                    "plan_observation": item.plan_observation,
-                    **_failure_code_payload(item, shared, code_sets),
-                    "input_schema": _capability_schema_payload(item.input_schema),
-                    "result_fields": _result_fields(item.output_schema),
+                    **({"plan_observation": True} if item.plan_observation else {}),
                 }
                 for item in capabilities
             ],
-            # Most capabilities repeat the same failure codes, so they are
-            # stated once and each capability lists only what it adds.
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _capability_details(capabilities: Sequence[Any], ids: Sequence[str]) -> str:
+    """The full entries of the listed capabilities she asked about."""
+    shared = _shared_failure_codes(capabilities)
+    code_sets = _failure_code_sets(capabilities, shared)
+    wanted = list(dict.fromkeys(ids))
+    by_id = {item.capability_id: item for item in capabilities}
+    found = [by_id[item] for item in wanted if item in by_id]
+    entries = [
+        {
+            "id": item.capability_id,
+            "purpose": item.purpose,
+            "side_effect": item.side_effect.value,
+            "plan_observation": item.plan_observation,
+            **_failure_code_payload(item, shared, code_sets),
+            "input_schema": _capability_schema_payload(item.input_schema),
+            "result_fields": _result_fields(item.output_schema),
+        }
+        for item in found
+    ]
+    used_sets = {entry["failure_code_set"] for entry in entries if "failure_code_set" in entry}
+    return json.dumps(
+        {
+            "capabilities": entries,
+            "not_listed": [item for item in wanted if item not in by_id],
             "shared_failure_codes": sorted(shared),
-            # A provider's capabilities repeat that provider's codes in full.
-            # Each such set is stated once; a capability names the set it
-            # carries and lists only the codes it adds beyond it.
             "failure_code_sets": {
-                name: sorted(codes) for codes, name in code_sets.items()
+                name: sorted(codes) for codes, name in code_sets.items() if name in used_sets
             },
         },
         separators=(",", ":"),
@@ -1552,6 +1599,9 @@ UPDATE_GOAL = "update_goal"
 UPDATE_PLAN = "update_plan"
 RETRIEVE_MEMORIES = "retrieve_memories"
 REMEMBER = "remember"
+DESCRIBE_CAPABILITIES = "describe_capabilities"
+# Description steps one session may take back to back before something else.
+MAX_DESCRIPTIONS = 8
 
 
 def _tool(name: str, description: str, schema: Mapping[str, Any]) -> dict[str, Any]:
@@ -1615,6 +1665,14 @@ def native_tools() -> tuple[dict[str, Any], ...]:
             "Retrieve memories you formed earlier. The result holds what it found "
             "that this turn had not already retrieved."
         ), parts["memory_query"]),
+        _tool(DESCRIBE_CAPABILITIES, (
+            "Show the full purpose, input, result fields and failure codes of "
+            "capabilities from your catalogue. Read one before you first call it "
+            "in a turn unless you already know its exact input."
+        ), _strict_object({
+            "capability_ids": {"type": "array", "items": string, "minItems": 1,
+                               "maxItems": 12},
+        })),
         _tool(REMEMBER, (
             "Form one or more memories you judge worth keeping. The result says "
             "whether they were stored."
@@ -1885,6 +1943,16 @@ class ModelReasoner:
                 completion = self._model.complete(request)
             else:
                 completion = self._spend_for(request)
+        # A description is read from this context, not done: the session is
+        # answered at once and goes on, without a step of the Core (D-067).
+        for _ in range(MAX_DESCRIPTIONS):
+            if completion.tool_use is None or completion.tool_use.get("name") != DESCRIBE_CAPABILITIES:
+                break
+            asked = (completion.tool_use.get("input") or {}).get("capability_ids")
+            ids = [item for item in asked if isinstance(item, str)] if isinstance(
+                asked, (list, tuple)) else []
+            completion = self._model.complete(replace(
+                request, tool_result=_capability_details(context.capabilities, ids)))
         self._native_pending = None
         if completion.tool_use is not None:
             if not request.tools:
@@ -1935,6 +2003,8 @@ class ModelReasoner:
             return AgentDecision(plan_update=_plan_update(arguments, context))
         if name == RETRIEVE_MEMORIES:
             return AgentDecision(memory_query=_memory_query(arguments))
+        if name == DESCRIBE_CAPABILITIES:
+            raise ValueError("describe_capabilities was asked too many times in a row")
         if name == REMEMBER:
             proposals = _memory_proposals(arguments.get("memories"), context)
             if not proposals:

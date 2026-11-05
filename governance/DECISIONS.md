@@ -2792,3 +2792,15 @@ This grants no authority a single goal update lacks: completion still requires s
   Ambiguous geometry, a second route between a port's ends, and copper of another net touching a coil return `needs_judgement`.
 - **Validation.** FastHenry reproduces Grover's square loop within 2%. On the RoomReader V2 Quad Coil it gave 1.815, 1.828, 1.809 and 1.535 µH, within 1% of an independent calculation.
 - **Boundary.** No Law exception; laws and identity remain unchanged.
+
+## D-067 — A lean Core context
+
+- **Date:** 2026-11-05
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-05.** After AL/X used her Claude allowance on one board's clean-up (about 22 million tokens in a morning, against 7–9 million on a normal day), Friedl stopped her and asked for the usage to come down first: "I think the way you work here is what we should aim for", meaning the way the implementing model's own context is handled.
+- **Why.** Her smallest step re-read about 59,000 tokens, of which the capability catalogue was about 21,700. Every step of a session re-reads everything before it, so 23 long sessions used 73% of the morning. A program running longer than one second was sent to the background, and each one finishing started a fresh full session: 41 that morning.
+- **Decision.**
+  1. The catalogue lists each capability by id, one-line purpose and effect class. Its full input, result and failure codes come from a native step, `describe_capabilities`, when she wants them. The listing remains the authoritative namespace.
+  2. A capability result seen live in a session is bounded by the same mechanical summary as a stored one; detail beyond it is read on purpose.
+  3. A program waits in the foreground for up to two minutes before it moves to the background, so a short one finishes inside the session that started it.
+- **Boundary.** No Law exception. Nothing interprets what she reads; the bounds are mechanical.

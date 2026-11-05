@@ -539,7 +539,7 @@ class FinishedHistoryTests(unittest.TestCase):
 
     def test_a_large_result_saved_this_turn_reaches_the_next_step_whole(self):
         """Greptile on PR 163: goal-bound results were capped before she read them."""
-        from alx.goals.result_summary import RESULT_LIMIT
+        from alx.contracts.result_summary import RESULT_LIMIT
         big = replace(shipment("big"), context={"notes": "x" * (RESULT_LIMIT + 1000)})
         self.store.create(big, "c1", RETENTION)
         current = [None]

@@ -22,7 +22,7 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.core.model_reasoner import (  # noqa: E402
     _capability_schema_payload,
-    _catalogue_payload,
+    _capability_details,
     _failure_codes,
     _result_fields,
     _shared_failure_codes,
@@ -155,7 +155,9 @@ class FailureCodeSetTests(unittest.TestCase):
             + tuple(CONTINUITY_DEFINITIONS) + tuple(MAIL)
             + tuple(XERO_DEFINITIONS) + tuple(DHL_DEFINITIONS)
         )
-        self.payload = json.loads(_catalogue_payload(self.definitions))
+        # Full entries come from describe_capabilities (D-067).
+        self.payload = json.loads(_capability_details(
+            self.definitions, [item.capability_id for item in self.definitions]))
 
     def test_every_capability_reconstructs_its_exact_failure_codes(self) -> None:
         declared = {item.capability_id: item for item in self.definitions}

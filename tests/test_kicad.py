@@ -18,7 +18,7 @@ from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.config.settings import KiCadSettings, ConfigurationError
 from alx.contracts import (Approval, ApprovalScope, ApprovalLifecycle, CapabilityCall,
                            CapabilityResultState, SideEffect)
-from alx.core.model_reasoner import _catalogue_payload
+from alx.core.model_reasoner import _capability_details, _catalogue_payload
 from alx.providers.coding_process import kicad_containment_available as REAL_CONTAINMENT, run_kicad_cli
 from alx.providers.kicad import KiCadProvider, KiCadError, inventory, board_facts, structural_diff
 from alx.safety import AuthorityContext, SafetyGate
@@ -166,7 +166,8 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(live.count('kicad_runtime = build_kicad_runtime('), 1)
 
     def test_write_back_catalogue_describes_partial_failure_recovery(self):
-        payload = json.loads(_catalogue_payload(self.runtime.definitions))
+        payload = json.loads(_capability_details(self.runtime.definitions,
+                                                 ['write_back_kicad_board']))
         description = next(d['purpose'] for d in payload['capabilities']
                            if d['id'] == 'write_back_kicad_board')
         self.assertNotIn('rolls back on failure', description)

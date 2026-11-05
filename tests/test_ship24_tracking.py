@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.bootstrap.ship24 import build_ship24_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState, SideEffect  # noqa: E402
-from alx.core.model_reasoner import _catalogue_payload  # noqa: E402
+from alx.core.model_reasoner import _capability_details  # noqa: E402
 from alx.providers.ship24 import Ship24Provider  # noqa: E402
 from alx.tools.ship24 import DEFINITION, TRACK_SHIPMENT  # noqa: E402
 
@@ -54,7 +54,7 @@ class Ship24TrackingTests(unittest.TestCase):
         self.assertIn("courier_code", DEFINITION.input_schema.properties)
         self.assertIn("events", DEFINITION.output_schema.properties)
         self.assertIn("tracking_not_found", DEFINITION.possible_failure_codes)
-        catalogue = json.loads(_catalogue_payload(self.runtime.definitions))
+        catalogue = json.loads(_capability_details(self.runtime.definitions, [TRACK_SHIPMENT]))
         entry = catalogue["capabilities"][0]
         self.assertEqual(entry["id"], TRACK_SHIPMENT)
         self.assertEqual(entry["side_effect"], "effectful")

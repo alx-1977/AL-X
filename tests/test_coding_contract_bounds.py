@@ -19,12 +19,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.core.model_reasoner import _catalogue_payload  # noqa: E402
+from alx.core.model_reasoner import _capability_details  # noqa: E402
 from alx.tools.coding import DEFINITION, build_coding_executors  # noqa: E402
 
 
 def catalogue_entry() -> dict:
-    payload = json.loads(_catalogue_payload((DEFINITION,)))
+    payload = json.loads(_capability_details((DEFINITION,), [DEFINITION.capability_id]))
     return payload["capabilities"][0]
 
 

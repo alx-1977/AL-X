@@ -250,6 +250,52 @@ class NativeTurnTests(unittest.TestCase):
                          "Friedl keeps notes in the notebook.")
 
 
+    # D-067: details on request, inside the session, at no step of the Core.
+
+    def test_a_description_is_answered_in_the_session_without_a_core_step(self) -> None:
+        contexts = []
+        reasoner = ModelReasoner(None, "laws", "identity")
+        transport = PausingTransport(
+            [tool("describe_capabilities", capability_ids=["read_note", "invented"]),
+             native("n1")], base_output(response="Read."))
+        reasoner._model = transport
+        original = reasoner.decide
+
+        def counting(context):
+            contexts.append(context)
+            return original(context)
+        reasoner.decide = counting
+        core = CoreAgent(self.store, reasoner, self.dispatch, (READ, CLEAN), clock=lambda: NOW)
+        outcome = core.process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.dispatched, ["n1"])
+        # Two steps of the Core: the call and the words. The description
+        # continued the same session in between.
+        self.assertEqual(len(contexts), 2)
+        described = json.loads(transport.requests[1].tool_result)
+        self.assertEqual([item["id"] for item in described["capabilities"]], ["read_note"])
+        self.assertIn("input_schema", described["capabilities"][0])
+        self.assertEqual(described["not_listed"], ["invented"])
+        self.assertEqual(transport.abandoned, 0)
+
+    def test_the_catalogue_lists_one_line_per_capability(self) -> None:
+        from alx.core.model_reasoner import _catalogue_payload
+        long = CapabilityDefinition(
+            "long_one", "Do one thing. Then a great deal more detail follows here.",
+            SCHEMA, SCHEMA, SideEffect.EFFECTFUL)
+        (entry,) = json.loads(_catalogue_payload((long,)))["capabilities"]
+        self.assertEqual(entry, {"id": "long_one", "purpose": "Do one thing.",
+                                 "side_effect": "effectful"})
+
+    def test_a_program_waits_two_minutes_before_the_background(self) -> None:
+        from alx.providers.program import FOREGROUND_SECONDS, ProgramRunner
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.assertEqual(ProgramRunner(Path(directory.name), ()).foreground_seconds,
+                         FOREGROUND_SECONDS)
+        self.assertGreaterEqual(FOREGROUND_SECONDS, 120)
+
+
 class OneProductionPathTests(unittest.TestCase):
     """Law 0: each outcome the decision used to carry now has one native path."""
 
@@ -283,7 +329,8 @@ class OneProductionPathTests(unittest.TestCase):
         names = [item["name"] for item in native_tools()]
         self.assertEqual(sorted(names), sorted(set(names)))
         self.assertEqual(set(names), {"call_capability", "select_goal", "update_goal",
-                                      "update_plan", "retrieve_memories", "remember"})
+                                      "update_plan", "retrieve_memories", "remember",
+                                      "describe_capabilities"})
 
 
 class ContinuationBoundaryTests(unittest.TestCase):

@@ -14,7 +14,7 @@ from alx.core import CoreAgent
 from alx.core.model_reasoner import _attempt_payload, _state_payload
 from alx.core.plan_results import classify_planned_result, PlanResultKind
 from alx.goals import SQLiteGoalStore
-from alx.goals.result_summary import STRING_LIMIT
+from alx.contracts.result_summary import STRING_LIMIT
 from alx.tools.coding import build_coding_executors, goal_coding_branch
 
 
@@ -147,7 +147,7 @@ def test_migration_preserves_intact_facts_and_does_not_promote_summary_markers(t
         data = json.loads(connection.execute('SELECT state_json FROM goals').fetchone()[0])
         values = {'checkpoint': raw, 'status': 'failed'}
         if legacy_shape == 'bounded':
-            from alx.goals.result_summary import bound_result
+            from alx.contracts.result_summary import bound_result
             values = bound_result(values)
         data['attempts'][0][6][3] = values
         if legacy_shape == 'completed_actions':

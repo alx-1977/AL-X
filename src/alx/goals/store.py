@@ -33,7 +33,7 @@ from alx.contracts.scope import (
 )
 from alx.contracts.storage import serialized_store
 from alx.contracts.records import PlanStopNote
-from alx.goals.result_summary import RESULT_LIMIT, bound_result, serialized_size
+from alx.contracts.result_summary import RESULT_LIMIT, bound_result, serialized_size
 
 
 SCHEMA_VERSION = 13
