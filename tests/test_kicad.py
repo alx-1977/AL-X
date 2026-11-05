@@ -255,6 +255,22 @@ class KiCadTests(unittest.TestCase):
                              script=EDIT_SCRIPT)
         (history / 'HEAD').write_text('ref: refs/heads/master')
         self.success('write_back_kicad_board', **self.write_args(fixed))
+        # Exports cannot be put into it (review of #208), and it is never entered.
+        self.failure('path_denied', 'export_kicad_manufacturing',
+                     work_copy_id=checked['work_copy_id'], output_dir='.history/gerbers')
+        from unittest.mock import patch as patched
+        import os as os_module
+        entered = []
+        real_walk = os_module.walk
+
+        def watching(top, *args, **kwargs):
+            for directory, folders, files in real_walk(top, *args, **kwargs):
+                entered.append(Path(directory).name)
+                yield directory, folders, files
+        with patched('alx.providers.kicad.os.walk', watching):
+            self.check()
+        self.assertNotIn('.history', entered)
+        self.assertNotIn('.git', entered)
         # Only that one folder at the top of the design is skipped.
         for name in ('.git/config', 'sub/.history/.git/config', '.history-old/.git/config'):
             path = self.project / name

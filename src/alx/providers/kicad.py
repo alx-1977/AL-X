@@ -65,10 +65,19 @@ def inventory(root, *, exclude=frozenset()):
     result = {}
     total = 0
     entries = 0
-    for path in root.rglob('*'):
-        # Only exact transaction-owned paths and their contents, never a filename pattern.
-        if path in exclude or not exclude.isdisjoint(path.parents):
-            continue
+
+    def walk():
+        # Excluded paths are pruned before they are entered, so an excluded
+        # tree costs nothing and cannot hide work from the entry limit
+        # (review of #208). Only exact paths, never a filename pattern.
+        for directory, folders, files in os.walk(root):
+            here = Path(directory)
+            folders[:] = [name for name in folders if here / name not in exclude]
+            for name in (*folders, *files):
+                if here / name not in exclude:
+                    yield here / name
+
+    for path in walk():
         entries += 1
         if entries > MAX_PROJECT_ENTRIES:
             raise KiCadError('project_too_large')
@@ -671,7 +680,10 @@ class KiCadProvider:
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
             relative = Path(arguments['output_dir'])
-            if relative.is_absolute() or not relative.parts or any(p in ('.', '..') for p in relative.parts):
+            if (relative.is_absolute() or not relative.parts
+                    or any(p in ('.', '..') for p in relative.parts)
+                    # KiCad's own history is never part of the design (review of #208).
+                    or relative.parts[0] == KICAD_LOCAL_HISTORY):
                 raise KiCadError('path_denied')
             source = self._source(meta['source'])
             output = source / relative
