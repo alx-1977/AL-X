@@ -452,7 +452,10 @@ async def run(repository_root: Path) -> None:
         diagnostics.publish(task_id, values)
         usage.record(task_id, values)
 
-    providers = build_runtime_providers(provider_settings, telemetry)
+    providers = build_runtime_providers(
+        provider_settings, telemetry,
+        # D-069: each Core session's full record, kept a week.
+        session_record_dir=storage_root / "reasoning-sessions")
     # AL/X Core reasons as her own Claude account. Confirmed before anything is
     # composed or served: a wrong or missing login stops startup here.
     verify_core_claude_identity(providers)

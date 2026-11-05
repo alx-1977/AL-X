@@ -6,6 +6,7 @@ import logging
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from alx.config import ConfigurationError, RuntimeSettings
@@ -216,6 +217,8 @@ def verify_core_claude_identity(providers: "RuntimeProviders") -> None:
 def build_runtime_providers(
     settings: RuntimeSettings,
     telemetry_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
+    *,
+    session_record_dir: Path | None = None,
 ) -> RuntimeProviders:
     if settings.reasoning.provider != CLAUDE_SUBSCRIPTION_PROVIDER:
         # Settings refuse any other Core; this is the same rule at the point
@@ -240,6 +243,7 @@ def build_runtime_providers(
         config_dir=settings.core_claude_config_dir,
         expected_account=settings.core_claude_account,
         oauth_token=settings.claude_oauth_token,
+        session_record_dir=session_record_dir,
     )
     specialist = _build_reasoning_model(settings.specialist, telemetry_sink)
     # D-024a as amended 2026-09-27: the autonomous Core, when switched on, is
@@ -255,6 +259,7 @@ def build_runtime_providers(
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,
+            session_record_dir=session_record_dir,
         )
     )
     autonomous_first_pass = (
@@ -266,6 +271,7 @@ def build_runtime_providers(
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,
+            session_record_dir=session_record_dir,
         )
     )
     coding = _build_coding_model(settings, telemetry_sink)

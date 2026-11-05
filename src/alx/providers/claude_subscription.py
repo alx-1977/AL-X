@@ -276,6 +276,157 @@ _BRIDGE_SCRIPT = Path(__file__).resolve().with_name("native_tool_bridge.py")
 # ends, when the next turn starts afresh, or when the Core abandons it.
 PAUSED_SESSION_LIMIT_SECONDS = 3600
 
+# How long a session's full record is kept. Long enough to look back over a
+# working week; well inside D-013's thirty days for anything mail-derived the
+# record may quote.
+SESSION_RECORD_DAYS = 7
+
+
+def _stream_events(stdout: str) -> list[Mapping[str, Any]]:
+    """The CLI's `stream-json` events, skipping anything that is not one."""
+    events = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, Mapping):
+            events.append(event)
+    return events
+
+
+def _stream_result(stdout: str) -> str:
+    """The run's final envelope, as `--output-format json` would print it."""
+    for event in reversed(_stream_events(stdout)):
+        if event.get("type") == "result":
+            return json.dumps(event)
+    raise _ClaudeProtocolError("response_json_invalid")
+
+
+def _identifier(value: Any) -> str | None:
+    """A capability id fit for a log line, or nothing."""
+    if isinstance(value, str) and 0 < len(value) <= 64 and value.replace("_", "").isalnum():
+        return value
+    return None
+
+
+def _session_calls(events: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per model call: its usage, the tool it chose, the result's size.
+
+    The CLI can split one message over several events; they share an id and
+    carry the same usage, so a message is counted once.
+    """
+    calls: list[dict[str, Any]] = []
+    seen: dict[str, dict[str, Any]] = {}
+    for event in events:
+        message = event.get("message")
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        if event.get("type") == "assistant":
+            key = str(message.get("id") or len(calls))
+            call = seen.get(key)
+            if call is None:
+                usage = message.get("usage") if isinstance(message.get("usage"), Mapping) else {}
+                def count(name: str) -> int:
+                    value = usage.get(name)
+                    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+                call = {"input": count("input_tokens"),
+                        "cache_read": count("cache_read_input_tokens"),
+                        "cache_write": count("cache_creation_input_tokens"),
+                        "output": count("output_tokens"),
+                        "tool": None, "capability": None, "result_chars": None}
+                seen[key] = call
+                calls.append(call)
+            for block in blocks:
+                if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                    name = str(block.get("name") or "")
+                    call["tool"] = name.removeprefix("mcp__alx__") or None
+                    arguments = block.get("input")
+                    if isinstance(arguments, Mapping):
+                        call["capability"] = _identifier(arguments.get("capability_id"))
+        elif event.get("type") == "user" and calls:
+            for block in blocks:
+                if isinstance(block, Mapping) and block.get("type") == "tool_result":
+                    result = block.get("content")
+                    text = result if isinstance(result, str) else json.dumps(result)
+                    calls[-1]["result_chars"] = (calls[-1]["result_chars"] or 0) + len(text)
+    return calls
+
+
+# How often records past their time are looked for while the runtime runs, so
+# a quiet week does not keep them alive.
+SESSION_RECORD_SWEEP_SECONDS = 3600
+
+
+def _prune_session_records(directory: Path, now: float | None = None) -> None:
+    """Delete every record older than SESSION_RECORD_DAYS, by its own time.
+
+    Each file is judged by when it was written, not by its day's folder, and
+    a day's folder goes once it is empty. Best effort, never raised.
+    """
+    import time
+    cutoff = (time.time() if now is None else now) - SESSION_RECORD_DAYS * 86400
+    try:
+        folders = [item for item in directory.iterdir() if item.is_dir()]
+    except OSError:
+        return
+    for folder in folders:
+        try:
+            for record in folder.glob("*.jsonl"):
+                if record.stat().st_mtime < cutoff:
+                    record.unlink()
+            if not any(folder.iterdir()):
+                folder.rmdir()
+        except OSError:
+            continue
+
+
+_SWEPT: set[Path] = set()
+_SWEPT_LOCK = Lock()
+
+
+def _start_record_sweeper(directory: Path) -> None:
+    """Prune now, and start one hourly sweeper per directory per process."""
+    import threading
+    _prune_session_records(directory)
+    with _SWEPT_LOCK:
+        if directory in _SWEPT:
+            return
+        _SWEPT.add(directory)
+
+    def sweep() -> None:
+        stop = threading.Event()
+        while not stop.wait(SESSION_RECORD_SWEEP_SECONDS):
+            _prune_session_records(directory)
+
+    threading.Thread(target=sweep, name="alx-session-record-sweeper", daemon=True).start()
+
+
+def _write_session_record(directory: Path, header: Mapping[str, Any], stdout: str) -> str | None:
+    """Keep a session's whole record, after dropping records past their time.
+
+    Best effort: a record that cannot be written loses the record, never the
+    turn it describes, and never the clean-up.
+    """
+    from datetime import UTC, datetime
+    _prune_session_records(directory)
+    try:
+        now = datetime.now(UTC)
+        folder = directory / now.strftime("%Y-%m-%d")
+        folder.mkdir(parents=True, exist_ok=True)
+        name = f"{now.strftime('%H%M%S')}-{uuid4().hex[:8]}.jsonl"
+        with open(folder / name, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(header, ensure_ascii=False) + "\n")
+            handle.write(stdout if stdout.endswith("\n") or not stdout else stdout + "\n")
+        return f"{folder.name}/{name}"
+    except OSError as error:
+        LOGGER.warning("Reasoning session record not written: %s", type(error).__name__)
+        return None
+
 
 class _NativeSession:
     """One Claude CLI run that may pause on native tool calls (D-065).
@@ -290,7 +441,7 @@ class _NativeSession:
 
     def __init__(self, launcher: Callable[..., Any], argv_for: Callable[[str, str], list[str]],
                  prompt: str, environment: Mapping[str, str], idle_seconds: float,
-                 tools: Any = ()) -> None:
+                 tools: Any = (), record: Callable[[str, str], None] | None = None) -> None:
         import socket
         import tempfile
         import threading
@@ -307,6 +458,10 @@ class _NativeSession:
         self._idle_timer: Any = None
         self._stdout: list[str] = []
         self._stderr: list[str] = []
+        # Called once, when the session ends however it ends, with its whole
+        # output and how it ended.
+        self._record = record
+        self._outcome = "abandoned"
         try:
             # The tool definitions, exactly as the request carries them, for
             # the bridge to list.
@@ -386,8 +541,10 @@ class _NativeSession:
             if self._process.poll() is not None:
                 for reader in self._readers:
                     reader.join(5)
+                self._outcome = "finished" if self._process.returncode == 0 else "failed"
                 return "exit", (self._process.returncode, "".join(self._stdout),
                                 "".join(self._stderr))
+        self._outcome = "timed_out"
         self.close()
         raise subprocess.TimeoutExpired("claude", timeout_seconds)
 
@@ -436,6 +593,14 @@ class _NativeSession:
         except OSError:
             pass
         _shutil.rmtree(self._directory, ignore_errors=True)
+        record, self._record = self._record, None
+        if record is not None:
+            for reader in self._readers:
+                reader.join(5)
+            try:
+                record("".join(self._stdout), self._outcome)
+            except Exception:  # noqa: BLE001 - a record never fails the turn
+                LOGGER.warning("Reasoning session record failed")
 
 
 class ClaudeSubscriptionReasoningModel:
@@ -466,6 +631,7 @@ class ClaudeSubscriptionReasoningModel:
         oauth_token: str | None = None,
         retry_policy: SubscriptionRetryPolicy | None = None,
         launcher: "Callable[..., subprocess.Popen] | None" = None,
+        session_record_dir: str | Path | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -497,6 +663,13 @@ class ClaudeSubscriptionReasoningModel:
         self._availability_lock = Lock()
         # D-065: the one session paused on a native call, if any.
         self._session: _NativeSession | None = None
+        # D-069: where each native session's full record is kept, if anywhere.
+        self._session_record_dir = (
+            None if session_record_dir is None else Path(session_record_dir))
+        if self._session_record_dir is not None:
+            # At startup, then hourly for as long as the runtime runs, so
+            # records go on time whether or not sessions are being written.
+            _start_record_sweeper(self._session_record_dir)
 
     def child_environment(self) -> dict[str, str]:
         """The environment the CLI is given: the subscription, never a key.
@@ -685,6 +858,11 @@ class ClaudeSubscriptionReasoningModel:
         argv = self.command(request)
         index = argv.index("--mcp-config")
         argv[index + 1] = json.dumps(bridge)
+        # D-069: every model call of the session as it happens, with its own
+        # usage, the tool it chose and what came back. The final event is the
+        # same envelope `json` prints.
+        output = argv.index("--output-format")
+        argv[output + 1:output + 2] = ["stream-json", "--verbose"]
         allowed = ",".join(f"mcp__alx__{item['name']}" for item in request.tools)
         return [*argv, "--allowedTools", allowed]
 
@@ -750,6 +928,45 @@ class ClaudeSubscriptionReasoningModel:
             raise _ClaudeProtocolError("request_without_turn_content")
         return "\n\n".join(parts)
 
+    def _session_recorder(self, request: ModelRequest) -> Callable[[str, str], None]:
+        """What a native session does with its output when it ends (D-069).
+
+        One log line per model call, so her own log shows where a turn's
+        tokens went, and the full record, prompt included, kept for a week.
+        """
+        from datetime import UTC, datetime
+        started = datetime.now(UTC).isoformat()
+        system_prompt, user_prompt = self._system_prompt(request), self._user_prompt(request)
+        tools = [item.get("name") for item in request.tools if isinstance(item, Mapping)]
+
+        def record(stdout: str, outcome: str) -> None:
+            calls = _session_calls(_stream_events(stdout))
+            name = None
+            if self._session_record_dir is not None:
+                name = _write_session_record(self._session_record_dir, {
+                    "started_at": started, "ended_at": datetime.now(UTC).isoformat(),
+                    "model": self._model, "outcome": outcome, "kind": request.kind,
+                    "purpose": request.purpose or None, "tools": tools,
+                    "system_prompt": system_prompt, "user_prompt": user_prompt,
+                }, stdout)
+            for index, call in enumerate(calls, 1):
+                LOGGER.info(
+                    "Reasoning session call %d/%d: tool=%s capability=%s input=%d "
+                    "cache_read=%d cache_write=%d output=%d result_chars=%s",
+                    index, len(calls), call["tool"], call["capability"], call["input"],
+                    call["cache_read"], call["cache_write"], call["output"],
+                    call["result_chars"])
+            LOGGER.info(
+                "Reasoning session ended: %s, %d calls, input=%d cache_read=%d "
+                "cache_write=%d output=%d, system_prompt_chars=%d user_prompt_chars=%d, "
+                "record=%s",
+                outcome, len(calls), sum(item["input"] for item in calls),
+                sum(item["cache_read"] for item in calls),
+                sum(item["cache_write"] for item in calls),
+                sum(item["output"] for item in calls),
+                len(system_prompt), len(user_prompt), name)
+        return record
+
     def abandon_session(self) -> None:
         """End a paused native session the Core will not continue.
 
@@ -793,6 +1010,7 @@ class ClaudeSubscriptionReasoningModel:
                          # The CLI waits on a native call as long as the pause may last.
                          "MCP_TOOL_TIMEOUT": str(PAUSED_SESSION_LIMIT_SECONDS * 1000)},
                 PAUSED_SESSION_LIMIT_SECONDS, request.tools,
+                record=self._session_recorder(request),
             )
             # Kept for the record of a run that is abandoned rather than finished.
             session.request, session.started_at = request, monotonic()
@@ -865,6 +1083,8 @@ class ClaudeSubscriptionReasoningModel:
                                            {"input_tokens": 0, "output_tokens": 0},
                                            tool_use=payload)
                 returncode, stdout, stderr = payload
+                if returncode == 0:
+                    stdout = _stream_result(stdout)
                 completed = subprocess.CompletedProcess([], returncode, stdout, stderr)
             else:
                 prompt = self._user_prompt(request)
