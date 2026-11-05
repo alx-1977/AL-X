@@ -19,7 +19,7 @@ from alx.contracts import (
 )
 from alx.core.model_reasoner import _attempt_payload, _state_payload
 from alx.goals import SQLiteGoalStore
-from alx.goals.result_summary import LIST_LIMIT, RESULT_LIMIT, STRING_LIMIT, bound_result
+from alx.contracts.result_summary import LIST_LIMIT, RESULT_LIMIT, STRING_LIMIT, bound_result
 from alx.goals.store import SCHEMA_VERSION, _goal_to_data
 
 NOW = datetime(2026, 10, 24, tzinfo=UTC)
@@ -43,7 +43,7 @@ def goal(values, failure=None, capability_id="read_coding_job"):
 
 @pytest.mark.parametrize("field", ["git_diff", "content"])
 @pytest.mark.parametrize("write", ["create", "replace", "memory_batch"])
-def test_large_results_keep_structure_identity_and_whole_immediate_observation(field, write):
+def test_large_results_keep_structure_identity_and_bounded_immediate_observation(field, write):
     text = "x" * 500_000
     state = goal({field: text, "report": {"files": ["module.py"]},
                   "exit_code": 0, "done": True, "job_id": "job-7"},
@@ -58,8 +58,12 @@ def test_large_results_keep_structure_identity_and_whole_immediate_observation(f
                                       ("attempt:call-1",), NOW)
             saved = store.replace_with_memory_batch(
                 state, saved.retention_until, saved.revision, (proposal,))
-        assert _state_payload(saved.state)["attempts"][0]["result_values"][field] == text
-        assert _attempt_payload(state.attempts[0])["result_values"][field] == text
+        # A live result is bounded the same way as a stored one (D-067): every
+        # later step of a session re-read it whole.
+        live = {"head": text[:STRING_LIMIT], "original_length": len(text),
+                "sha256": hashlib.sha256(text.encode()).hexdigest()}
+        assert _state_payload(saved.state)["attempts"][0]["result_values"][field] == live
+        assert _attempt_payload(state.attempts[0])["result_values"][field] == live
         loaded = store.load(state.goal_id)
         values = _state_payload(loaded.state)["attempts"][0]["result_values"]
         summary = values[field]
@@ -143,7 +147,7 @@ def test_no_projection_size_replacement_path_remains():
     assert not hasattr(model_reasoner, "_stored_result")
 
 
-def test_protocol_describes_bounded_stored_results_and_one_turn_live_results():
+def test_protocol_describes_bounded_stored_and_live_results():
     from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
     from alx.tools.goal_history import DEFINITION
 
@@ -153,7 +157,7 @@ def test_protocol_describes_bounded_stored_results_and_one_turn_live_results():
         "long strings use head, original_length and sha256",
         "long lists end with an _omitted_items count",
         "read_own_goals returns the same bounded summary",
-        "A live result is seen whole only on the turn it arrives",
+        "a result arriving in your turn is bounded the same way",
     ):
         assert fact in protocol
     assert "same bounded attempt result summaries" in DEFINITION.purpose

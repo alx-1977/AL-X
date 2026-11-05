@@ -152,8 +152,12 @@ class LiveDefinitionReachesCore(unittest.TestCase):
         # The exact identifier, not a near miss, and not a description.
         self.assertIn(TRASH, entries)
         self.assertEqual(TRASH, MOVE_MAIL_MESSAGE_TO_TRASH)
-        entry = entries[TRASH]
-        # Enough for Core to call it without guessing anything.
+        self.assertEqual(entries[TRASH]["side_effect"], "effectful")
+        # Its full entry, from describe_capabilities (D-067), is enough for
+        # Core to call it without guessing anything.
+        from alx.core.model_reasoner import _capability_details
+        (entry,) = json.loads(_capability_details(
+            registry.list_definitions(), [TRASH]))["capabilities"]
         self.assertEqual(entry["side_effect"], "effectful")
         self.assertEqual(
             sorted(entry["input_schema"]["required"]),

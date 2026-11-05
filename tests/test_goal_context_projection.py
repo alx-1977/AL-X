@@ -35,7 +35,7 @@ from alx.core.model_reasoner import (  # noqa: E402
     _state_payload,
 )
 from alx.goals import SQLiteGoalStore  # noqa: E402
-from alx.goals.result_summary import RESULT_LIMIT  # noqa: E402
+from alx.contracts.result_summary import RESULT_LIMIT  # noqa: E402
 
 
 def attempt(index: int, *, failed: bool = False) -> CapabilityAttempt:

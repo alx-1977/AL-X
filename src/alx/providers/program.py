@@ -343,9 +343,16 @@ def summary(path: Path, bound: int = 4096) -> str:
                 + "\n[output omitted]\n" + stream.read(half).decode("utf-8", errors="replace"))
 
 
+# How long a call waits for its program before handing it to the background.
+# A program that finishes in time answers inside the session that ran it; one
+# handed over wakes a fresh session when it ends, which was 41 sessions on one
+# morning of KiCad scripts when this was one second (D-067).
+FOREGROUND_SECONDS = 120.0
+
+
 class ProgramRunner:
     def __init__(self, root: Path, banking_targets: tuple[str, ...],
-                 foreground_seconds: float = 1.0) -> None:
+                 foreground_seconds: float = FOREGROUND_SECONDS) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.targets = tuple(item.casefold() for item in banking_targets)

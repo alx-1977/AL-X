@@ -250,6 +250,132 @@ class NativeTurnTests(unittest.TestCase):
                          "Friedl keeps notes in the notebook.")
 
 
+    # D-067: details on request, inside the session, at no step of the Core.
+
+    def test_a_description_is_answered_in_the_session_without_a_core_step(self) -> None:
+        contexts = []
+        reasoner = ModelReasoner(None, "laws", "identity")
+        transport = PausingTransport(
+            [tool("describe_capabilities", capability_ids=["read_note", "invented"]),
+             native("n1")], base_output(response="Read."))
+        reasoner._model = transport
+        original = reasoner.decide
+
+        def counting(context):
+            contexts.append(context)
+            return original(context)
+        reasoner.decide = counting
+        core = CoreAgent(self.store, reasoner, self.dispatch, (READ, CLEAN), clock=lambda: NOW)
+        outcome = core.process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(self.dispatched, ["n1"])
+        # Two steps of the Core: the call and the words. The description
+        # continued the same session in between.
+        self.assertEqual(len(contexts), 2)
+        described = json.loads(transport.requests[1].tool_result)
+        self.assertEqual([item["id"] for item in described["capabilities"]], ["read_note"])
+        self.assertIn("input_schema", described["capabilities"][0])
+        self.assertEqual(described["not_listed"], ["invented"])
+        self.assertEqual(transport.abandoned, 0)
+
+    def test_a_long_result_is_bounded_and_read_in_full_inside_the_session(self) -> None:
+        """Review of #203: a long email must stay readable to the end."""
+        body = "x" * 12_000 + "THE END"
+
+        def long_dispatch(call, _state):
+            self.dispatched.append(call.call_id)
+            return CapabilityAttempt(
+                call, CapabilityAttemptDisposition.EXECUTED, True,
+                CapabilityResult(call.call_id, call.capability_id,
+                                 CapabilityResultState.SUCCEEDED, {"body": body}))
+
+        transport = PausingTransport(
+            [native("n1"), tool("read_full_result", call_id="n1", offset=8000)],
+            base_output(response="Read it all."))
+        core = CoreAgent(self.store, ModelReasoner(transport, "laws", "identity"),
+                         long_dispatch, (READ,), clock=lambda: NOW)
+        outcome = core.process(conversation(), RETENTION, 8)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        bounded, window = transport.results()
+        self.assertEqual(bounded["result_values"]["body"]["original_length"], len(body))
+        self.assertIn('THE END', window["text"])
+        self.assertIsNone(window["next_offset"])
+        self.assertGreater(window["total_length"], len(body))
+
+    def test_a_full_transient_result_is_read_before_its_stored_summary(self) -> None:
+        """Second review of #203: a returning plan's full result wins."""
+        from alx.core.model_reasoner import _full_result_window
+        call = CapabilityCall("p1", "read_note", {}, None)
+
+        def attempt(values):
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult("p1", "read_note",
+                                                      CapabilityResultState.SUCCEEDED, values))
+        stored = GoalState("g1", Objective("turn:t1", "Read"), (SuccessCriterion("r", "r"),),
+                           attempts=(attempt({"detail": "summary"}),))
+        context = ReasoningContext(stored, conversation().turns, (READ,), conversation_id="c1",
+                                   transient_attempts=(attempt({"detail": "the whole text"}),),
+                                   unfinished_goals=(GoalSummary.of(stored),))
+        self.assertIn("the whole text", json.loads(_full_result_window(context, "p1", 0))["text"])
+
+    def test_a_paused_session_settles_its_spend_once_when_it_ends(self) -> None:
+        """Review of #203: usage after a pause is never left unaccounted."""
+        from unittest import mock
+        authority = mock.Mock()
+        authority.reserve.return_value = "reservation-1"
+        transport = PausingTransport(
+            [tool("describe_capabilities", capability_ids=["read_note"])],
+            base_output(response="Done."))
+        final_usage = {"input_tokens": 900, "output_tokens": 40}
+        original = transport.complete
+
+        def with_usage(request):
+            completion = original(request)
+            if completion.tool_use is None:
+                return ModelCompletion("fake", "fake", completion.output, final_usage)
+            return completion
+        transport.complete = with_usage
+        reasoner = ModelReasoner(transport, "laws", "identity", max_output_tokens=1000,
+                                 max_input_tokens=10**7, spend_authority=authority)
+        context = ReasoningContext(None, conversation().turns, (READ,), conversation_id="c1",
+                                   turn_key="t", step_index=0)
+        decision = reasoner.decide(context)
+        self.assertEqual(decision.response, "Done.")
+        authority.reserve.assert_called_once()
+        authority.settle.assert_called_once_with("reservation-1", final_usage)
+
+    def test_an_abandoned_paused_session_settles_with_usage_unknown(self) -> None:
+        from unittest import mock
+        authority = mock.Mock()
+        authority.reserve.return_value = "reservation-1"
+        transport = PausingTransport([native("n1")], base_output(response="Done."))
+        reasoner = ModelReasoner(transport, "laws", "identity", max_output_tokens=1000,
+                                 max_input_tokens=10**7, spend_authority=authority)
+        context = ReasoningContext(None, conversation().turns, (READ,), conversation_id="c1",
+                                   turn_key="t", step_index=0)
+        reasoner.decide(context)
+        authority.settle.assert_not_called()
+        reasoner.abandon()
+        authority.settle.assert_called_once_with("reservation-1", None)
+
+    def test_the_catalogue_lists_one_line_per_capability(self) -> None:
+        from alx.core.model_reasoner import _catalogue_payload
+        long = CapabilityDefinition(
+            "long_one", "Do one thing. Then a great deal more detail follows here.",
+            SCHEMA, SCHEMA, SideEffect.EFFECTFUL)
+        (entry,) = json.loads(_catalogue_payload((long,)))["capabilities"]
+        self.assertEqual(entry, {"id": "long_one", "purpose": "Do one thing.",
+                                 "side_effect": "effectful"})
+
+    def test_a_program_waits_two_minutes_before_the_background(self) -> None:
+        from alx.providers.program import FOREGROUND_SECONDS, ProgramRunner
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.assertEqual(ProgramRunner(Path(directory.name), ()).foreground_seconds,
+                         FOREGROUND_SECONDS)
+        self.assertGreaterEqual(FOREGROUND_SECONDS, 120)
+
+
 class OneProductionPathTests(unittest.TestCase):
     """Law 0: each outcome the decision used to carry now has one native path."""
 
@@ -283,7 +409,8 @@ class OneProductionPathTests(unittest.TestCase):
         names = [item["name"] for item in native_tools()]
         self.assertEqual(sorted(names), sorted(set(names)))
         self.assertEqual(set(names), {"call_capability", "select_goal", "update_goal",
-                                      "update_plan", "retrieve_memories", "remember"})
+                                      "update_plan", "retrieve_memories", "remember",
+                                      "describe_capabilities", "read_full_result"})
 
 
 class ContinuationBoundaryTests(unittest.TestCase):
