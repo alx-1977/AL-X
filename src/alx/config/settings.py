@@ -843,6 +843,18 @@ def autonomous_first_pass_settings(
     return replace(autonomous, model=model)
 
 
+# D-070: the worker's model. Named here so a configured change is a recorded one.
+WORKER_DEFAULT_MODEL = "claude-sonnet-5-5"
+
+
+def worker_settings(
+    environment: Mapping[str, str], reasoning: "ReasoningSettings",
+) -> "ReasoningSettings":
+    """The worker's model: the Core's login and transport, a lighter model (D-070)."""
+    model = environment.get("ALX_WORKER_MODEL", "").strip() or WORKER_DEFAULT_MODEL
+    return replace(reasoning, model=model)
+
+
 def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:
     """How promptly a matured request is noticed. Not a cognition cadence.
 
@@ -1195,6 +1207,8 @@ class RuntimeSettings:
     # EX-001 as amended 2026-11-03: the model that reasons first on an
     # autonomous turn. None means the autonomous Core reasons alone.
     autonomous_first_pass: "ReasoningSettings | None"
+    # D-070: the worker that carries out mechanical briefs for her.
+    worker: "ReasoningSettings"
     # D-028 coding jobs. Independent of the conversational Core.
     coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
@@ -1231,6 +1245,7 @@ class RuntimeSettings:
             research=_research_settings(environment, reasoning_provider),
             autonomous=autonomous,
             autonomous_first_pass=autonomous_first_pass_settings(environment, autonomous),
+            worker=worker_settings(environment, reasoning),
             coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
