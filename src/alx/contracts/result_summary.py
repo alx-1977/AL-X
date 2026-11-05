@@ -20,21 +20,22 @@ def serialized_size(value: Any) -> int:
 def bound_result(value: Any, limit: int = RESULT_LIMIT) -> Any:
     """Bound one values/failure envelope without mutating the live result.
 
-    Ordinary keys and scalars survive unless the aggregate budget requires
-    omitting a container tail. Summary heads are small strings; list markers
+    Long strings are kept whole when the result fits the budget with them;
+    long lists are always cut. Otherwise ordinary keys and scalars survive
+    unless the aggregate budget requires omitting a container tail. Summary heads are small strings; list markers
     occupy the final slot, so repeated serialization is stable.
     """
-    def normalize(item: Any) -> Any:
-        if isinstance(item, str) and len(item) > STRING_LIMIT:
+    def normalize(item: Any, cut_strings: bool = True) -> Any:
+        if cut_strings and isinstance(item, str) and len(item) > STRING_LIMIT:
             return {"head": item[:STRING_LIMIT], "original_length": len(item),
                     "sha256": hashlib.sha256(item.encode("utf-8")).hexdigest()}
         if isinstance(item, Mapping):
-            return {key: normalize(child) for key, child in item.items()}
+            return {key: normalize(child, cut_strings) for key, child in item.items()}
         if isinstance(item, (list, tuple)):
             if len(item) > LIST_LIMIT:
-                return [normalize(child) for child in item[:LIST_LIMIT - 1]] + [
+                return [normalize(child, cut_strings) for child in item[:LIST_LIMIT - 1]] + [
                     {"_omitted_items": len(item) - LIST_LIMIT + 1}]
-            return [normalize(child) for child in item]
+            return [normalize(child, cut_strings) for child in item]
         return item
 
     missing = object()
@@ -97,6 +98,15 @@ def bound_result(value: Any, limit: int = RESULT_LIMIT) -> Any:
             return result if serialized_size(result) <= budget else missing
         return missing
 
+    # Long strings are cut only when the result does not fit whole: cutting
+    # one inside a result that is small overall only made her read the rest
+    # a second time (review of 2026-11-05).
+    whole = normalize(value, cut_strings=False)
+    try:
+        if serialized_size(whole) <= limit:
+            return whole
+    except TypeError:
+        pass  # not plain JSON: bounded below exactly as before
     result = fit(normalize(value), limit)
     if result is missing:
         raise ValueError("result summary budget cannot hold omission metadata")

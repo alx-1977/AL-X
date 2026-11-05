@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -434,6 +434,41 @@ def _memory_proposal_from_data(value: str) -> MemoryProposal:
         meaning=data["meaning"],
         supersedes_memory_id=data["supersedes_memory_id"],
     )
+
+
+def _matching_records(
+    state: Any, literal: str, limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Whole stored records holding a value that contains `literal`, with paths.
+
+    Literal and case-insensitive. A record is one entry of a top-level
+    collection (an evidence item, a progress note, an attempt), one entry of
+    the context, or a top-level field on its own, so a match never comes back
+    as a fragment of its record or as the whole goal. Nothing is ranked or
+    summarised.
+    """
+    wanted = literal.casefold()
+
+    def contains(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            return any(contains(child) for child in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(contains(child) for child in value)
+        if isinstance(value, bool) or value is None:
+            return False
+        return wanted in str(value).casefold()
+
+    records: list[tuple[str, Any]] = []
+    for key, value in state.items():
+        if isinstance(value, Mapping):
+            records.extend((f"{key}.{name}", {name: child}) for name, child in value.items())
+        elif isinstance(value, (list, tuple)) and any(
+                isinstance(child, (Mapping, list, tuple)) for child in value):
+            records.extend((f"{key}[{index}]", child) for index, child in enumerate(value))
+        else:
+            records.append((str(key), {key: value}))
+    found = [{"path": path, "record": record} for path, record in records if contains(record)]
+    return found[:limit], len(found) > limit
 
 
 @serialized_store
@@ -939,6 +974,7 @@ class SQLiteGoalStore:
 
     def read_history(
         self, *, contains: str | None = None, goal_id: str | None = None, limit: int = 10,
+        match: str | None = None,
     ) -> tuple[dict[str, Any], tuple[ContentProvenance, ...]]:
         """Read retained history using the authoritative stored serializer.
 
@@ -946,9 +982,15 @@ class SQLiteGoalStore:
         including nested context, referents, progress, attempts and evidence.
         Search returns bounded identities; exact or unambiguous prefix id
         reads all stored content. Exact ids take precedence over prefixes.
+        With `match`, an id read returns only the stored records whose text
+        contains it literally (case-insensitive), each with its path in the
+        goal, instead of the whole state.
         """
         if (contains is None) == (goal_id is None):
             raise ValueError("provide exactly one of contains or goal_id")
+        if match is not None and (goal_id is None or not isinstance(match, str)
+                                  or not match.strip()):
+            raise ValueError("match needs a goal_id and must not be blank")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
             raise ValueError("limit must be 1 to 50")
         value = contains if contains is not None else goal_id
@@ -989,8 +1031,13 @@ class SQLiteGoalStore:
                     revision=item.revision,
                     retention_until=_time_to_data(item.retention_until),
                     scope=None if item.scope is None else json.loads(scope_to_storage(item.scope)),
-                    state=_goal_to_data(item.state),
                 )
+                state = _goal_to_data(item.state)
+                if match is None:
+                    record["state"] = state
+                else:
+                    record["matches"], record["matches_truncated"] = _matching_records(
+                        state, match, limit)
             records.append(record)
         return (
             {"goals": records, "truncated": goal_id is None and len(ids) > limit},

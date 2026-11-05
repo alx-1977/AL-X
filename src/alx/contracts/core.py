@@ -476,6 +476,7 @@ class DurableGoalStore(Protocol):
 
     def read_history(
         self, *, contains: str | None = None, goal_id: str | None = None, limit: int = 10,
+        match: str | None = None,
     ) -> tuple[dict[str, Any], tuple[ContentProvenance, ...]]: ...
 
     def list_goals(self) -> tuple[GoalSnapshot, ...]: ...

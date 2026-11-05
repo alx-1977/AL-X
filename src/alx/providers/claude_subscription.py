@@ -313,10 +313,12 @@ def _identifier(value: Any) -> str | None:
 
 
 def _session_calls(events: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """One entry per model call: its usage, the tool it chose, the result's size.
+    """One entry per model call: its input usage, the tool it chose, the result's size.
 
     The CLI can split one message over several events; they share an id and
-    carry the same usage, so a message is counted once.
+    carry the same usage, so a message is counted once. Its output count is
+    taken when the message starts, so it is not reported per call: the true
+    output is the session total in the final envelope (review, 2026-11-05).
     """
     calls: list[dict[str, Any]] = []
     seen: dict[str, dict[str, Any]] = {}
@@ -337,7 +339,6 @@ def _session_calls(events: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 call = {"input": count("input_tokens"),
                         "cache_read": count("cache_read_input_tokens"),
                         "cache_write": count("cache_creation_input_tokens"),
-                        "output": count("output_tokens"),
                         "tool": None, "capability": None, "result_chars": None}
                 seen[key] = call
                 calls.append(call)
@@ -940,7 +941,16 @@ class ClaudeSubscriptionReasoningModel:
         tools = [item.get("name") for item in request.tools if isinstance(item, Mapping)]
 
         def record(stdout: str, outcome: str) -> None:
-            calls = _session_calls(_stream_events(stdout))
+            events = _stream_events(stdout)
+            calls = _session_calls(events)
+            # The session's true output, from the final envelope; unknown when
+            # the session ended without one.
+            final = next((event for event in reversed(events)
+                          if event.get("type") == "result"), None)
+            usage = final.get("usage") if isinstance(final, Mapping) else None
+            output = usage.get("output_tokens") if isinstance(usage, Mapping) else None
+            if isinstance(output, bool) or not isinstance(output, int):
+                output = "unknown"
             name = None
             if self._session_record_dir is not None:
                 name = _write_session_record(self._session_record_dir, {
@@ -952,18 +962,17 @@ class ClaudeSubscriptionReasoningModel:
             for index, call in enumerate(calls, 1):
                 LOGGER.info(
                     "Reasoning session call %d/%d: tool=%s capability=%s input=%d "
-                    "cache_read=%d cache_write=%d output=%d result_chars=%s",
+                    "cache_read=%d cache_write=%d result_chars=%s",
                     index, len(calls), call["tool"], call["capability"], call["input"],
-                    call["cache_read"], call["cache_write"], call["output"],
-                    call["result_chars"])
+                    call["cache_read"], call["cache_write"], call["result_chars"])
             LOGGER.info(
                 "Reasoning session ended: %s, %d calls, input=%d cache_read=%d "
-                "cache_write=%d output=%d, system_prompt_chars=%d user_prompt_chars=%d, "
+                "cache_write=%d output=%s, system_prompt_chars=%d user_prompt_chars=%d, "
                 "record=%s",
                 outcome, len(calls), sum(item["input"] for item in calls),
                 sum(item["cache_read"] for item in calls),
                 sum(item["cache_write"] for item in calls),
-                sum(item["output"] for item in calls),
+                output,
                 len(system_prompt), len(user_prompt), name)
         return record
 

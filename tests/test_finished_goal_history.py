@@ -101,6 +101,41 @@ class FinishedHistoryTests(unittest.TestCase):
             self.assertEqual([g.state.goal_id for g in self.store.list_recent_finished("c1", 5)],
                              ["e8b6a256"])
 
+    def test_a_goal_read_can_return_only_the_records_that_match(self):
+        """Review of 2026-11-05: she read 17,256 characters of a 120,887-character
+        goal to find two evidence entries of 975 characters."""
+        self.store.create(shipment(), "c1", RETENTION)
+        result = self.read(goal_id="e8b6a256", match="cape town")
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
+        (goal,) = result.values["goals"]
+        self.assertNotIn("state", goal)
+        self.assertFalse(goal["matches_truncated"])
+        (found,) = goal["matches"]
+        # The whole holding record, with its path; nothing ranked or summarised.
+        # The whole evidence entry: its id and sources come with the match.
+        self.assertEqual(found["path"], "evidence[0]")
+        self.assertEqual(found["record"][0], "tracking")
+        self.assertEqual(list(found["record"][4]), ["event:reminder"])
+        # Review of #206: a progress match is that one note, not the history.
+        self.store.replace(replace(shipment(), progress=(
+            ProgressRecord("checked", "Checked shipment", ("tracking",)),
+            ProgressRecord("called", "Called the courier", ()),
+        )), RETENTION, 1)
+        (note,) = self.read(goal_id="e8b6a256", match="courier").values["goals"][0]["matches"]
+        self.assertEqual(note["path"], "progress[1]")
+        self.assertEqual(note["record"][0], "called")
+        # A top-level value comes back alone, never the whole goal.
+        (status,) = self.read(goal_id="e8b6a256", match="active").values["goals"][0]["matches"]
+        self.assertEqual((status["path"], dict(status["record"])), ("status", {"status": "active"}))
+        self.assertEqual(list(self.read(goal_id="e8b6a256", match="no such text")
+                              .values["goals"][0]["matches"]), [])
+        many = self.read(goal_id="e8b6a256", match="c", limit=1).values["goals"][0]
+        self.assertEqual(len(many["matches"]), 1)
+        self.assertTrue(many["matches_truncated"])
+        for arguments in ({"query": "FedEx", "match": "x"}, {"goal_id": "e8b6a256", "match": " "}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.read(**arguments).failure["code"], "arguments_unusable")
+
     def test_old_email_does_not_expire_a_new_finished_goal(self):
         policy = RetentionPolicy()
         email = policy.direct_mail(NOW - timedelta(days=41), (MailReference("INBOX", "42", "1"),))
