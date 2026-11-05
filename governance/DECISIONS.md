@@ -2832,3 +2832,25 @@ This grants no authority a single goal update lacks: completion still requires s
   1. The per-call log lines no longer report output. The CLI's events carry each message's output count from when it started: 297 per-call against 14,112 in the session's final envelope. The session line now reports the envelope's output, or `unknown` when the session ended without one.
   2. A result that fits the 8,000-character bound whole keeps its long strings whole. They are cut only when the whole result does not fit; long lists are still cut. Three re-reads of 2,500–2,600-character outputs prompted this.
   3. `read_own_goals` with a `goal_id` takes an optional literal `match`. It then returns only the stored records holding that text, each whole with its path, instead of the whole goal. She had read 17,256 characters of a 120,887-character goal to reach two evidence entries of 975 characters.
+
+## D-070 — Opus decides; a Sonnet worker does the mechanical work
+
+- **Date:** 2026-11-05
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-05** ("D70 is approved"). He approved it with the bounded second loop stated below in plain words.
+- **Why.** On the morning of 2026-11-05 the Quad Coil board clean-up used up AL/X's 5-hour allowance: 65 Opus sessions, mostly 112 program runs and 138 reviews of their results. That evening Friedl read the usage page on claude.ai while controlled calls ran on her login:
+  - one fresh Opus step of her context (26,400 tokens) used about 1% of the 5-hour session;
+  - ten cached steps used under 1%;
+  - two fresh Sonnet steps of the same size used less than one Opus step.
+
+  The cost is fresh input and output on Opus, and raw results written into her context. A Sonnet test on the capacitor job that evening calculated correctly but chose a trade-off against Friedl's stated priority, so judgement stays with Opus.
+- **Decision.**
+  1. **Opus directs.** AL/X keeps every decision: what the work is for, what to measure, what results mean, and what to tell Friedl.
+  2. **She may hand one brief at a time to a worker**, `delegate_mechanical_work`. The brief says what to run or measure, on which of her copies, what counts as a checked result, and when to stop.
+  3. **The worker runs on Sonnet** (`ALX_WORKER_MODEL`, default `claude-sonnet-5-5`) on her own Claude login, with its own small context. It may call only `run_program`, `check_kicad_board`, `edit_kicad_work_copy`, `read_reference_file`, `analyse_kicad_copper`, `simulate_kicad_circuit`, `compile_particle_firmware`, `read_own_goals`, `read_mail_document` and `read_mail_attachment`.
+  4. **Every worker call goes through her broker and safety gate**, with her permissions and none of her approvals or standing scopes. Anything needing approval is refused to it. It cannot send, spend, merge or change Friedl's files.
+  5. **The worker reports once:** a status, results each with how they were checked, open points it could not settle, files it touched, and every call it made. It stops at 40 calls by default (80 at most) or after 20 minutes. The report is evidence for her.
+  6. **Worker sessions are recorded** like hers (D-069) under the usage kind `worker`.
+- **Bounded second loop (Law 1).** The architecture has one agent loop choosing the next step. Inside a brief, the worker chooses its own mechanical next steps. Friedl approved this knowingly, as with the coding worker. Meaning, judgement and anything ambiguous return to her.
+- **Measure.** A real board job (the Dual Coil board), with Friedl reading the usage page before and after, compared with the Quad Coil morning.
+- **Later.** Once the worker is proven, check whether the autonomous Sonnet first pass (EX-001) is still worth keeping.

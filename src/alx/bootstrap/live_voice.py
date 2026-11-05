@@ -134,6 +134,10 @@ from alx.tools.self_diagnosis import (
     DEFINITIONS as SELF_DIAGNOSIS_DEFINITIONS,
     build_self_diagnosis_executors,
 )
+from alx.specialists.worker import MechanicalWorker
+from alx.tools.worker import (
+    DEFINITION as WORKER_DEFINITION, WORKER_CAPABILITIES, build_worker_executors,
+)
 from alx.tools.conversation_history import (
     DEFINITION as CONVERSATION_HISTORY_DEFINITION,
     build_conversation_history_executors,
@@ -1071,6 +1075,32 @@ async def run(repository_root: Path) -> None:
         policies.update(send_policies)
         executors.update(send_executors)
         permissions.update(send_permissions)
+
+    # D-070: the worker carries out her mechanical briefs. Its calls go
+    # through this same broker and gate, with her permissions and none of her
+    # approvals, so anything needing one is refused to it.
+    def worker_dispatch(call):
+        token = current_call_id.set(call.call_id)
+        try:
+            return broker.dispatch(call, AuthorityContext(
+                principal_reference=voice_settings.primary_person_id,
+                granted_permission_references=frozenset(permissions),
+                evaluated_at=datetime.now(UTC),
+            ))
+        finally:
+            current_call_id.reset(token)
+
+    worker_definitions = tuple(
+        item for item in registry.list_definitions()
+        if item.capability_id in WORKER_CAPABILITIES
+    )
+    if worker_definitions:
+        register((WORKER_DEFINITION,), TraceSubsystem.CORE)
+        policies[WORKER_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
+        executors.update(build_worker_executors(
+            MechanicalWorker(providers.worker, worker_dispatch, worker_definitions),
+            current_call_id.get,
+        ))
 
     broker = CapabilityBroker(
         registry, SafetyGate(policies), executors,
