@@ -240,6 +240,31 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+    def test_kicads_own_save_history_is_skipped_and_git_elsewhere_still_refused(self):
+        """2026-11-05: KiCad's `.history/.git` made Friedl's saved project look
+        like a credential path, and every check of it was refused."""
+        history = self.project / '.history' / '.git'
+        history.mkdir(parents=True)
+        (history / 'config').write_text('[core]')
+        checked = self.check()
+        copy = self.storage / 'kicad' / checked['work_copy_id'] / 'project'
+        self.assertTrue((copy / 'test.kicad_pcb').exists())
+        self.assertFalse((copy / '.history').exists())
+        # KiCad saving its history meanwhile does not block writing back.
+        fixed = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                             script=EDIT_SCRIPT)
+        (history / 'HEAD').write_text('ref: refs/heads/master')
+        self.success('write_back_kicad_board', **self.write_args(fixed))
+        # Only that one folder at the top of the design is skipped.
+        for name in ('.git/config', 'sub/.history/.git/config', '.history-old/.git/config'):
+            path = self.project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('[core]')
+            with self.subTest(name=name):
+                self.failure('path_denied', 'check_kicad_board', project_dir=str(self.project))
+            import shutil
+            shutil.rmtree(self.project / name.split('/')[0])
+
     def test_cli_failure_diagnostics_never_include_board_content(self):
         private = '(gr_text "private board text")'
         for outcome in (SimpleNamespace(returncode=2, stderr=private),
