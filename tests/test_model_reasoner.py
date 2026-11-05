@@ -803,7 +803,7 @@ class ModelReasonerTests(unittest.TestCase):
         ModelReasoner(model, "laws", "identity").decide(self.context())
         protocol = " ".join(model.requests[0].messages[1].content.split())
         for instruction in (
-            "Before saying you do not know something about your own work, check your trace, log and goals.",
+            "Before saying you do not know something about your own work, check your trace, log, goals and past conversations (read_own_conversations holds what was said and replied in every thread).",
             "When evidence does not settle a cause, say 'I think' and keep checking; never state a guess as fact.",
             "If the same fix fails twice for the same reason, stop, read the failing check and the rule behind it, and try a different approach; if still stuck, tell Friedl plainly what is blocking you.",
         ):

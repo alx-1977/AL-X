@@ -13,6 +13,7 @@ from alx.contracts.cognition import AutonomousRequestUnbounded
 from alx.contracts.models import input_token_upper_bound
 from alx.contracts.result_summary import bound_result
 from alx.contracts.mail import MailReference
+from alx.contracts.trace import MAX_TRACE_REFERENCE_CHARACTERS, TraceSink, TraceStatus, TraceSubsystem, emit_trace
 from alx.contracts import (
     completion_supported_criteria,
     MAX_MEMORY_RETRIEVAL_LIMIT,
@@ -213,7 +214,8 @@ wrong, because Friedl asks, a result surprises you or a step failed, look there 
 you answer, and find the cause. Putting it right in your code is yours too, through a
 coding task and a pull request.
 Before saying you do not know something about your own work, check your trace,
-log and goals. When evidence does not settle a cause, say 'I think' and keep
+log, goals and past conversations (read_own_conversations holds what was said and
+replied in every thread). When evidence does not settle a cause, say 'I think' and keep
 checking; never state a guess as fact. If the same fix fails twice for the same
 reason, stop, read the failing check and the rule behind it, and try a different
 approach; if still stuck, tell Friedl plainly what is blocking you.
@@ -1724,6 +1726,8 @@ class ModelReasoner:
         max_input_tokens: int | None = None,
         spend_authority: AutonomousSpendAuthority | None = None,
         on_request_dispatched: Callable[[Mapping[str, Any]], None] | None = None,
+        *,
+        trace: TraceSink | None = None,
     ) -> None:
         """One reasoner over one model.
 
@@ -1761,6 +1765,9 @@ class ModelReasoner:
         self._max_input_tokens = max_input_tokens
         self._spend_authority = spend_authority
         self._on_request_dispatched = on_request_dispatched
+        # The operator's trace. A lookup answered inside a step is recorded
+        # here, because the Core loop never sees it.
+        self._trace = trace
         # D-065: the native step this reasoner's paused session is waiting on.
         self._native_pending: _NativePending | None = None
         # The spend reservation of a paused session, settled when it ends.
@@ -1997,11 +2004,22 @@ class ModelReasoner:
             asked = completion.tool_use.get("input") or {}
             if name == DESCRIBE_CAPABILITIES:
                 ids = asked.get("capability_ids")
-                answer = _capability_details(context.capabilities, [
-                    item for item in ids if isinstance(item, str)
-                ] if isinstance(ids, (list, tuple)) else [])
+                named = [item for item in ids if isinstance(item, str)
+                         ] if isinstance(ids, (list, tuple)) else []
+                answer = _capability_details(context.capabilities, named)
+                emit_trace(self._trace, TraceSubsystem.CORE, TraceStatus.COMPLETED,
+                           "Read capability details", reference=_trace_reference(named),
+                           count=len(named), conversation_id=context.conversation_id)
             else:
-                answer = _full_result_window(context, asked.get("call_id"), asked.get("offset"))
+                call_id = asked.get("call_id")
+                answer = _full_result_window(context, call_id, asked.get("offset"))
+                read = "error" not in json.loads(answer)
+                emit_trace(self._trace, TraceSubsystem.CORE,
+                           TraceStatus.COMPLETED if read else TraceStatus.FAILED,
+                           "Read full result",
+                           reference=_trace_reference([call_id] if isinstance(call_id, str) else []),
+                           reason_code=None if read else "result_unavailable",
+                           conversation_id=context.conversation_id)
             completion = self._continue(request, answer)
         self._native_pending = None
         if completion.tool_use is not None:
@@ -2107,6 +2125,13 @@ class _NativePending:
 
 def _result_text(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, default=str)
+
+
+def _trace_reference(values: Sequence[str]) -> str | None:
+    """Identifiers as one short trace reference, or none."""
+    text = ",".join(item.strip() for item in values if item.strip())
+    text = " ".join(text.split())[:MAX_TRACE_REFERENCE_CHARACTERS]
+    return text or None
 
 
 def _full_result_window(context: ReasoningContext, call_id: Any, offset: Any) -> str:
