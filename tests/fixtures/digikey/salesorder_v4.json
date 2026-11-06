@@ -1,0 +1,28 @@
+{
+  "SalesOrderId": 102748548,
+  "Status": {"SalesOrderStatus": "Shipped", "ShortDescription": "Shipped"},
+  "Currency": "ZAR",
+  "TotalPrice": 2464.91,
+  "ShipMethod": "DHL",
+  "DateEntered": "2026-11-01T12:00:00Z",
+  "LineItems": [
+    {
+      "SalesOrderId": 102748548,
+      "DigiKeyProductNumber": "TEST-1-ND",
+      "ManufacturerProductNumber": "TEST-1",
+      "Description": "Synthetic component fixture",
+      "CountryOfOrigin": "MY",
+      "QuantityOrdered": 10,
+      "QuantityShipped": 10,
+      "UnitPrice": 200.491,
+      "TotalPrice": 2004.91,
+      "ItemShipments": [{
+        "InvoiceId": 135916797,
+        "QuantityShipped": 10,
+        "ShippedDate": "2026-11-03T09:03:54-06:00",
+        "TrackingNumber": "1697298993",
+        "ExpectedDeliveryDate": "2026-11-06"
+      }]
+    }
+  ]
+}

@@ -43,6 +43,7 @@ class TraceSubsystem(str, Enum):
     XERO = "xero"
     DHL = "dhl"
     SHIP24 = "ship24"
+    DIGIKEY = "digikey"
     READERS = "readers"
     SANDBOX = "sandbox"
     # KiCad design work, so the operator sees which steps used the ECAD tools.
