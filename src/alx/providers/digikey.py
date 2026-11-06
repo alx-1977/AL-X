@@ -187,8 +187,9 @@ class DigiKeyProvider:
         if invoice_number:
             seen = 0
             checked: set[str] = set()
+            match: dict[str, Any] | None = None
             # SearchOrders has no invoice filter and can omit shipment facts.
-            # Resolve each candidate through detail, stopping at the first match.
+            # A match is provisional until every distinct candidate is checked.
             for page in range(1, 1001):
                 body = self._request("GET", base + "/orders", budget=budget, headers=headers, params={
                     "Shared": "true", "StartDate": "1900-01-01", "EndDate": date.today().isoformat(),
@@ -212,7 +213,9 @@ class DigiKeyProvider:
                             raise DigiKeyError("response_invalid")
                         budget.remaining()
                         if invoice_number in normalized["invoice_numbers"]:
-                            return normalized
+                            if match is not None:
+                                raise DigiKeyError("order_ambiguous")
+                            match = normalized
                 seen += len(orders)
                 budget.remaining()
                 if seen >= count:
@@ -221,6 +224,8 @@ class DigiKeyProvider:
                     raise DigiKeyError("response_invalid")
             else:
                 raise DigiKeyError("search_incomplete")
+            if match is not None:
+                return match
             raise DigiKeyError("order_not_found")
         order = normalize_order(self._request("GET", base + "/salesorder/" + sales_order_number, headers=headers))
         if order["sales_order_number"] != sales_order_number or (

@@ -122,7 +122,7 @@ def test_invoice_search_paginates_and_retrieves_exact_order():
     assert len(calls) == 5
 
 
-def invoice_history_handler(numbers, *, total=None, match=False):
+def invoice_history_handler(numbers, *, total=None, match=False, matching_numbers=()):
     base, calls = handler_with_order()
     def handle(request):
         if request.url.path.endswith("/orders"):
@@ -135,41 +135,89 @@ def invoice_history_handler(numbers, *, total=None, match=False):
             calls.append(request)
             raw = complete_order()
             raw["SalesOrderId"] = int(request.url.path.rsplit("/", 1)[1])
-            if not match:
+            if not match and raw["SalesOrderId"] not in matching_numbers:
                 raw["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
             return httpx.Response(200, json=raw)
         return base(request)
     return handle, calls
 
 
-def test_invoice_search_stops_at_first_match():
-    handler, calls = invoice_history_handler([111, 222], total=100, match=True)
-    result = provider(handler).lookup(invoice_number="135916797")
+@pytest.mark.parametrize("capture_bill", [False, True])
+@pytest.mark.parametrize("paginated", [False, True])
+def test_invoice_search_rejects_distinct_matching_orders(capture_bill, paginated):
+    base, calls = invoice_history_handler([111, 222], match=True)
+    def handle(request):
+        if paginated and request.url.path.endswith("/orders"):
+            calls.append(request)
+            number = 111 if request.url.params["PageNumber"] == "1" else 222
+            return httpx.Response(200, json={"TotalOrders": 2, "Orders": [
+                {"SalesOrders": [{"SalesOrderId": number}]}]})
+        return base(request)
+    p = provider(handle)
+    xero = FakeXero()
+    xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
+    xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    if capture_bill:
+        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
+                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
+    else:
+        execute = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER]
+    result = execute({"invoice_number": "135916797"})
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure == {"code": "order_ambiguous"}
+    assert [r.url.path for r in calls if "/salesorder/" in r.url.path] == [
+        "/orderstatus/v4/salesorder/111", "/orderstatus/v4/salesorder/222"]
+    assert xero.created == 0
+    xero.create_draft_bill.assert_not_called()
+    xero.authorise_bill.assert_not_called()
+
+
+def test_invoice_search_returns_unique_match_only_after_all_pages(monkeypatch):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", 5)
+    base, calls = invoice_history_handler([], matching_numbers=(111,))
+    def handle(request):
+        if request.url.path.endswith("/orders"):
+            calls.append(request)
+            numbers = [111] if request.url.params["PageNumber"] == "1" else [111, 222]
+            return httpx.Response(200, json={"TotalOrders": 3, "Orders": [
+                {"SalesOrders": [{"SalesOrderId": n}]} for n in numbers]})
+        return base(request)
+    result = provider(handle).lookup(invoice_number="135916797")
     assert result["sales_order_number"] == "111"
+    # Repeated references to 111 neither imply ambiguity nor repeat detail reads.
     assert [r.url.path for r in calls] == [
-        "/v1/oauth2/token", "/orderstatus/v4/orders", "/orderstatus/v4/salesorder/111"]
+        "/v1/oauth2/token", "/orderstatus/v4/orders", "/orderstatus/v4/salesorder/111",
+        "/orderstatus/v4/orders", "/orderstatus/v4/salesorder/222"]
 
 
 @pytest.mark.parametrize("exhaustion", ["requests", "deadline", "timeout"])
 @pytest.mark.parametrize("capture_bill", [False, True])
-def test_incomplete_invoice_search_never_writes(monkeypatch, exhaustion, capture_bill):
+@pytest.mark.parametrize("after_match", [False, True])
+def test_incomplete_invoice_search_never_writes(monkeypatch, exhaustion, capture_bill, after_match):
     import alx.providers.digikey as module
 
     monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", 4, raising=False)
     monkeypatch.setattr(module, "INVOICE_SEARCH_TIMEOUT", 10, raising=False)
     clock = [0.0]
     monkeypatch.setattr(module, "monotonic", lambda: clock[0], raising=False)
-    base, calls = invoice_history_handler([111, 222, 333])
+    base, calls = invoice_history_handler([111, 222, 333],
+                                         matching_numbers=(111,) if after_match else ())
     def handle(request):
         response = base(request)
         if exhaustion == "deadline":
-            clock[0] += 4
-        if exhaustion == "timeout" and "/salesorder/" in request.url.path:
+            clock[0] += 3 if after_match else 4
+        if exhaustion == "timeout" and "/salesorder/" in request.url.path and (
+            not after_match or request.url.path.endswith("/222")
+        ):
             raise httpx.ReadTimeout("private", request=request)
         return response
     p = provider(handle)
     if capture_bill:
         xero = FakeXero()
+        xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
         xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
         xero.authorise_bill = Mock(wraps=xero.authorise_bill)
         execute = build_xero_executors(xero, FakeMail(), lambda: "call",
@@ -179,9 +227,9 @@ def test_incomplete_invoice_search_never_writes(monkeypatch, exhaustion, capture
     result = execute({"invoice_number": "135916797"})
     assert result.state is CapabilityResultState.FAILED
     assert result.failure == {"code": "search_incomplete"}
-    assert len(calls) == {"requests": 4, "deadline": 3, "timeout": 3}[exhaustion]
+    assert len(calls) == (4 if after_match else {"requests": 4, "deadline": 3, "timeout": 3}[exhaustion])
     if exhaustion == "deadline":
-        assert [r.extensions["timeout"]["read"] for r in calls] == [10, 6, 2]
+        assert [r.extensions["timeout"]["read"] for r in calls] == ([10, 7, 4, 1] if after_match else [10, 6, 2])
     if capture_bill:
         assert xero.created == 0
         xero.create_draft_bill.assert_not_called()
