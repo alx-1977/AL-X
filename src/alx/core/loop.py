@@ -3557,9 +3557,21 @@ class CoreAgent:
         ]
         if not repeats:
             return None
+
+        def later_instruction(item: CapabilityAttempt) -> bool:
+            # The once-per-instruction rule spends one turn. A person turn
+            # after the refusal is a new instruction, so it stops binding and
+            # only a fresh valid approval is still required (2026-11-06: a
+            # board write-back stayed blocked through every new OK).
+            return (conversation is not None and item.recorded_at is not None
+                    and any(turn.person_id is not None and turn.occurred_at > item.recorded_at
+                            for turn in conversation.turns))
+
         binding = next(
             (item for item in reversed(repeats)
              if item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS
+             and not (item.reason_code == "approval_capability_already_dispatched"
+                      and later_instruction(item))
              and not (
                  item.reason_code == "approval_covers_unheard_text"
                  and conversation is not None

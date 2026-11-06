@@ -397,6 +397,71 @@ class OneTurnOneReviewTests(unittest.TestCase):
             self.dispatched, [REQUEST_EXTERNAL_REVIEW, REQUEST_EXTERNAL_REVIEW]
         )
 
+    def test_a_turn_refused_as_already_done_does_not_block_the_next_instruction(self) -> None:
+        """2026-11-06: a write-back refused as a second use of one OK stayed
+        blocked as a 'repeat' through every fresh OK Friedl gave afterwards."""
+        first = review_call("call-1", "approve-1")
+        second = review_call("call-2", "approve-2")
+        agent = self.agent(Queued(
+            AgentDecision(goal_proposal=self.goal()),
+            AgentDecision(call=first, approval_proposal=approved(first, "turn:turn-2")),
+            AgentDecision(call=second, approval_proposal=approved(second, "turn:turn-2")),
+            AgentDecision(response="Requested once."),
+        ))
+        agent.process(one_instruction(), RETENTION, 6)
+        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+
+        later = NOW + timedelta(minutes=2)
+        conversation = ConversationSnapshot("conversation-1", (
+            *one_instruction().turns,
+            ConversationTurn("conversation-1", "turn-3", ConversationOrigin.ALX_RESPONSE,
+                             "Requested once.", later, None),
+            ConversationTurn("conversation-1", "turn-4", ConversationOrigin.TYPED,
+                             "Yes, request it again.", later, "friedl"),
+        ), 4, RETENTION)
+        again = review_call("call-3", "approve-3")
+        agent_two = CoreAgent(
+            self.store, Queued(
+                AgentDecision(goal_id="goal-1"),
+                AgentDecision(call=again, approval_proposal=approved(again, "turn:turn-4")),
+                AgentDecision(response="Requested again."),
+            ),
+            lambda call, state: self._executed(call), (REVIEW_DEFINITION,),
+            clock=lambda: later, identifier_factory=lambda: "goal-2",
+            turn_bound_capabilities=TURN_BOUND,
+        )
+        outcome = agent_two.process(conversation, RETENTION, 4)
+        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW, REQUEST_EXTERNAL_REVIEW])
+        self.assertNotIn("repeated_rejected_call",
+                         [item.reason_code for item in outcome.snapshot.state.attempts])
+
+    def test_without_a_fresh_approval_the_refusal_still_binds(self) -> None:
+        first = review_call("call-1", "approve-1")
+        second = review_call("call-2", "approve-2")
+        self.agent(Queued(
+            AgentDecision(goal_proposal=self.goal()),
+            AgentDecision(call=first, approval_proposal=approved(first, "turn:turn-2")),
+            AgentDecision(call=second, approval_proposal=approved(second, "turn:turn-2")),
+            AgentDecision(response="Requested once."),
+        )).process(one_instruction(), RETENTION, 6)
+        later = NOW + timedelta(minutes=2)
+        conversation = ConversationSnapshot("conversation-1", (
+            *one_instruction().turns,
+            ConversationTurn("conversation-1", "turn-4", ConversationOrigin.TYPED,
+                             "Try again.", later, "friedl"),
+        ), 3, RETENTION)
+        # The same, already-refused approval: still a repeat.
+        stale = review_call("call-3", "approve-2")
+        outcome = CoreAgent(
+            self.store, Queued(AgentDecision(goal_id="goal-1"), AgentDecision(call=stale),
+                               AgentDecision(response="Blocked.")),
+            lambda call, state: self._executed(call), (REVIEW_DEFINITION,),
+            clock=lambda: later, turn_bound_capabilities=TURN_BOUND,
+        ).process(conversation, RETENTION, 4)
+        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+        self.assertIn("repeated_rejected_call",
+                      [item.reason_code for item in outcome.snapshot.state.attempts])
+
     def _executed(self, call):
         self.dispatched.append(call.capability_id)
         return CapabilityAttempt(
