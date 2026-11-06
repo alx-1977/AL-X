@@ -13,7 +13,7 @@ import hashlib
 import sys
 import tempfile
 import unittest
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -100,7 +100,7 @@ class FakeXero:
         total = Decimal("0")
         exclusive = bill.get("LineAmountTypes") == "Exclusive"
         for line in bill.get("LineItems") or ():
-            amount = (Decimal(str(line["Quantity"])) * Decimal(str(line["UnitAmount"]))).quantize(Decimal("0.01"))
+            amount = (Decimal(str(line["Quantity"])) * Decimal(str(line["UnitAmount"]))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             if exclusive:
                 amount += Decimal(str(line.get("TaxAmount") or 0))
             total += amount

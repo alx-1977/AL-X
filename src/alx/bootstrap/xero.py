@@ -185,6 +185,9 @@ def build_xero_runtime(
             settings.default_tax_type,
             classify_dhl_document,
             digikey_lookup=digikey_lookup,
+            # An approval of capture covers writes only. Cleanup may use
+            # deletion's standing authority, never capture's approval.
+            draft_cleanup_permitted=delete_policy.enabled and not delete_policy.approval_required,
         )
     )
     if extractor is not None:

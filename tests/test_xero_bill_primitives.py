@@ -664,11 +664,30 @@ class XeroAccountingAdapterTests(unittest.TestCase):
 
         self.assertEqual(created["InvoiceID"], "bill-1")
         args, kwargs = request.call_args
-        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices"))
+        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices?unitdp=4"))
         self.assertEqual(kwargs["headers"]["Xero-tenant-id"], "tenant-1")
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer access-token")
         self.assertEqual(kwargs["json"], {"Invoices": [bill]})
         self.assertEqual(kwargs["timeout"], 17)
+
+    def test_all_bill_line_requests_use_four_decimal_unit_amounts(self) -> None:
+        bill = {"Type": "ACCPAY", "InvoiceID": "bill/1", "InvoiceNumber": "SUP-42",
+                "Status": "DRAFT", "LineItems": [{"UnitAmount": 0.9054}]}
+        operations = (
+            lambda: self.adapter.find_bill("SUP-42"),
+            lambda: self.adapter.bills_for_contact("contact-1"),
+            lambda: self.adapter.read_bill("bill/1"),
+            lambda: self.adapter.create_draft_bill(bill),
+            lambda: self.adapter.update_draft_bill("bill/1", bill),
+            lambda: self.adapter.authorise_bill("bill/1"),
+            lambda: self.adapter.delete_draft_bill("bill/1"),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with patch("httpx.request", return_value=self.response({"Invoices": [bill]})) as request:
+                    operation()
+                query = parse_qs(urlsplit(request.call_args.args[1]).query)
+                self.assertEqual(query["unitdp"], ["4"])
 
     def test_discarded_bill_does_not_block_recreating_the_invoice_number(self) -> None:
         """A deleted or voided bill is not an existing bill.
@@ -737,7 +756,7 @@ class XeroAccountingAdapterTests(unittest.TestCase):
             args,
             (
                 "GET",
-                f"{ACCOUNTING_URL}/Invoices?InvoiceNumbers=SUP+42%2F7&ContactIDs=contact%2F1",
+                f"{ACCOUNTING_URL}/Invoices?InvoiceNumbers=SUP+42%2F7&unitdp=4&ContactIDs=contact%2F1",
             ),
         )
 
@@ -949,7 +968,7 @@ class XeroAccountingAdapterTests(unittest.TestCase):
 
         self.assertEqual(updated["InvoiceID"], "bill-1")
         args, kwargs = request.call_args
-        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices/bill%2F1"))
+        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices/bill%2F1?unitdp=4"))
         self.assertEqual(kwargs["json"]["Invoices"][0]["InvoiceID"], "bill/1")
 
     def test_authorise_updates_only_the_identified_bill(self) -> None:
@@ -961,7 +980,7 @@ class XeroAccountingAdapterTests(unittest.TestCase):
 
         self.assertEqual(authorised["Status"], "AUTHORISED")
         args, kwargs = request.call_args
-        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices/bill-1"))
+        self.assertEqual(args, ("POST", f"{ACCOUNTING_URL}/Invoices/bill-1?unitdp=4"))
         self.assertEqual(
             kwargs["json"],
             {"Invoices": [{"InvoiceID": "bill-1", "Status": "AUTHORISED"}]},

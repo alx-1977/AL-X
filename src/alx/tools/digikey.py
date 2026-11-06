@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from alx.contracts import (
@@ -132,8 +132,12 @@ def bill_invoice(order: Mapping[str, Any], *, rounding_adjustment: bool = False)
                          for key in ("shipping", "tax"))
         total = amount(order["total"])
         invoice["tax_amount"] = str(tax)
+        cent = Decimal("0.01")
+        unit_precision = Decimal("0.0001")
+        submitted_shipping = shipping.quantize(unit_precision, rounding=ROUND_HALF_UP)
         merchandise = Decimal(0)
-        rounded_lines = shipping.quantize(Decimal("0.01"))
+        unrounded_lines = submitted_shipping
+        rounded_lines = submitted_shipping.quantize(cent, rounding=ROUND_HALF_UP)
         if not order["line_items"] or total <= 0:
             raise ValueError("line_items")
         for line in order["line_items"]:
@@ -144,18 +148,28 @@ def bill_invoice(order: Mapping[str, Any], *, rounding_adjustment: bool = False)
             if (not shipments or any(item["invoice_number"] != invoice["invoice_number"] for item in shipments)
                     or sum((amount(item["quantity"]) for item in shipments), Decimal(0)) != quantity):
                 raise ValueError("invoice_allocation")
-            if abs(quantity * unit - extension) > Decimal("0.01"):
-                raise ValueError("line_extension")
+            if quantity * unit != extension:
+                problems.append("totals_mismatch")
+            unit = unit.quantize(unit_precision, rounding=ROUND_HALF_UP)
             merchandise += extension
-            rounded_lines += (quantity * unit).quantize(Decimal("0.01"))
+            unrounded_lines += quantity * unit
+            rounded_lines += (quantity * unit).quantize(cent, rounding=ROUND_HALF_UP)
             lines.append({"description": " | ".join(filter(None, (
                 line["digikey_part_number"], line["manufacturer_part_number"], line["description"]
             ))), "quantity": str(quantity), "unit_amount": str(unit)})
         difference = total - (rounded_lines + tax)
-        if abs(merchandise - amount(order["subtotal"])) > Decimal("0.01"):
+        # Only source merchandise lines earn rounding allowance, never shipping
+        # or the new adjustment. Predict the exact four-decimal prices sent by
+        # the shared writer, not merely the source's extended prices.
+        rounding_bound = min(Decimal("0.005") * len(order["line_items"]), Decimal("0.05"))
+        subtotal = amount(order["subtotal"])
+        if (subtotal not in (merchandise, merchandise.quantize(cent, rounding=ROUND_HALF_UP))
+                or (merchandise + shipping + tax).quantize(cent, rounding=ROUND_HALF_UP) != total
+                or (unrounded_lines + tax).quantize(cent, rounding=ROUND_HALF_UP) != total
+                or abs(difference) > rounding_bound):
             problems.append("totals_mismatch")
         elif difference:
-            if rounding_adjustment and abs(difference) <= Decimal("0.05"):
+            if rounding_adjustment:
                 lines.append({"description": "Rounding adjustment", "quantity": "1",
                               "unit_amount": str(difference)})
             else:
@@ -164,7 +178,7 @@ def bill_invoice(order: Mapping[str, Any], *, rounding_adjustment: bool = False)
             problems.append("tax_allocation_unresolved")
         invoice["subtotal"] = str(total - tax)
         if shipping:
-            lines.append({"description": "Shipping", "quantity": "1", "unit_amount": str(shipping)})
+            lines.append({"description": "Shipping", "quantity": "1", "unit_amount": str(submitted_shipping)})
     except (InvalidOperation, ValueError):
         problems.append("billing_values_unresolved")
     return invoice, lines, problems

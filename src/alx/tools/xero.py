@@ -8,7 +8,7 @@ import hashlib
 import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from alx.contracts import (
@@ -267,7 +267,7 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
 
 CAPTURE_DIGIKEY_DEFINITION = CapabilityDefinition(
     CAPTURE_DIGIKEY_ORDER_BILL,
-    "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true. rounding_adjustment defaults to false; true permits one signed rounding line for a difference up to 0.05.",
+    "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true. rounding_adjustment defaults to false; true permits one signed line only for proven cent rounding of submitted prices, bounded by 0.005 per merchandise line and at most 0.05.",
     StructuredSchema(ValueKind.OBJECT,
                      {**ORDER_INPUT.properties, "authorise": _BOOLEAN, "rounding_adjustment": _BOOLEAN},
                      extra_properties=False),
@@ -594,14 +594,16 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
         account_code = _required(item, "account_code")
         tax_type = _required(item, "tax_type")
         quantity = _decimal(item.get("quantity"), "quantity")
-        unit_amount = _decimal(item.get("unit_amount"), "unit_amount")
+        unit_amount = _decimal(item.get("unit_amount"), "unit_amount").quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP
+        )
         tax_amount = _decimal(item.get("tax_amount"), "tax_amount")
         if quantity <= 0 or tax_amount < 0:
             raise ValueError("line_items")
         base = quantity * unit_amount
         # Xero rounds each line before summing the bill, while retaining the
-        # supplied quantity and full unit-price precision.
-        rounded_base = base.quantize(Decimal("0.01"))
+        # supplied quantity and four-decimal unit-price precision.
+        rounded_base = base.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         total += rounded_base + tax_amount if line_amount_types == "Exclusive" else rounded_base
         output.append(
             {
@@ -644,7 +646,7 @@ def _draft_mismatch(
 
     requested_total = sum(
         (
-            (money(item.get("Quantity")) * money(item.get("UnitAmount"))).quantize(Decimal("0.01"))
+            (money(item.get("Quantity")) * money(item.get("UnitAmount"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             + (
                 money(item.get("TaxAmount"))
                 if str(requested.get("LineAmountTypes") or "") == "Exclusive"
@@ -653,7 +655,7 @@ def _draft_mismatch(
             for item in requested.get("LineItems") or []
         ),
         Decimal("0"),
-    ).quantize(Decimal("0.01"))
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     try:
         if money(existing.get("Total")) != requested_total:
             return (
@@ -724,13 +726,13 @@ def _draft_mismatch(
                 if was.get("LineAmount") is not None
                 else (
                     money(was.get("Quantity")) * money(was.get("UnitAmount"))
-                ).quantize(Decimal("0.01"))
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             )
             # Compare extensions at the same cent precision as bill-total
             # validation; keep the quantity and unit-price checks exact below.
             wanted_amount = (
                 money(wanted.get("Quantity")) * money(wanted.get("UnitAmount"))
-            ).quantize(Decimal("0.01"))
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             if stored_amount != wanted_amount:
                 return f"line {index} amount differs"
             # Two lines can multiply to the same amount from different
@@ -813,8 +815,8 @@ def _draft_payload(
     if expected_total <= 0:
         raise ValueError("expected_total")
     lines, calculated_total = _line_items(arguments)
-    if calculated_total != expected_total.quantize(Decimal("0.01")):
-        raise ValueError("expected_total")
+    if calculated_total != expected_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP):
+        raise XeroAccessError("source_mismatch")
     line_amount_types = _required(arguments, "line_amount_types")
     _validate_line_mappings(account, lines, line_amount_types)
     return (
@@ -830,7 +832,7 @@ def _draft_payload(
             "LineItems": lines,
             "Status": "DRAFT",
         },
-        expected_total.quantize(Decimal("0.01")),
+        expected_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
     )
 
 
@@ -1085,6 +1087,7 @@ def build_xero_executors(
     dhl_classifier: Callable[[bytes], str] | None = None,
     today: Callable[[], date] = date.today,
     digikey_lookup: Callable[..., Mapping[str, Any]] | None = None,
+    draft_cleanup_permitted: bool = False,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     def failed(capability_id: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
@@ -1195,6 +1198,7 @@ def build_xero_executors(
         """
         steps: list[str] = []
         attached: list[str] = []
+        created_id = ""
 
         def returned(reason: str, detail: str, bill: Mapping[str, Any] | None = None):
             return CapabilityResult(
@@ -1213,6 +1217,34 @@ def build_xero_executors(
                 # bill: an execution plan must stop here rather than run on.
                 outcome=ExecutionOutcome.AMBIGUOUS,
             )
+
+        def reject_created_total(bill: Mapping[str, Any]) -> CapabilityResult:
+            # Only the draft created by this call is eligible for cleanup.
+            if str(bill.get("InvoiceID") or "") != created_id or bill.get("Status") != "DRAFT":
+                return returned("draft_cleanup_failed", "the created bill is not a verified draft", bill)
+            # D-019 / D-051: capture's write approval cannot approve deletion.
+            # Without separate unattended delete authority, leave the draft
+            # and return its actual identity and total for AL/X to decide.
+            if not draft_cleanup_permitted:
+                return CapabilityResult(
+                    call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                    CapabilityResultState.FAILED,
+                    failure={
+                        "code": "source_mismatch",
+                        "invoice_id": created_id,
+                        "total": _bill_values(bill)["total"],
+                        "draft_retained": True,
+                        "cleanup": "delete_not_permitted",
+                    },
+                )
+            try:
+                deleted = account.delete_draft_bill(created_id)
+                if deleted.get("InvoiceID") != created_id or deleted.get("Status") != "DELETED":
+                    return returned("draft_cleanup_failed", "Xero did not confirm draft deletion", bill)
+            except XeroAccessError as error:
+                return returned("draft_cleanup_failed", error.code, bill)
+            steps.append("deleted_mismatched_draft")
+            return failed(CAPTURE_SUPPLIER_INVOICE, "source_mismatch")
 
         try:
             documents = arguments.get("source_documents")
@@ -1283,14 +1315,21 @@ def build_xero_executors(
                 invoice_id = current["invoice_id"]
                 steps.append("resumed_existing_draft")
             else:
-                created = _bill_values(account.create_draft_bill(bill_payload))
+                created_bill = account.create_draft_bill(bill_payload)
+                created = _bill_values(created_bill)
+                invoice_id = created_id = created["invoice_id"]
+                steps.append("created_draft")
                 if (
                     created["invoice_number"] != invoice_number
                     or Decimal(created["total"]) != expected_total
                 ):
-                    raise XeroAccessError("source_mismatch")
-                invoice_id = created["invoice_id"]
-                steps.append("created_draft")
+                    return reject_created_total(created_bill)
+                # Read back before authorisation, while cleanup is possible.
+                draft = account.read_bill(invoice_id)
+                if draft is not None and Decimal(_bill_values(draft)["total"]) != expected_total:
+                    return reject_created_total(draft)
+                if draft is None:
+                    return returned("read_back_mismatch", "the created draft could not be read back", created_bill)
 
             stored = {
                 str(item.get("FileName"))
@@ -1352,6 +1391,9 @@ def build_xero_executors(
                 raw_bill = account.read_bill(invoice_id)
 
             final = _bill_values(raw_bill)
+            if (created_id and raw_bill is not None and final["status"] == "DRAFT"
+                    and Decimal(final["total"]) != expected_total):
+                return reject_created_total(raw_bill)
             steps.append("read_back")
             expected_status = "AUTHORISED" if authorise_requested else "DRAFT"
             if (
@@ -1707,6 +1749,8 @@ def build_xero_executors(
             code = getattr(error, "code", "provider_failed")
             return failed(capability_id, code if code in FAILURE_CODES else "provider_failed")
         invoice, lines, problems = bill_invoice(order, rounding_adjustment=rounding_adjustment)
+        if "totals_mismatch" in problems:
+            return failed(capability_id, "source_mismatch")
         if problems:
             return CapabilityResult(
                 call_id_source(), capability_id, CapabilityResultState.SUCCEEDED,

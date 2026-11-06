@@ -2,7 +2,7 @@
 
 import ast
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import sys
 from pathlib import Path
@@ -308,12 +308,13 @@ def test_bad_identifiers_do_not_make_http_requests(args):
     p.lookup.assert_not_called()
 
 
-def capture(order=None, xero=None):
+def capture(order=None, xero=None, *, draft_cleanup_permitted=False):
     xero = xero or FakeXero()
     xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
     handler, _ = handler_with_order(order)
     executors = build_xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
-                                     digikey_lookup=provider(handler).lookup)
+                                     digikey_lookup=provider(handler).lookup,
+                                     draft_cleanup_permitted=draft_cleanup_permitted)
     return xero, executors[CAPTURE_DIGIKEY_ORDER_BILL]
 
 
@@ -353,8 +354,11 @@ def test_uncertain_order_never_writes(change):
     if change == "currency": raw["Currency"] = ""
     xero, execute = capture(raw)
     result = execute({"sales_order_number": "102748548"})
-    assert result.values["returned_for"] == "needs_judgment"
-    assert result.outcome is ExecutionOutcome.AMBIGUOUS
+    if change in ("total", "missing_charges"):
+        assert result.failure["code"] == "source_mismatch"
+    else:
+        assert result.values["returned_for"] == "needs_judgment"
+        assert result.outcome is ExecutionOutcome.AMBIGUOUS
     assert xero.created == 0
 
 
@@ -424,21 +428,31 @@ def test_rounding_difference_needs_judgment_before_write():
     raw["TotalPrice"] = 2464.92
     xero, execute = capture(raw)
     result = execute({"sales_order_number": "102748548"})
-    assert result.values["returned_for"] == "needs_judgment"
-    assert "rounding_allocation_unresolved" in result.values["detail"]
+    assert result.failure["code"] == "source_mismatch"
     assert xero.created == 0
 
 
 def shipped_rounding_order():
-    # Reported IDs, total and four-decimal extensions, with synthetic goods.
+    # Exact quantities, prices and extensions from order 102748548 /
+    # invoice 135916797. Product descriptions remain sanitized.
     raw = raw_order()
-    raw.update(ShippingCharges="", SalesTax="")
+    raw.update(ShippingCharges="0", SalesTax="0", Subtotal="2464.9050", TotalPrice="2464.91")
     template = raw["LineItems"][0]
     raw["LineItems"] = []
-    for extension in ("166.7750", "311.3750", "100.0150", "200.0150", "1686.7300"):
+    for quantity, unit, extension in (
+        (250, "0.5488", "137.2000"),
+        (250, "0.6671", "166.7750"),
+        (250, "1.2455", "311.3750"),
+        (250, "0.8117", "202.9250"),
+        (250, "0.9054", "226.3500"),
+        (1, "744.53", "744.53"),
+        (250, "0.8117", "202.9250"),
+        (250, "0.8709", "217.7250"),
+        (250, "1.0204", "255.1000"),
+    ):
         line = deepcopy(template)
-        line.update(QuantityOrdered=1, QuantityShipped=1, UnitPrice=extension)
-        line["ItemShipments"][0]["QuantityShipped"] = 1
+        line.update(QuantityOrdered=quantity, QuantityShipped=quantity, UnitPrice=unit, TotalPrice=extension)
+        line["ItemShipments"][0]["QuantityShipped"] = quantity
         raw["LineItems"].append(line)
     return raw
 
@@ -464,7 +478,9 @@ def test_reported_shipped_order_rounding_and_invoice_capture(identifier, enabled
     result = execute(args)
     order = result.values["invoice"]["order"]
     assert "135916797" in order["invoice_numbers"]
-    assert sum((Decimal(line["extended_price"]).quantize(Decimal("0.01"))
+    assert len(order["line_items"]) == 9
+    assert order["subtotal"] == "2464.9050"
+    assert sum((Decimal(line["extended_price"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 for line in order["line_items"]), Decimal(0)) == Decimal("2464.93")
     if not enabled:
         assert "rounding_allocation_unresolved" in result.values["detail"]
@@ -477,6 +493,17 @@ def test_reported_shipped_order_rounding_and_invoice_capture(identifier, enabled
     adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
     assert len(adjustments) == 1
     assert adjustments[0]["UnitAmount"] == -0.02
+    ordinary = [line for line in bill["LineItems"] if line["Description"] != "Rounding adjustment"]
+    assert len(ordinary) == 9
+    for source, sent in zip(raw["LineItems"], ordinary):
+        assert Decimal(str(sent["UnitAmount"])) == Decimal(source["UnitPrice"]).quantize(Decimal("0.0001"))
+        assert Decimal(str(sent["Quantity"])) == Decimal(source["QuantityOrdered"])
+    amounts = [(Decimal(str(line["Quantity"])) * Decimal(str(line["UnitAmount"]))).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP) for line in bill["LineItems"]]
+    assert sum(amounts[:-1]) == Decimal("2464.93")
+    assert sum(amounts) == Decimal("2464.91")
+    assert bill["LineAmountTypes"] == "NoTax"
+    assert all(line["TaxType"] == "NONE" and line["TaxAmount"] == 0 for line in bill["LineItems"])
     for key in ("AccountCode", "TaxType", "TaxAmount"):
         assert adjustments[0][key] == bill["LineItems"][0][key]
     assert not any(line["Description"] == "Shipping" for line in bill["LineItems"])
@@ -488,9 +515,8 @@ def test_rounding_adjustment_bounds(difference):
     raw["TotalPrice"] = str(Decimal("2464.93") + Decimal(difference))
     xero, execute = capture(raw)
     result = execute({"sales_order_number": "102748548", "rounding_adjustment": True})
-    if abs(Decimal(difference)) > Decimal("0.05"):
-        assert result.values["returned_for"] == "needs_judgment"
-        assert "rounding_allocation_unresolved" in result.values["detail"]
+    if Decimal(raw["TotalPrice"]) != Decimal("2464.91"):
+        assert result.failure["code"] == "source_mismatch"
         assert xero.created == 0
     else:
         assert result.values["completed"] is True
@@ -498,6 +524,104 @@ def test_rounding_adjustment_bounds(difference):
         assert Decimal(bill["Total"]) == Decimal(raw["TotalPrice"])
         adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
         assert len(adjustments) == bool(Decimal(difference))
+
+
+@pytest.mark.parametrize("authorise", [False, True])
+@pytest.mark.parametrize("change", ["price", "small_price", "submitted_precision", "subtotal", "extension"])
+def test_non_rounding_difference_fails_before_any_write(change, authorise):
+    raw = shipped_rounding_order()
+    if change == "price":
+        raw["LineItems"][0]["UnitPrice"] = "0.5588"
+    elif change == "small_price":
+        # The old tolerance could hide this extra cent on a quantity-one line.
+        raw["LineItems"][5]["UnitPrice"] = "744.54"
+    elif change == "submitted_precision":
+        # The discrepancy fits both bounds, but comes from price truncation
+        # to four decimals, not cent rounding of the submitted extensions.
+        raw = rounding_order(10, "1.0000049", quantity=1000)
+    elif change == "subtotal":
+        raw["Subtotal"] = "2464.9150"
+    xero, execute = capture(raw)
+    if change == "extension":
+        order = normalize_order(raw)
+        order["line_items"][5]["extended_price"] = "744.54"
+        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
+                                      digikey_lookup=lambda **_: order)[CAPTURE_DIGIKEY_ORDER_BILL]
+    assert_source_mismatch_without_write(xero, execute, authorise=authorise)
+
+
+def rounding_order(count, unit, *, quantity=1, shipping="0"):
+    raw = raw_order()
+    template = raw["LineItems"][0]
+    subtotal = Decimal(count) * Decimal(quantity) * Decimal(unit)
+    raw.update(ShippingCharges=shipping, SalesTax="0", Subtotal=str(subtotal),
+               TotalPrice=str((subtotal + Decimal(shipping)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)))
+    raw["LineItems"] = []
+    for _ in range(count):
+        line = deepcopy(template)
+        line.update(QuantityOrdered=quantity, QuantityShipped=quantity, UnitPrice=unit)
+        line["ItemShipments"][0]["QuantityShipped"] = quantity
+        raw["LineItems"].append(line)
+    return raw
+
+
+def assert_source_mismatch_without_write(xero, execute, *, authorise=True):
+    xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True,
+                      "authorise": authorise})
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure == {"code": "source_mismatch"}
+    xero.create_draft_bill.assert_not_called()
+    xero.authorise_bill.assert_not_called()
+    assert xero.created == 0
+    assert not xero.bills
+
+
+@pytest.mark.parametrize("count,unit,shipping,expected", [
+    (2, "1.0050", "0", "-0.01"),  # Exactly 0.005 per source line.
+    (2, "1.0049", "0", "0.01"),   # Positive residue at the same bound.
+    (9, "1.0050", "0", "-0.04"),  # Odd line count: bound is 0.045, not 0.05.
+    (10, "1.0050", "0", "-0.05"), # Exactly the absolute cap.
+    (12, "1.0050", "0", None),     # Pure rounding, but exceeds 0.05.
+    (12, "1.0049", "0", None),     # Positive residue also exceeds the cap.
+    (1, "1.0049", "0.0049", None), # Exceeds the per-source-line bound.
+])
+@pytest.mark.parametrize("authorise", [False, True])
+def test_proven_rounding_respects_line_count_and_absolute_bounds(count, unit, shipping, expected, authorise):
+    xero, execute = capture(rounding_order(count, unit, shipping=shipping))
+    if expected is None:
+        assert_source_mismatch_without_write(xero, execute, authorise=authorise)
+        return
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True,
+                      "authorise": authorise})
+    assert result.values["completed"] is True
+    bill = xero.bills["bill-1"]
+    adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
+    assert len(adjustments) == 1
+    assert Decimal(str(adjustments[0]["UnitAmount"])) == Decimal(expected)
+    assert Decimal(bill["Total"]) == Decimal(rounding_order(count, unit, shipping=shipping)["TotalPrice"])
+
+
+@pytest.mark.parametrize("line_amount_types", ["NoTax", "Exclusive"])
+def test_rounding_prediction_includes_shipping_and_shared_no_tax_resolution(line_amount_types):
+    raw = shipped_rounding_order()
+    raw.update(ShippingCharges="10.1256", TotalPrice="2475.03")
+    xero, execute = capture(raw)
+    xero.history = ({"LineAmountTypes": line_amount_types,
+                     "LineItems": [{"AccountCode": "310", "TaxType": "NONE"}]},)
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True})
+    assert result.values["completed"] is True
+    bill = xero.bills["bill-1"]
+    assert bill["Total"] == "2475.03"
+    # The source states zero tax, so shared coding selects NoTax even when
+    # supplier history used Exclusive amounts.
+    assert bill["LineAmountTypes"] == "NoTax"
+    adjustment = next(line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment")
+    shipping = next(line for line in bill["LineItems"] if line["Description"] == "Shipping")
+    assert Decimal(str(adjustment["UnitAmount"])) == Decimal("-0.03")
+    assert Decimal(str(shipping["UnitAmount"])) == Decimal("10.1256")
+    assert all(line["TaxType"] == "NONE" and line["TaxAmount"] == 0 for line in bill["LineItems"])
 
 
 @pytest.mark.parametrize("field", ["ShippingCharges", "SalesTax"])
@@ -657,3 +781,191 @@ def test_runtime_independent_of_pdf_extractor_and_authority(tmp_path):
         assert runtime.policies[CAPTURE_DIGIKEY_ORDER_BILL].approval_required is not unattended
     assert CAPTURE_DIGIKEY_ORDER_BILL in BILL_EXECUTION_CAPABILITIES
     assert CAPTURE_DIGIKEY_DEFINITION.side_effect is SideEffect.EFFECTFUL
+
+
+@pytest.mark.parametrize("rounding_adjustment", [False, True])
+def test_four_decimal_prices_need_no_adjustment_when_lines_reconcile(rounding_adjustment):
+    # A single four-decimal price whose cent-rounded total already reconciles.
+    raw = raw_order()
+    raw.update(TotalPrice="9.05", ShippingCharges=0, SalesTax=0)
+    line = raw["LineItems"][0]
+    line.update(QuantityOrdered=10, QuantityShipped=10, UnitPrice="0.9054", TotalPrice="9.054")
+    xero, execute = capture(raw)
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": rounding_adjustment})
+    assert result.values["completed"] is True
+    bill = xero.bills["bill-1"]
+    assert bill["Total"] == "9.05"
+    assert len(bill["LineItems"]) == 1
+    assert bill["LineItems"][0]["UnitAmount"] == 0.9054
+    assert bill["LineItems"][0]["TaxType"] == "NONE"
+    assert bill["LineItems"][0]["TaxAmount"] == 0
+
+
+@pytest.mark.parametrize("line_amount_types,unit,tax,expected", [
+    ("NoTax", "0.9054", "0", "9.05"),
+    ("NoTax", "0.9055", "0", "9.06"),
+    ("Exclusive", "0.9055", "1.36", "10.42"),
+    ("Inclusive", "0.9055", "1.18", "9.06"),
+    ("NoTax", "0.905449", "0", "9.05"),
+])
+def test_shared_payload_calculates_xero_four_dp_line_rounding(line_amount_types, unit, tax, expected):
+    from alx.tools.xero import _draft_payload
+    xero = FakeXero()
+    xero.tax_rates = ({"TaxType": "INPUT", "Status": "ACTIVE"},)
+    payload, total = _draft_payload({
+        "contact_id": "c-1", "invoice_number": "test", "date": "2026-11-03",
+        "due_date": "2026-11-03", "currency": "ZAR", "reference": "test",
+        "line_amount_types": line_amount_types, "expected_total": expected,
+        "line_items": [{"description": "Synthetic capacitor", "quantity": "10",
+                        "unit_amount": unit, "tax_amount": tax, "account_code": "310",
+                        "tax_type": "NONE" if line_amount_types == "NoTax" else "INPUT"}],
+    }, xero)
+    assert total == Decimal(expected)
+    assert Decimal(str(payload["LineItems"][0]["UnitAmount"])) == Decimal(unit).quantize(
+        Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def test_shared_commit_rejects_source_mismatch_before_write():
+    xero = FakeXero()
+    executors = build_xero_executors(xero, FakeMail(), lambda: "call",
+                                     lambda *_: extracted(subtotal="179.99"))
+    result = executors["capture_supplier_invoice"](arguments())
+    assert result.failure["code"] == "source_mismatch"
+    assert xero.created == 0
+    assert not xero.bills
+
+
+@pytest.mark.parametrize("stage", ["create", "read", "final"])
+@pytest.mark.parametrize("authorise", [False, True])
+@pytest.mark.parametrize("delete_permitted", [False, True])
+@pytest.mark.parametrize("source", ["pdf", "digikey"])
+def test_created_total_cleanup_respects_separate_runtime_delete_authority(
+    tmp_path, monkeypatch, stage, authorise, delete_permitted, source
+):
+    xero = FakeXero()
+    if source == "digikey":
+        xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
+    monkeypatch.setattr("alx.bootstrap.xero.XeroAccountingAdapter", lambda *_: xero)
+    handler, _ = handler_with_order()
+    runtime = build_xero_runtime(
+        xero_settings(unattended_bill_writes=True, unattended_bill_deletes=delete_permitted),
+        tmp_path, FakeMail(), lambda: "call", lambda *_: extracted(),
+        digikey_lookup=provider(handler).lookup,
+    )
+    capability = "capture_supplier_invoice" if source == "pdf" else CAPTURE_DIGIKEY_ORDER_BILL
+    assert not runtime.policies[capability].approval_required
+    assert runtime.policies["delete_xero_draft_bill"].approval_required is not delete_permitted
+    create, read = xero.create_draft_bill, xero.read_bill
+    reads = 0
+
+    def wrong_create(payload):
+        stored = create(payload)
+        if stage == "create":
+            stored["Total"] = "2467.04"
+        return dict(stored)
+
+    def wrong_read(invoice_id):
+        nonlocal reads
+        reads += 1
+        stored = read(invoice_id)
+        if (stage == "read" or (stage == "final" and reads == 2)) and stored["Status"] == "DRAFT":
+            stored["Total"] = "2467.04"
+        return stored
+
+    xero.create_draft_bill = wrong_create
+    xero.read_bill = wrong_read
+    xero.delete_draft_bill = Mock(wraps=xero.delete_draft_bill)
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    args = arguments(authorise=authorise) if source == "pdf" else {
+        "sales_order_number": "102748548", "authorise": authorise}
+    result = runtime.executors[capability](args)
+    if stage == "final" and authorise:
+        assert result.values["completed"] is True
+        xero.delete_draft_bill.assert_not_called()
+        return
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure["code"] == "source_mismatch"
+    xero.authorise_bill.assert_not_called()
+    if delete_permitted:
+        xero.delete_draft_bill.assert_called_once_with("bill-1")
+        assert xero.bills["bill-1"]["Status"] == "DELETED"
+    else:
+        xero.delete_draft_bill.assert_not_called()
+        assert xero.bills["bill-1"]["Status"] == "DRAFT"
+        assert result.failure["draft_retained"] is True
+        assert result.failure["invoice_id"] == "bill-1"
+        assert result.failure["total"] == "2467.04"
+
+
+@pytest.mark.parametrize("stage", ["create", "read", "final"])
+@pytest.mark.parametrize("authorise", [False, True])
+def test_new_mismatched_draft_is_deleted_before_return_or_authorisation(stage, authorise):
+    xero, execute = capture(draft_cleanup_permitted=True)
+    create = xero.create_draft_bill
+    read = xero.read_bill
+    reads = 0
+
+    def wrong_create(payload):
+        stored = create(payload)
+        if stage == "create":
+            stored["Total"] = "2467.04"
+        return dict(stored)
+
+    def wrong_read(invoice_id):
+        nonlocal reads
+        reads += 1
+        stored = read(invoice_id)
+        if (stage == "read" or (stage == "final" and reads == 2)) and stored["Status"] == "DRAFT":
+            stored["Total"] = "2467.04"
+        return stored
+
+    xero.create_draft_bill = wrong_create
+    xero.read_bill = wrong_read
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    result = execute({"sales_order_number": "102748548", "authorise": authorise})
+    if stage == "final" and authorise:
+        # The draft matched before authorisation; this case is no longer a draft.
+        assert result.values["completed"] is True
+    else:
+        assert result.failure["code"] == "source_mismatch"
+        assert xero.bills["bill-1"]["Status"] == "DELETED"
+        xero.authorise_bill.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["exception", "unconfirmed"])
+def test_draft_cleanup_failure_is_explicit_and_retains_bill_identity(failure):
+    from alx.contracts import XeroAccessError
+    xero, execute = capture(draft_cleanup_permitted=True)
+    create = xero.create_draft_bill
+
+    def wrong_create(payload):
+        stored = create(payload)
+        stored["Total"] = "2467.04"
+        return stored
+
+    def refuse_delete(invoice_id):
+        if failure == "exception":
+            raise XeroAccessError("connection_failed")
+        return xero.bills[invoice_id]
+
+    xero.create_draft_bill = wrong_create
+    xero.delete_draft_bill = refuse_delete
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    result = execute({"sales_order_number": "102748548"})
+    assert result.values["completed"] is False
+    assert "draft_cleanup_failed" in result.values["detail"]
+    assert result.values["bill"]["invoice_id"] == "bill-1"
+    assert xero.bills["bill-1"]["Status"] == "DRAFT"
+    xero.authorise_bill.assert_not_called()
+
+
+def test_preexisting_mismatched_draft_is_never_deleted():
+    xero, execute = capture()
+    assert execute({"sales_order_number": "102748548", "authorise": False}).values["completed"]
+    xero.bills["bill-1"]["Total"] = "2467.04"
+    xero.delete_draft_bill = Mock(wraps=xero.delete_draft_bill)
+    result = execute({"sales_order_number": "102748548"})
+    assert result.values["completed"] is False
+    assert xero.created == 1
+    assert xero.bills["bill-1"]["Status"] == "DRAFT"
+    xero.delete_draft_bill.assert_not_called()
