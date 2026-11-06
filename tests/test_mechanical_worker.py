@@ -239,5 +239,45 @@ class DelegateCapabilityTests(unittest.TestCase):
         self.assertNotIn("standing_scopes", body)
 
 
+
+class WorkerVisibilityTests(unittest.TestCase):
+    """2026-11-06: she never used the worker. Its one-line entry dropped the
+    "when to use" sentence and her instructions never mentioned it."""
+
+    def test_her_instructions_and_catalogue_line_say_when_to_use_it(self) -> None:
+        from alx.core.model_reasoner import ModelReasoner, _catalogue_payload
+        from tests.test_model_reasoner import FakeModel, base_output
+        model = FakeModel(base_output())
+        reasoner = ModelReasoner(model, "laws", "identity")
+        from alx.contracts import ReasoningContext
+        reasoner.decide(ReasoningContext(None, (), (DEFINITION,), conversation_id="c"))
+        protocol = " ".join(model.requests[0].messages[1].content.split())
+        self.assertIn("hand it to your worker with delegate_mechanical_work", protocol)
+        self.assertIn("budget_exhausted means this turn used all its steps", protocol)
+        (entry,) = json.loads(_catalogue_payload((DEFINITION,)))["capabilities"]
+        self.assertIn("many-step mechanical work", entry["purpose"])
+
+    def test_worker_calls_and_kicad_calls_carry_their_own_labels(self) -> None:
+        from alx.contracts import TraceSubsystem
+        events = []
+        registry = CapabilityRegistry((RUN,))
+        broker = CapabilityBroker(registry, SafetyGate({
+            "run_program": AuthorityPolicy(frozenset({"self.read"}))}), {
+            "run_program": lambda arguments: CapabilityResult(
+                "c1", "run_program", CapabilityResultState.SUCCEEDED, {})},
+            trace=events.append, subsystems={"run_program": TraceSubsystem.ECAD})
+        context = AuthorityContext("friedl", frozenset({"self.read"}), datetime.now(UTC))
+        from alx.contracts import CapabilityCall
+        broker.dispatch(CapabilityCall("c1", "run_program", {}), context)
+        broker.dispatch(CapabilityCall("c1", "run_program", {}), context,
+                        trace_subsystem=TraceSubsystem.WORKER)
+        self.assertEqual([e.subsystem.value for e in events],
+                         ["ecad", "ecad", "worker", "worker"])
+        source = (ROOT / "src/alx/bootstrap/live_voice.py").read_text(encoding="utf-8")
+        self.assertIn("register(kicad_runtime.definitions, TraceSubsystem.ECAD)", source)
+        self.assertIn("register((WORKER_DEFINITION,), TraceSubsystem.WORKER)", source)
+        self.assertIn("trace_subsystem=TraceSubsystem.WORKER", source)
+
+
 if __name__ == "__main__":
     unittest.main()

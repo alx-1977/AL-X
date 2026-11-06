@@ -562,7 +562,10 @@ class SelectionCannotBuyReasoningTests(Fixture):
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
         self.assertEqual(outcome.reason, "budget_exhausted")
-        self.assertEqual(len(reasoner.contexts), 3)
+        # Three steps, then one that can only speak (2026-11-06); a selection
+        # offered there is refused, so nothing more is inspected.
+        self.assertEqual(len(reasoner.contexts), 4)
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "budget_exhausted")
         self.assertTrue(all(self.store.load(f"goal-{i}").revision == 1 for i in range(3)))
 
     def test_a_goal_beyond_the_candidate_cap_is_not_selectable(self) -> None:

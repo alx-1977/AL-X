@@ -37,10 +37,9 @@ _OBJECTS = StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.OB
 
 DEFINITION = CapabilityDefinition(
     DELEGATE_MECHANICAL_WORK,
-    "Hand one piece of mechanical work to your worker, a lighter model with its own small "
-    "context, and get one checked report back. Use it for checks, analyses, simulations and "
-    "edits on your work copies that would otherwise take you many steps; keep judgement for "
-    "yourself. It cannot run general programs. Write the brief as you would for a careful technician: what to run or measure, "
+    "For many-step mechanical work (board checks, work-copy edits, analyses, simulations), "
+    "hand one brief to your worker, a cheaper model with its own small context, and get one "
+    "checked report back. Keep judgement for yourself. It cannot run general programs. Write the brief as you would for a careful technician: what to run or measure, "
     "on which of your copies, what counts as a checked result, and when to stop. The worker "
     "can call only " + ", ".join(WORKER_CAPABILITIES) + ", through the same safety gate as "
     "you, with no approvals: it cannot send, spend, merge or change Friedl's files. It "

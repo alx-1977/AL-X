@@ -163,12 +163,20 @@ class LiveVoiceServer:
         """
         source_conversation_id = conversation_id
         identity = self._identify(conversation_id, response)
+
+        def not_queued(reason: str) -> ResponseDelivery:
+            # Every exit is logged, content-free (review of #209).
+            LOGGER.info("Background reply not queued for the screen: reason=%s thread=%s "
+                        "stored_turn=%s", reason, conversation_id,
+                        identity[0] if identity else None)
+            return ResponseDelivery.UNDELIVERABLE
+
         stop_note = identity is not None and identity[0].startswith("plan-stop:")
         # This mechanical note was explicitly requested for the conversation
         # surface, held for his next session while away.
         presence = getattr(self, "_presence", None)
         if stop_note and presence is not None and presence()[0] == "away":
-            return ResponseDelivery.UNDELIVERABLE
+            return not_queued("away")
         phone = getattr(self, "_phone", None)
         if not stop_note and phone is not None and phone.carries(conversation_id):
             # D-049: he is away, or this is the phone thread. Sent to his
@@ -187,7 +195,7 @@ class LiveVoiceServer:
             live = [item for item in getattr(self, "_live_conversations", [])
                     if self._delivery_queues.get(item)]
             if not live:
-                return ResponseDelivery.UNDELIVERABLE
+                return not_queued("no_screen_connected")
             conversation_id = live[-1]
             registered = self._delivery_queues.get(conversation_id) or []
         # Snapshot: the listener may go away while this runs, which the loop
@@ -195,7 +203,7 @@ class LiveVoiceServer:
         listeners = list(registered)
         loop = self._delivery_loop
         if loop is None or loop.is_closed():
-            return ResponseDelivery.UNDELIVERABLE
+            return not_queued("loop_closed")
 
         acknowledged: "queue.Queue[bool]" = queue.Queue(maxsize=1)
 
@@ -244,7 +252,7 @@ class LiveVoiceServer:
             loop.call_soon_threadsafe(enqueue_on_loop)
         except RuntimeError:
             # The loop stopped between the check above and now.
-            return ResponseDelivery.UNDELIVERABLE
+            return not_queued("loop_stopped")
         try:
             # Bounded so a loop that dies mid-turn cannot hold the Core worker
             # forever. The callback takes no lock, so it cannot be blocked by
@@ -252,7 +260,14 @@ class LiveVoiceServer:
             # queue and answers.
             accepted = acknowledged.get(timeout=self.DELIVERY_ACK_SECONDS)
         except queue.Empty:
-            return ResponseDelivery.UNDELIVERABLE
+            return not_queued("acknowledgement_timeout")
+        # Every hand-off to the screen is logged, content-free, so a reply that
+        # never shows can be traced to where it stopped: on 2026-11-05 none of
+        # 111 plan replies ever had a delivery receipt (D-069 amendment).
+        LOGGER.info(
+            "Background reply %s for the screen: thread=%s stored_turn=%s listeners=%d",
+            "queued" if accepted else "not queued", conversation_id,
+            identity[0] if identity else None, len(listeners))
         if accepted:
             # Heard in his thread, so it is recorded in his thread: his answer
             # to it is then an answer to something his conversation holds.

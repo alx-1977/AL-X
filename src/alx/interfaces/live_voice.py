@@ -787,7 +787,14 @@ class VoiceSession:
         expires_at = getattr(response, "expires_at", None)
         if expires_at is not None and expires_at <= self._clock():
             return
-        yield VoiceEvent(VoiceEventKind.TEXT, text=response)
+        turn_id = getattr(response, "turn_id", None)
+        try:
+            yield VoiceEvent(VoiceEventKind.TEXT, text=response)
+        except GeneratorExit:
+            # The connection closed while her words were being sent.
+            LOGGER.info("Reply text not sent to the screen: connection closed, turn=%s", turn_id)
+            raise
+        LOGGER.info("Reply text sent to the screen: turn=%s", turn_id)
         # Resumption means the consumer successfully sent TEXT. Closing or
         # failing that send leaves this response unconfirmed. Keep its source
         # identity across the queue and this asynchronous boundary.

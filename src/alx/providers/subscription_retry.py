@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -14,6 +15,8 @@ from alx.contracts.coding import CodingError, CodingSessionResult
 from alx.contracts.models import ModelRequest
 from alx.contracts.diagnostics import mask_credentials
 from alx.providers.errors import ProviderError
+
+LOGGER = logging.getLogger(__name__)
 
 
 def error_event_message(event: Mapping[str, object]) -> str:
@@ -82,6 +85,10 @@ def retry_delay(message: str, attempt: int, *, now: datetime | None = None) -> f
     return min(2.0 ** min(attempt, 5), 30.0)
 
 
+# A wait longer than this is a stated limit reset, worth showing on screen.
+LONG_PAUSE_SECONDS = 60.0
+
+
 @dataclass(frozen=True)
 class SubscriptionRetryPolicy:
     """Three attempts by default; clock and waiting are injectable for tests."""
@@ -94,10 +101,18 @@ class SubscriptionRetryPolicy:
         if type(self.max_attempts) is not int or self.max_attempts < 2:
             raise ValueError("subscription retry requires at least two attempts")
 
-    def pause(self, message: str, attempt: int) -> None:
+    def pause(self, message: str, attempt: int,
+              announce: Callable[[float], None] | None = None) -> None:
         from alx.providers.coding_process import wait_with_cancellation
 
         delay = retry_delay(message, attempt, now=self.now() if self.now else None)
+        if announce is not None and delay > LONG_PAUSE_SECONDS:
+            # A wait for a stated reset is shown, never silent (2026-11-05: a
+            # 54-minute wait looked like a hang).
+            try:
+                announce(delay)
+            except Exception:  # noqa: BLE001 - showing the pause never stops it
+                pass
         wait_with_cancellation(delay, self.wait or sleep)
 
 
@@ -141,8 +156,32 @@ def retry_subscription(operation):
                 if failure is None:
                     return result
                 raise failure
-            policy.pause(message, attempt)
             request = args[0] if args else kwargs.get('request')
+            emit = getattr(self, "_emit_telemetry", None)
+            announced = []
+
+            def announce(delay: float, request=request, emit=emit) -> None:
+                announced.append(True)
+                # The same clock the reset was read against.
+                resume = (policy.now() if policy.now else datetime.now()) + timedelta(
+                    seconds=delay)
+                LOGGER.info("Subscription limit: paused until %s", resume.strftime("%H:%M"))
+                if callable(emit) and isinstance(request, ModelRequest):
+                    emit(request.affinity_key, {
+                        "code": "reasoning.paused",
+                        "resume_at": resume.strftime("%H:%M"),
+                        "wait_seconds": round(delay),
+                        "kind": request.kind,
+                    })
+            policy.pause(message, attempt, announce)
+            if announced and callable(emit) and isinstance(request, ModelRequest):
+                # Releases the pause a reconnecting screen would otherwise
+                # still be shown (review of #209).
+                try:
+                    emit(request.affinity_key, {"code": "reasoning.paused",
+                                                "state": "resumed", "kind": request.kind})
+                except Exception:  # noqa: BLE001 - showing never stops the retry
+                    pass
             if isinstance(request, ModelRequest) and request.on_retry is not None:
                 # Outside the failure handler: a refused reservation is final
                 # control flow and must never be retried or dispatched.

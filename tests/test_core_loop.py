@@ -390,13 +390,15 @@ class CategoryARecoveryTests(unittest.TestCase):
         reasoner = Queued(
             AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
             AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
-            AgentDecision(response="never reached"),
+            AgentDecision(response="I ran out of steps."),
             selects="goal-1",
         )
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 3)
-        self.assertIsNone(outcome.response)
+        # 2026-11-06: the turn ends by saying so, in a step that can only speak.
+        self.assertEqual((outcome.reason, outcome.response),
+                         ("budget_exhausted", "I ran out of steps."))
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "budget_exhausted")
         self.assertEqual(len(dispatched), 1)
-        self.assertEqual(len(reasoner.contexts), 3)
 
 
 class CoreTests(unittest.TestCase):

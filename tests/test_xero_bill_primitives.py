@@ -464,6 +464,8 @@ class XeroPrimitiveTests(unittest.TestCase):
             first_reasoner = Queued(
                 AgentDecision(goal_id="goal-1"),
                 AgentDecision(call=capture_call),
+                # 2026-11-06: a person's turn out of steps says where it stands.
+                AgentDecision(response="Captured; I will read it back next."),
             )
             first = CoreAgent(
                 store,
@@ -472,7 +474,8 @@ class XeroPrimitiveTests(unittest.TestCase):
                 XERO_DEFINITIONS,
                 clock=lambda: now,
             ).process(conversation, retention, 2)
-            self.assertEqual(first.state, CoreState.CHECKPOINTED)
+            self.assertEqual((first.state, first.reason),
+                             (CoreState.RESPONDED, "budget_exhausted"))
             captured = first.snapshot.state.attempts[-1].result.values
             self.assertTrue(captured["completed"])
             self.assertEqual(captured["bill"]["status"], "DRAFT")

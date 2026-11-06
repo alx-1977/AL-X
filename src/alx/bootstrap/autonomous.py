@@ -310,7 +310,7 @@ class AutonomousCognitionRunner:
         if state == "responded":
             status, label = (
                 (TraceStatus.INFO, "Response recorded as undelivered") if undelivered
-                else (TraceStatus.COMPLETED, "Background response delivered")
+                else (TraceStatus.COMPLETED, "Background response queued for screen")
             )
         elif state == "finished_silently":
             status, label = TraceStatus.COMPLETED, "No action taken"

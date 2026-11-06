@@ -39,6 +39,8 @@ class VoiceDiagnosticFeed:
     _STATE_KEYS = {
         "task.status": ("task_id",),
         "coding.status": ("job_id",),
+        # A limit pause stays shown to a screen that connects during it.
+        "reasoning.paused": ("kind",),
     }
     _SETTLED_TASK_STATES = frozenset({"completed", "failed", "observer_unavailable"})
 
@@ -129,6 +131,8 @@ class VoiceDiagnosticFeed:
             released = event.get("state") in self._SETTLED_TASK_STATES
         elif event["code"] == "coding.status":
             released = bool(event.get("terminal"))
+        elif event["code"] == "reasoning.paused":
+            released = event.get("state") == "resumed"
         else:
             released = event.get("state") != "blocked"
         if released:

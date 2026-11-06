@@ -45,6 +45,10 @@ class TraceSubsystem(str, Enum):
     SHIP24 = "ship24"
     READERS = "readers"
     SANDBOX = "sandbox"
+    # KiCad design work, so the operator sees which steps used the ECAD tools.
+    ECAD = "ecad"
+    # The D-070 worker and every call it makes.
+    WORKER = "worker"
     VOICE = "voice"
     CAPABILITY = "capability"
 

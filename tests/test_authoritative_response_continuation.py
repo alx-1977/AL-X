@@ -89,14 +89,18 @@ class SelectionContinuationTests(Fixture):
         self.assertTrue(reasoner.contexts[2].refused_calls)
         self.assertEqual(self.store.load("goal-a"), before)
 
-    def test_budget_exhaustion_after_persistence_is_a_checkpoint(self):
+    def test_a_person_turn_that_uses_its_steps_is_answered_not_silent(self):
+        """2026-11-06: the Dual Coil request used its steps and ended without a
+        word. The work is kept; one step that can only speak tells him."""
         self.store.create(paused_goal(), "conversation-1", RETENTION)
-        reasoner = Queued(*self.selection(), AgentDecision(response="Must not be requested."))
+        reasoner = Queued(*self.selection(),
+                          AgentDecision(response="I ran out of steps; the goal is saved."))
         result = self.core(reasoner).process(conversation(), RETENTION, 2)
-        self.assertEqual(result.state, CoreState.CHECKPOINTED)
+        self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual(result.reason, "budget_exhausted")
-        self.assertIsNone(result.response)
-        self.assertEqual(len(reasoner.contexts), 2)
+        self.assertEqual(result.response, "I ran out of steps; the goal is saved.")
+        self.assertEqual(len(reasoner.contexts), 3)
+        self.assertEqual(reasoner.contexts[-1].response_only_reason, "budget_exhausted")
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
         self.assertEqual(self.store.load("goal-a").revision, 2)
 
