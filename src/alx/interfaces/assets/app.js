@@ -596,8 +596,12 @@ function handleControl(message) {
     } else if (message.code === "reasoning.paused") {
       // A technical state, not AL/X speaking: the provider's limit is reached
       // and the call resumes by itself at the stated reset.
-      diagnostic(`Claude limit reached · paused until ${message.resume_at ?? "reset"}`,
-        "info", "SYSTEM", { subsystem: "CORE", at, background });
+      if (message.state === "resumed") {
+        diagnostic("Claude limit reset · resumed", "ok", "SYSTEM", { subsystem: "CORE", at, background });
+      } else {
+        diagnostic(`Claude limit reached · paused until ${message.resume_at ?? "reset"}`,
+          "info", "SYSTEM", { subsystem: "CORE", at, background });
+      }
     } else if (message.code === "autonomous.reasoning_disabled") {
       diagnostic("External event skipped · autonomous reasoning disabled", "info", "SYSTEM", { subsystem: "CORE", at });
     } else if (message.code === "core.checkpointed") {

@@ -52,12 +52,63 @@ class LimitPauseTests(unittest.TestCase):
         self.assertIn("Claude limit reached · paused until", app)
 
 
+class PauseReplayTests(unittest.TestCase):
+    """Review of #209: a screen that connects during a pause still sees it."""
+
+    def test_a_screen_connecting_during_a_pause_sees_it_until_resumed(self) -> None:
+        from alx.interfaces.diagnostic_feed import VoiceDiagnosticFeed
+        feed = VoiceDiagnosticFeed()
+        feed.publish("c1", {"code": "reasoning.paused", "resume_at": "13:20", "kind": "core"})
+        unsubscribe, replay = feed.subscribe(lambda owner, event: None)
+        self.assertEqual([e.get("resume_at") for _o, e in replay
+                          if e["code"] == "reasoning.paused"], ["13:20"])
+        unsubscribe()
+        feed.publish("c1", {"code": "reasoning.paused", "state": "resumed", "kind": "core"})
+        _unsubscribe, later = feed.subscribe(lambda owner, event: None)
+        self.assertEqual([e for _o, e in later if e["code"] == "reasoning.paused"], [])
+
+    def test_the_retry_announces_resumption_after_the_wait(self) -> None:
+        from alx.contracts import ModelMessage, ModelRequest, ModelRole
+        from alx.providers.errors import ProviderError
+        from alx.providers.subscription_retry import retry_subscription
+
+        class Transport:
+            def __init__(self):
+                self._retry_policy = SubscriptionRetryPolicy(
+                    wait=lambda _s: None, now=lambda: datetime(2026, 11, 5, 12, 26))
+                self.events, self.calls = [], 0
+
+            def _emit_telemetry(self, key, values):
+                self.events.append(dict(values))
+
+            @retry_subscription
+            def complete(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError("claude", "limit",
+                                        {"service_message": "limit · resets 1:20pm"})
+                return "ok"
+
+        transport = Transport()
+        request = ModelRequest((ModelMessage(ModelRole.USER, "x"),), "s", {}, affinity_key="c1")
+        self.assertEqual(transport.complete(request), "ok")
+        self.assertEqual([e.get("state") for e in transport.events], [None, "resumed"])
+        self.assertEqual(transport.events[0]["resume_at"], "13:20")
+
+
 class DeliveryVisibilityTests(unittest.TestCase):
     def test_each_hand_off_and_text_send_is_logged(self) -> None:
         server = (ROOT / "src/alx/interfaces/server.py").read_text(encoding="utf-8")
         voice = (ROOT / "src/alx/interfaces/live_voice.py").read_text(encoding="utf-8")
         runner = (ROOT / "src/alx/bootstrap/autonomous.py").read_text(encoding="utf-8")
         self.assertIn('"Background reply %s for the screen', server)
+        # Review of #209: every early exit is logged too, with its reason.
+        for reason in ("away", "no_screen_connected", "loop_closed", "loop_stopped",
+                       "acknowledgement_timeout"):
+            self.assertIn(f'not_queued("{reason}")', server)
+        body = server.split("    def deliver(")[1].split("\n    def ")[0]
+        # The only UNDELIVERABLE return left is the logged one inside not_queued.
+        self.assertEqual(body.count("return ResponseDelivery.UNDELIVERABLE"), 1)
         self.assertIn('"Reply text sent to the screen: turn=%s"', voice)
         self.assertIn('"Reply text not sent to the screen: connection closed', voice)
         # Queued is what is known; "delivered" claimed more than that.

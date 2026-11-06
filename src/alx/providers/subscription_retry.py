@@ -158,9 +158,13 @@ def retry_subscription(operation):
                 raise failure
             request = args[0] if args else kwargs.get('request')
             emit = getattr(self, "_emit_telemetry", None)
+            announced = []
 
             def announce(delay: float, request=request, emit=emit) -> None:
-                resume = datetime.now() + timedelta(seconds=delay)
+                announced.append(True)
+                # The same clock the reset was read against.
+                resume = (policy.now() if policy.now else datetime.now()) + timedelta(
+                    seconds=delay)
                 LOGGER.info("Subscription limit: paused until %s", resume.strftime("%H:%M"))
                 if callable(emit) and isinstance(request, ModelRequest):
                     emit(request.affinity_key, {
@@ -170,6 +174,14 @@ def retry_subscription(operation):
                         "kind": request.kind,
                     })
             policy.pause(message, attempt, announce)
+            if announced and callable(emit) and isinstance(request, ModelRequest):
+                # Releases the pause a reconnecting screen would otherwise
+                # still be shown (review of #209).
+                try:
+                    emit(request.affinity_key, {"code": "reasoning.paused",
+                                                "state": "resumed", "kind": request.kind})
+                except Exception:  # noqa: BLE001 - showing never stops the retry
+                    pass
             if isinstance(request, ModelRequest) and request.on_retry is not None:
                 # Outside the failure handler: a refused reservation is final
                 # control flow and must never be retried or dispatched.
