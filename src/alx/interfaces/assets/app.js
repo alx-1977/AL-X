@@ -593,6 +593,11 @@ function handleControl(message) {
         `Reasoning provider failed after ${seconds(message.duration_ms)} · ${message.error_code ?? message.error_type ?? "unknown"}${cause}`,
         "error", "SYSTEM", { subsystem: "CORE", at, background },
       );
+    } else if (message.code === "reasoning.paused") {
+      // A technical state, not AL/X speaking: the provider's limit is reached
+      // and the call resumes by itself at the stated reset.
+      diagnostic(`Claude limit reached · paused until ${message.resume_at ?? "reset"}`,
+        "info", "SYSTEM", { subsystem: "CORE", at, background });
     } else if (message.code === "autonomous.reasoning_disabled") {
       diagnostic("External event skipped · autonomous reasoning disabled", "info", "SYSTEM", { subsystem: "CORE", at });
     } else if (message.code === "core.checkpointed") {

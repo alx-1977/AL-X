@@ -253,6 +253,13 @@ class LiveVoiceServer:
             accepted = acknowledged.get(timeout=self.DELIVERY_ACK_SECONDS)
         except queue.Empty:
             return ResponseDelivery.UNDELIVERABLE
+        # Every hand-off to the screen is logged, content-free, so a reply that
+        # never shows can be traced to where it stopped: on 2026-11-05 none of
+        # 111 plan replies ever had a delivery receipt (D-069 amendment).
+        LOGGER.info(
+            "Background reply %s for the screen: thread=%s stored_turn=%s listeners=%d",
+            "queued" if accepted else "not queued", conversation_id,
+            identity[0] if identity else None, len(listeners))
         if accepted:
             # Heard in his thread, so it is recorded in his thread: his answer
             # to it is then an answer to something his conversation holds.
