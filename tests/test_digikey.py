@@ -432,15 +432,26 @@ def test_rounding_difference_needs_judgment_before_write():
 
 
 def shipped_rounding_order():
-    # Reported IDs, total and four-decimal extensions, with synthetic goods.
+    # Exact quantities, prices and extensions from order 102748548 /
+    # invoice 135916797. Product descriptions remain sanitized.
     raw = raw_order()
-    raw.update(ShippingCharges="", SalesTax="")
+    raw.update(ShippingCharges="0", SalesTax="0", Subtotal="2464.9050", TotalPrice="2464.91")
     template = raw["LineItems"][0]
     raw["LineItems"] = []
-    for extension in ("166.7750", "311.3750", "100.0150", "200.0150", "1686.7300"):
+    for quantity, unit, extension in (
+        (250, "0.5488", "137.2000"),
+        (250, "0.6671", "166.7750"),
+        (250, "1.2455", "311.3750"),
+        (250, "0.8117", "202.9250"),
+        (250, "0.9054", "226.3500"),
+        (1, "744.53", "744.53"),
+        (250, "0.8117", "202.9250"),
+        (250, "0.8709", "217.7250"),
+        (250, "1.0204", "255.1000"),
+    ):
         line = deepcopy(template)
-        line.update(QuantityOrdered=1, QuantityShipped=1, UnitPrice=extension)
-        line["ItemShipments"][0]["QuantityShipped"] = 1
+        line.update(QuantityOrdered=quantity, QuantityShipped=quantity, UnitPrice=unit, TotalPrice=extension)
+        line["ItemShipments"][0]["QuantityShipped"] = quantity
         raw["LineItems"].append(line)
     return raw
 
@@ -466,7 +477,9 @@ def test_reported_shipped_order_rounding_and_invoice_capture(identifier, enabled
     result = execute(args)
     order = result.values["invoice"]["order"]
     assert "135916797" in order["invoice_numbers"]
-    assert sum((Decimal(line["extended_price"]).quantize(Decimal("0.01"))
+    assert len(order["line_items"]) == 9
+    assert order["subtotal"] == "2464.9050"
+    assert sum((Decimal(line["extended_price"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 for line in order["line_items"]), Decimal(0)) == Decimal("2464.93")
     if not enabled:
         assert "rounding_allocation_unresolved" in result.values["detail"]
@@ -479,6 +492,17 @@ def test_reported_shipped_order_rounding_and_invoice_capture(identifier, enabled
     adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
     assert len(adjustments) == 1
     assert adjustments[0]["UnitAmount"] == -0.02
+    ordinary = [line for line in bill["LineItems"] if line["Description"] != "Rounding adjustment"]
+    assert len(ordinary) == 9
+    for source, sent in zip(raw["LineItems"], ordinary):
+        assert Decimal(str(sent["UnitAmount"])) == Decimal(source["UnitPrice"]).quantize(Decimal("0.0001"))
+        assert Decimal(str(sent["Quantity"])) == Decimal(source["QuantityOrdered"])
+    amounts = [(Decimal(str(line["Quantity"])) * Decimal(str(line["UnitAmount"]))).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP) for line in bill["LineItems"]]
+    assert sum(amounts[:-1]) == Decimal("2464.93")
+    assert sum(amounts) == Decimal("2464.91")
+    assert bill["LineAmountTypes"] == "NoTax"
+    assert all(line["TaxType"] == "NONE" and line["TaxAmount"] == 0 for line in bill["LineItems"])
     for key in ("AccountCode", "TaxType", "TaxAmount"):
         assert adjustments[0][key] == bill["LineItems"][0][key]
     assert not any(line["Description"] == "Shipping" for line in bill["LineItems"])
@@ -499,6 +523,104 @@ def test_rounding_adjustment_bounds(difference):
         assert Decimal(bill["Total"]) == Decimal(raw["TotalPrice"])
         adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
         assert len(adjustments) == bool(Decimal(difference))
+
+
+@pytest.mark.parametrize("authorise", [False, True])
+@pytest.mark.parametrize("change", ["price", "small_price", "submitted_precision", "subtotal", "extension"])
+def test_non_rounding_difference_fails_before_any_write(change, authorise):
+    raw = shipped_rounding_order()
+    if change == "price":
+        raw["LineItems"][0]["UnitPrice"] = "0.5588"
+    elif change == "small_price":
+        # The old tolerance could hide this extra cent on a quantity-one line.
+        raw["LineItems"][5]["UnitPrice"] = "744.54"
+    elif change == "submitted_precision":
+        # The discrepancy fits both bounds, but comes from price truncation
+        # to four decimals, not cent rounding of the submitted extensions.
+        raw = rounding_order(10, "1.0000049", quantity=1000)
+    elif change == "subtotal":
+        raw["Subtotal"] = "2464.9150"
+    xero, execute = capture(raw)
+    if change == "extension":
+        order = normalize_order(raw)
+        order["line_items"][5]["extended_price"] = "744.54"
+        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
+                                      digikey_lookup=lambda **_: order)[CAPTURE_DIGIKEY_ORDER_BILL]
+    assert_source_mismatch_without_write(xero, execute, authorise=authorise)
+
+
+def rounding_order(count, unit, *, quantity=1, shipping="0"):
+    raw = raw_order()
+    template = raw["LineItems"][0]
+    subtotal = Decimal(count) * Decimal(quantity) * Decimal(unit)
+    raw.update(ShippingCharges=shipping, SalesTax="0", Subtotal=str(subtotal),
+               TotalPrice=str((subtotal + Decimal(shipping)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)))
+    raw["LineItems"] = []
+    for _ in range(count):
+        line = deepcopy(template)
+        line.update(QuantityOrdered=quantity, QuantityShipped=quantity, UnitPrice=unit)
+        line["ItemShipments"][0]["QuantityShipped"] = quantity
+        raw["LineItems"].append(line)
+    return raw
+
+
+def assert_source_mismatch_without_write(xero, execute, *, authorise=True):
+    xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True,
+                      "authorise": authorise})
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure == {"code": "source_mismatch"}
+    xero.create_draft_bill.assert_not_called()
+    xero.authorise_bill.assert_not_called()
+    assert xero.created == 0
+    assert not xero.bills
+
+
+@pytest.mark.parametrize("count,unit,shipping,expected", [
+    (2, "1.0050", "0", "-0.01"),  # Exactly 0.005 per source line.
+    (2, "1.0049", "0", "0.01"),   # Positive residue at the same bound.
+    (9, "1.0050", "0", "-0.04"),  # Odd line count: bound is 0.045, not 0.05.
+    (10, "1.0050", "0", "-0.05"), # Exactly the absolute cap.
+    (12, "1.0050", "0", None),     # Pure rounding, but exceeds 0.05.
+    (12, "1.0049", "0", None),     # Positive residue also exceeds the cap.
+    (1, "1.0049", "0.0049", None), # Exceeds the per-source-line bound.
+])
+@pytest.mark.parametrize("authorise", [False, True])
+def test_proven_rounding_respects_line_count_and_absolute_bounds(count, unit, shipping, expected, authorise):
+    xero, execute = capture(rounding_order(count, unit, shipping=shipping))
+    if expected is None:
+        assert_source_mismatch_without_write(xero, execute, authorise=authorise)
+        return
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True,
+                      "authorise": authorise})
+    assert result.values["completed"] is True
+    bill = xero.bills["bill-1"]
+    adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
+    assert len(adjustments) == 1
+    assert Decimal(str(adjustments[0]["UnitAmount"])) == Decimal(expected)
+    assert Decimal(bill["Total"]) == Decimal(rounding_order(count, unit, shipping=shipping)["TotalPrice"])
+
+
+@pytest.mark.parametrize("line_amount_types", ["NoTax", "Exclusive"])
+def test_rounding_prediction_includes_shipping_and_shared_no_tax_resolution(line_amount_types):
+    raw = shipped_rounding_order()
+    raw.update(ShippingCharges="10.1256", TotalPrice="2475.03")
+    xero, execute = capture(raw)
+    xero.history = ({"LineAmountTypes": line_amount_types,
+                     "LineItems": [{"AccountCode": "310", "TaxType": "NONE"}]},)
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True})
+    assert result.values["completed"] is True
+    bill = xero.bills["bill-1"]
+    assert bill["Total"] == "2475.03"
+    # The source states zero tax, so shared coding selects NoTax even when
+    # supplier history used Exclusive amounts.
+    assert bill["LineAmountTypes"] == "NoTax"
+    adjustment = next(line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment")
+    shipping = next(line for line in bill["LineItems"] if line["Description"] == "Shipping")
+    assert Decimal(str(adjustment["UnitAmount"])) == Decimal("-0.03")
+    assert Decimal(str(shipping["UnitAmount"])) == Decimal("10.1256")
+    assert all(line["TaxType"] == "NONE" and line["TaxAmount"] == 0 for line in bill["LineItems"])
 
 
 @pytest.mark.parametrize("field", ["ShippingCharges", "SalesTax"])
@@ -662,7 +784,7 @@ def test_runtime_independent_of_pdf_extractor_and_authority(tmp_path):
 
 @pytest.mark.parametrize("rounding_adjustment", [False, True])
 def test_four_decimal_prices_need_no_adjustment_when_lines_reconcile(rounding_adjustment):
-    # Synthetic regression: the real order's complete API lines are unavailable.
+    # A single four-decimal price whose cent-rounded total already reconciles.
     raw = raw_order()
     raw.update(TotalPrice="9.05", ShippingCharges=0, SalesTax=0)
     line = raw["LineItems"][0]

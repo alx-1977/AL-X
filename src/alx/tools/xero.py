@@ -267,7 +267,7 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
 
 CAPTURE_DIGIKEY_DEFINITION = CapabilityDefinition(
     CAPTURE_DIGIKEY_ORDER_BILL,
-    "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true. rounding_adjustment defaults to false; true permits one signed rounding line for a difference up to 0.05.",
+    "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true. rounding_adjustment defaults to false; true permits one signed line only for proven cent rounding of submitted prices, bounded by 0.005 per merchandise line and at most 0.05.",
     StructuredSchema(ValueKind.OBJECT,
                      {**ORDER_INPUT.properties, "authorise": _BOOLEAN, "rounding_adjustment": _BOOLEAN},
                      extra_properties=False),
