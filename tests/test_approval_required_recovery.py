@@ -226,6 +226,9 @@ class ExistingBehaviourIsUnchanged(unittest.TestCase):
                 "approval_id_reused",
                 "approval_source_missing",
                 "approval_source_not_latest_person_turn",
+                # 2026-11-06: enforced afresh each turn; a fresh approval,
+                # which only a new instruction can supply, repairs it.
+                "approval_capability_already_dispatched",
             }),
         )
 

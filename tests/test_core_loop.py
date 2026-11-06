@@ -1428,8 +1428,7 @@ class CoreTests(unittest.TestCase):
 
     def test_cleared_unheard_text_does_not_hide_other_binding_rejections(self) -> None:
         for reason in ("permission_missing", "policy_missing", "policy_denied",
-                       "input_invalid", "active_goal_required",
-                       "approval_capability_already_dispatched"):
+                       "input_invalid", "active_goal_required"):
             with self.subTest(reason=reason):
                 outcome, reasoner, dispatched, _ = self._retry_tax_reply(other_reason=reason)
                 self.assertEqual(dispatched, [])

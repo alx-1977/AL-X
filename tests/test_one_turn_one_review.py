@@ -435,6 +435,28 @@ class OneTurnOneReviewTests(unittest.TestCase):
         self.assertNotIn("repeated_rejected_call",
                          [item.reason_code for item in outcome.snapshot.state.attempts])
 
+    def test_an_old_refusal_without_a_timestamp_does_not_block_a_new_instruction(self) -> None:
+        """Review of #210: records saved before refusals carried a time."""
+        from alx.contracts import GoalState, Objective
+        old = review_call("call-2", "approve-2")
+        self.store.create(GoalState(
+            "goal-1", Objective("turn:turn-2", "Have PR 21 reviewed"),
+            (SuccessCriterion("criterion-1", "a review is requested"),),
+            attempts=(CapabilityAttempt(old, CapabilityAttemptDisposition.REJECTED, False,
+                                        reason_code="approval_capability_already_dispatched"),),
+        ), "conversation-1", RETENTION)
+        again = review_call("call-3", "approve-3")
+        CoreAgent(
+            self.store, Queued(
+                AgentDecision(goal_id="goal-1"),
+                AgentDecision(call=again, approval_proposal=approved(again, "turn:turn-4")),
+                AgentDecision(response="Requested."),
+            ),
+            lambda call, state: self._executed(call), (REVIEW_DEFINITION,),
+            clock=lambda: NOW, turn_bound_capabilities=TURN_BOUND,
+        ).process(a_second_instruction(), RETENTION, 4)
+        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+
     def test_without_a_fresh_approval_the_refusal_still_binds(self) -> None:
         first = review_call("call-1", "approve-1")
         second = review_call("call-2", "approve-2")

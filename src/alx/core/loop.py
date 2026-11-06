@@ -3484,10 +3484,8 @@ class CoreAgent:
     # Deliberately excluded, because a new approval does not touch the cause:
     # `active_goal_required` (the goal, not the approval), `policy_missing`,
     # `policy_denied` and `permission_missing` (authority configuration),
-    # `input_invalid` (the arguments), `approval_covers_unheard_text` (the
-    # content), and `approval_capability_already_dispatched` - that last one
-    # is the once-per-instruction rule, and bypassing it on a fresh approval
-    # is exactly the double-send it exists to prevent.
+    # `input_invalid` (the arguments) and `approval_covers_unheard_text` (the
+    # content).
     _CORRECTABLE_REJECTION_REASONS = frozenset({
         # The ordinary first-time refusal of a consequential action: the call
         # carried no approval because none had been given yet. Asking Friedl
@@ -3503,6 +3501,13 @@ class CoreAgent:
         "approval_id_reused",
         "approval_source_missing",
         "approval_source_not_latest_person_turn",
+        # The once-per-instruction rule is enforced afresh in every turn, before
+        # this guard runs, so it needs no memory here. Kept binding, it blocked
+        # a board write-back through every new instruction and OK on
+        # 2026-11-06. A fresh approval must cite the latest person turn, so
+        # only a new instruction can supply one; a used or refused one is
+        # still a repeat below.
+        "approval_capability_already_dispatched",
     })
 
     @classmethod
@@ -3557,21 +3562,9 @@ class CoreAgent:
         ]
         if not repeats:
             return None
-
-        def later_instruction(item: CapabilityAttempt) -> bool:
-            # The once-per-instruction rule spends one turn. A person turn
-            # after the refusal is a new instruction, so it stops binding and
-            # only a fresh valid approval is still required (2026-11-06: a
-            # board write-back stayed blocked through every new OK).
-            return (conversation is not None and item.recorded_at is not None
-                    and any(turn.person_id is not None and turn.occurred_at > item.recorded_at
-                            for turn in conversation.turns))
-
         binding = next(
             (item for item in reversed(repeats)
              if item.reason_code not in cls._CORRECTABLE_REJECTION_REASONS
-             and not (item.reason_code == "approval_capability_already_dispatched"
-                      and later_instruction(item))
              and not (
                  item.reason_code == "approval_covers_unheard_text"
                  and conversation is not None
