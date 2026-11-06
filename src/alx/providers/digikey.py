@@ -6,15 +6,40 @@ import json
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from time import monotonic
 from typing import Any
 
 import httpx
+
+
+# Include authentication, history pages and detail requests in one lookup budget.
+INVOICE_SEARCH_MAX_REQUESTS = 50
+INVOICE_SEARCH_TIMEOUT = 60.0
 
 
 class DigiKeyError(Exception):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class _SearchBudget:
+    def __init__(self) -> None:
+        self.deadline = monotonic() + INVOICE_SEARCH_TIMEOUT
+        self.requests = 0
+
+    def remaining(self) -> float:
+        remaining = self.deadline - monotonic()
+        if remaining <= 0:
+            raise DigiKeyError("search_incomplete")
+        return remaining
+
+    def next_timeout(self) -> float:
+        remaining = self.remaining()
+        if self.requests >= INVOICE_SEARCH_MAX_REQUESTS:
+            raise DigiKeyError("search_incomplete")
+        self.requests += 1
+        return min(60.0, remaining)
 
 
 def _object(value: Any) -> Mapping[str, Any]:
@@ -120,14 +145,20 @@ class DigiKeyProvider:
         self._account_id = account_id
         self._client = client or httpx
 
-    def _request(self, method: str, url: str, **kwargs: Any) -> Mapping[str, Any]:
+    def _request(self, method: str, url: str, *, budget: _SearchBudget | None = None,
+                 **kwargs: Any) -> Mapping[str, Any]:
         code = ""
+        timeout = budget.next_timeout() if budget is not None else 60
         try:
-            response = self._client.request(method, url, timeout=60, **kwargs)
+            response = self._client.request(method, url, timeout=timeout, **kwargs)
+        except httpx.TimeoutException:
+            code = "search_incomplete" if budget is not None else "connection_failed"
         except httpx.RequestError:
             code = "connection_failed"
         # Raise outside the HTTP exception handler so request-bearing errors
         # cannot expose credentials through exception chains or diagnostics.
+        if budget is not None:
+            budget.remaining()
         if code:
             raise DigiKeyError(code)
         status = response.status_code
@@ -143,7 +174,8 @@ class DigiKeyProvider:
     def lookup(self, *, sales_order_number: str = "", invoice_number: str = "") -> dict[str, Any]:
         if not (self._client_id and self._client_secret and self._account_id):
             raise DigiKeyError("not_configured")
-        token = self._request("POST", "https://api.digikey.com/v1/oauth2/token", data={
+        budget = _SearchBudget() if invoice_number else None
+        token = self._request("POST", "https://api.digikey.com/v1/oauth2/token", budget=budget, data={
             "client_id": self._client_id, "client_secret": self._client_secret,
             "grant_type": "client_credentials",
         }).get("access_token")
@@ -153,14 +185,12 @@ class DigiKeyProvider:
                    "X-DIGIKEY-Account-Id": self._account_id}
         base = "https://api.digikey.com/orderstatus/v4"
         if invoice_number:
-            matches: set[str] = set()
             seen = 0
             checked: set[str] = set()
-            # SearchOrders has no invoice filter. Search all account orders,
-            # Resolve history candidates through sales-order detail: history
-            # can omit shipment invoice facts. Finish all pages for ambiguity.
+            # SearchOrders has no invoice filter and can omit shipment facts.
+            # Resolve each candidate through detail, stopping at the first match.
             for page in range(1, 1001):
-                body = self._request("GET", base + "/orders", headers=headers, params={
+                body = self._request("GET", base + "/orders", budget=budget, headers=headers, params={
                     "Shared": "true", "StartDate": "1900-01-01", "EndDate": date.today().isoformat(),
                     "PageNumber": page, "PageSize": 25,
                 })
@@ -177,21 +207,21 @@ class DigiKeyProvider:
                             continue
                         checked.add(number)
                         normalized = normalize_order(self._request(
-                            "GET", base + "/salesorder/" + number, headers=headers))
+                            "GET", base + "/salesorder/" + number, budget=budget, headers=headers))
                         if normalized["sales_order_number"] != number:
                             raise DigiKeyError("response_invalid")
+                        budget.remaining()
                         if invoice_number in normalized["invoice_numbers"]:
-                            matches.add(normalized["sales_order_number"])
+                            return normalized
                 seen += len(orders)
+                budget.remaining()
                 if seen >= count:
                     break
                 if not orders:
                     raise DigiKeyError("response_invalid")
             else:
                 raise DigiKeyError("search_incomplete")
-            if len(matches) != 1 or "" in matches:
-                raise DigiKeyError("order_ambiguous" if matches else "order_not_found")
-            sales_order_number = matches.pop()
+            raise DigiKeyError("order_not_found")
         order = normalize_order(self._request("GET", base + "/salesorder/" + sales_order_number, headers=headers))
         if order["sales_order_number"] != sales_order_number or (
             invoice_number and invoice_number not in order["invoice_numbers"]

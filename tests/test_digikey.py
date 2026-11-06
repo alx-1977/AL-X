@@ -97,8 +97,7 @@ def test_schema_only_response_defaults_absent_charges_to_zero():
     assert result["shipping"] == result["tax"] == "0"
 
 
-@pytest.mark.parametrize("ambiguous", [False, True])
-def test_invoice_search_paginates_and_retrieves_exact_order(ambiguous):
+def test_invoice_search_paginates_and_retrieves_exact_order():
     base, calls = handler_with_order()
     sales = {}
     def handle(request):
@@ -110,23 +109,124 @@ def test_invoice_search_paginates_and_retrieves_exact_order(ambiguous):
             sale = complete_order()
             if page == 1:
                 sale["SalesOrderId"] = 111
-                if not ambiguous:
-                    sale["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
+                sale["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
             sales[str(sale["SalesOrderId"])] = sale
             return httpx.Response(200, json={"TotalOrders": 2, "Orders": [{"SalesOrders": [{"SalesOrderId": sale["SalesOrderId"]}]}]})
         if "/salesorder/" in request.url.path:
             calls.append(request)
             return httpx.Response(200, json=sales[request.url.path.rsplit("/", 1)[1]])
         return base(request)
-    if ambiguous:
-        with pytest.raises(DigiKeyError, match="order_ambiguous"):
-            provider(handle).lookup(invoice_number="135916797")
-        assert len(sales) == 2
+    result = provider(handle).lookup(invoice_number="135916797")
+    assert result["sales_order_number"] == "102748548"
+    assert result["invoice_numbers"] == ["135916797"]
+    assert len(calls) == 5
+
+
+def invoice_history_handler(numbers, *, total=None, match=False):
+    base, calls = handler_with_order()
+    def handle(request):
+        if request.url.path.endswith("/orders"):
+            calls.append(request)
+            return httpx.Response(200, json={
+                "TotalOrders": len(numbers) if total is None else total,
+                "Orders": [{"SalesOrders": [{"SalesOrderId": n}]} for n in numbers],
+            })
+        if "/salesorder/" in request.url.path:
+            calls.append(request)
+            raw = complete_order()
+            raw["SalesOrderId"] = int(request.url.path.rsplit("/", 1)[1])
+            if not match:
+                raw["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
+            return httpx.Response(200, json=raw)
+        return base(request)
+    return handle, calls
+
+
+def test_invoice_search_stops_at_first_match():
+    handler, calls = invoice_history_handler([111, 222], total=100, match=True)
+    result = provider(handler).lookup(invoice_number="135916797")
+    assert result["sales_order_number"] == "111"
+    assert [r.url.path for r in calls] == [
+        "/v1/oauth2/token", "/orderstatus/v4/orders", "/orderstatus/v4/salesorder/111"]
+
+
+@pytest.mark.parametrize("exhaustion", ["requests", "deadline", "timeout"])
+@pytest.mark.parametrize("capture_bill", [False, True])
+def test_incomplete_invoice_search_never_writes(monkeypatch, exhaustion, capture_bill):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", 4, raising=False)
+    monkeypatch.setattr(module, "INVOICE_SEARCH_TIMEOUT", 10, raising=False)
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0], raising=False)
+    base, calls = invoice_history_handler([111, 222, 333])
+    def handle(request):
+        response = base(request)
+        if exhaustion == "deadline":
+            clock[0] += 4
+        if exhaustion == "timeout" and "/salesorder/" in request.url.path:
+            raise httpx.ReadTimeout("private", request=request)
+        return response
+    p = provider(handle)
+    if capture_bill:
+        xero = FakeXero()
+        xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
+        xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
+                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
     else:
-        result = provider(handle).lookup(invoice_number="135916797")
-        assert result["sales_order_number"] == "102748548"
-        assert result["invoice_numbers"] == ["135916797"]
-        assert len(calls) == 6
+        execute = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER]
+    result = execute({"invoice_number": "135916797"})
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure == {"code": "search_incomplete"}
+    assert len(calls) == {"requests": 4, "deadline": 3, "timeout": 3}[exhaustion]
+    if exhaustion == "deadline":
+        assert [r.extensions["timeout"]["read"] for r in calls] == [10, 6, 2]
+    if capture_bill:
+        assert xero.created == 0
+        xero.create_draft_bill.assert_not_called()
+        xero.authorise_bill.assert_not_called()
+
+
+def test_completed_invoice_search_not_found(monkeypatch):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", 3, raising=False)
+    handler, calls = invoice_history_handler([111])
+    with pytest.raises(DigiKeyError, match="^order_not_found$"):
+        provider(handler).lookup(invoice_number="135916797")
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("limit", [1, 3])
+def test_invoice_request_budget_includes_authentication_and_pagination(monkeypatch, limit):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", limit)
+    # Repeated candidates must not trigger repeated detail requests, but each
+    # history page still consumes budget even when it adds no new candidates.
+    handler, calls = invoice_history_handler([111], total=100)
+    with pytest.raises(DigiKeyError, match="^search_incomplete$"):
+        provider(handler).lookup(invoice_number="135916797")
+    assert len(calls) == limit
+    assert sum("/salesorder/" in r.url.path for r in calls) == (limit == 3)
+
+
+@pytest.mark.parametrize("late_phase", ["token", "match"])
+def test_invoice_search_rejects_results_received_after_deadline(monkeypatch, late_phase):
+    import alx.providers.digikey as module
+
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    handler, calls = invoice_history_handler([111], match=True)
+    def handle(request):
+        response = handler(request)
+        if (late_phase == "token" or "/salesorder/" in request.url.path):
+            clock[0] = module.INVOICE_SEARCH_TIMEOUT
+        return response
+    with pytest.raises(DigiKeyError, match="^search_incomplete$"):
+        provider(handle).lookup(invoice_number="135916797")
+    assert len(calls) == (1 if late_phase == "token" else 3)
 
 
 @pytest.mark.parametrize("status,code", [(401, "authentication_failed"), (400, "provider_failed"),
