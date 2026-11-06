@@ -2100,8 +2100,12 @@ class ReplyDurabilityTests(PlanHarness):
     def test_a_native_finish_waits_when_the_turn_runs_out_of_steps(self):
         """Second review of #200: no words, no close; the attention stays to answer."""
         self.finish_ready()
-        outcome_ = self.person(self.agent(self.native_finish()), budget=2)
+        # 2026-11-06: the turn now ends with words saying where it stands;
+        # those words are not her finishing, so the close stays held.
+        outcome_ = self.person(self.agent(self.native_finish(
+            AgentDecision(response="Out of steps; nothing is closed yet."))), budget=2)
         self.assertEqual(outcome_.reason, "budget_exhausted")
+        self.assertEqual(outcome_.response, "Out of steps; nothing is closed yet.")
         self.assertEqual(self.plan_of().status, PlanStatus.NEEDS_CORE)
         self.assertEqual(self.plan_of().announcements, ())
 

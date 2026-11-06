@@ -493,6 +493,10 @@ class CoreAgent:
         if not held:
             return outcome
         close = held[0]
+        # The words of a turn that ran out of steps say where the work stands;
+        # they are not her finishing it, so the close stays held.
+        if outcome.reason == "budget_exhausted":
+            return outcome
         if not (outcome.state is CoreState.RESPONDED or (
                 outcome.state is CoreState.FINISHED_SILENTLY
                 and outcome.reason == "core_selected_silence")):
@@ -1485,6 +1489,16 @@ class CoreAgent:
                 conversation_id, conversation, snapshot, reasoning_context,
                 transient_attempts, "approval_covers_unheard_text",
                 decision_provenance, refused_calls, park=False,
+            )
+        if origin is CognitionOrigin.PERSON_TURN:
+            # A person's turn never ends in silence: on 2026-11-06 the Dual
+            # Coil request used its steps and stopped without a word. Her
+            # work is parked above; one step that can only speak tells him
+            # where it stands.
+            return self._respond_to_terminal_blocker(
+                conversation_id, conversation, snapshot, reasoning_context,
+                transient_attempts, "budget_exhausted", decision_provenance,
+                refused_calls, park=False,
             )
         return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
 

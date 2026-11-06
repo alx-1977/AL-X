@@ -45,7 +45,13 @@ class CapabilityBroker:
         # registered it. A capability composition did not name is CAPABILITY.
         self._subsystems = dict(subsystems or {})
 
-    def dispatch(self, call: CapabilityCall, authority: AuthorityContext) -> CapabilityAttempt:
+    def dispatch(self, call: CapabilityCall, authority: AuthorityContext, *,
+                 trace_subsystem: TraceSubsystem | None = None) -> CapabilityAttempt:
+        """Validate, authorise, invoke and record one call.
+
+        `trace_subsystem` only changes the operator label, so a call the
+        D-070 worker makes reads as the worker's, not as hers.
+        """
         started_at = datetime.now(UTC)
         started = monotonic()
 
@@ -58,7 +64,7 @@ class CapabilityBroker:
                 result = attempt.result
                 failure = None if result is None or result.failure is None else result.failure.get("code")
                 self._emit(
-                    definition, call,
+                    definition, call, trace_subsystem,
                     TraceStatus.REFUSED if attempt.disposition is CapabilityAttemptDisposition.REJECTED
                     else TraceStatus.FAILED if result is None or result.state is CapabilityResultState.FAILED
                     else TraceStatus.COMPLETED,
@@ -85,7 +91,7 @@ class CapabilityBroker:
         executor = self._implementations.get(call.capability_id)
         if executor is None:
             return record(self._failed(call, "implementation_missing", invoked=False), definition)
-        self._emit(definition, call, TraceStatus.STARTED)
+        self._emit(definition, call, trace_subsystem, TraceStatus.STARTED)
         return record(self._invoke(definition, call, executor), definition)
 
     def _invoke(self, definition: CapabilityDefinition, call: CapabilityCall,
@@ -110,7 +116,7 @@ class CapabilityBroker:
         return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
 
     def _emit(self, definition: CapabilityDefinition, call: CapabilityCall,
-              status: TraceStatus, **values: Any) -> None:
+              subsystem: TraceSubsystem | None, status: TraceStatus, **values: Any) -> None:
         if self._trace is None:
             return
         shown = [
@@ -121,7 +127,7 @@ class CapabilityBroker:
         ]
         emit_trace(
             self._trace,
-            self._subsystems.get(call.capability_id, TraceSubsystem.CAPABILITY),
+            subsystem or self._subsystems.get(call.capability_id, TraceSubsystem.CAPABILITY),
             status,
             call.capability_id.replace("_", " ").capitalize(),
             # The label is the capability; a reference only adds declared

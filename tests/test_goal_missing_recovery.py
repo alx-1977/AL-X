@@ -192,6 +192,7 @@ class TheLiveComplaintTrace(Harness):
             AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE)),
             AgentDecision(goal_proposal=create_proposal()),
             AgentDecision(call=call()),
+            AgentDecision(response="Logged; out of steps for now."),
         )
         outcome = self.agent(reasoner).process(conversation(), RETENTION, 3)
 

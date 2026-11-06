@@ -518,7 +518,7 @@ async def run(repository_root: Path) -> None:
     executors.update(ship24_runtime.executors)
     permissions.update(ship24_runtime.permissions)
     kicad_runtime = build_kicad_runtime(current_call_id.get, environment, storage_root)
-    register(kicad_runtime.definitions, TraceSubsystem.CORE)
+    register(kicad_runtime.definitions, TraceSubsystem.ECAD)
     policies.update(kicad_runtime.policies)
     executors.update(kicad_runtime.executors)
     permissions.update(kicad_runtime.permissions)
@@ -1086,7 +1086,7 @@ async def run(repository_root: Path) -> None:
                 principal_reference=voice_settings.primary_person_id,
                 granted_permission_references=frozenset(permissions),
                 evaluated_at=datetime.now(UTC),
-            ))
+            ), trace_subsystem=TraceSubsystem.WORKER)
         finally:
             current_call_id.reset(token)
 
@@ -1095,7 +1095,7 @@ async def run(repository_root: Path) -> None:
         if item.capability_id in WORKER_CAPABILITIES
     )
     if worker_definitions:
-        register((WORKER_DEFINITION,), TraceSubsystem.CORE)
+        register((WORKER_DEFINITION,), TraceSubsystem.WORKER)
         policies[WORKER_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
         executors.update(build_worker_executors(
             MechanicalWorker(providers.worker, worker_dispatch, worker_definitions),
