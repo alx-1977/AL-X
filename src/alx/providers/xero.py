@@ -598,7 +598,7 @@ class XeroAccountingAdapter:
     def find_bill(
         self, invoice_number: str, contact_id: str = ""
     ) -> Mapping[str, Any] | None:
-        parameters: dict[str, str] = {"InvoiceNumbers": invoice_number}
+        parameters: dict[str, str] = {"InvoiceNumbers": invoice_number, "unitdp": "4"}
         if contact_id:
             parameters["ContactIDs"] = contact_id
         body = self._request("GET", f"/Invoices?{urlencode(parameters)}")
@@ -631,6 +631,7 @@ class XeroAccountingAdapter:
             + urlencode(
                 {
                     "ContactIDs": contact_id,
+                    "unitdp": "4",
                     "where": 'Type=="ACCPAY"',
                     "order": "UpdatedDateUTC DESC",
                 }
@@ -645,7 +646,7 @@ class XeroAccountingAdapter:
 
     def read_bill(self, invoice_id: str) -> Mapping[str, Any] | None:
         body = self._request(
-            "GET", f"/Invoices/{quote(invoice_id, safe='')}", allow_not_found=True
+            "GET", f"/Invoices/{quote(invoice_id, safe='')}?unitdp=4", allow_not_found=True
         )
         items = self._items(body, "Invoices") if body is not None else ()
         return (
@@ -658,7 +659,7 @@ class XeroAccountingAdapter:
 
     def create_draft_bill(self, bill: Mapping[str, Any]) -> Mapping[str, Any]:
         body = self._request(
-            "POST", "/Invoices", json_body={"Invoices": [dict(bill)]}
+            "POST", "/Invoices?unitdp=4", json_body={"Invoices": [dict(bill)]}
         )
         items = self._items(body, "Invoices")
         if not items:
@@ -670,7 +671,7 @@ class XeroAccountingAdapter:
     ) -> Mapping[str, Any]:
         body = self._request(
             "POST",
-            f"/Invoices/{quote(invoice_id, safe='')}",
+            f"/Invoices/{quote(invoice_id, safe='')}?unitdp=4",
             json_body={"Invoices": [{**dict(bill), "InvoiceID": invoice_id}]},
         )
         items = self._items(body, "Invoices")
@@ -726,7 +727,7 @@ class XeroAccountingAdapter:
         """Discard one draft bill. Xero records DELETED, it does not remove."""
         body = self._request(
             "POST",
-            f"/Invoices/{quote(invoice_id, safe='')}",
+            f"/Invoices/{quote(invoice_id, safe='')}?unitdp=4",
             json_body={
                 "Invoices": [{"InvoiceID": invoice_id, "Status": "DELETED"}]
             },
@@ -739,7 +740,7 @@ class XeroAccountingAdapter:
     def authorise_bill(self, invoice_id: str) -> Mapping[str, Any]:
         body = self._request(
             "POST",
-            f"/Invoices/{quote(invoice_id, safe='')}",
+            f"/Invoices/{quote(invoice_id, safe='')}?unitdp=4",
             json_body={
                 "Invoices": [{"InvoiceID": invoice_id, "Status": "AUTHORISED"}]
             },

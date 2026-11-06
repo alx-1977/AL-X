@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from alx.contracts import (
@@ -133,7 +133,7 @@ def bill_invoice(order: Mapping[str, Any], *, rounding_adjustment: bool = False)
         total = amount(order["total"])
         invoice["tax_amount"] = str(tax)
         merchandise = Decimal(0)
-        rounded_lines = shipping.quantize(Decimal("0.01"))
+        rounded_lines = shipping.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if not order["line_items"] or total <= 0:
             raise ValueError("line_items")
         for line in order["line_items"]:
@@ -147,12 +147,14 @@ def bill_invoice(order: Mapping[str, Any], *, rounding_adjustment: bool = False)
             if abs(quantity * unit - extension) > Decimal("0.01"):
                 raise ValueError("line_extension")
             merchandise += extension
-            rounded_lines += (quantity * unit).quantize(Decimal("0.01"))
+            rounded_lines += (quantity * unit).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             lines.append({"description": " | ".join(filter(None, (
                 line["digikey_part_number"], line["manufacturer_part_number"], line["description"]
             ))), "quantity": str(quantity), "unit_amount": str(unit)})
         difference = total - (rounded_lines + tax)
-        if abs(merchandise - amount(order["subtotal"])) > Decimal("0.01"):
+        if (abs(merchandise - amount(order["subtotal"])) > Decimal("0.01")
+                or (merchandise + shipping + tax).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) != total):
+            # Adjust only per-line rounding; never conceal a source mismatch.
             problems.append("totals_mismatch")
         elif difference:
             if rounding_adjustment and abs(difference) <= Decimal("0.05"):
