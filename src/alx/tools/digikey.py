@@ -105,9 +105,13 @@ def bill_invoice(order: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[st
         problems.append("invoice_allocation_unresolved")
     else:
         invoice["invoice_number"] = order["invoice_numbers"][0]
-    dates = {item["invoice_date"][:10] or item["ship_date"][:10] for item in order["shipments"]}
+    # Every explicit invoice date is evidence, including shipment-level dates.
+    # Shipping dates are a fallback only when no invoice date was supplied.
+    dates = {item["invoice_date"][:10] for item in order["shipments"] if item["invoice_date"]}
     if order["invoice_date"]:
-        dates = {order["invoice_date"][:10]}
+        dates.add(order["invoice_date"][:10])
+    if not dates:
+        dates = {item["ship_date"][:10] for item in order["shipments"]}
     try:
         if len(dates) != 1:
             raise ValueError("invoice_date")

@@ -202,6 +202,53 @@ def test_uncertain_order_never_writes(change):
     assert xero.created == 0
 
 
+@pytest.mark.parametrize("authorise", [False, True])
+@pytest.mark.parametrize("conflict", ["order_invoice", "shipment_invoices", "ship_dates"])
+def test_conflicting_dates_return_for_judgment_without_xero_writes(authorise, conflict):
+    raw = complete_order()
+    shipments = raw["LineItems"][0]["ItemShipments"]
+    if conflict == "order_invoice":
+        raw["InvoiceDate"] = "2026-11-04"
+        shipments[0]["InvoiceDate"] = "2026-11-03"
+    else:
+        shipments[0]["QuantityShipped"] = 5
+        shipments.append({**shipments[0], "ShippedDate": "2026-11-04"})
+        if conflict == "shipment_invoices":
+            raw["InvoiceDate"] = "2026-11-03"
+            shipments[0]["InvoiceDate"] = "2026-11-03"
+            shipments[1]["InvoiceDate"] = "2026-11-04"
+    xero, execute = capture(raw)
+    xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    result = execute({"sales_order_number": "102748548", "authorise": authorise})
+    assert result.values["completed"] is False
+    assert result.values["returned_for"] == "needs_judgment"
+    assert "invoice_date_unresolved" in result.values["detail"]
+    assert result.outcome is ExecutionOutcome.AMBIGUOUS
+    xero.create_draft_bill.assert_not_called()
+    xero.authorise_bill.assert_not_called()
+
+
+@pytest.mark.parametrize("explicit_at", ["order", "one_shipment", "shipments", "both"])
+def test_agreeing_invoice_dates_take_precedence_over_different_ship_dates(explicit_at):
+    raw = complete_order()
+    shipments = raw["LineItems"][0]["ItemShipments"]
+    shipments[0]["QuantityShipped"] = 5
+    shipments.append({**shipments[0], "ShippedDate": "2026-11-04"})
+    if explicit_at in ("order", "both"):
+        raw["InvoiceDate"] = "2026-11-05"
+    if explicit_at in ("shipments", "both"):
+        for shipment in shipments:
+            shipment["InvoiceDate"] = "2026-11-05T12:00:00Z"
+    if explicit_at == "one_shipment":
+        shipments[0]["InvoiceDate"] = "2026-11-05"
+    xero, execute = capture(raw)
+    result = execute({"sales_order_number": "102748548"})
+    assert result.values["completed"] is True
+    assert xero.bills["bill-1"]["Date"] == "2026-11-05"
+    assert xero.bills["bill-1"]["Status"] == "AUTHORISED"
+
+
 @pytest.mark.parametrize("kind", ["supplier", "account", "conflicting_history", "mapping"])
 def test_ambiguous_resolution_never_writes(kind):
     xero, execute = capture()
@@ -234,6 +281,60 @@ def test_matching_draft_is_resumed_through_shared_commit():
     assert second.values["bill"]["status"] == "AUTHORISED"
     assert "resumed_existing_draft" in second.values["steps"]
     assert xero.created == 1
+
+
+def fractional_order():
+    raw = complete_order()
+    raw.update(ShippingCharges=0, TotalPrice=1.00)
+    line = raw["LineItems"][0]
+    line.update(QuantityOrdered=3, QuantityShipped=3, UnitPrice=0.3333, TotalPrice=1.00)
+    line["ItemShipments"][0]["QuantityShipped"] = 3
+    return raw
+
+
+@pytest.mark.parametrize("stored_line_amount", [False, True])
+def test_fractional_unit_price_draft_retry_preserves_precision(stored_line_amount):
+    xero, execute = capture(fractional_order())
+    first = execute({"sales_order_number": "102748548", "authorise": False})
+    assert first.values["bill"]["status"] == "DRAFT"
+    bill = xero.bills["bill-1"]
+    assert bill["Total"] == "1.00"
+    assert bill["LineItems"][0]["UnitAmount"] == 0.3333
+    if stored_line_amount:
+        bill["LineItems"][0]["LineAmount"] = 1.00
+        bill["LineItems"][1]["LineAmount"] = 0
+
+    second = execute({"sales_order_number": "102748548", "authorise": True})
+    assert second.values["completed"] is True
+    assert second.values["bill"]["status"] == "AUTHORISED"
+    assert "resumed_existing_draft" in second.values["steps"]
+    assert xero.created == 1
+
+
+@pytest.mark.parametrize("change", ["total", "extension", "unit_price", "quantity", "tax"])
+def test_fractional_price_retry_rejects_different_draft_values(change):
+    xero, execute = capture(fractional_order())
+    first = execute({"sales_order_number": "102748548", "authorise": False})
+    assert first.values["bill"]["status"] == "DRAFT"
+    bill = xero.bills["bill-1"]
+    line = bill["LineItems"][0]
+    if change == "total":
+        bill["Total"] = "1.01"
+    if change == "extension":
+        line["LineAmount"] = 1.01
+    if change == "unit_price":
+        line["UnitAmount"] = 0.3334  # Same rounded extension, different price.
+    if change == "quantity":
+        line.update(Quantity=1, UnitAmount=0.9999)
+    if change == "tax":
+        line["TaxAmount"] = 0.01
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    result = execute({"sales_order_number": "102748548", "authorise": True})
+    assert result.values["completed"] is False
+    assert result.values["returned_for"] == "needs_judgment"
+    assert bill["Status"] == "DRAFT"
+    assert xero.created == 1
+    xero.authorise_bill.assert_not_called()
 
 
 def bill_call_owners(source):

@@ -650,7 +650,7 @@ def _draft_mismatch(
             for item in requested.get("LineItems") or []
         ),
         Decimal("0"),
-    )
+    ).quantize(Decimal("0.01"))
     try:
         if money(existing.get("Total")) != requested_total:
             return (
@@ -719,11 +719,16 @@ def _draft_mismatch(
             stored_amount = (
                 money(was["LineAmount"])
                 if was.get("LineAmount") is not None
-                else money(was.get("Quantity")) * money(was.get("UnitAmount"))
+                else (
+                    money(was.get("Quantity")) * money(was.get("UnitAmount"))
+                ).quantize(Decimal("0.01"))
             )
-            if stored_amount != money(wanted.get("Quantity")) * money(
-                wanted.get("UnitAmount")
-            ):
+            # Compare extensions at the same cent precision as bill-total
+            # validation; keep the quantity and unit-price checks exact below.
+            wanted_amount = (
+                money(wanted.get("Quantity")) * money(wanted.get("UnitAmount"))
+            ).quantize(Decimal("0.01"))
+            if stored_amount != wanted_amount:
                 return f"line {index} amount differs"
             # Two lines can multiply to the same amount from different
             # quantities, so the parts are compared as well as the product.
