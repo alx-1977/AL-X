@@ -61,6 +61,7 @@ from alx.bootstrap.xero import (
 )
 from alx.bootstrap.dhl import build_dhl_runtime
 from alx.bootstrap.ship24 import build_ship24_runtime
+from alx.bootstrap.digikey import build_digikey_runtime
 from alx.bootstrap.kicad import build_kicad_runtime
 from alx.bootstrap.particle_local import build_particle_local_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
@@ -1002,6 +1003,12 @@ async def run(repository_root: Path) -> None:
         permissions.update(reader_runtime.permissions)
 
     xero_approval_ttl_seconds: int | None = None
+    digikey_runtime = build_digikey_runtime(environment, current_call_id.get)
+    if digikey_runtime is not None:
+        register(digikey_runtime.definitions, TraceSubsystem.DIGIKEY)
+        policies.update(digikey_runtime.policies)
+        executors.update(digikey_runtime.executors)
+        permissions.update(digikey_runtime.permissions)
     # For her own setup facts: whether D-018's standing bill authority is on,
     # and which of these integrations were composed.
     unattended_bills = False
@@ -1032,6 +1039,7 @@ async def run(repository_root: Path) -> None:
             mail_runtime.source,
             current_call_id.get,
             extractor,
+            digikey_lookup=digikey_runtime.provider.lookup if digikey_runtime is not None else None,
         )
         register(xero_runtime.definitions, TraceSubsystem.XERO)
         policies.update(xero_runtime.policies)
@@ -1278,6 +1286,8 @@ async def run(repository_root: Path) -> None:
                  "src/alx/providers/dhl.py", xero_composed),
                 ("Ship24", "tracking shipments across supported couriers",
                  "src/alx/providers/ship24.py", True),
+                ("DigiKey", "order status, invoices, shipping and structured supplier bill values",
+                 "src/alx/providers/digikey.py", digikey_runtime is not None),
                 ("KiCad", "board DRC, confined pcbnew editing on copies, add-only manufacturing "
                  "exports, home/iCloud reference reading and "
                  "approved write-back", "src/alx/providers/kicad.py", True),

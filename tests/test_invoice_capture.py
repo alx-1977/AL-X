@@ -1359,8 +1359,8 @@ class NoFallbackTests(unittest.TestCase):
                 self.assertNotIn(capability_id, runtime.executors)
                 self.assertNotIn(capability_id, runtime.policies)
 
-    def test_no_second_route_to_a_bill_survives_in_the_registry(self) -> None:
-        """The named outcome has exactly one production entry point."""
+    def test_only_supported_bill_sources_are_registered(self) -> None:
+        """Both source adapters use the shared core enforced by test_digikey."""
         from alx.tools import XERO_DEFINITIONS
 
         effectful = {
@@ -1368,7 +1368,7 @@ class NoFallbackTests(unittest.TestCase):
             for item in XERO_DEFINITIONS
             if item.side_effect is SideEffect.EFFECTFUL
         }
-        # Capture commits a bill; delete discards one. The D-034 contact
+        # PDF and DigiKey capture feed the same core; delete discards a bill. The D-034 contact
         # rename and D-035 contact creation write a contact, and the D-037
         # quote invoice writes a DRAFT sales invoice, never a bill. Nothing
         # else writes.
@@ -1376,6 +1376,7 @@ class NoFallbackTests(unittest.TestCase):
             effectful,
             {
                 CAPTURE_SUPPLIER_INVOICE,
+                "capture_digikey_order_bill",
                 "delete_xero_draft_bill",
                 "update_xero_contact",
                 "create_xero_contact",

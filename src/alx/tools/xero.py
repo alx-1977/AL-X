@@ -30,6 +30,7 @@ from alx.contracts import (
     xero_date,
 )
 from alx.specialists import checked_invoice, is_supplier_bill, prior_coding, resolve_supplier
+from alx.tools.digikey import CAPTURE_DIGIKEY_ORDER_BILL, FAILURE_CODES, ORDER_INPUT
 
 
 SEARCH_XERO_CONTACTS = "search_xero_contacts"
@@ -264,6 +265,17 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
     ),
 )
 
+CAPTURE_DIGIKEY_DEFINITION = CapabilityDefinition(
+    CAPTURE_DIGIKEY_ORDER_BILL,
+    "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true.",
+    StructuredSchema(ValueKind.OBJECT,
+                     {**ORDER_INPUT.properties, "authorise": _BOOLEAN},
+                     extra_properties=False),
+    CAPTURE_INVOICE_DEFINITION.output_schema,
+    SideEffect.EFFECTFUL,
+    tuple(dict.fromkeys((*_FAILURES, *FAILURE_CODES, "invoice_validation_failed"))),
+)
+
 DELETE_DRAFT_DEFINITION = CapabilityDefinition(
     DELETE_XERO_DRAFT_BILL,
     "Discard one exact DRAFT accounts-payable bill after verifying its invoice number and total; refuse a bill that is not a draft.",
@@ -385,6 +397,7 @@ INVOICE_QUOTE_DEFINITION = CapabilityDefinition(
 )
 
 DEFINITIONS = (
+    CAPTURE_DIGIKEY_DEFINITION,
     SEARCH_CONTACTS_DEFINITION,
     LIST_ACCOUNTS_DEFINITION,
     LIST_TAX_RATES_DEFINITION,
@@ -637,7 +650,7 @@ def _draft_mismatch(
             for item in requested.get("LineItems") or []
         ),
         Decimal("0"),
-    )
+    ).quantize(Decimal("0.01"))
     try:
         if money(existing.get("Total")) != requested_total:
             return (
@@ -706,11 +719,16 @@ def _draft_mismatch(
             stored_amount = (
                 money(was["LineAmount"])
                 if was.get("LineAmount") is not None
-                else money(was.get("Quantity")) * money(was.get("UnitAmount"))
+                else (
+                    money(was.get("Quantity")) * money(was.get("UnitAmount"))
+                ).quantize(Decimal("0.01"))
             )
-            if stored_amount != money(wanted.get("Quantity")) * money(
-                wanted.get("UnitAmount")
-            ):
+            # Compare extensions at the same cent precision as bill-total
+            # validation; keep the quantity and unit-price checks exact below.
+            wanted_amount = (
+                money(wanted.get("Quantity")) * money(wanted.get("UnitAmount"))
+            ).quantize(Decimal("0.01"))
+            if stored_amount != wanted_amount:
                 return f"line {index} amount differs"
             # Two lines can multiply to the same amount from different
             # quantities, so the parts are compared as well as the product.
@@ -1063,6 +1081,7 @@ def build_xero_executors(
     default_tax_type: str = "",
     dhl_classifier: Callable[[bytes], str] | None = None,
     today: Callable[[], date] = date.today,
+    digikey_lookup: Callable[..., Mapping[str, Any]] | None = None,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     def failed(capability_id: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
@@ -1157,10 +1176,10 @@ def build_xero_executors(
         )
 
     def _commit_decided_bill(arguments: StructuredData) -> CapabilityResult:
-        """Private step of capture_supplier_invoice, not a capability.
+        """Private step of the shared structured-invoice core, not a capability.
 
         Law 0: this is a shared implementation component, reachable only
-        through the one capture path. It is deliberately absent from the
+        through the shared invoice core. It is deliberately absent from the
         capability registry, the executor map and the authority policies, so
         it cannot form a second end-to-end route to a posted bill.
         """
@@ -1194,7 +1213,7 @@ def build_xero_executors(
 
         try:
             documents = arguments.get("source_documents")
-            if not isinstance(documents, (tuple, list)) or not documents:
+            if not isinstance(documents, (tuple, list)):
                 raise ValueError("source_documents")
             authorise_requested = arguments.get("authorise")
             if not isinstance(authorise_requested, bool):
@@ -1272,7 +1291,7 @@ def build_xero_executors(
 
             stored = {
                 str(item.get("FileName"))
-                for item in _listed_attachments(account, invoice_id)
+                for item in (_listed_attachments(account, invoice_id) if documents else ())
             }
             required_attachments: list[tuple[str, str, str]] = []
             for document in documents:
@@ -1339,7 +1358,7 @@ def build_xero_executors(
                 or final["contact_id"] != contact_id
                 or Decimal(final["total"]) != expected_total
                 or final["status"] != expected_status
-                or not final["has_attachments"]
+                or (documents and not final["has_attachments"])
             ):
                 return returned(
                     "read_back_mismatch",
@@ -1527,6 +1546,43 @@ def build_xero_executors(
                     invoice,
                 )
 
+        except ValueError as error:
+            return CapabilityResult(
+                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                CapabilityResultState.FAILED,
+                {"steps": tuple(steps)},
+                failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "capture_input")},
+            )
+        except MailAccessError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+        except SpecialistError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+        except XeroAccessError as error:
+            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+
+
+        return _capture_structured_invoice(
+            invoice, capability_id=CAPTURE_SUPPLIER_INVOICE,
+            authorise_requested=authorise_requested, context_line=context_line,
+            filename=attachment.filename, source_documents=[dict(arguments)], steps=steps,
+        )
+
+    def _capture_structured_invoice(
+        invoice: Mapping[str, Any], *, capability_id: str,
+        authorise_requested: bool, context_line: str, filename: str,
+        source_documents: list[Mapping[str, Any]], steps: list[str],
+        invoice_lines: list[Mapping[str, str]] | None = None,
+    ) -> CapabilityResult:
+        def returned(reason: str, detail: str, invoice: Mapping[str, Any]) -> CapabilityResult:
+            return CapabilityResult(
+                call_id_source(), capability_id, CapabilityResultState.SUCCEEDED,
+                {"completed": False, "returned_for": reason, "detail": detail,
+                 "invoice": dict(invoice), "bill": _bill_values(None),
+                 "attached": (), "steps": tuple(steps)},
+                outcome=ExecutionOutcome.AMBIGUOUS,
+            )
+
+        try:
             contact = resolve_supplier(
                 account.search_contacts(invoice["supplier_name"]),
                 invoice["supplier_name"],
@@ -1545,20 +1601,21 @@ def build_xero_executors(
             steps.append("looked_up_prior_coding")
             if not coding["resolved"]:
                 return returned("coding_unresolved", coding["reason"], invoice)
-        except ValueError as error:
-            return CapabilityResult(
-                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
-                CapabilityResultState.FAILED,
-                {"steps": tuple(steps)},
-                failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "capture_input")},
-            )
-        except MailAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
-        except SpecialistError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
         except XeroAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+            return failed(capability_id, error.code, error)
 
+        resolved_lines = None
+        if invoice_lines is not None:
+            # Provider lines are exclusive merchandise values. Without per-line
+            # tax evidence, allocating tax or converting inclusive prices is a
+            # judgment; never invent an allocation.
+            if _decimal_or_zero(invoice["tax_amount"]) != 0 or coding["line_amount_types"] not in ("NoTax", "Exclusive"):
+                return returned("tax_allocation_unresolved", "exclusive line tax allocation is not stated", invoice)
+            resolved_lines = [
+                {**line, "account_code": coding["account_code"],
+                 "tax_type": coding["tax_type"], "tax_amount": "0"}
+                for line in invoice_lines
+            ]
         # Everything is unambiguous, so the same commit path runs directly
         # rather than returning to AL/X to be told to do what is already known.
         line_amount_types = coding["line_amount_types"] or "NoTax"
@@ -1588,11 +1645,11 @@ def build_xero_executors(
                 # the same choice, and it is recorded in D-020.
                 "due_date": invoice["due_date"] or invoice["invoice_date"],
                 "currency": invoice["currency"],
-                "reference": _bill_reference(context_line, invoice, attachment.filename),
+                "reference": _bill_reference(context_line, invoice, filename),
                 "reference_supplied": bool(context_line.strip()),
                 "line_amount_types": line_amount_types,
                 "expected_total": invoice["total"],
-                "line_items": [
+                "line_items": resolved_lines or [
                     {
                         "description": invoice["description"] or "Supplier invoice",
                         "quantity": "1",
@@ -1602,7 +1659,7 @@ def build_xero_executors(
                         "tax_amount": invoice["tax_amount"] or "0",
                     }
                 ],
-                "source_documents": [dict(arguments)],
+                "source_documents": source_documents,
                 "authorise": authorise_requested,
             }
         )
@@ -1610,14 +1667,14 @@ def build_xero_executors(
         if outcome.state is not CapabilityResultState.SUCCEEDED:
             return CapabilityResult(
                 call_id_source(),
-                CAPTURE_SUPPLIER_INVOICE,
+                capability_id,
                 CapabilityResultState.FAILED,
                 {"steps": (*steps, *outcome.values.get("steps", ()))},
                 failure=dict(outcome.failure or {"code": "request_rejected"}),
             )
         return CapabilityResult(
             call_id_source(),
-            CAPTURE_SUPPLIER_INVOICE,
+            capability_id,
             CapabilityResultState.SUCCEEDED,
             {
                 **outcome.values,
@@ -1626,6 +1683,47 @@ def build_xero_executors(
             },
             outcome=outcome.outcome,
         )
+
+    def capture_digikey(arguments: StructuredData) -> CapabilityResult:
+        from alx.tools.digikey import order_arguments, bill_invoice
+
+        capability_id = CAPTURE_DIGIKEY_ORDER_BILL
+        if digikey_lookup is None:
+            return failed(capability_id, "not_configured")
+        try:
+            lookup_arguments = order_arguments(arguments)
+            authorise = arguments.get("authorise", True)
+            if not isinstance(authorise, bool):
+                raise ValueError("authorise")
+        except ValueError:
+            return failed(capability_id, "arguments_unusable")
+        try:
+            order = digikey_lookup(**lookup_arguments)
+        except Exception as error:
+            code = getattr(error, "code", "provider_failed")
+            return failed(capability_id, code if code in FAILURE_CODES else "provider_failed")
+        invoice, lines, problems = bill_invoice(order)
+        if problems:
+            return CapabilityResult(
+                call_id_source(), capability_id, CapabilityResultState.SUCCEEDED,
+                {"completed": False, "returned_for": "needs_judgment",
+                 "detail": "; ".join(problems), "invoice": invoice,
+                 "bill": _bill_values(None), "attached": (), "steps": ("read_digikey_order",)},
+                outcome=ExecutionOutcome.AMBIGUOUS,
+            )
+        result = _capture_structured_invoice(
+            invoice, capability_id=capability_id, authorise_requested=authorise,
+            context_line="", filename="", source_documents=[],
+            steps=["read_digikey_order"], invoice_lines=lines,
+        )
+        if result.outcome is ExecutionOutcome.AMBIGUOUS:
+            return CapabilityResult(
+                result.call_id, capability_id, result.state,
+                {**result.values, "returned_for": "needs_judgment",
+                 "detail": result.values.get("returned_for", "") + ": " + result.values.get("detail", "")},
+                failure=result.failure, outcome=result.outcome,
+            )
+        return result
 
     def delete_draft(arguments: StructuredData) -> CapabilityResult:
         def operation() -> Mapping[str, Any]:
@@ -1969,6 +2067,7 @@ def build_xero_executors(
         FIND_XERO_BILL: find_bill,
         READ_XERO_BILL: read_bill,
         CAPTURE_SUPPLIER_INVOICE: capture_invoice,
+        CAPTURE_DIGIKEY_ORDER_BILL: capture_digikey,
         DELETE_XERO_DRAFT_BILL: delete_draft,
         UPDATE_XERO_CONTACT: update_contact,
         CREATE_XERO_CONTACT: create_contact,

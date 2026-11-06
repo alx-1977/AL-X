@@ -29,6 +29,7 @@ from alx.tools import (
     XERO_DEFINITIONS,
     build_xero_executors,
 )
+from alx.tools.digikey import CAPTURE_DIGIKEY_ORDER_BILL
 
 
 XERO_READ_PERMISSION = "xero.read"
@@ -39,14 +40,14 @@ XERO_CONTACT_CREATE_PERMISSION = "xero.contact.create"
 XERO_QUOTE_INVOICE_PERMISSION = "xero.quote.invoice"
 
 # Law 0: one production path per outcome. An ordinary supplier bill is posted
-# by capture_supplier_invoice and a DHL import by process_dhl_import. The steps
-# inside each are private implementation, not competing entry points, and the
-# capabilities they replaced are deleted rather than withheld.
+# through the shared structured-invoice core (mail/PDF or DigiKey source), and
+# a DHL import by process_dhl_import. The steps inside each are private
+# implementation, not competing writers. Superseded capabilities are deleted.
 # Both commit a bill, so both close their own ceiling window when they
 # actually finish. A DHL import armed the ceiling but could never settle it,
 # so a completed import left the conversation inside a spent window.
 BILL_EXECUTION_CAPABILITIES = frozenset(
-    {CAPTURE_SUPPLIER_INVOICE, PROCESS_DHL_IMPORT}
+    {CAPTURE_SUPPLIER_INVOICE, CAPTURE_DIGIKEY_ORDER_BILL, PROCESS_DHL_IMPORT}
 )
 
 # Arming the ceiling on the commit was too late: a task spent seven reasoning
@@ -112,6 +113,7 @@ def build_xero_runtime(
     mail_account: MailAccount,
     call_id_source: Callable[[], str],
     extractor: Callable[[bytes, str, str, str], Mapping[str, Any]] | None = None,
+    digikey_lookup: Callable[..., Mapping[str, Any]] | None = None,
 ) -> XeroRuntime:
     oauth = SQLiteXeroOAuth(
         storage_root / "xero.sqlite3",
@@ -170,8 +172,8 @@ def build_xero_runtime(
     definitions = tuple(
         definition
         for definition in XERO_DEFINITIONS
-        if extractor is not None
-        or definition.capability_id != CAPTURE_SUPPLIER_INVOICE
+        if (extractor is not None or definition.capability_id != CAPTURE_SUPPLIER_INVOICE)
+        and (digikey_lookup is not None or definition.capability_id != CAPTURE_DIGIKEY_ORDER_BILL)
     )
     executors = dict(
         build_xero_executors(
@@ -182,6 +184,7 @@ def build_xero_runtime(
             settings.default_account_code,
             settings.default_tax_type,
             classify_dhl_document,
+            digikey_lookup=digikey_lookup,
         )
     )
     if extractor is not None:
@@ -192,6 +195,10 @@ def build_xero_runtime(
         # LlamaParse extractor, so it is absent rather than advertised as a
         # callable that will fail before doing any work.
         executors.pop(CAPTURE_SUPPLIER_INVOICE)
+    if digikey_lookup is not None:
+        policies[CAPTURE_DIGIKEY_ORDER_BILL] = write_policy
+    else:
+        executors.pop(CAPTURE_DIGIKEY_ORDER_BILL)
     return XeroRuntime(
         oauth,
         adapter,

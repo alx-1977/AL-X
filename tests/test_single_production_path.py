@@ -135,13 +135,14 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
         self.assertFalse(hasattr(DhlImportAnalyzerAdapter, "reconcile"))
         self.assertFalse(hasattr(DhlImportAnalyzerAdapter, "analyze_customs"))
 
-    def test_exactly_one_capability_commits_a_bill(self) -> None:
+    def test_only_supported_bill_sources_are_registered(self) -> None:
         effectful = {
             item.capability_id
             for item in (*XERO_DEFINITIONS, *DHL_DEFINITIONS)
             if item.side_effect is SideEffect.EFFECTFUL
         }
-        # Capture posts an ordinary bill, process_dhl_import posts a DHL
+        # PDF and DigiKey captures feed the one structured-invoice core
+        # (call ownership is enforced in test_digikey); process_dhl_import posts a DHL
         # import, and delete discards a draft. The D-034 contact rename and
         # D-035 contact creation write a contact, and the D-037 quote invoice
         # writes a DRAFT sales invoice, never a bill. Nothing else writes.
@@ -149,6 +150,7 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
             effectful,
             {
                 CAPTURE_SUPPLIER_INVOICE,
+                "capture_digikey_order_bill",
                 PROCESS_DHL_IMPORT,
                 DELETE_XERO_DRAFT_BILL,
                 UPDATE_XERO_CONTACT,

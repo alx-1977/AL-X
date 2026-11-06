@@ -208,7 +208,9 @@ id = "xero.supplier_bill_is_committed"
 description = "An ordinary supplier bill is committed to Xero."
 # D-020. Five capabilities could each independently reach a posted bill before
 # `capture_supplier_invoice` consolidated them; all five were deleted.
-entry = "tools/xero.py::build_xero_executors.<locals>.capture_invoice"
+# PDF and DigiKey now feed one structured-invoice core, with the sole bill
+# commit primitive beneath it. Tests enumerate writer and core call ownership.
+entry = "tools/xero.py::build_xero_executors.<locals>._capture_structured_invoice"
 forbidden = [
   "execute_xero_bill",
   "create_xero_draft_bill",
