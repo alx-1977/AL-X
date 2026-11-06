@@ -51,7 +51,7 @@ ORDER_INPUT = StructuredSchema(
 )
 LOOKUP_DEFINITION = CapabilityDefinition(
     LOOKUP_DIGIKEY_ORDER,
-    "Read a DigiKey order by exactly one sales_order_number or invoice_number. Returns all lines, invoices and shipping facts; empty values are unknown. Invoice search scans paginated account history and refuses ambiguous matches.",
+    "Read a DigiKey order by exactly one sales_order_number or invoice_number. Returns all lines, invoices and shipping facts; absent shipping/tax charges are zero. Invoice search scans paginated account history and sales-order details and refuses ambiguous matches.",
     ORDER_INPUT, ORDER_SCHEMA, SideEffect.NONE, FAILURE_CODES,
 )
 
@@ -88,15 +88,16 @@ def build_digikey_executors(provider: Any, call_id_source: Callable[[], str]):
     return {LOOKUP_DIGIKEY_ORDER: lookup}
 
 
-def bill_invoice(order: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]], list[str]]:
+def bill_invoice(order: Mapping[str, Any], *, rounding_adjustment: bool = False) -> tuple[dict[str, Any], list[dict[str, str]], list[str]]:
     """Require one fully shipped invoice and an explicit reconciled breakdown.
 
     No policy-based allocation of shipping, partial quantities, tax or multiple
-    invoices is permitted. Missing amounts are not evidence of zero charges.
+    invoices is permitted. Absent shipping/tax charges are zero. Small rounding
+    adjustments require explicit caller opt-in.
     """
     invoice = {"supplier_name": "DigiKey", "document_type": "supplier_invoice",
                "invoice_number": "", "invoice_date": "", "due_date": "",
-               "currency": order["currency"], "subtotal": "", "tax_amount": order["tax"],
+               "currency": order["currency"], "subtotal": "", "tax_amount": order.get("tax", ""),
                "total": order["total"], "description": "DigiKey " + order["sales_order_number"],
                "order": dict(order)}
     lines: list[dict[str, str]] = []
@@ -127,7 +128,10 @@ def bill_invoice(order: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[st
             if not result.is_finite() or result < 0:
                 raise ValueError("amount")
             return result
-        shipping, tax, total = (amount(order[key]) for key in ("shipping", "tax", "total"))
+        shipping, tax = (amount("0" if order.get(key) in (None, "") else order[key])
+                         for key in ("shipping", "tax"))
+        total = amount(order["total"])
+        invoice["tax_amount"] = str(tax)
         merchandise = Decimal(0)
         rounded_lines = shipping.quantize(Decimal("0.01"))
         if not order["line_items"] or total <= 0:
@@ -147,18 +151,20 @@ def bill_invoice(order: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[st
             lines.append({"description": " | ".join(filter(None, (
                 line["digikey_part_number"], line["manufacturer_part_number"], line["description"]
             ))), "quantity": str(quantity), "unit_amount": str(unit)})
-        if (abs(merchandise - amount(order["subtotal"])) > Decimal("0.01")
-                or abs(merchandise + shipping + tax - total) > Decimal("0.01")):
+        difference = total - (rounded_lines + tax)
+        if abs(merchandise - amount(order["subtotal"])) > Decimal("0.01"):
             problems.append("totals_mismatch")
-        elif (merchandise + shipping + tax).quantize(Decimal("0.01")) != total.quantize(Decimal("0.01")) or rounded_lines + tax != total:
-            # The existing writer verifies exact cent totals. A cent-level
-            # difference needs a chosen rounding allocation before posting,
-            # even when it is inside the reconciliation tolerance.
-            problems.append("rounding_allocation_unresolved")
+        elif difference:
+            if rounding_adjustment and abs(difference) <= Decimal("0.05"):
+                lines.append({"description": "Rounding adjustment", "quantity": "1",
+                              "unit_amount": str(difference)})
+            else:
+                problems.append("rounding_allocation_unresolved")
         if tax:
             problems.append("tax_allocation_unresolved")
-        invoice["subtotal"] = str(merchandise + shipping)
-        lines.append({"description": "Shipping", "quantity": "1", "unit_amount": str(shipping)})
+        invoice["subtotal"] = str(total - tax)
+        if shipping:
+            lines.append({"description": "Shipping", "quantity": "1", "unit_amount": str(shipping)})
     except (InvalidOperation, ValueError):
         problems.append("billing_values_unresolved")
     return invoice, lines, problems

@@ -100,7 +100,7 @@ class FakeXero:
         total = Decimal("0")
         exclusive = bill.get("LineAmountTypes") == "Exclusive"
         for line in bill.get("LineItems") or ():
-            amount = Decimal(str(line["Quantity"])) * Decimal(str(line["UnitAmount"]))
+            amount = (Decimal(str(line["Quantity"])) * Decimal(str(line["UnitAmount"]))).quantize(Decimal("0.01"))
             if exclusive:
                 amount += Decimal(str(line.get("TaxAmount") or 0))
             total += amount

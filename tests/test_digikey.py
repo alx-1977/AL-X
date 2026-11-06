@@ -1,6 +1,8 @@
 """HTTP-mocked v4 orders and the single structured supplier-bill path."""
 
 import ast
+from copy import deepcopy
+from decimal import Decimal
 import json
 import sys
 from pathlib import Path
@@ -90,14 +92,14 @@ def test_sales_order_lookup_and_contract(caplog):
             assert secret not in repr(result) + caplog.text
 
 
-def test_schema_only_response_preserves_unknown_charges():
+def test_schema_only_response_defaults_absent_charges_to_zero():
     result = normalize_order(raw_order())
-    assert result["shipping"] == result["tax"] == ""
+    assert result["shipping"] == result["tax"] == "0"
 
 
-@pytest.mark.parametrize("ambiguous", [False, True])
-def test_invoice_search_paginates_and_retrieves_exact_order(ambiguous):
+def test_invoice_search_paginates_and_retrieves_exact_order():
     base, calls = handler_with_order()
+    sales = {}
     def handle(request):
         if request.url.path.endswith("/orders"):
             calls.append(request)
@@ -107,18 +109,172 @@ def test_invoice_search_paginates_and_retrieves_exact_order(ambiguous):
             sale = complete_order()
             if page == 1:
                 sale["SalesOrderId"] = 111
-                if not ambiguous:
-                    sale["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
-            return httpx.Response(200, json={"TotalOrders": 2, "Orders": [{"SalesOrders": [sale]}]})
+                sale["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
+            sales[str(sale["SalesOrderId"])] = sale
+            return httpx.Response(200, json={"TotalOrders": 2, "Orders": [{"SalesOrders": [{"SalesOrderId": sale["SalesOrderId"]}]}]})
+        if "/salesorder/" in request.url.path:
+            calls.append(request)
+            return httpx.Response(200, json=sales[request.url.path.rsplit("/", 1)[1]])
         return base(request)
-    if ambiguous:
-        with pytest.raises(DigiKeyError, match="order_ambiguous"):
-            provider(handle).lookup(invoice_number="135916797")
-        assert not any("/salesorder/" in str(call.url) for call in calls)
+    result = provider(handle).lookup(invoice_number="135916797")
+    assert result["sales_order_number"] == "102748548"
+    assert result["invoice_numbers"] == ["135916797"]
+    assert len(calls) == 5
+
+
+def invoice_history_handler(numbers, *, total=None, match=False, matching_numbers=()):
+    base, calls = handler_with_order()
+    def handle(request):
+        if request.url.path.endswith("/orders"):
+            calls.append(request)
+            return httpx.Response(200, json={
+                "TotalOrders": len(numbers) if total is None else total,
+                "Orders": [{"SalesOrders": [{"SalesOrderId": n}]} for n in numbers],
+            })
+        if "/salesorder/" in request.url.path:
+            calls.append(request)
+            raw = complete_order()
+            raw["SalesOrderId"] = int(request.url.path.rsplit("/", 1)[1])
+            if not match and raw["SalesOrderId"] not in matching_numbers:
+                raw["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
+            return httpx.Response(200, json=raw)
+        return base(request)
+    return handle, calls
+
+
+@pytest.mark.parametrize("capture_bill", [False, True])
+@pytest.mark.parametrize("paginated", [False, True])
+def test_invoice_search_rejects_distinct_matching_orders(capture_bill, paginated):
+    base, calls = invoice_history_handler([111, 222], match=True)
+    def handle(request):
+        if paginated and request.url.path.endswith("/orders"):
+            calls.append(request)
+            number = 111 if request.url.params["PageNumber"] == "1" else 222
+            return httpx.Response(200, json={"TotalOrders": 2, "Orders": [
+                {"SalesOrders": [{"SalesOrderId": number}]}]})
+        return base(request)
+    p = provider(handle)
+    xero = FakeXero()
+    xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
+    xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    if capture_bill:
+        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
+                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
     else:
-        result = provider(handle).lookup(invoice_number="135916797")
-        assert result["sales_order_number"] == "102748548"
-        assert len(calls) == 4
+        execute = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER]
+    result = execute({"invoice_number": "135916797"})
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure == {"code": "order_ambiguous"}
+    assert [r.url.path for r in calls if "/salesorder/" in r.url.path] == [
+        "/orderstatus/v4/salesorder/111", "/orderstatus/v4/salesorder/222"]
+    assert xero.created == 0
+    xero.create_draft_bill.assert_not_called()
+    xero.authorise_bill.assert_not_called()
+
+
+def test_invoice_search_returns_unique_match_only_after_all_pages(monkeypatch):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", 5)
+    base, calls = invoice_history_handler([], matching_numbers=(111,))
+    def handle(request):
+        if request.url.path.endswith("/orders"):
+            calls.append(request)
+            numbers = [111] if request.url.params["PageNumber"] == "1" else [111, 222]
+            return httpx.Response(200, json={"TotalOrders": 3, "Orders": [
+                {"SalesOrders": [{"SalesOrderId": n}]} for n in numbers]})
+        return base(request)
+    result = provider(handle).lookup(invoice_number="135916797")
+    assert result["sales_order_number"] == "111"
+    # Repeated references to 111 neither imply ambiguity nor repeat detail reads.
+    assert [r.url.path for r in calls] == [
+        "/v1/oauth2/token", "/orderstatus/v4/orders", "/orderstatus/v4/salesorder/111",
+        "/orderstatus/v4/orders", "/orderstatus/v4/salesorder/222"]
+
+
+@pytest.mark.parametrize("exhaustion", ["requests", "deadline", "timeout"])
+@pytest.mark.parametrize("capture_bill", [False, True])
+@pytest.mark.parametrize("after_match", [False, True])
+def test_incomplete_invoice_search_never_writes(monkeypatch, exhaustion, capture_bill, after_match):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", 4, raising=False)
+    monkeypatch.setattr(module, "INVOICE_SEARCH_TIMEOUT", 10, raising=False)
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0], raising=False)
+    base, calls = invoice_history_handler([111, 222, 333],
+                                         matching_numbers=(111,) if after_match else ())
+    def handle(request):
+        response = base(request)
+        if exhaustion == "deadline":
+            clock[0] += 3 if after_match else 4
+        if exhaustion == "timeout" and "/salesorder/" in request.url.path and (
+            not after_match or request.url.path.endswith("/222")
+        ):
+            raise httpx.ReadTimeout("private", request=request)
+        return response
+    p = provider(handle)
+    if capture_bill:
+        xero = FakeXero()
+        xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
+        xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
+        xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
+                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
+    else:
+        execute = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER]
+    result = execute({"invoice_number": "135916797"})
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure == {"code": "search_incomplete"}
+    assert len(calls) == (4 if after_match else {"requests": 4, "deadline": 3, "timeout": 3}[exhaustion])
+    if exhaustion == "deadline":
+        assert [r.extensions["timeout"]["read"] for r in calls] == ([10, 7, 4, 1] if after_match else [10, 6, 2])
+    if capture_bill:
+        assert xero.created == 0
+        xero.create_draft_bill.assert_not_called()
+        xero.authorise_bill.assert_not_called()
+
+
+def test_completed_invoice_search_not_found(monkeypatch):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", 3, raising=False)
+    handler, calls = invoice_history_handler([111])
+    with pytest.raises(DigiKeyError, match="^order_not_found$"):
+        provider(handler).lookup(invoice_number="135916797")
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("limit", [1, 3])
+def test_invoice_request_budget_includes_authentication_and_pagination(monkeypatch, limit):
+    import alx.providers.digikey as module
+
+    monkeypatch.setattr(module, "INVOICE_SEARCH_MAX_REQUESTS", limit)
+    # Repeated candidates must not trigger repeated detail requests, but each
+    # history page still consumes budget even when it adds no new candidates.
+    handler, calls = invoice_history_handler([111], total=100)
+    with pytest.raises(DigiKeyError, match="^search_incomplete$"):
+        provider(handler).lookup(invoice_number="135916797")
+    assert len(calls) == limit
+    assert sum("/salesorder/" in r.url.path for r in calls) == (limit == 3)
+
+
+@pytest.mark.parametrize("late_phase", ["token", "match"])
+def test_invoice_search_rejects_results_received_after_deadline(monkeypatch, late_phase):
+    import alx.providers.digikey as module
+
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    handler, calls = invoice_history_handler([111], match=True)
+    def handle(request):
+        response = handler(request)
+        if (late_phase == "token" or "/salesorder/" in request.url.path):
+            clock[0] = module.INVOICE_SEARCH_TIMEOUT
+        return response
+    with pytest.raises(DigiKeyError, match="^search_incomplete$"):
+        provider(handle).lookup(invoice_number="135916797")
+    assert len(calls) == (1 if late_phase == "token" else 3)
 
 
 @pytest.mark.parametrize("status,code", [(401, "authentication_failed"), (400, "provider_failed"),
@@ -273,6 +429,127 @@ def test_rounding_difference_needs_judgment_before_write():
     assert xero.created == 0
 
 
+def shipped_rounding_order():
+    # Reported IDs, total and four-decimal extensions, with synthetic goods.
+    raw = raw_order()
+    raw.update(ShippingCharges="", SalesTax="")
+    template = raw["LineItems"][0]
+    raw["LineItems"] = []
+    for extension in ("166.7750", "311.3750", "100.0150", "200.0150", "1686.7300"):
+        line = deepcopy(template)
+        line.update(QuantityOrdered=1, QuantityShipped=1, UnitPrice=extension)
+        line["ItemShipments"][0]["QuantityShipped"] = 1
+        raw["LineItems"].append(line)
+    return raw
+
+
+@pytest.mark.parametrize("identifier", ["sales_order_number", "invoice_number"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_reported_shipped_order_rounding_and_invoice_capture(identifier, enabled):
+    raw = shipped_rounding_order()
+    base, calls = handler_with_order(raw)
+    def handle(request):
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(200, json={"TotalOrders": 1, "Orders": [
+                {"SalesOrders": [{"SalesOrderId": 102748548}]}]})
+        return base(request)
+    xero = FakeXero()
+    xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
+    execute = build_xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
+                                   digikey_lookup=provider(handle).lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
+    args = {identifier: "135916797" if identifier == "invoice_number" else "102748548"}
+    if enabled:
+        args["rounding_adjustment"] = True
+    assert CAPTURE_DIGIKEY_DEFINITION.input_schema.accepts(args)
+    result = execute(args)
+    order = result.values["invoice"]["order"]
+    assert "135916797" in order["invoice_numbers"]
+    assert sum((Decimal(line["extended_price"]).quantize(Decimal("0.01"))
+                for line in order["line_items"]), Decimal(0)) == Decimal("2464.93")
+    if not enabled:
+        assert "rounding_allocation_unresolved" in result.values["detail"]
+        assert result.values["returned_for"] == "needs_judgment"
+        assert xero.created == 0
+        return
+    assert result.values["completed"] is True
+    bill = xero.bills["bill-1"]
+    assert bill["Total"] == "2464.91"
+    adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
+    assert len(adjustments) == 1
+    assert adjustments[0]["UnitAmount"] == -0.02
+    for key in ("AccountCode", "TaxType", "TaxAmount"):
+        assert adjustments[0][key] == bill["LineItems"][0][key]
+    assert not any(line["Description"] == "Shipping" for line in bill["LineItems"])
+
+
+@pytest.mark.parametrize("difference", ["0", "0.02", "-0.02", "0.05", "-0.05", "0.06", "-0.06"])
+def test_rounding_adjustment_bounds(difference):
+    raw = shipped_rounding_order()
+    raw["TotalPrice"] = str(Decimal("2464.93") + Decimal(difference))
+    xero, execute = capture(raw)
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True})
+    if abs(Decimal(difference)) > Decimal("0.05"):
+        assert result.values["returned_for"] == "needs_judgment"
+        assert "rounding_allocation_unresolved" in result.values["detail"]
+        assert xero.created == 0
+    else:
+        assert result.values["completed"] is True
+        bill = xero.bills["bill-1"]
+        assert Decimal(bill["Total"]) == Decimal(raw["TotalPrice"])
+        adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
+        assert len(adjustments) == bool(Decimal(difference))
+
+
+@pytest.mark.parametrize("field", ["ShippingCharges", "SalesTax"])
+@pytest.mark.parametrize("value", [None, "", "garbage"])
+def test_optional_charges_and_invalid_nonempty_values(field, value):
+    raw = fractional_order()
+    if value is None:
+        raw.pop(field)
+    else:
+        raw[field] = value
+    xero, execute = capture(raw)
+    result = execute({"sales_order_number": "102748548"})
+    if value == "garbage":
+        assert result.failure["code"] == "response_invalid"
+        assert xero.created == 0
+    else:
+        assert result.values["completed"] is True
+        assert len(xero.bills["bill-1"]["LineItems"]) == 1
+
+
+def test_normalized_empty_charges_and_nonempty_garbage():
+    from alx.tools.digikey import bill_invoice
+
+    order = normalize_order(fractional_order())
+    order.update(shipping="", tax="")
+    invoice, lines, problems = bill_invoice(order)
+    assert not problems
+    assert invoice["tax_amount"] == "0"
+    assert len(lines) == 1
+    for field in ("shipping", "tax"):
+        _, _, problems = bill_invoice({**order, field: "garbage"}, rounding_adjustment=True)
+        assert "billing_values_unresolved" in problems
+
+
+def test_rounding_adjustment_draft_resumes_through_shared_commit():
+    xero, execute = capture(shipped_rounding_order())
+    args = {"sales_order_number": "102748548", "rounding_adjustment": True}
+    assert execute({**args, "authorise": False}).values["bill"]["status"] == "DRAFT"
+    result = execute(args)
+    assert result.values["completed"] is True
+    assert "resumed_existing_draft" in result.values["steps"]
+    assert xero.created == 1
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_rounding_option_must_be_boolean(value):
+    xero, execute = capture()
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": value})
+    assert result.failure["code"] == "arguments_unusable"
+    assert xero.created == 0
+
+
 def test_matching_draft_is_resumed_through_shared_commit():
     xero, execute = capture()
     first = execute({"sales_order_number": "102748548", "authorise": False})
@@ -302,7 +579,6 @@ def test_fractional_unit_price_draft_retry_preserves_precision(stored_line_amoun
     assert bill["LineItems"][0]["UnitAmount"] == 0.3333
     if stored_line_amount:
         bill["LineItems"][0]["LineAmount"] = 1.00
-        bill["LineItems"][1]["LineAmount"] = 0
 
     second = execute({"sales_order_number": "102748548", "authorise": True})
     assert second.values["completed"] is True
