@@ -1087,6 +1087,7 @@ def build_xero_executors(
     dhl_classifier: Callable[[bytes], str] | None = None,
     today: Callable[[], date] = date.today,
     digikey_lookup: Callable[..., Mapping[str, Any]] | None = None,
+    draft_cleanup_permitted: bool = False,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     def failed(capability_id: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
@@ -1221,6 +1222,21 @@ def build_xero_executors(
             # Only the draft created by this call is eligible for cleanup.
             if str(bill.get("InvoiceID") or "") != created_id or bill.get("Status") != "DRAFT":
                 return returned("draft_cleanup_failed", "the created bill is not a verified draft", bill)
+            # D-019 / D-051: capture's write approval cannot approve deletion.
+            # Without separate unattended delete authority, leave the draft
+            # and return its actual identity and total for AL/X to decide.
+            if not draft_cleanup_permitted:
+                return CapabilityResult(
+                    call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                    CapabilityResultState.FAILED,
+                    failure={
+                        "code": "source_mismatch",
+                        "invoice_id": created_id,
+                        "total": _bill_values(bill)["total"],
+                        "draft_retained": True,
+                        "cleanup": "delete_not_permitted",
+                    },
+                )
             try:
                 deleted = account.delete_draft_bill(created_id)
                 if deleted.get("InvoiceID") != created_id or deleted.get("Status") != "DELETED":

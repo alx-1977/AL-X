@@ -308,12 +308,13 @@ def test_bad_identifiers_do_not_make_http_requests(args):
     p.lookup.assert_not_called()
 
 
-def capture(order=None, xero=None):
+def capture(order=None, xero=None, *, draft_cleanup_permitted=False):
     xero = xero or FakeXero()
     xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
     handler, _ = handler_with_order(order)
     executors = build_xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
-                                     digikey_lookup=provider(handler).lookup)
+                                     digikey_lookup=provider(handler).lookup,
+                                     draft_cleanup_permitted=draft_cleanup_permitted)
     return xero, executors[CAPTURE_DIGIKEY_ORDER_BILL]
 
 
@@ -836,8 +837,70 @@ def test_shared_commit_rejects_source_mismatch_before_write():
 
 @pytest.mark.parametrize("stage", ["create", "read", "final"])
 @pytest.mark.parametrize("authorise", [False, True])
+@pytest.mark.parametrize("delete_permitted", [False, True])
+@pytest.mark.parametrize("source", ["pdf", "digikey"])
+def test_created_total_cleanup_respects_separate_runtime_delete_authority(
+    tmp_path, monkeypatch, stage, authorise, delete_permitted, source
+):
+    xero = FakeXero()
+    if source == "digikey":
+        xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
+    monkeypatch.setattr("alx.bootstrap.xero.XeroAccountingAdapter", lambda *_: xero)
+    handler, _ = handler_with_order()
+    runtime = build_xero_runtime(
+        xero_settings(unattended_bill_writes=True, unattended_bill_deletes=delete_permitted),
+        tmp_path, FakeMail(), lambda: "call", lambda *_: extracted(),
+        digikey_lookup=provider(handler).lookup,
+    )
+    capability = "capture_supplier_invoice" if source == "pdf" else CAPTURE_DIGIKEY_ORDER_BILL
+    assert not runtime.policies[capability].approval_required
+    assert runtime.policies["delete_xero_draft_bill"].approval_required is not delete_permitted
+    create, read = xero.create_draft_bill, xero.read_bill
+    reads = 0
+
+    def wrong_create(payload):
+        stored = create(payload)
+        if stage == "create":
+            stored["Total"] = "2467.04"
+        return dict(stored)
+
+    def wrong_read(invoice_id):
+        nonlocal reads
+        reads += 1
+        stored = read(invoice_id)
+        if (stage == "read" or (stage == "final" and reads == 2)) and stored["Status"] == "DRAFT":
+            stored["Total"] = "2467.04"
+        return stored
+
+    xero.create_draft_bill = wrong_create
+    xero.read_bill = wrong_read
+    xero.delete_draft_bill = Mock(wraps=xero.delete_draft_bill)
+    xero.authorise_bill = Mock(wraps=xero.authorise_bill)
+    args = arguments(authorise=authorise) if source == "pdf" else {
+        "sales_order_number": "102748548", "authorise": authorise}
+    result = runtime.executors[capability](args)
+    if stage == "final" and authorise:
+        assert result.values["completed"] is True
+        xero.delete_draft_bill.assert_not_called()
+        return
+    assert result.state is CapabilityResultState.FAILED
+    assert result.failure["code"] == "source_mismatch"
+    xero.authorise_bill.assert_not_called()
+    if delete_permitted:
+        xero.delete_draft_bill.assert_called_once_with("bill-1")
+        assert xero.bills["bill-1"]["Status"] == "DELETED"
+    else:
+        xero.delete_draft_bill.assert_not_called()
+        assert xero.bills["bill-1"]["Status"] == "DRAFT"
+        assert result.failure["draft_retained"] is True
+        assert result.failure["invoice_id"] == "bill-1"
+        assert result.failure["total"] == "2467.04"
+
+
+@pytest.mark.parametrize("stage", ["create", "read", "final"])
+@pytest.mark.parametrize("authorise", [False, True])
 def test_new_mismatched_draft_is_deleted_before_return_or_authorisation(stage, authorise):
-    xero, execute = capture()
+    xero, execute = capture(draft_cleanup_permitted=True)
     create = xero.create_draft_bill
     read = xero.read_bill
     reads = 0
@@ -872,7 +935,7 @@ def test_new_mismatched_draft_is_deleted_before_return_or_authorisation(stage, a
 @pytest.mark.parametrize("failure", ["exception", "unconfirmed"])
 def test_draft_cleanup_failure_is_explicit_and_retains_bill_identity(failure):
     from alx.contracts import XeroAccessError
-    xero, execute = capture()
+    xero, execute = capture(draft_cleanup_permitted=True)
     create = xero.create_draft_bill
 
     def wrong_create(payload):
