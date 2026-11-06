@@ -14,10 +14,10 @@ headers to `https://api.digikey.com/orderstatus/v4`.
 
 `lookup_digikey_order` accepts exactly one decimal-string `sales_order_number`
 or `invoice_number`. It returns decimal-string amounts, every order line, and
-invoice/shipment facts. Missing facts are empty strings, never assumed zero.
+invoice/shipment facts. Absent or empty shipping/tax charges become zero; other missing facts remain empty strings.
 Invoice lookup pages through account history (`Shared=true`, from 1900 to
-today), matches exact shipment InvoiceId values, and retrieves the sole matching
-sales order. Incomplete search or multiple matches is refused. It makes no
+today), retrieves each distinct sales-order detail and matches exact invoice IDs
+there, rather than relying on invoice fields in the history response. Incomplete search or multiple matches is refused. It makes no
 production write.
 
 The published v4 SalesOrder schema guarantees `TotalPrice`, but does **not**
@@ -30,9 +30,14 @@ published v4 shape with synthetic merchandise; success tests add explicit
 charge values. It is not a retained live account response.
 
 `capture_digikey_order_bill` accepts the same identifier and optional boolean
-`authorise` (default true). It requires one invoice, all accepted quantities
+`authorise` (default true) and `rounding_adjustment` (default false). It requires one invoice, all accepted quantities
 shipped to that invoice, one invoice/ship date, currency and a reconciled charge
-breakdown. Shipping becomes its own line. An unresolved breakdown, tax
+breakdown. Nonzero shipping becomes its own line. Rounded goods and shipping
+line amounts plus tax are compared with the DigiKey total. With explicit
+`rounding_adjustment=true`, a nonzero difference of at most 0.05 in absolute
+value becomes one signed Rounding adjustment line with the goods account/tax
+treatment. Otherwise the difference returns rounding_allocation_unresolved
+without writing. Quantities and precise unit prices are preserved. An unresolved breakdown, tax
 allocation, partial shipment, multiple invoices, conflicting dates or totals
 returns `needs_judgment` with the found order and commits nothing. Nonzero tax
 without line allocation evidence also returns for judgment.

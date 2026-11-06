@@ -1,6 +1,8 @@
 """HTTP-mocked v4 orders and the single structured supplier-bill path."""
 
 import ast
+from copy import deepcopy
+from decimal import Decimal
 import json
 import sys
 from pathlib import Path
@@ -90,14 +92,15 @@ def test_sales_order_lookup_and_contract(caplog):
             assert secret not in repr(result) + caplog.text
 
 
-def test_schema_only_response_preserves_unknown_charges():
+def test_schema_only_response_defaults_absent_charges_to_zero():
     result = normalize_order(raw_order())
-    assert result["shipping"] == result["tax"] == ""
+    assert result["shipping"] == result["tax"] == "0"
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])
 def test_invoice_search_paginates_and_retrieves_exact_order(ambiguous):
     base, calls = handler_with_order()
+    sales = {}
     def handle(request):
         if request.url.path.endswith("/orders"):
             calls.append(request)
@@ -109,16 +112,21 @@ def test_invoice_search_paginates_and_retrieves_exact_order(ambiguous):
                 sale["SalesOrderId"] = 111
                 if not ambiguous:
                     sale["LineItems"][0]["ItemShipments"][0]["InvoiceId"] = 999
-            return httpx.Response(200, json={"TotalOrders": 2, "Orders": [{"SalesOrders": [sale]}]})
+            sales[str(sale["SalesOrderId"])] = sale
+            return httpx.Response(200, json={"TotalOrders": 2, "Orders": [{"SalesOrders": [{"SalesOrderId": sale["SalesOrderId"]}]}]})
+        if "/salesorder/" in request.url.path:
+            calls.append(request)
+            return httpx.Response(200, json=sales[request.url.path.rsplit("/", 1)[1]])
         return base(request)
     if ambiguous:
         with pytest.raises(DigiKeyError, match="order_ambiguous"):
             provider(handle).lookup(invoice_number="135916797")
-        assert not any("/salesorder/" in str(call.url) for call in calls)
+        assert len(sales) == 2
     else:
         result = provider(handle).lookup(invoice_number="135916797")
         assert result["sales_order_number"] == "102748548"
-        assert len(calls) == 4
+        assert result["invoice_numbers"] == ["135916797"]
+        assert len(calls) == 6
 
 
 @pytest.mark.parametrize("status,code", [(401, "authentication_failed"), (400, "provider_failed"),
@@ -273,6 +281,127 @@ def test_rounding_difference_needs_judgment_before_write():
     assert xero.created == 0
 
 
+def shipped_rounding_order():
+    # Reported IDs, total and four-decimal extensions, with synthetic goods.
+    raw = raw_order()
+    raw.update(ShippingCharges="", SalesTax="")
+    template = raw["LineItems"][0]
+    raw["LineItems"] = []
+    for extension in ("166.7750", "311.3750", "100.0150", "200.0150", "1686.7300"):
+        line = deepcopy(template)
+        line.update(QuantityOrdered=1, QuantityShipped=1, UnitPrice=extension)
+        line["ItemShipments"][0]["QuantityShipped"] = 1
+        raw["LineItems"].append(line)
+    return raw
+
+
+@pytest.mark.parametrize("identifier", ["sales_order_number", "invoice_number"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_reported_shipped_order_rounding_and_invoice_capture(identifier, enabled):
+    raw = shipped_rounding_order()
+    base, calls = handler_with_order(raw)
+    def handle(request):
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(200, json={"TotalOrders": 1, "Orders": [
+                {"SalesOrders": [{"SalesOrderId": 102748548}]}]})
+        return base(request)
+    xero = FakeXero()
+    xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
+    execute = build_xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
+                                   digikey_lookup=provider(handle).lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
+    args = {identifier: "135916797" if identifier == "invoice_number" else "102748548"}
+    if enabled:
+        args["rounding_adjustment"] = True
+    assert CAPTURE_DIGIKEY_DEFINITION.input_schema.accepts(args)
+    result = execute(args)
+    order = result.values["invoice"]["order"]
+    assert "135916797" in order["invoice_numbers"]
+    assert sum((Decimal(line["extended_price"]).quantize(Decimal("0.01"))
+                for line in order["line_items"]), Decimal(0)) == Decimal("2464.93")
+    if not enabled:
+        assert "rounding_allocation_unresolved" in result.values["detail"]
+        assert result.values["returned_for"] == "needs_judgment"
+        assert xero.created == 0
+        return
+    assert result.values["completed"] is True
+    bill = xero.bills["bill-1"]
+    assert bill["Total"] == "2464.91"
+    adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
+    assert len(adjustments) == 1
+    assert adjustments[0]["UnitAmount"] == -0.02
+    for key in ("AccountCode", "TaxType", "TaxAmount"):
+        assert adjustments[0][key] == bill["LineItems"][0][key]
+    assert not any(line["Description"] == "Shipping" for line in bill["LineItems"])
+
+
+@pytest.mark.parametrize("difference", ["0", "0.02", "-0.02", "0.05", "-0.05", "0.06", "-0.06"])
+def test_rounding_adjustment_bounds(difference):
+    raw = shipped_rounding_order()
+    raw["TotalPrice"] = str(Decimal("2464.93") + Decimal(difference))
+    xero, execute = capture(raw)
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": True})
+    if abs(Decimal(difference)) > Decimal("0.05"):
+        assert result.values["returned_for"] == "needs_judgment"
+        assert "rounding_allocation_unresolved" in result.values["detail"]
+        assert xero.created == 0
+    else:
+        assert result.values["completed"] is True
+        bill = xero.bills["bill-1"]
+        assert Decimal(bill["Total"]) == Decimal(raw["TotalPrice"])
+        adjustments = [line for line in bill["LineItems"] if line["Description"] == "Rounding adjustment"]
+        assert len(adjustments) == bool(Decimal(difference))
+
+
+@pytest.mark.parametrize("field", ["ShippingCharges", "SalesTax"])
+@pytest.mark.parametrize("value", [None, "", "garbage"])
+def test_optional_charges_and_invalid_nonempty_values(field, value):
+    raw = fractional_order()
+    if value is None:
+        raw.pop(field)
+    else:
+        raw[field] = value
+    xero, execute = capture(raw)
+    result = execute({"sales_order_number": "102748548"})
+    if value == "garbage":
+        assert result.failure["code"] == "response_invalid"
+        assert xero.created == 0
+    else:
+        assert result.values["completed"] is True
+        assert len(xero.bills["bill-1"]["LineItems"]) == 1
+
+
+def test_normalized_empty_charges_and_nonempty_garbage():
+    from alx.tools.digikey import bill_invoice
+
+    order = normalize_order(fractional_order())
+    order.update(shipping="", tax="")
+    invoice, lines, problems = bill_invoice(order)
+    assert not problems
+    assert invoice["tax_amount"] == "0"
+    assert len(lines) == 1
+    for field in ("shipping", "tax"):
+        _, _, problems = bill_invoice({**order, field: "garbage"}, rounding_adjustment=True)
+        assert "billing_values_unresolved" in problems
+
+
+def test_rounding_adjustment_draft_resumes_through_shared_commit():
+    xero, execute = capture(shipped_rounding_order())
+    args = {"sales_order_number": "102748548", "rounding_adjustment": True}
+    assert execute({**args, "authorise": False}).values["bill"]["status"] == "DRAFT"
+    result = execute(args)
+    assert result.values["completed"] is True
+    assert "resumed_existing_draft" in result.values["steps"]
+    assert xero.created == 1
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_rounding_option_must_be_boolean(value):
+    xero, execute = capture()
+    result = execute({"sales_order_number": "102748548", "rounding_adjustment": value})
+    assert result.failure["code"] == "arguments_unusable"
+    assert xero.created == 0
+
+
 def test_matching_draft_is_resumed_through_shared_commit():
     xero, execute = capture()
     first = execute({"sales_order_number": "102748548", "authorise": False})
@@ -302,7 +431,6 @@ def test_fractional_unit_price_draft_retry_preserves_precision(stored_line_amoun
     assert bill["LineItems"][0]["UnitAmount"] == 0.3333
     if stored_line_amount:
         bill["LineItems"][0]["LineAmount"] = 1.00
-        bill["LineItems"][1]["LineAmount"] = 0
 
     second = execute({"sales_order_number": "102748548", "authorise": True})
     assert second.values["completed"] is True

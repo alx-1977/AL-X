@@ -50,11 +50,11 @@ def _amount(value: Any) -> str:
 
 
 def normalize_order(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Whitelist protocol fields; missing amounts stay unknown, never zero.
+    """Whitelist protocol fields; absent shipping/tax charges are zero.
 
     v4's published schema has TotalPrice but no guaranteed shipping/tax
     breakdown. Preserve explicit breakdowns when returned; never classify the
-    difference as shipping or tax. An incomplete breakdown cannot be posted.
+    difference as shipping or tax.
     """
     shipments: list[dict[str, str]] = []
     lines = []
@@ -106,8 +106,8 @@ def normalize_order(raw: Mapping[str, Any]) -> dict[str, Any]:
         "invoice_date": _text(raw.get("InvoiceDate")),
         "currency": _text(raw.get("Currency")),
         "subtotal": _amount(raw["Subtotal"]) if "Subtotal" in raw else subtotal,
-        "shipping": _amount(raw.get("ShippingCharges")),
-        "tax": _amount(raw.get("SalesTax")),
+        "shipping": _amount(0 if raw.get("ShippingCharges") in (None, "") else raw["ShippingCharges"]),
+        "tax": _amount(0 if raw.get("SalesTax") in (None, "") else raw["SalesTax"]),
         "total": _amount(raw.get("TotalPrice")), "line_items": lines,
     }
 
@@ -155,8 +155,10 @@ class DigiKeyProvider:
         if invoice_number:
             matches: set[str] = set()
             seen = 0
+            checked: set[str] = set()
             # SearchOrders has no invoice filter. Search all account orders,
-            # then compare exact ItemShipments.InvoiceId values on every page.
+            # Resolve history candidates through sales-order detail: history
+            # can omit shipment invoice facts. Finish all pages for ambiguity.
             for page in range(1, 1001):
                 body = self._request("GET", base + "/orders", headers=headers, params={
                     "Shared": "true", "StartDate": "1900-01-01", "EndDate": date.today().isoformat(),
@@ -168,7 +170,16 @@ class DigiKeyProvider:
                     raise DigiKeyError("response_invalid")
                 for order in orders:
                     for sale in _rows(_object(order).get("SalesOrders")):
-                        normalized = normalize_order(_object(sale))
+                        number = _text(_object(sale).get("SalesOrderId"))
+                        if not number.isascii() or not number.isdigit() or int(number) <= 0:
+                            raise DigiKeyError("response_invalid")
+                        if number in checked:
+                            continue
+                        checked.add(number)
+                        normalized = normalize_order(self._request(
+                            "GET", base + "/salesorder/" + number, headers=headers))
+                        if normalized["sales_order_number"] != number:
+                            raise DigiKeyError("response_invalid")
                         if invoice_number in normalized["invoice_numbers"]:
                             matches.add(normalized["sales_order_number"])
                 seen += len(orders)

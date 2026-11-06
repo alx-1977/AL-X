@@ -267,9 +267,9 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
 
 CAPTURE_DIGIKEY_DEFINITION = CapabilityDefinition(
     CAPTURE_DIGIKEY_ORDER_BILL,
-    "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true.",
+    "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true. rounding_adjustment defaults to false; true permits one signed rounding line for a difference up to 0.05.",
     StructuredSchema(ValueKind.OBJECT,
-                     {**ORDER_INPUT.properties, "authorise": _BOOLEAN},
+                     {**ORDER_INPUT.properties, "authorise": _BOOLEAN, "rounding_adjustment": _BOOLEAN},
                      extra_properties=False),
     CAPTURE_INVOICE_DEFINITION.output_schema,
     SideEffect.EFFECTFUL,
@@ -599,7 +599,10 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
         if quantity <= 0 or tax_amount < 0:
             raise ValueError("line_items")
         base = quantity * unit_amount
-        total += base + tax_amount if line_amount_types == "Exclusive" else base
+        # Xero rounds each line before summing the bill, while retaining the
+        # supplied quantity and full unit-price precision.
+        rounded_base = base.quantize(Decimal("0.01"))
+        total += rounded_base + tax_amount if line_amount_types == "Exclusive" else rounded_base
         output.append(
             {
                 "Description": description,
@@ -641,7 +644,7 @@ def _draft_mismatch(
 
     requested_total = sum(
         (
-            money(item.get("Quantity")) * money(item.get("UnitAmount"))
+            (money(item.get("Quantity")) * money(item.get("UnitAmount"))).quantize(Decimal("0.01"))
             + (
                 money(item.get("TaxAmount"))
                 if str(requested.get("LineAmountTypes") or "") == "Exclusive"
@@ -1693,8 +1696,9 @@ def build_xero_executors(
         try:
             lookup_arguments = order_arguments(arguments)
             authorise = arguments.get("authorise", True)
-            if not isinstance(authorise, bool):
-                raise ValueError("authorise")
+            rounding_adjustment = arguments.get("rounding_adjustment", False)
+            if not isinstance(authorise, bool) or not isinstance(rounding_adjustment, bool):
+                raise ValueError("capture_options")
         except ValueError:
             return failed(capability_id, "arguments_unusable")
         try:
@@ -1702,7 +1706,7 @@ def build_xero_executors(
         except Exception as error:
             code = getattr(error, "code", "provider_failed")
             return failed(capability_id, code if code in FAILURE_CODES else "provider_failed")
-        invoice, lines, problems = bill_invoice(order)
+        invoice, lines, problems = bill_invoice(order, rounding_adjustment=rounding_adjustment)
         if problems:
             return CapabilityResult(
                 call_id_source(), capability_id, CapabilityResultState.SUCCEEDED,
