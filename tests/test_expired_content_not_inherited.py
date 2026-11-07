@@ -97,6 +97,27 @@ class ExpiredContentTests(unittest.TestCase):
         self.assertEqual(offered, ["new"])
         self.assertNotIn("old", needing)
 
+    def test_a_plan_resume_on_an_expired_goal_ends_quietly(self) -> None:
+        """Second review of #215: a queued plan attention loads its goal by id."""
+        old_mail = RetentionPolicy().direct_mail(
+            datetime(2026, 9, 8, tzinfo=UTC), (MailReference("INBOX", "1", "5"),))
+        with tempfile.TemporaryDirectory() as directory:
+            now = [datetime(2026, 9, 8, tzinfo=UTC)]
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3", clock=lambda: now[0])
+            store.create(GoalState("old", Objective("turn:t", "Tidy mail"),
+                                   (SuccessCriterion("c", "done"),)),
+                         "runtime", RETENTION, old_mail)
+            now[0] = NOW
+            reasoner = Queued()
+            outcome = CoreAgent(store, reasoner, lambda call, state: None, (),
+                                clock=lambda: NOW).process(
+                ConversationSnapshot("runtime", (), 1, RETENTION), RETENTION, 2,
+                resume_plan_goal_id="old")
+            store.close()
+        self.assertEqual((outcome.state, outcome.reason),
+                         (CoreState.FINISHED_SILENTLY, "goal_content_expired"))
+        self.assertEqual(reasoner.contexts, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -596,6 +596,12 @@ class CoreAgent:
             # one the turn works under; whether it still needs her is read
             # from the plan, never from the occasion.
             snapshot = self._store.load(resume_plan_goal_id)
+            expires = None if snapshot.provenance is None else snapshot.provenance.content_expires_at
+            if expires is not None and expires <= self._clock():
+                # Its content is past its deadline (D-013): reasoning over it
+                # would carry that deadline into a reply that is then withheld.
+                return CoreOutcome(CoreState.FINISHED_SILENTLY, None,
+                                   reason="goal_content_expired")
             if snapshot.plan_conversation_id != conversation_id:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="plan_conversation_changed")
             plan = snapshot.state.execution_plan
