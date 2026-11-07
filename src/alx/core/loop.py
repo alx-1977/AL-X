@@ -497,6 +497,13 @@ class CoreAgent:
         """
         held: list[_HeldClose] = []
         conversation = _current_content(conversation, self._clock())
+        if trigger_event_id is not None and not any(
+                event.event_id == trigger_event_id for event in conversation.events):
+            # The event that prompted this turn has passed its content
+            # deadline: there is nothing current to reason about (review of
+            # #215). Its content is not restored to make the turn possible.
+            return CoreOutcome(CoreState.FINISHED_SILENTLY, None,
+                               reason="trigger_content_expired")
         outcome = self._process(conversation, retention_until, step_budget,
                                 trigger_event_id, origin, resume_plan_goal_id, held)
         return self._settle_held_close(outcome, held, conversation)

@@ -50,6 +50,9 @@ RETAINED_GOAL = (
     "julianday(retention_until) > julianday(?) AND "
     "(content_expires_at IS NULL OR julianday(content_expires_at) > julianday(?))"
 )
+# Content still within its D-013 deadline. Offering and resuming goals check
+# this alone: retention of the record itself is the store's purge, unchanged.
+CURRENT_CONTENT = "(content_expires_at IS NULL OR julianday(content_expires_at) > julianday(?))"
 
 
 def _goal_provenance(
@@ -853,26 +856,32 @@ class SQLiteGoalStore:
         # SQLite already sorts NULL last under DESC — and it forced a temp
         # B-tree over the whole matching set, which was most of the cost the
         # index was added to remove.
+        # A goal whose content is past its deadline is not offered (D-013):
+        # its state would bring expired content, and its deadline, into a
+        # reply (2026-11-07).
+        now = _time_to_data(self._now())
         sources: list[tuple[str, tuple[Any, ...]]] = []
         if conversation_id is not None:
             sources.append((
                 "SELECT goal_id, state_json, conversation_id, scope, updated_at "
                 "FROM goals WHERE unfinished = 1 AND conversation_id = ? "
+                "AND " + CURRENT_CONTENT + " "
                 "ORDER BY updated_at DESC, goal_id DESC",
-                (conversation_id,),
+                (conversation_id, now),
             ))
         if project_id is not None:
             sources.append((
                 "SELECT goal_id, state_json, conversation_id, scope, updated_at "
                 "FROM goals WHERE unfinished = 1 AND project_id = ? "
+                "AND " + CURRENT_CONTENT + " "
                 "ORDER BY updated_at DESC, goal_id DESC",
-                (project_id,),
+                (project_id, now),
             ))
         sources.append((
             "SELECT goal_id, state_json, conversation_id, scope, updated_at "
-            "FROM goals WHERE unfinished = 1 "
+            "FROM goals WHERE unfinished = 1 AND " + CURRENT_CONTENT + " "
             "ORDER BY updated_at DESC, goal_id DESC",
-            (),
+            (now,),
         ))
 
         summaries: list[GoalSummary] = []
@@ -930,8 +939,9 @@ class SQLiteGoalStore:
             "SELECT goal_id, state_json, scope, updated_at "
             "FROM goals WHERE unfinished = 1 "
             "AND json_extract(state_json, '$.execution_plan.status') = 'needs_core' "
+            "AND " + CURRENT_CONTENT + " "
             "ORDER BY updated_at DESC, goal_id DESC LIMIT ?",
-            (limit + len(exclude),),
+            (_time_to_data(self._now()), limit + len(exclude)),
         ):
             if goal_id in exclude:
                 continue
@@ -1065,8 +1075,8 @@ class SQLiteGoalStore:
             "SELECT goal_id FROM goals "
             "WHERE json_extract(state_json, '$.execution_plan.status') "
             f"IN ({', '.join('?' for _ in statuses)}) "
-            "AND retention_until > ? ORDER BY rowid",
-            (*statuses, _time_to_data(self._now())),
+            "AND retention_until > ? AND " + CURRENT_CONTENT + " ORDER BY rowid",
+            (*statuses, _time_to_data(self._now()), _time_to_data(self._now())),
         ).fetchall())
 
     def list_idle_goal_ids(self, untouched_since: datetime) -> tuple[str, ...]:

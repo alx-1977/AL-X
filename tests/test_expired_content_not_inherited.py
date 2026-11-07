@@ -16,7 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import (  # noqa: E402
-    AgentDecision, ConversationOrigin, ConversationSnapshot, ConversationTurn, RetentionPolicy,
+    AgentDecision, BackgroundEvent, ConversationOrigin, ConversationSnapshot, ConversationTurn,
+    GoalState, Objective, RetentionPolicy, SuccessCriterion,
 )
 from alx.contracts.mail import MailReference  # noqa: E402
 from alx.core.loop import CoreAgent, CoreState  # noqa: E402
@@ -59,6 +60,42 @@ class ExpiredContentTests(unittest.TestCase):
         # ...and the reply's provenance carries no deadline already past.
         expires = outcome.response_provenance.content_expires_at
         self.assertTrue(expires is None or expires > NOW, expires)
+
+    def test_an_expired_trigger_ends_the_turn_quietly(self) -> None:
+        """Review of #215: the occasion's own content expired before it ran."""
+        old_mail = RetentionPolicy().direct_mail(
+            datetime(2026, 9, 8, tzinfo=UTC), (MailReference("INBOX", "1", "3"),))
+        event = BackgroundEvent("mail:1:3", "mail.message_arrived",
+                                datetime(2026, 9, 8, tzinfo=UTC), {"uid": "3"}, {}, old_mail)
+        conversation = ConversationSnapshot("runtime", (), 1, RETENTION, (event,))
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
+            reasoner = Queued()
+            outcome = CoreAgent(store, reasoner, lambda call, state: None, (),
+                                clock=lambda: NOW).process(
+                conversation, RETENTION, 2, trigger_event_id="mail:1:3")
+            store.close()
+        self.assertEqual((outcome.state, outcome.reason),
+                         (CoreState.FINISHED_SILENTLY, "trigger_content_expired"))
+        self.assertEqual(reasoner.contexts, [])
+
+    def test_a_goal_whose_content_expired_is_not_offered(self) -> None:
+        """Review of #215: selecting it would bring its expired deadline back."""
+        old_mail = RetentionPolicy().direct_mail(
+            datetime(2026, 9, 8, tzinfo=UTC), (MailReference("INBOX", "1", "4"),))
+        with tempfile.TemporaryDirectory() as directory:
+            now = [datetime(2026, 9, 8, tzinfo=UTC)]
+            store = SQLiteGoalStore(Path(directory) / "goals.sqlite3", clock=lambda: now[0])
+            goal = lambda gid: GoalState(gid, Objective("turn:t", "Tidy mail"),
+                                         (SuccessCriterion("c", "done"),))
+            store.create(goal("old"), "runtime", RETENTION, old_mail)
+            now[0] = NOW
+            store.create(goal("new"), "runtime", RETENTION)
+            offered = [item.goal_id for item in store.list_unfinished("runtime")]
+            needing = [item.goal_id for item in store.list_needing_core(10)]
+            store.close()
+        self.assertEqual(offered, ["new"])
+        self.assertNotIn("old", needing)
 
 
 if __name__ == "__main__":
