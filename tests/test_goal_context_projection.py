@@ -109,11 +109,6 @@ class PromptSizeTests(unittest.TestCase):
         self.assertIn("violations", this_turn["attempts"][0]["result_values"])
         self.assertLess(len(json.dumps(later_turn)), len(json.dumps(this_turn)))
 
-    def test_a_finished_goal_lists_attempts_without_results(self) -> None:
-        attempts = _state_payload(oversized_goal(), finished=True)["attempts"]
-        self.assertEqual(attempts[0]["capability_id"], "check_kicad_board")
-        self.assertEqual(attempts[0]["result_state"], "succeeded")
-        self.assertIsNone(attempts[0]["result_values"])
 
 
 class ProjectionTests(unittest.TestCase):

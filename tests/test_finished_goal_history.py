@@ -21,7 +21,7 @@ from alx.contracts import (
 from alx.core import CoreAgent, CoreState
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.core.loop import RECENT_FINISHED_GOALS
-from alx.core.model_reasoner import _context_payload, DETAILED_FINISHED_GOALS, VERBATIM_HISTORY
+from alx.core.model_reasoner import _context_payload, VERBATIM_HISTORY
 from alx.goals import SQLiteGoalStore
 from alx.goals.store import _goal_to_data
 from alx.contracts.provenance import provenance_to_storage
@@ -401,13 +401,10 @@ class FinishedHistoryTests(unittest.TestCase):
         context = self.follow_up()[0]
         self.assertEqual(context.unfinished_goals, ())
         self.assertEqual(context.recent_finished_goals[0].state, self.store.load("e8b6a256").state)
+        # Listed in one line; its detail is one read away (2026-11-07).
         payload = json.loads(_context_payload(context))["recent_finished_goals"][0]
-        self.assertEqual(payload["context"]["tracking_number"], "878504110311")
-        self.assertEqual(payload["objective"]["source_reference"], "event:reminder")
-        self.assertEqual(payload["referents"][0]["attributes"]["carrier"], "FedEx")
-        self.assertEqual(payload["progress"][0]["evidence_refs"], ["tracking"])
-        self.assertEqual(payload["evidence"][0]["attributes"],
-                         {"status": "out for delivery", "location": "CAPE TOWN, WC"})
+        self.assertEqual((payload["goal_id"], payload["status"]), ("e8b6a256", "completed"))
+        self.assertNotIn("context", payload)
         found = self.read(query="878504110311")
         self.assertEqual(found.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(found.values["goals"][0]["goal_id"], "e8b6a256")
@@ -601,16 +598,15 @@ class FinishedHistoryTests(unittest.TestCase):
         read = [item for item in attempts if item["call_id"] == "read-big"][0]
         self.assertEqual(read["result_values"]["goal_ids"], ["big"])
 
-    def test_only_the_newest_finished_goals_are_shown_in_detail(self):
-        for index in range(DETAILED_FINISHED_GOALS + 2):
+    def test_finished_goals_are_listed_one_line_each(self):
+        """2026-11-07: the two newest in detail were 14,000-25,000 characters of
+        every Opus turn; read_own_goals gives the detail when she needs it."""
+        for index in range(4):
             self.now = NOW + timedelta(seconds=index)
             self.store.create(shipment(str(index), GoalStatus.COMPLETED), "c1", RETENTION)
         payload = json.loads(_context_payload(self.follow_up()[0]))["recent_finished_goals"]
-        detailed = payload[:DETAILED_FINISHED_GOALS]
-        listed = payload[DETAILED_FINISHED_GOALS:]
-        self.assertTrue(all("context" in item for item in detailed))
-        self.assertTrue(listed)
-        for item in listed:
+        self.assertEqual(len(payload), 4)
+        for item in payload:
             self.assertEqual(set(item), {"goal_id", "objective", "status", "stop_reason", "detail"})
             self.assertIn("read_own_goals", item["detail"])
 
@@ -623,18 +619,6 @@ class FinishedHistoryTests(unittest.TestCase):
         self.now += timedelta(seconds=1)
         self.store.replace(replace(saved.state, status=GoalStatus.COMPLETED, stop_reason=GoalStopReason.SUCCESS_CRITERIA_MET), RETENTION, saved.revision)
         self.assertEqual(self.store.list_recent_finished("c1", 5)[0].state.goal_id, "a")
-
-    def test_finished_progress_shows_the_latest_and_counts_the_rest(self):
-        # 2026-11-03: two finished goals' full history was an eighth of every
-        # request. The latest records are shown; read_own_goals has the rest.
-        progress = tuple(ProgressRecord(str(i), f"progress {i}", ("tracking",))
-                         for i in range(VERBATIM_HISTORY + 3))
-        self.store.create(replace(shipment(status=GoalStatus.COMPLETED), progress=progress), "c1", RETENTION)
-        payload = json.loads(_context_payload(self.follow_up()[0]))
-        finished = payload["recent_finished_goals"][0]
-        self.assertEqual([item["id"] for item in finished["progress"]],
-                         [str(i) for i in range(3, VERBATIM_HISTORY + 3)])
-        self.assertEqual(finished["older_progress_count"], 3)
 
     def test_an_active_goal_shows_its_latest_history_and_what_is_already_supported(self):
         from alx.contracts import (

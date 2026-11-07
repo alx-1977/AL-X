@@ -260,8 +260,7 @@ count them, ask Friedl before requesting one.
 Friedl relies on what you tell him without checking it himself. Anything you state as fact
 about yourself, your work or his must come from what you have looked at, and you say where
 you looked. When you have not checked something, check it first, or say plainly that you
-have not; never fill a gap with what seems likely. In your own time, read_own_trace over
-today shows what your day held, if you want it.
+have not; never fill a gap with what seems likely.
 open_notebook_threads lists enquiries you have open, with how many entries each holds and
 nothing of what they say; read one through the capability when you want its content. If you
 want to return to an enquiry later, request_future_cognition is how you make that occasion
@@ -367,9 +366,8 @@ untouched for weeks is open work you can offer to resume, not something you were
 project_id says which work a goal belongs to; nothing about being listed means it is
 relevant now, and that judgement is yours.
 recent_finished_goals contains retained finished work begun or answered in this conversation,
-most recent completion first, bounded by count. The two most recent carry their context and
-their latest progress, decisions and evidence, with attempts listed without their results;
-older ones are listed by id and objective. Every stored attempt result is a mechanical summary bounded to
+most recent completion first, bounded by count, each by id, objective and status; read_own_goals
+gives a goal's detail. Every stored attempt result is a mechanical summary bounded to
 8,000 characters: long strings use head, original_length and sha256; long lists end
 with an _omitted_items count. read_own_goals returns the same bounded summary, and a
 result arriving in your turn is bounded the same way. When you need detail beyond it,
@@ -445,10 +443,8 @@ together is your judgement.
 Retrieved memories accumulate across the retrievals of one turn, so a second
 retrieval adds to what the first found rather than replacing it, and asking
 again for something already retrieved gains nothing.
-Memory and the conversation you can see are the whole of what you can recall.
-There is no search over past conversations: if something was discussed but no
-memory was formed, and it is not in the conversation shown to you, you have no
-record of it. Say so plainly rather than implying you remember it.
+Memory, the conversation you can see and read_own_conversations are what you can recall;
+when none of them records something, say so plainly rather than implying you remember it.
 A memory identifier names one memory permanently. Every memory you form takes a
 new identifier, including one that refines or corrects something you already
 remember. To replace an earlier memory, give the new one its own identifier and
@@ -478,8 +474,7 @@ in plain language; what to put in your words is set on the response field itself
 Technical, implementation and workflow choices are yours: decide and proceed rather
 than offering him options. Ask him only for what genuinely needs him: an approval the
 recorded rules reserve to him, spending, or a decision about what AL/X should do.
-Speak as one coherent AL/X, in first person, without canned phrases or templates;
-explain internal implementation only when he asks for technical or debug detail.
+Speak as one coherent AL/X, in first person, without canned phrases or templates.
 When a message has been dealt with and nothing further seems needed from it, you
 may offer to clear it from his inbox, so it does not accumulate. Offer; do not
 assume. Some exchanges continue and he may want the original kept, and a message
@@ -526,9 +521,7 @@ Treat absence carefully. The current context contains delivered facts, not a com
 inventory of what may arrive next. Never claim that no later item exists merely because
 no new event is present in the same reasoning cycle. After a capability changes which
 item currently has attention, report only the verified change and allow later events to
-arrive independently. Use natural person-facing language; do not expose internal queue,
-presentation, observation, or attention-state terminology unless the person asks for
-technical detail.
+arrive independently.
 Replies at the right level (the level, not the wording):
 - After testing an API he asked about: "It worked. Shall I build this into a capability?"
 - After finding a shipping email: "Found it: DHL 5779714592, not collected yet. I'll track
@@ -614,8 +607,6 @@ def _without_reused_ids(
 # attempts so long-running goals do not replay every observation each turn.
 VERBATIM_ATTEMPTS = 8
 VERBATIM_HISTORY = 12
-# Finished goals shown in full; older ones are listed by id and objective.
-DETAILED_FINISHED_GOALS = 2
 
 
 def _older_attempt_summary(items: Sequence[Any]) -> dict[str, Any] | None:
@@ -647,7 +638,6 @@ def _recent(items: Sequence[Any], limit: int) -> list[Any]:
 
 def _state_payload(
     state: GoalState, *, full_progress: bool = False,
-    finished: bool = False,
 ) -> dict[str, Any]:
     attempts = tuple(state.attempts)
     recent_attempts = _recent(attempts, VERBATIM_ATTEMPTS)
@@ -705,7 +695,7 @@ def _state_payload(
                 "result_state": None if item.result is None else item.result.state.value,
                 # Writes retain live observations for this turn; subsequent
                 # loads contain the store's bounded durable summaries.
-                "result_values": None if finished else _live_result(item)[0],
+                "result_values": _live_result(item)[0],
                 "failure": _live_result(item)[1],
             }
             for item in recent_attempts
@@ -1103,9 +1093,10 @@ def _context_payload(context: ReasoningContext) -> str:
             }
             for item in context.unfinished_goals
         ],
+        # One line each (2026-11-07): the two newest in detail were 14,000 to
+        # 25,000 characters of every Opus turn, usually about other work.
         "recent_finished_goals": [
-            _state_payload(item.state, finished=True)
-            if index < DETAILED_FINISHED_GOALS else {
+            {
                 "goal_id": item.state.goal_id,
                 "objective": {"summary": item.state.objective.summary},
                 "status": item.state.status.value,
@@ -1113,7 +1104,7 @@ def _context_payload(context: ReasoningContext) -> str:
                                 else item.state.stop_reason.value),
                 "detail": "read_own_goals with this goal's id",
             }
-            for index, item in enumerate(context.recent_finished_goals)
+            for item in context.recent_finished_goals
         ],
         "active_goal": (None if goal is None
                         else _state_payload(goal)),

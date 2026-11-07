@@ -883,7 +883,8 @@ class ModelReasonerTests(unittest.TestCase):
         self.assertIn(
             "Never claim that no later item exists merely because", protocol
         )
-        self.assertIn("Use natural person-facing language", protocol)
+        # Plain wording is set on the response field (2026-11-07).
+        self.assertNotIn("Use natural person-facing language", protocol)
         self.assertIn("Mail attention is deliberately one item at a time", protocol)
         self.assertIn("A failed\nor uncertain reply does not release it", protocol)
         self.assertIn(
@@ -1044,6 +1045,14 @@ class RelationshipMemoryPayloadTests(unittest.TestCase):
         ):
             with self.subTest(stated=stated):
                 self.assertIn(stated, " ".join(PROTOCOL_INSTRUCTIONS.split()))
+
+
+def test_her_rules_name_her_conversation_history_as_recall():
+    """2026-11-07: the rules said there was no search over past conversations,
+    while read_own_conversations reads them."""
+    from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
+    assert "There is no search over past conversations" not in PROTOCOL_INSTRUCTIONS
+    assert "read_own_conversations are what you can recall" in PROTOCOL_INSTRUCTIONS
 
 
 if __name__ == "__main__":
