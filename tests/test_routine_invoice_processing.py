@@ -420,12 +420,12 @@ class CompletionGuidanceTests(unittest.TestCase):
     """Routine completions are brief by general guidance, not invoice wording."""
 
     def test_finished_work_is_reported_briefly(self):
-        text = " ".join(PROTOCOL_INSTRUCTIONS.split())
-        self.assertIn("When work he asked for finishes as expected, the outcome is the "
-                      "answer: say that it is done, briefly.", text)
-        self.assertIn("Identifiers, amounts, dates, the checks you ran and where things "
-                      "went stay in the background unless something was unusual, he "
-                      "needs to act, or he asks.", text)
+        # D-072 (2026-11-07): the rule sits on the field she writes into.
+        from alx.core.model_reasoner import RESPONSE_FIELD
+        text = RESPONSE_FIELD["description"]
+        self.assertIn("the top-level answer only - the outcome or what he asked", text)
+        self.assertIn("Leave out figures, method, checks, caveats, identifiers and "
+                      "background he did not ask for", text)
 
     def test_decided_calls_are_steered_to_a_plan(self):
         text = " ".join(PROTOCOL_INSTRUCTIONS.split())
