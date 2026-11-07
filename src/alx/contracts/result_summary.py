@@ -17,6 +17,32 @@ def serialized_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=True))
 
 
+def _shares(item: Mapping[str, Any], budget: int) -> dict[str, int]:
+    """Each key's part of a dict's budget: small values whole, the rest split.
+
+    An equal share per key left a long value with a fraction of the budget
+    while short neighbours used little of theirs: a worker's 1,750 characters
+    of printed output kept 149 beside a large change report (2026-11-06).
+    Values that fit an equal share of what remains take only their size; the
+    remainder is split equally among the ones that do not.
+    """
+    sizes = {key: serialized_size(child) for key, child in item.items()}
+    shares: dict[str, int] = {}
+    pending, remaining = set(sizes), max(0, budget)
+    while pending:
+        share = remaining // len(pending)
+        small = {key for key in pending if sizes[key] <= share}
+        if not small:
+            break
+        for key in small:
+            shares[key] = sizes[key]
+            remaining -= sizes[key]
+        pending -= small
+    for key in pending:
+        shares[key] = remaining // len(pending)
+    return shares
+
+
 def bound_result(value: Any, limit: int = RESULT_LIMIT) -> Any:
     """Bound one values/failure envelope without mutating the live result.
 
@@ -43,6 +69,14 @@ def bound_result(value: Any, limit: int = RESULT_LIMIT) -> Any:
     def fit(item: Any, budget: int) -> Any:
         if serialized_size(item) <= budget:
             return item
+        if isinstance(item, str):
+            # A string under STRING_LIMIT that is still over its share is
+            # shortened like a long one, never dropped: dropping it also
+            # dropped every key after it, and a worker that lost its printed
+            # output that way crashed its scripts on purpose to see it
+            # (2026-11-06).
+            item = {"head": item, "original_length": len(item),
+                    "sha256": hashlib.sha256(item.encode("utf-8")).hexdigest()}
         # Preserve the original string's identity when shortening its head.
         if (isinstance(item, dict) and set(item) == {"head", "original_length", "sha256"}
                 and isinstance(item["head"], str)):
@@ -64,12 +98,15 @@ def bound_result(value: Any, limit: int = RESULT_LIMIT) -> Any:
                 marker = "_" + marker
             result: dict[str, Any] = {}
             entries = list(item.items())
-            share = max(0, (budget - serialized_size(dict.fromkeys(item))) // max(1, len(item))) + 4
+            # The marker's own room is reserved, so a value given its whole
+            # share never leaves too little for the small ones after it.
+            shares = _shares(item, budget - serialized_size(dict.fromkeys(item))
+                             - serialized_size({marker: len(entries)}))
             for index, (key, child) in enumerate(entries):
                 trial = dict(result)
                 trial[key] = None
                 trial[marker] = len(entries) - index - 1
-                allowance = min(share, budget - serialized_size(trial) + 4)
+                allowance = min(shares[key] + 4, budget - serialized_size(trial) + 4)
                 bounded = fit(child, allowance) if allowance >= 2 else missing
                 if bounded is missing:
                     break
