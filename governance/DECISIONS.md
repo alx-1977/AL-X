@@ -2871,3 +2871,26 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Status: APPROVED by Friedl, 2026-11-06.** Approval source: Friedl's typed instruction at 15:22, conversation turn `98d5b859-7af7-42a0-b0a2-151cffaeb2cc`: "You can build the Digikey API capabilty afterall. You can then use this to recreate the invoice in Xero as we do not really need PDF copies for non-VAT invoices."
 - **Deterministic sequence.** `capture_digikey_order_bill` may look up one DigiKey order by sales order or invoice number, validate one fully shipped invoice and its dates, currency and reconciled charge breakdown, then reuse `capture_supplier_invoice`'s shared supplier/account/tax resolution, duplicate check and bill commit (D-020). The shared commit creates or resumes a matching draft, authorises it when requested and verifies the bill by read-back. This names the DigiKey order-lookup-to-supplier-bill sequence under Law 2; AL/X chooses whether to invoke it and evaluates its structured result.
 - **Authority and boundary.** Bill writes remain under the standing bill authority of D-018 and its existing permission and authorisation controls. No PDF is required for this non-VAT invoice source. Missing or conflicting facts, unresolved allocations, and tax requiring allocation return to AL/X for judgment without Xero writes. This records the supplied approval of the sequence; it grants no additional bill authority, payment authority or unrelated integration authority.
+
+## D-072 — Top-level replies, toolbox gaps, the real case before merging, and a weekly self-review
+
+- **Date:** 2026-11-06
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-06,** in conversation. He did not want a fixed sentence limit: the brief is a top-level answer with no technical detail unless he asks. Weekly reviews, improvements she starts herself using included reviews with a buffer, gaps that block his request proposed and built straight away, and nothing merged before it works on the real case.
+- **Why.**
+  - Her replies kept reading as reports. One example: after a DigiKey API test, the whole answer he wanted was "It worked. Shall I build this into a capability?"
+  - She stopped at "I can't" without proposing what would fix it.
+  - The DigiKey bill capability was merged three times before it worked on the real order, after five reviews.
+  - She improved herself only when something broke in front of him.
+- **Decision** (guidance in her instructions; she still decides):
+  1. **Replies.** Give the top-level answer: the outcome or what he asked, and anything he must act on or decide. No figures, method, checks, caveats or background unless he asks, or something is wrong that he needs to know. The DigiKey line illustrates the level, not the wording.
+  2. **Toolbox gaps.**
+     - Before saying she cannot do something, she checks what she already has, including running a program.
+     - If a missing capability blocks his request, she proposes building it in one line, with its cost in coding jobs and reviews. With his agreement she builds it now and finishes his request with it.
+     - If it blocks nothing now, she records it in her memories as a toolbox gap.
+  3. **The real case before merging.** Nothing she builds is merged until it has worked on the real case that needed it, in addition to its tests and a clean review.
+  4. **Weekly self-review.**
+     - Once a week, in her own time, she reviews her own records: failing capabilities, merged work that needed fixing, job costs, Friedl's corrections and recorded gaps.
+     - When the evidence shows a real problem, she fixes the one or two that matter most and tells him in one line. Otherwise she changes nothing and says nothing.
+     - Improvements she starts herself may use reviews while the month's included allowance lasts, with ten to spare. Beyond that she asks first.
+- **Boundary.** No Law exception and no new capability. Meaning, priority and whether to act remain her judgement. Nothing here routes on wording.

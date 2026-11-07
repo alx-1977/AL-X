@@ -1024,8 +1024,15 @@ class RelationshipMemoryPayloadTests(unittest.TestCase):
         for stated in (
             "relationship_memories holds your current relationship memories",
             "not a software developer",
-            "what was done and whether it worked",
+            "give the top-level answer",
+            "It worked. Shall I build this into a capability?",
             "Technical, implementation and workflow choices are yours",
+            # 2026-11-06: toolbox gaps, the real case before merging, and a
+            # weekly review of her own records.
+            "record it in your memories as a toolbox gap",
+            "Nothing you build is merged until it has worked on the real case",
+            "Once a week, in your own time, review your own records",
+            "If you cannot count them, ask Friedl before requesting one.",
         ):
             with self.subTest(stated=stated):
                 self.assertIn(stated, " ".join(PROTOCOL_INSTRUCTIONS.split()))
