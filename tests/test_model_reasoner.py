@@ -1017,6 +1017,14 @@ class RelationshipMemoryPayloadTests(unittest.TestCase):
         )
         self.assertEqual(payload["relationship_memories_omitted"], 0)
 
+    def test_the_response_field_carries_the_reply_level(self) -> None:
+        """2026-11-07: the reply rule is read where she writes, not 30 pages earlier."""
+        from alx.core.model_reasoner import decision_schema, response_only_schema
+        for schema in (decision_schema(), response_only_schema()):
+            text = json.dumps(schema)
+            self.assertIn("the top-level answer only", text)
+            self.assertIn("A report only when he asks for one.", text)
+
     def test_the_conversation_policy_asks_for_high_level_plain_replies(self) -> None:
         from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS
 
@@ -1024,7 +1032,7 @@ class RelationshipMemoryPayloadTests(unittest.TestCase):
         for stated in (
             "relationship_memories holds your current relationship memories",
             "not a software developer",
-            "give the top-level answer",
+            "what to put in your words is set on the response field itself",
             "It worked. Shall I build this into a capability?",
             "Technical, implementation and workflow choices are yours",
             # 2026-11-06: toolbox gaps, the real case before merging, and a

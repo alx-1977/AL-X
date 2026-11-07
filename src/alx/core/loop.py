@@ -192,6 +192,26 @@ RECENT_FINISHED_GOALS = 5
 PLAN_ATTENTION_CANDIDATES = 5
 
 
+def _current_content(conversation: ConversationSnapshot, at: datetime) -> ConversationSnapshot:
+    """The conversation without turns or events whose content has expired (D-013).
+
+    Expired content is neither reasoned over nor inherited: on 2026-11-06
+    turns from September, whose mail content expired on 8 October, gave every
+    reply written in their conversation an expiry already in the past, and the
+    screen then withheld those replies as expired.
+    """
+    def current(item: Any) -> bool:
+        provenance = getattr(item, "provenance", None)
+        expires = None if provenance is None else provenance.content_expires_at
+        return expires is None or expires > at
+
+    turns = tuple(item for item in conversation.turns if current(item))
+    events = tuple(item for item in conversation.events if current(item))
+    if len(turns) == len(conversation.turns) and len(events) == len(conversation.events):
+        return conversation
+    return replace(conversation, turns=turns, events=events)
+
+
 def project_turns_for_reasoning(
     turns: Sequence[ConversationTurn],
     state: GoalState | None,
@@ -476,6 +496,7 @@ class CoreAgent:
         goal she is working under by then.
         """
         held: list[_HeldClose] = []
+        conversation = _current_content(conversation, self._clock())
         outcome = self._process(conversation, retention_until, step_budget,
                                 trigger_event_id, origin, resume_plan_goal_id, held)
         return self._settle_held_close(outcome, held, conversation)

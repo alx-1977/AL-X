@@ -724,7 +724,7 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
         goals = SQLiteGoalStore(root / "goals.sqlite3")
         reasoner = Queued(AgentDecision(response="A supplier sent a quote."))
         gateway = ConversationGateway(
-            CoreAgent(goals, reasoner, lambda call, state: None, ()),
+            CoreAgent(goals, reasoner, lambda call, state: None, (), clock=lambda: NOW),
             conversations,
             identifier_factory=lambda: "response-1",
             clock=lambda: NOW,

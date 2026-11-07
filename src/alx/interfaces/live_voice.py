@@ -786,6 +786,10 @@ class VoiceSession:
         """Send Core words to the console, confirm that send, then synthesize."""
         expires_at = getattr(response, "expires_at", None)
         if expires_at is not None and expires_at <= self._clock():
+            # Withheld, never silently: content past its D-013 deadline is
+            # not shown, and the log says which reply and why.
+            LOGGER.warning("Reply not shown: its content expired at %s, turn=%s",
+                           expires_at.isoformat(), getattr(response, "turn_id", None))
             return
         turn_id = getattr(response, "turn_id", None)
         try:
