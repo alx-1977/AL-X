@@ -182,3 +182,40 @@ def test_a_long_string_is_kept_whole_when_the_result_fits():
     assert len(json.dumps(too_big)) <= RESULT_LIMIT
     # Long lists are still cut even when they would fit.
     assert bound_result({"items": list(range(100))})["items"][-1] == {"_omitted_items": 51}
+
+
+def _edit_result(stdout):
+    return {"disposition": "executed", "reason_code": None, "failure": None, "values": {
+        "work_copy_id": "f4dc9e05fd94465f801a22a3bc3f8ac7", "work_copy_revision": "c" * 64,
+        "stdout": stdout, "stderr": "y" * 300,
+        "change_report": {"files_changed": ["a.kicad_pcb"],
+                          "board": {"tracks": ["track %d moved from (1,2) to (3,4) on F.Cu width 0.4" % i
+                                              for i in range(200)]},
+                          "file_diffs": [{"name": "a", "diff": "-x\n+y\n" * 3000}]},
+        "before": {"errors": 3}, "after": {"errors": 3}}}
+
+
+def test_printed_output_beside_a_large_report_is_kept():
+    """2026-11-06: 1,750 characters of a worker's printed output beside a large
+    change report were dropped with every key after them, and the worker
+    raised errors on purpose to see its output."""
+    stdout = "RF1_P end dangling at 100.12,75.63\n" * 50
+    kept = bound_result(_edit_result(stdout))
+    assert kept["values"]["stdout"] == stdout
+    assert {"stderr", "change_report", "before", "after"} <= set(kept["values"])
+    assert len(json.dumps(kept)) <= RESULT_LIMIT
+    assert bound_result(kept) == kept
+
+
+def test_a_string_over_its_share_is_shortened_not_dropped():
+    kept = bound_result(_edit_result("z" * 7_000))
+    assert kept["values"]["stdout"]["original_length"] == 7_000
+    assert kept["values"]["stdout"]["head"]
+    assert "after" in kept["values"]
+    assert len(json.dumps(kept)) <= RESULT_LIMIT
+
+
+def test_the_worker_is_told_its_printed_output_comes_back():
+    from alx.specialists.worker import WORKER_INSTRUCTIONS
+    assert "printed output comes back" in WORKER_INSTRUCTIONS
+    assert "never raise an error to see it" in WORKER_INSTRUCTIONS
