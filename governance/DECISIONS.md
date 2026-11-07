@@ -2872,7 +2872,7 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Deterministic sequence.** `capture_digikey_order_bill` may look up one DigiKey order by sales order or invoice number, validate one fully shipped invoice and its dates, currency and reconciled charge breakdown, then reuse `capture_supplier_invoice`'s shared supplier/account/tax resolution, duplicate check and bill commit (D-020). The shared commit creates or resumes a matching draft, authorises it when requested and verifies the bill by read-back. This names the DigiKey order-lookup-to-supplier-bill sequence under Law 2; AL/X chooses whether to invoke it and evaluates its structured result.
 - **Authority and boundary.** Bill writes remain under the standing bill authority of D-018 and its existing permission and authorisation controls. No PDF is required for this non-VAT invoice source. Missing or conflicting facts, unresolved allocations, and tax requiring allocation return to AL/X for judgment without Xero writes. This records the supplied approval of the sequence; it grants no additional bill authority, payment authority or unrelated integration authority.
 
-## D-071 — Top-level replies, toolbox gaps, the real case before merging, and a weekly self-review
+## D-072 — Top-level replies, toolbox gaps, the real case before merging, and a weekly self-review
 
 - **Date:** 2026-11-06
 - **Decision owner:** Friedl

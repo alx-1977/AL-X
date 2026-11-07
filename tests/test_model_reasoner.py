@@ -1032,6 +1032,7 @@ class RelationshipMemoryPayloadTests(unittest.TestCase):
             "record it in your memories as a toolbox gap",
             "Nothing you build is merged until it has worked on the real case",
             "Once a week, in your own time, review your own records",
+            "If you cannot count them, ask Friedl before requesting one.",
         ):
             with self.subTest(stated=stated):
                 self.assertIn(stated, " ".join(PROTOCOL_INSTRUCTIONS.split()))
