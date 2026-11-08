@@ -181,6 +181,11 @@ def checked_invoice(values: Mapping[str, Any]) -> dict[str, Any]:
     elif total <= 0:
         problems.append(f"total is not a positive amount: {total}")
     amount_due = _money(values, "amount_due")
+    # A printed figure that cannot be read is never taken as absent: an
+    # unreadable tax would otherwise post a taxed invoice as tax-free.
+    for name, parsed in (("tax_amount", tax), ("amount_due", amount_due)):
+        if parsed is None and _text(values, name):
+            problems.append(f"{name.replace('_', ' ')} unreadable")
     adjustments: list[dict[str, str]] = []
     raw_adjustments = values.get("adjustments") or ()
     if not isinstance(raw_adjustments, (list, tuple)):

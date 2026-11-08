@@ -90,6 +90,16 @@ class CheckedInvoiceTests(unittest.TestCase):
         self.assertTrue(invoice["verified"])
         self.assertEqual(invoice["bill_total"], "180.00")
 
+    def test_an_unreadable_tax_is_never_taken_as_zero(self) -> None:
+        invoice = checked_invoice(greptile(tax_amount="see page 2"))
+        self.assertFalse(invoice["verified"])
+        self.assertIn("tax amount unreadable", invoice["problems"])
+
+    def test_an_unreadable_amount_due_is_reported(self) -> None:
+        invoice = checked_invoice(greptile(amount_due="ninety"))
+        self.assertFalse(invoice["verified"])
+        self.assertIn("amount due unreadable", invoice["problems"])
+
     def test_its_own_output_checks_the_same(self) -> None:
         # Capture re-checks the dict after a currency repair.
         first = checked_invoice(greptile())
@@ -110,6 +120,19 @@ class ExtractionSchemaTests(unittest.TestCase):
         })
         self.assertEqual(fields["amount_due"], "94.50")
         self.assertEqual(fields["adjustments"], [{"description": "Credit applied", "amount": "-2.0"}])
+
+
+    def test_a_malformed_deduction_from_the_reader_is_reported_not_dropped(self) -> None:
+        # The discount alone matches the total, so dropping the bad credit
+        # entry would have passed an incomplete bill.
+        for adjustments in (
+            [{"description": "Startup discount", "amount": "-96.50"}, "Credit applied -2.00"],
+            "Startup discount -96.50",
+        ):
+            with self.subTest(adjustments=adjustments):
+                fields = _invoice_fields({**greptile(amount_due=""), "adjustments": adjustments})
+                invoice = checked_invoice(fields)
+                self.assertFalse(invoice["verified"])
 
 
 class CaptureTests(unittest.TestCase):
