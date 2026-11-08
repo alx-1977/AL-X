@@ -67,9 +67,16 @@ Amounts are decimal strings without currency symbols or thousands separators.
 Dates are ISO 8601, yyyy-mm-dd. Use an empty string for a field the document
 does not state; never infer, calculate or invent a value. If the text is not a
 supplier invoice, set document_type to what it appears to be and leave the
-invoice fields empty."""
+invoice fields empty.
 
-ANSWER_SCHEMA = json_schema(
+Some invoices deduct amounts after the charges: a discount, a promotional or
+startup discount, or an account credit applied. List each one in adjustments,
+in the order printed, with its printed label as description and its amount as a
+negative decimal string. subtotal is then the amount before those deductions.
+A payment already received is not an adjustment. amount_due is the amount the
+document says is due or charged, when it states one; otherwise leave it empty."""
+
+_FLAT_SCHEMA = json_schema(
     {
         "document_type": "string",
         "supplier_name": "string",
@@ -95,6 +102,29 @@ ANSWER_SCHEMA = json_schema(
         "description",
     ),
 )
+# Deductions are a list, so they extend the flat schema rather than flattening
+# into numbered fields. Each is read as printed; checked_invoice decides nothing
+# beyond the arithmetic.
+ANSWER_SCHEMA = {
+    **_FLAT_SCHEMA,
+    "properties": {
+        **_FLAT_SCHEMA["properties"],
+        "amount_due": {"type": "string"},
+        "adjustments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "amount": {"type": "string"},
+                },
+                "required": ["description", "amount"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": [*_FLAT_SCHEMA["required"], "amount_due", "adjustments"],
+}
 
 
 def invoice_question(document_text: str, context_line: str = "") -> SpecialistQuestion:
@@ -150,7 +180,47 @@ def checked_invoice(values: Mapping[str, Any]) -> dict[str, Any]:
         problems.append("total missing or unreadable")
     elif total <= 0:
         problems.append(f"total is not a positive amount: {total}")
-    if subtotal is not None and tax is not None and total is not None:
+    amount_due = _money(values, "amount_due")
+    # A printed figure that cannot be read is never taken as absent: an
+    # unreadable tax would otherwise post a taxed invoice as tax-free.
+    for name, parsed in (("tax_amount", tax), ("amount_due", amount_due)):
+        if parsed is None and _text(values, name):
+            problems.append(f"{name.replace('_', ' ')} unreadable")
+    adjustments: list[dict[str, str]] = []
+    raw_adjustments = values.get("adjustments") or ()
+    if not isinstance(raw_adjustments, (list, tuple)):
+        problems.append("adjustments unreadable")
+        raw_adjustments = ()
+    for item in raw_adjustments:
+        label = _text(item, "description") if isinstance(item, Mapping) else ""
+        amount = _money(item, "amount") if isinstance(item, Mapping) else None
+        if not label or amount is None:
+            problems.append("an adjustment has no readable label or amount")
+        elif amount >= 0:
+            problems.append(f"adjustment {label} {amount} is not a deduction")
+        else:
+            adjustments.append({"description": label, "amount": format(amount, "f")})
+    bill_total = total
+    if adjustments:
+        # The bill carries the charges and each deduction as its own line, so
+        # its total must equal a figure the document prints: the total when
+        # the deductions are all above it, the amount due when a credit is
+        # applied after it. Matching neither is reported, never resolved.
+        if subtotal is None:
+            problems.append("adjustments without a subtotal")
+        else:
+            bill_total = subtotal + (tax or Decimal("0")) + sum(
+                Decimal(item["amount"]) for item in adjustments
+            )
+            printed = [value for value in (total, amount_due) if value is not None]
+            if not any(abs(bill_total - value) <= Decimal("0.01") for value in printed):
+                problems.append(
+                    f"subtotal {subtotal}, tax {tax or 0} and adjustments come to "
+                    f"{bill_total}, which is neither the total {total} nor the amount due {amount_due}"
+                )
+            elif bill_total <= 0:
+                problems.append(f"bill total is not a positive amount: {bill_total}")
+    elif subtotal is not None and tax is not None and total is not None:
         if abs((subtotal + tax) - total) > Decimal("0.01"):
             problems.append(
                 f"subtotal {subtotal} plus tax {tax} does not equal total {total}"
@@ -165,6 +235,9 @@ def checked_invoice(values: Mapping[str, Any]) -> dict[str, Any]:
         "subtotal": "" if subtotal is None else format(subtotal, "f"),
         "tax_amount": "" if tax is None else format(tax, "f"),
         "total": "" if total is None else format(total, "f"),
+        "amount_due": "" if amount_due is None else format(amount_due, "f"),
+        "adjustments": tuple(adjustments),
+        "bill_total": "" if bill_total is None else format(bill_total, "f"),
         "description": _text(values, "description"),
         "verified": not problems,
         "problems": tuple(problems),

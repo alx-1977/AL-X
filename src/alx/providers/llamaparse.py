@@ -52,6 +52,7 @@ _INVOICE_FIELDS = (
     "subtotal",
     "tax_amount",
     "total",
+    "amount_due",
     "description",
 )
 _ALLOWED_MEDIA = frozenset(
@@ -292,8 +293,23 @@ def _json_object(response: httpx.Response) -> dict[str, Any]:
     return body
 
 
-def _invoice_fields(values: Mapping[str, Any]) -> dict[str, str]:
-    return {name: _as_text(values.get(name)) for name in _INVOICE_FIELDS}
+def _invoice_fields(values: Mapping[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {name: _as_text(values.get(name)) for name in _INVOICE_FIELDS}
+    # A malformed answer is passed on as it came, never dropped, so
+    # checked_invoice reports it: a missing credit could otherwise leave the
+    # remaining deductions matching the total.
+    raw = values.get("adjustments")
+    if raw is None:
+        fields["adjustments"] = []
+    elif isinstance(raw, list):
+        fields["adjustments"] = [
+            {"description": _as_text(item.get("description")), "amount": _as_text(item.get("amount"))}
+            if isinstance(item, Mapping) else item
+            for item in raw
+        ]
+    else:
+        fields["adjustments"] = raw
+    return fields
 
 
 def _as_text(value: Any) -> str:
