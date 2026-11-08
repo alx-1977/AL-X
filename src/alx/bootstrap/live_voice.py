@@ -131,6 +131,11 @@ from alx.tools.self_restart import (
     DEFINITION as SELF_RESTART_DEFINITION,
     build_self_restart_executors,
 )
+from alx.tools.display import (
+    DEFINITIONS as DISPLAY_DEFINITIONS,
+    DisplayBoard,
+    build_display_executors,
+)
 from alx.tools.self_diagnosis import (
     DEFINITIONS as SELF_DIAGNOSIS_DEFINITIONS,
     build_self_diagnosis_executors,
@@ -536,11 +541,21 @@ async def run(repository_root: Path) -> None:
     policies.update(ship24_runtime.policies)
     executors.update(ship24_runtime.executors)
     permissions.update(ship24_runtime.permissions)
+    display_board = DisplayBoard()
     kicad_runtime = build_kicad_runtime(current_call_id.get, environment, storage_root)
     register(kicad_runtime.definitions, TraceSubsystem.ECAD)
     policies.update(kicad_runtime.policies)
     executors.update(kicad_runtime.executors)
     permissions.update(kicad_runtime.permissions)
+    # D-073: she shows Friedl things on her screen, over the reader wave.
+    register(DISPLAY_DEFINITIONS, TraceSubsystem.CORE)
+    policies.update({definition.capability_id: AuthorityPolicy(frozenset({"screen.show"}))
+                     for definition in DISPLAY_DEFINITIONS})
+    executors.update(build_display_executors(
+        display_board,
+        None if kicad_runtime.provider is None else kicad_runtime.provider.section,
+        current_call_id.get))
+    permissions.add("screen.show")
     particle_local_runtime = build_particle_local_runtime(current_call_id.get, environment, storage_root)
     register(particle_local_runtime.definitions, TraceSubsystem.CORE)
     policies.update(particle_local_runtime.policies)
@@ -1482,6 +1497,7 @@ async def run(repository_root: Path) -> None:
         voice_settings.port,
         provider_settings.speech_to_text.sample_rate_hz,
         CODE_ROOT / "src/alx/interfaces/assets",
+        display=display_board.snapshot,
         reader_tile=None if reader_runtime is None else tile_source(
             reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch,
             display=ReaderSettings.from_environment(environment).display),

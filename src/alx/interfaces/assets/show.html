@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AL/X is showing</title>
+<link rel="stylesheet" href="/show.css">
+<script>if (window.parent === window) document.documentElement.classList.add('standalone');</script>
+</head>
+<body>
+<!-- D-073: the reader screen's own wave, alone, behind what she shows. -->
+<iframe class="wave" src="/bhl-field?backdrop" aria-hidden="true" tabindex="-1"></iframe>
+<div class="shade" aria-hidden="true"></div>
+<main class="ui">
+  <button class="close" id="close" type="button">CLOSE ×</button>
+  <svg id="view" aria-label="Board views"></svg>
+  <aside class="side">
+    <div class="side-head"><span class="led"></span><span id="context"></span></div>
+    <h1 class="name"><span id="title"></span><span class="way" id="subtitle"></span></h1>
+    <div class="verdict" id="verdict"></div>
+    <div class="rule"></div>
+    <div id="items"></div>
+    <div class="note" id="note"></div>
+  </aside>
+  <div class="said" id="saidBox" hidden>
+    <div class="h">AL/X</div>
+    <div class="t"><span id="said"></span><span class="cursor"></span></div>
+  </div>
+</main>
+<script src="/show.js"></script>
+</body>
+</html>

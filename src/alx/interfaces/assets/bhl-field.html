@@ -9,9 +9,13 @@
 // Inside AL/X's page the field is a transparent overlay on her backdrop.
 // Opened on its own there is nothing behind it, so it brings its own night.
 if (window.parent === window) document.documentElement.classList.add('standalone');
+// ?backdrop: the wave alone, behind another screen (the viewer, D-073). No
+// readers, labels or numbers, and nothing polled.
+if (new URLSearchParams(location.search).has('backdrop')) document.documentElement.classList.add('backdrop');
 </script>
 <style>
 :root{--ice:#e9fbff;--pale:#b1d5e0;--muted:#66889a;--hair:rgba(104,195,226,.24);--blue:#00cfff;--amber:#ffac00;--red:#ff254f;--green:#00ffc6}
+html.backdrop .tags,html.backdrop #lock,html.backdrop .shell{display:none}
 *{box-sizing:border-box}html.standalone{background:radial-gradient(120% 100% at 35% 30%,#071a2a 0%,#03101d 45%,#010710 80%)}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{color:var(--ice);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
 #matrix{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}
 body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,transparent 67%,rgba(1,7,16,.32) 71%,rgba(1,7,16,.58) 75%,rgba(1,7,16,.62)),linear-gradient(180deg,rgba(1,7,16,.5),transparent 25%,transparent 80%,rgba(1,7,16,.17));}
@@ -879,7 +883,7 @@ function loop(now){requestAnimationFrame(loop);if(document.hidden)return;if(!las
 window.addEventListener('resize',resize,{passive:true});reduced.addEventListener('change',()=>{dirty=true;draw();});
 canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();mode='context-lost';errorMessage='Graphics context interrupted. Waiting for recovery.';});
 canvas.addEventListener('webglcontextrestored',()=>{try{initGL();resize();mode='webgl2';}catch(err){console.error(err);}});
-poll();setInterval(poll,5000);
+if(!document.documentElement.classList.contains('backdrop')){poll();setInterval(poll,5000);}
 // Triage and terminal typing run independently of graphics frame rate.
 // A busy GPU or low-FPS software fallback must never strand a connection.
 setInterval(()=>{const now=performance.now();triage(now);tickTyping(now);},50);
