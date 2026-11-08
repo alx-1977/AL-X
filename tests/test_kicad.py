@@ -1,4 +1,7 @@
 """D-058: isolated board mechanics, bounded files and exact write authority."""
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from kicad_actions import kicad_call  # noqa: E402
 import json
 import os
 import pwd
@@ -138,7 +141,7 @@ class KiCadTests(unittest.TestCase):
         return SimpleNamespace(returncode=0)
 
     def call(self, name, **arguments):
-        return self.runtime.executors[name](arguments)
+        return kicad_call(self.runtime.executors, name, arguments)
 
     def success(self, name, **arguments):
         result = self.call(name, **arguments)
@@ -153,23 +156,30 @@ class KiCadTests(unittest.TestCase):
     def check(self):
         return self.success('check_kicad_board', project_dir=str(self.project))
 
-    def test_seven_unique_catalogue_entries_and_one_runtime_registration(self):
+    def test_one_kicad_capability_reads_freely_and_changes_with_approval(self):
+        """D-074: one capability; export and write_back change his project."""
+        from alx.contracts.capabilities import arguments_match
         registry = CapabilityRegistry(self.runtime.definitions)
-        self.assertEqual(len(registry.list_definitions()), 7)
-        self.assertEqual(set(self.runtime.executors), {d.capability_id for d in DEFINITIONS})
+        self.assertEqual([d.capability_id for d in registry.list_definitions()], ['kicad'])
+        self.assertEqual(set(self.runtime.executors), {'kicad'})
         payload = json.loads(_catalogue_payload(self.runtime.definitions))
-        self.assertEqual({d['id'] for d in payload['capabilities']}, set(self.runtime.executors))
-        self.assertEqual([d.side_effect for d in DEFINITIONS],
-                         [SideEffect.NONE, SideEffect.NONE, SideEffect.EFFECTFUL, SideEffect.NONE,
-                          SideEffect.EFFECTFUL, SideEffect.NONE, SideEffect.NONE])
+        [line] = payload['capabilities']
+        self.assertTrue(line['purpose'].startswith('Anything KiCad - PCB or schematic: inspect a board first'))
+        definition = DEFINITIONS[0]
+        policy = self.runtime.policies['kicad']
+        for action in ('inspect', 'check', 'edit', 'read_reference', 'analyse_copper', 'simulate'):
+            self.assertIs(definition.effect_for({'action': action}), SideEffect.NONE)
+            self.assertTrue(arguments_match(policy.approval_exempt_when, {'action': action}))
+        for action in ('export', 'write_back'):
+            self.assertIs(definition.effect_for({'action': action}), SideEffect.EFFECTFUL)
+            self.assertFalse(arguments_match(policy.approval_exempt_when, {'action': action}))
         live = (Path(__file__).parents[1] / 'src/alx/bootstrap/live_voice.py').read_text()
         self.assertEqual(live.count('kicad_runtime = build_kicad_runtime('), 1)
 
     def test_write_back_catalogue_describes_partial_failure_recovery(self):
-        payload = json.loads(_capability_details(self.runtime.definitions,
-                                                 ['write_back_kicad_board']))
-        description = next(d['purpose'] for d in payload['capabilities']
-                           if d['id'] == 'write_back_kicad_board')
+        payload = json.loads(_capability_details(self.runtime.definitions, ['kicad']))
+        description = next(d['purpose'] for d in payload['capabilities'] if d['id'] == 'kicad')
+        description = description[description.index('[write_back]'):]
         self.assertNotIn('rolls back on failure', description)
         self.assertIn('already replaced files may remain', description)
         self.assertIn('returned backups and evidence', description)
@@ -326,7 +336,8 @@ class KiCadTests(unittest.TestCase):
         broker = CapabilityBroker(CapabilityRegistry(DEFINITIONS), SafetyGate(self.runtime.policies), self.runtime.executors)
         now = datetime.now(UTC)
         context = AuthorityContext('friedl', self.runtime.permissions, now)
-        call = CapabilityCall('call', 'write_back_kicad_board', args)
+        args = {'action': 'write_back', **args}
+        call = CapabilityCall('call', 'kicad', args)
         self.assertEqual(broker.dispatch(call, context).state.value, 'rejected')
         self.assertEqual((self.project / 'test.kicad_pcb').read_text(), BOARD)
         approval = Approval('approved', ApprovalScope(call.capability_id, args),
@@ -347,7 +358,7 @@ class KiCadTests(unittest.TestCase):
         with patch('alx.providers.kicad.shutil.copy2', side_effect=copying):
             outcome = broker.dispatch(CapabilityCall('call', call.capability_id, args, 'approved'), context)
         self.assertEqual(outcome.result.state, CapabilityResultState.SUCCEEDED, outcome.result.failure)
-        self.assertTrue(outcome.result.values['written'])
+        self.assertTrue(outcome.result.values['result']['written'])
         self.assertIn('backups', events[0])
         self.assertIn('(size 1 1)', (self.project / 'test.kicad_pcb').read_text())
         self.assertFalse(any(p.suffix in ('.json', '.svg') for p in self.project.iterdir()))
@@ -402,7 +413,7 @@ class KiCadTests(unittest.TestCase):
                     self.assertNotIn('export stalled', logs.output[0])
                 self.assertIs(caught.exception.__cause__, error)
                 runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, runner)
-                result = runtime.executors['check_kicad_board']({'project_dir': str(self.project)})
+                result = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(self.project)})
                 self.assertEqual(result.state, CapabilityResultState.FAILED)
                 self.assertEqual(result.failure['code'], code)
 
@@ -412,7 +423,7 @@ class KiCadTests(unittest.TestCase):
         runner = Mock(return_value=SimpleNamespace(returncode=2, stderr='x' * 3000 + '\npassword=private-value\x1b'))
         runtime = build_kicad_runtime(lambda: 'call', environment, self.storage, runner)
         with self.assertLogs('alx.providers.kicad', level='WARNING') as logs:
-            result = runtime.executors['check_kicad_board']({'project_dir': str(self.project)})
+            result = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(self.project)})
         self.assertEqual(result.failure['code'], 'cli_failed')
         self.assertEqual(runner.call_args.kwargs['timeout'], 875)
         self.assertIn('pcb drc failed (2)', logs.output[0])
@@ -453,7 +464,7 @@ class KiCadTests(unittest.TestCase):
     def test_custom_noise_configuration_is_the_only_flag_source(self):
         environment = dict(self.environment, ALX_KICAD_NOISE_CHECKS='unconnected_items')
         runtime = build_kicad_runtime(lambda: 'call', environment, self.storage, self.run_cli)
-        result = runtime.executors['check_kicad_board']({'project_dir': str(self.project)})
+        result = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(self.project)})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
         self.assertFalse(result.values['violations'][0]['noise'])
         self.assertTrue(result.values['unconnected_items'][0]['noise'])
@@ -896,7 +907,7 @@ class KiCadTests(unittest.TestCase):
         checked = self.check()
         args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/test',
                 'renames': {'User.1': 'pib_0.15.gbr', 'test-F_Cu.gbr': 'top.gbr'}, 'zip_name': 'maker.zip'}
-        result = runtime.executors['export_kicad_manufacturing'](args)
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         dest = self.project / 'production/test'
         self.assertEqual(set(p.name for p in dest.iterdir()), {'pib_0.15.gbr', 'top.gbr', 'test.drl', 'maker.zip'})
@@ -904,7 +915,7 @@ class KiCadTests(unittest.TestCase):
             self.assertEqual(set(bundle.namelist()), {'pib_0.15.gbr', 'top.gbr', 'test.drl'})
         before = inventory(dest)
         (dest / 'top.gbr').unlink()
-        result = runtime.executors['export_kicad_manufacturing'](args)
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
         self.assertEqual(result.failure['code'], 'export_would_overwrite')
         self.assertFalse((dest / 'top.gbr').exists())
         self.assertEqual(inventory(dest), {k: v for k, v in before.items() if k != 'top.gbr'})
@@ -928,7 +939,7 @@ class KiCadTests(unittest.TestCase):
                     'renames': {'F.Cu': 'top.gbr'}}
             if option is not None:
                 args['separate_drills'] = option
-            result = runtime.executors['export_kicad_manufacturing'](args)
+            result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
             self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
             gerbers, drill = calls
             self.assertIn('--board-plot-params', gerbers)
@@ -937,7 +948,7 @@ class KiCadTests(unittest.TestCase):
             self.assertEqual('--excellon-separate-th' in drill, option is True)
             expected = {'top.gbr', 'test-PTH.drl', 'test-NPTH.drl'} if option else {'top.gbr', 'test.drl'}
             self.assertEqual({Path(p).name for p in result.values['files_written']}, expected)
-        result = runtime.executors['export_kicad_manufacturing'](dict(args, separate_drills='yes'))
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', dict(args, separate_drills='yes'))
         self.assertEqual(result.failure['code'], 'arguments_unusable')
 
     def test_manufacturing_comparison_ignores_dates_comments_and_generator(self):
@@ -967,11 +978,11 @@ class KiCadTests(unittest.TestCase):
         checked = self.check()
         for output, renames in (('../escape', {}), ('/absolute', {}), ('production', {'User.1': '../escape'}),
                                 ('production', {'User.1': 'test-F_Cu.gbr'})):
-            result = runtime.executors['export_kicad_manufacturing']({
+            result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
                 'work_copy_id': checked['work_copy_id'], 'output_dir': output, 'renames': renames})
             self.assertEqual(result.state, CapabilityResultState.FAILED)
         (self.project / 'linked').symlink_to(self.root)
-        result = runtime.executors['export_kicad_manufacturing']({
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
             'work_copy_id': checked['work_copy_id'], 'output_dir': 'linked/production'})
         self.assertEqual(result.failure['code'], 'path_denied')
 
@@ -1052,7 +1063,7 @@ class KiCadTests(unittest.TestCase):
     def test_own_exports_do_not_block_later_guarded_writeback(self):
         edited = self.fixed()
         runtime = self.manufacturing_runtime()
-        result = runtime.executors['export_kicad_manufacturing']({
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
             'work_copy_id': edited['work_copy_id'], 'output_dir': 'production'})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         self.success('write_back_kicad_board', **self.write_args(edited))
@@ -1173,7 +1184,7 @@ class KiCadTests(unittest.TestCase):
                 (target / 'test.drl').write_text('M48\n')
             return SimpleNamespace(returncode=0)
         runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
-        result = runtime.executors['export_kicad_manufacturing']({
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
             'work_copy_id': checked['work_copy_id'], 'output_dir': 'production',
             'renames': {'test-job.gbrjob': 'maker.json', 'test-F_Cu.gbr': 'top.gbr',
                         'test-B_Cu.gbr': 'bottom.gbrjob'}})
@@ -1193,7 +1204,7 @@ class KiCadTests(unittest.TestCase):
                 raise OSError('disk full')
             return real_fsync(fd)
         with patch('alx.providers.kicad.os.fsync', fsync):
-            result = runtime.executors['export_kicad_manufacturing']({
+            result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
                 'work_copy_id': checked['work_copy_id'], 'output_dir': 'production'})
         self.assertEqual(result.state, CapabilityResultState.FAILED)
         metadata = json.loads((self.storage / 'kicad' / checked['work_copy_id'] / 'metadata.json').read_text())

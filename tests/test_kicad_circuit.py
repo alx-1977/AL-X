@@ -217,14 +217,15 @@ class CircuitProvider(unittest.TestCase):
             self.assertEqual(caught.exception.recovery['log'].strip(), 'failure detail')
 
     def test_exactly_two_added_actions_use_existing_runtime_and_permission(self):
-        expected = {'check_kicad_board', 'edit_kicad_work_copy', 'export_kicad_manufacturing',
-                    'read_reference_file', 'write_back_kicad_board', 'analyse_kicad_copper', 'simulate_kicad_circuit'}
+        # D-074: analysis and simulation are actions of the one kicad capability,
+        # free of approval and read-only.
+        from alx.contracts.capabilities import arguments_match
         runtime = build_kicad_runtime(lambda: 'call', {}, self.root)
-        self.assertEqual(set(runtime.executors), expected)
-        for name in ('analyse_kicad_copper', 'simulate_kicad_circuit'):
-            definition = next(d for d in DEFINITIONS if d.capability_id == name)
-            self.assertEqual(definition.side_effect.value, 'none')
-            self.assertFalse(runtime.policies[name].approval_required)
+        self.assertEqual(set(runtime.executors), {'kicad'})
+        for action in ('analyse_copper', 'simulate'):
+            self.assertEqual(DEFINITIONS[0].effect_for({'action': action}).value, 'none')
+            self.assertTrue(arguments_match(runtime.policies['kicad'].approval_exempt_when,
+                                            {'action': action}))
 
     def test_installed_engine_ac_transient_and_op(self):
         if not Path('/opt/homebrew/bin/ngspice').is_file():

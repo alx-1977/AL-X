@@ -1,4 +1,6 @@
-"""Single-outcome KiCad capabilities; structured evidence returns to Core."""
+"""One KiCad capability with an action per job (D-074); structured evidence returns to Core."""
+from enum import Enum
+
 from alx.contracts import (
     CapabilityDefinition, CapabilityResult, CapabilityResultState,
     SideEffect, StructuredSchema, ValueKind,
@@ -68,7 +70,7 @@ TUNING = obj({'components': array(obj({'reference': S, 'values': array(N),
                                      ('reference', 'values', 'tolerance_fraction'))),
               'targets': array(TARGET), 'tie_margin': N})
 
-DEFINITIONS = (
+_ACTION_DEFINITIONS = (
     CapabilityDefinition('check_kicad_board',
         'Run all-severity KiCad DRC with zone refill on a new isolated project copy. '
         'Requires exactly one top-level board. Returns grouped facts, configured noise flags '
@@ -172,28 +174,105 @@ DEFINITIONS = (
 )
 
 
+INSPECT = CapabilityDefinition('inspect',
+    'Read a board without changing anything, and look before you judge: every part '
+    '(reference, value, footprint, side, position, rotation, every field such as the '
+    'manufacturer part number, and each pad with its net), every net with the pads it '
+    'joins and its track and via counts, every zone and keep-out with its layers and '
+    'extent, the board outline and the copper layers. The board is project_dir (one '
+    'top-level board), board (a .kicad_pcb path) or work_copy_id. refs, nets and contains '
+    '(text in a reference, value, footprint or field) narrow the parts and nets; limit '
+    '(default 300) bounds each list, with truncated saying when more exist.',
+    obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'refs': array(S), 'nets': array(S),
+         'contains': S, 'limit': I}, ()),
+    obj({'board': MAP, 'parts': array(MAP), 'nets': array(MAP), 'zones': array(MAP),
+         'truncated': MAP}), SideEffect.NONE, FAILURES)
+
+class KiCadAction(str, Enum):
+    """Every KiCad job, a closed list like the repository operations (D-074)."""
+
+    INSPECT = 'inspect'
+    CHECK = 'check'
+    EDIT = 'edit'
+    EXPORT = 'export'
+    READ_REFERENCE = 'read_reference'
+    WRITE_BACK = 'write_back'
+    ANALYSE_COPPER = 'analyse_copper'
+    SIMULATE = 'simulate'
+
+
+# Each action keeps its own contract; the capability is one (D-074).
+CONTRACTS = {
+    KiCadAction.INSPECT: INSPECT,
+    KiCadAction.CHECK: _ACTION_DEFINITIONS[0],
+    KiCadAction.EDIT: _ACTION_DEFINITIONS[1],
+    KiCadAction.EXPORT: _ACTION_DEFINITIONS[2],
+    KiCadAction.READ_REFERENCE: _ACTION_DEFINITIONS[3],
+    KiCadAction.WRITE_BACK: _ACTION_DEFINITIONS[4],
+    KiCadAction.ANALYSE_COPPER: _ACTION_DEFINITIONS[5],
+    KiCadAction.SIMULATE: _ACTION_DEFINITIONS[6],
+}
+# What changes nothing of Friedl's: reads, and edits of her own work copies.
+FREE_ACTIONS = tuple(item.value for item in (
+    KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
+    KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE))
+KICAD = 'kicad'
+FAILURES += ('board_unavailable', 'section_failed', 'section_too_large')
+
+_FIELDS = {}
+for _definition in CONTRACTS.values():
+    _FIELDS.update(_definition.input_schema.properties)
+
+DEFINITION = CapabilityDefinition(KICAD,
+    'Anything KiCad - PCB or schematic: inspect a board first (every part with its value '
+    'and part number, nets, keep-outs), then edit a work copy, check it (DRC), analyse '
+    'copper, simulate a circuit, read reference files, export manufacturing files or apply '
+    'an approved copy to his project. action names which; its fields are listed per action '
+    'below. export and write_back change his project and need his approval of the exact '
+    'call; every other action is free. ' + ' '.join(
+        f'[{name.value}] {definition.purpose}' for name, definition in CONTRACTS.items()),
+    StructuredSchema(ValueKind.OBJECT, {'action': S, **_FIELDS}, ('action',), extra_properties=False),
+    obj({'action': S, 'result': MAP}),
+    SideEffect.EFFECTFUL, FAILURES,
+    trace_fields=('action',),
+    read_only_when=tuple((('action', name),) for name in FREE_ACTIONS),
+)
+DEFINITIONS = (DEFINITION,)
+
+
 def build_kicad_executors(provider, call_id_source):
-    def bind(definition, execute):
-        def invoke(arguments):
-            code = 'arguments_unusable'
-            failure = {}
-            if definition.input_schema.accepts(arguments):
-                try:
-                    values = execute(arguments)
-                    if not definition.output_schema.accepts(values):
-                        raise ValueError('invalid_report')
-                    return CapabilityResult(call_id_source(), definition.capability_id,
-                                            CapabilityResultState.SUCCEEDED, values)
-                except Exception as error:
-                    code = (str(error) if str(error) in FAILURES else
-                            'unsupported_project' if isinstance(error, (KeyError, ValueError, TypeError, IndexError))
-                            else 'unavailable')
-                    recovery = getattr(error, 'recovery', None)
-                    if recovery is not None:
-                        failure['recovery'] = recovery
-            return CapabilityResult(call_id_source(), definition.capability_id,
-                                    CapabilityResultState.FAILED, failure=dict(failure, code=code))
-        return invoke
-    return {definition.capability_id: bind(definition, method) for definition, method in zip(
-        DEFINITIONS, (provider.check, provider.edit, provider.export, provider.read_reference,
-                      provider.write_back, provider.analyse_copper, provider.simulate_circuit))}
+    methods = {KiCadAction.INSPECT: provider.inspect, KiCadAction.CHECK: provider.check,
+               KiCadAction.EDIT: provider.edit, KiCadAction.EXPORT: provider.export,
+               KiCadAction.READ_REFERENCE: provider.read_reference,
+               KiCadAction.WRITE_BACK: provider.write_back,
+               KiCadAction.ANALYSE_COPPER: provider.analyse_copper,
+               KiCadAction.SIMULATE: provider.simulate_circuit}
+
+    def invoke(arguments):
+        code = 'arguments_unusable'
+        failure = {}
+        try:
+            action = KiCadAction(arguments.get('action'))
+        except ValueError:
+            action = None
+        contract = CONTRACTS.get(action)
+        values = {key: value for key, value in arguments.items() if key != 'action'}
+        if contract is not None and contract.input_schema.accepts(values):
+            try:
+                result = methods[action](values)
+                if not contract.output_schema.accepts(result):
+                    raise ValueError('invalid_report')
+                return CapabilityResult(call_id_source(), KICAD, CapabilityResultState.SUCCEEDED,
+                                        {'action': action.value, 'result': result})
+            except Exception as error:
+                code = (str(error) if str(error) in FAILURES else
+                        'unsupported_project' if isinstance(error, (KeyError, ValueError, TypeError, IndexError))
+                        else 'unavailable')
+                recovery = getattr(error, 'recovery', None)
+                if recovery is not None:
+                    failure['recovery'] = recovery
+        elif contract is None:
+            failure['reason'] = 'action must be one of ' + ', '.join(item.value for item in KiCadAction)
+        return CapabilityResult(call_id_source(), KICAD, CapabilityResultState.FAILED,
+                                failure=dict(failure, code=code))
+    return {KICAD: invoke}

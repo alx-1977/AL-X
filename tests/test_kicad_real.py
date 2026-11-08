@@ -1,5 +1,8 @@
 """Real CLI contract: only KiCad's upgraded output reaches the provider."""
 from pathlib import Path
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from kicad_actions import kicad_call  # noqa: E402
 import shutil
 import sys
 import tempfile
@@ -39,7 +42,7 @@ class CapturedKiCadTests(unittest.TestCase):
             runtime = build_kicad_runtime(lambda: 'captured', {
                 'ALX_KICAD_DESIGN_ROOTS': str(root / 'designs'),
             }, root / 'storage', captured)
-            result = runtime.executors['check_kicad_board']({'project_dir': str(project)})
+            result = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(project)})
             self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
             self.assertEqual(result.values['totals'],
                              {'error': 0, 'warning': 2, 'ignore': 0, 'total': 2})
@@ -111,9 +114,9 @@ print('confined')
             runtime = build_kicad_runtime(lambda: 'manufacturing', {
                 'ALX_KICAD_CLI': CLI, 'ALX_KICAD_DESIGN_ROOTS': str(root / 'designs'),
             }, root / 'storage')
-            checked = runtime.executors['check_kicad_board']({'project_dir': str(project)})
+            checked = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(project)})
             self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
-            exported = runtime.executors['export_kicad_manufacturing']({
+            exported = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
                 'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production',
                 'renames': {'F.Cu': 'top.gbr', 'F.Silkscreen': 'silk.gbr'}, 'zip_name': 'maker.zip'})
             self.assertEqual(exported.state, CapabilityResultState.SUCCEEDED, exported.failure)
@@ -134,12 +137,12 @@ print('confined')
                 'ALX_KICAD_CLI': cli,
                 'ALX_KICAD_DESIGN_ROOTS': str(root / 'designs'),
             }, root / 'storage')
-            checked = runtime.executors['check_kicad_board']({'project_dir': str(project)})
+            checked = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(project)})
             self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
             self.assertEqual(checked.values['totals']['total'], sum(
                 group['count'] for key in ('violations', 'unconnected_items', 'schematic_parity')
                 for group in checked.values[key]))
-            edited = runtime.executors['edit_kicad_work_copy']({
+            edited = kicad_call(runtime.executors, 'edit_kicad_work_copy', {
                 'work_copy_id': checked.values['work_copy_id'],
                 'script': '''
 import sys
@@ -163,7 +166,7 @@ pcbnew.SaveBoard(sys.argv[1], board)
             self.assertEqual(edited.values['change_report']['board']['layer_moves'], ({
                 'id': 'd8478024-7b53-4e3c-b624-b00426b46aed', 'kind': 'gr_text',
                 'before': ('F.SilkS',), 'after': ('User.1',)},))
-            exported = runtime.executors['export_kicad_manufacturing']({
+            exported = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
                 'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production',
                 'renames': {'User.1': 'pib_0.15.gbr'}, 'zip_name': 'production.zip'})
             self.assertEqual(exported.state, CapabilityResultState.SUCCEEDED, exported.failure)

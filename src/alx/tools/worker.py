@@ -21,11 +21,7 @@ MAX_CALLS = 80
 # runs any command as Friedl's user, which no fixed limit here can bound
 # (review of #207).
 WORKER_CAPABILITIES = (
-    "check_kicad_board",
-    "edit_kicad_work_copy",
-    "read_reference_file",
-    "analyse_kicad_copper",
-    "simulate_kicad_circuit",
+    "kicad",
     "compile_particle_firmware",
     "read_own_goals",
     "read_mail_document",

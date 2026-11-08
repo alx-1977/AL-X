@@ -2002,7 +2002,7 @@ class CoreAgent:
             # what follows it.
             return "plan_step_in_flight"
         definition = self._definition(call.capability_id)
-        if definition is not None and definition.side_effect in (
+        if definition is not None and definition.effect_for(call.arguments) in (
             SideEffect.NONE,
             SideEffect.ATTENTION_STATE,
         ):
@@ -3833,7 +3833,7 @@ class CoreAgent:
             not self._approval_free_capabilities
             or call.capability_id not in self._approval_free_capabilities
         )
-        if definition.side_effect is SideEffect.EFFECTFUL and needs_approval:
+        if definition.effect_for(call.arguments) is SideEffect.EFFECTFUL and needs_approval:
             return decision
         if decision.approval_proposal is None and call.approval_id is None:
             return decision
