@@ -179,6 +179,18 @@ def _bill_budget_for_turn(
 LOGGER = logging.getLogger(__name__)
 
 
+def _turn_provenance(store: SQLiteConversationStore):
+    """Whether a conversation turn still exists, and its D-013 sources (D-050)."""
+    def lookup(conversation_id: str, turn_id: str):
+        try:
+            turns = store.load(conversation_id).turns
+        except Exception:  # noqa: BLE001 - a missing conversation is a missing turn
+            return False, None
+        turn = next((item for item in turns if item.turn_id == turn_id), None)
+        return (turn is not None), (None if turn is None else turn.provenance)
+    return lookup
+
+
 def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
     """Read simple KEY=VALUE settings while preserving process-level overrides."""
     values: dict[str, str] = {}
@@ -610,6 +622,7 @@ async def run(repository_root: Path) -> None:
         read_usage=usage.between,
         sessions_dir=storage_root / "reasoning-sessions",
         session_days=SESSION_RECORD_DAYS,
+        turn_provenance=_turn_provenance(conversation_store),
     ))
     permissions.add("self.read")
 

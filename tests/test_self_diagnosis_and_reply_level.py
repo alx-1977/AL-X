@@ -16,7 +16,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -181,6 +181,67 @@ class SessionPrivacyAndDetailTests(unittest.TestCase):
     def test_failures_are_masked_like_everything_else(self) -> None:
         step = self.read({}).values["sessions"][0]["steps"][0]
         self.assertNotIn("abc123secretvalue", json.dumps(dict(step["result"]["failure"])))
+
+
+class SessionContextProvenanceTests(unittest.TestCase):
+    """Review of 12e350a: a session's words can come from conversation turns
+    about mail that carry no bookmark in the record. Their D-013 sources live in
+    the conversation store, and the session's words inherit them."""
+
+    TURN = ("conv-1", "turn-mail")
+
+    def setUp(self) -> None:
+        from alx.contracts import MailReference
+        from alx.contracts.provenance import RetentionPolicy
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name) / "2026-11-08"
+        root.mkdir(parents=True)
+        header = {
+            "started_at": "2026-11-08T08:57:37+00:00", "ended_at": "2026-11-08T08:59:10+00:00",
+            "user_prompt": json.dumps({
+                "current_trigger": {"kind": "conversation_turn", "reference": None},
+                "conversation": [
+                    {"conversation_id": "conv-1", "turn_id": "turn-mail", "content": "Greptile charged $94.50"},
+                    {"conversation_id": "conv-1", "turn_id": "turn-said", "content": "Is it in Xero?"},
+                ],
+            }),
+        }
+        answer = _event("tool_use", id="t1", name="StructuredOutput", input={"action": {
+            "type": "respond", "response": "Yes, $94.50.", "detail": "From the receipt."}})
+        (root / "085910-dddddddd.jsonl").write_text(json.dumps(header) + "\n" + answer + "\n")
+        self.root = root.parent
+        # Read on 14 October, so its D-013 deadline (13 November) is earlier
+        # than the session record's own (15 November).
+        self.mail = RetentionPolicy().direct_mail(
+            datetime(2026, 10, 14, 6, 0, tzinfo=UTC), [MailReference("INBOX", "1376545928", "61560")])
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def read(self, lookup):
+        return build_self_diagnosis_executors(
+            None, None, lambda: "call-1", clock=lambda: datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+            sessions_dir=self.root, turn_provenance=lookup,
+        )[READ_OWN_SESSIONS]({})
+
+    def test_words_from_a_mail_turn_inherit_its_earlier_expiry(self) -> None:
+        result = self.read(lambda cid, tid: (True, self.mail if (cid, tid) == self.TURN else None))
+        self.assertEqual(result.values["sessions"][0]["answer"]["response"], "Yes, $94.50.")
+        self.assertEqual([ref.uid for ref in result.provenance.mail_references], ["61560"])
+        # The mail's own earlier deadline, not the record's and not a fresh one.
+        self.assertEqual(result.provenance.content_expires_at, datetime(2026, 11, 13, 6, 0, tzinfo=UTC))
+
+    def test_a_session_that_saw_expired_or_removed_content_keeps_only_its_shape(self) -> None:
+        for lookup in (
+            lambda cid, tid: (False, None) if (cid, tid) == self.TURN else (True, None),
+            lambda cid, tid: (True, replace(self.mail, content_expires_at=datetime(2026, 11, 2, tzinfo=UTC)))
+            if (cid, tid) == self.TURN else (True, None),
+        ):
+            with self.subTest():
+                session = self.read(lookup).values["sessions"][0]
+                self.assertTrue(session["withheld"])
+                self.assertNotIn("94.50", json.dumps(session, default=dict))
+                self.assertEqual(session["answer"]["type"], "respond")
 
 
 def _goal(status: GoalStatus, result_state: CapabilityResultState) -> GoalState:

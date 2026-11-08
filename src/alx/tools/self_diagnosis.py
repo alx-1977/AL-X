@@ -178,22 +178,49 @@ def _collect_mail_references(value: Any, found: set[MailReference]) -> None:
             _collect_mail_references(item, found)
 
 
+_WITHHELD = "[withheld: drawn from mail content that has expired]"
+
+
+def _withheld(summary: dict[str, Any]) -> dict[str, Any]:
+    """A session whose context included expired mail content keeps its shape
+    - which calls, which states, which goal statuses - but none of its words."""
+    steps = []
+    for step in summary["steps"]:
+        result = step.get("result")
+        if isinstance(result, Mapping) and "state" in result:
+            result = {**result, "values": _WITHHELD}
+        elif not (isinstance(result, Mapping) and "status" in result):
+            result = _WITHHELD
+        steps.append({**step, "arguments": _WITHHELD, "result": result})
+    answer = summary["answer"]
+    if isinstance(answer, Mapping):
+        answer = {**answer, "response": _WITHHELD, "detail": _WITHHELD}
+    trigger = {key: (_WITHHELD if key in ("said", "reference") else value)
+               for key, value in summary["trigger"].items()}
+    return {**summary, "trigger": trigger, "steps": steps, "answer": answer, "withheld": True}
+
+
 def _session_summary(path: Path, limits: Mapping[str, int] = _BRIEF,
-                     ) -> tuple[dict[str, Any], set[MailReference]] | None:
-    """One recorded session, reduced to its trigger, steps and answer, and the
-    mail bookmarks in it, so mail-derived content keeps its D-013 expiry."""
+                     ) -> tuple[dict[str, Any], set[MailReference], list[tuple[str, str]]] | None:
+    """One recorded session, reduced to its trigger, steps and answer, with the
+    mail bookmarks in it and the conversation turns it saw, so mail-derived
+    content keeps its D-013 expiry."""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     if not lines:
         return None
     header = json.loads(lines[0])
     mail: set[MailReference] = set()
     _collect_mail_references(header.get("user_prompt"), mail)
+    seen: list[tuple[str, str]] = []
     trigger: dict[str, Any] = {}
     try:
         state = json.loads(header.get("user_prompt") or "{}")
         current = state.get("current_trigger") or {}
         trigger = {"kind": current.get("kind")}
         conversation = state.get("conversation") or []
+        seen = [(str(turn.get("conversation_id")), str(turn.get("turn_id")))
+                for turn in conversation
+                if isinstance(turn, Mapping) and turn.get("conversation_id") and turn.get("turn_id")]
         if current.get("kind") == "conversation_turn" and conversation:
             trigger["said"] = _short(conversation[-1].get("content", ""), limits["said"])
         elif current.get("reference") is not None:
@@ -242,7 +269,7 @@ def _session_summary(path: Path, limits: Mapping[str, int] = _BRIEF,
     return ({"session": f"{path.parent.name}/{path.name}", "started_at": header.get("started_at"),
              "ended_at": header.get("ended_at"), "purpose": header.get("purpose"),
              "outcome": header.get("outcome"), "trigger": trigger, "steps": steps,
-             "answer": answer}, mail)
+             "answer": answer}, mail, seen)
 
 
 def _window(arguments: Mapping[str, Any], now: datetime) -> tuple[datetime, datetime, int]:
@@ -271,6 +298,7 @@ def build_self_diagnosis_executors(
     read_usage: Callable[..., dict[str, Any]] | None = None,
     sessions_dir: Path | None = None,
     session_days: int = 7,
+    turn_provenance: Callable[[str, str], tuple[bool, ContentProvenance | None]] | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
@@ -361,28 +389,46 @@ def build_self_diagnosis_executors(
                         matched.append(path)
                 kept = matched[-limit:]
                 limits = _BRIEF
+            moment = now()
             sessions: list[dict[str, Any]] = []
             mail: set[MailReference] = set()
             expiries: list[datetime] = []
+            looked_up: dict[tuple[str, str], tuple[bool, ContentProvenance | None]] = {}
             for path in kept:
                 read = _session_summary(path, limits)
                 if read is None:
                     continue
-                summary, references = read
+                summary, references, seen = read
+                # The turns a session saw carry their own D-013 sources in the
+                # conversation store; its words inherit them. A turn gone or
+                # expired means its content has expired, so the session's
+                # words are withheld and only its shape remains.
+                expired = False
+                for key in (seen if turn_provenance is not None else ()):
+                    if key not in looked_up:
+                        looked_up[key] = turn_provenance(*key)
+                    found, source = looked_up[key]
+                    if not found or (source is not None and source.is_expired(moment)):
+                        expired = True
+                    elif source is not None and source.governed_by_retention():
+                        references |= set(source.mail_references)
+                        expiries.append(source.content_expires_at)
+                if expired:
+                    sessions.append(_withheld(summary))
+                    continue
                 sessions.append(summary)
                 if references:
                     mail.update(references)
                     expiries.append(recorded(path) + timedelta(days=session_days))
         except (OSError, ValueError) as error:
             return failed(READ_OWN_SESSIONS, "unavailable", type(error).__name__)
-        moment = now()
         # A session that read mail may quote it. Whatever she derives from it
         # carries those bookmarks and ends no later than the record does (D-013).
         provenance = None if not mail else ContentProvenance(
             origins=frozenset({ContentOrigin.MAIL_MESSAGE, ContentOrigin.ALX}),
             recorded_at=moment,
             mail_references=tuple(sorted(mail, key=lambda item: (item.mailbox_id, item.uid_validity, item.uid))),
-            content_expires_at=max(moment, min(expiries)),
+            content_expires_at=max(moment, min(expiries)) if expiries else moment,
         )
         truncated = len(matched) > len(kept)
         return CapabilityResult(
