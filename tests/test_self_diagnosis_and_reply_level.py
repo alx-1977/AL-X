@@ -127,6 +127,62 @@ class ReadOwnSessionsTests(unittest.TestCase):
         self.assertIn("latest state", definition.purpose)
 
 
+class SessionPrivacyAndDetailTests(unittest.TestCase):
+    """Review of 14c9887: mail kept its D-013 expiry only by luck, a long detail
+    could be stored but not read back, and failures skipped masking."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.long_detail = "Figure. " * 400
+        _record(self.root / "2026-11-08", "085910-cccccccc.jsonl", "Capture the bill", [
+            _event("tool_use", id="t1", name="mcp__alx__call_capability",
+                   input={"capability_id": "list_mail_attachments", "arguments_json": json.dumps(
+                       {"mailbox_id": "INBOX", "uid_validity": "1376545928", "uid": "61560"})}),
+            _event("tool_result", tool_use_id="t1", content=[{"type": "text", "text": json.dumps({
+                "result_state": "failed",
+                "failure": {"code": "provider_failed", "service_message": "api_key=abc123secretvalue"},
+                "result_values": {}})}]),
+            _event("tool_use", id="t2", name="StructuredOutput", input={"action": {
+                "type": "respond", "response": "Captured.", "detail": self.long_detail}}),
+        ])
+        self.read = build_self_diagnosis_executors(
+            None, None, lambda: "call-1",
+            clock=lambda: datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+            sessions_dir=self.root, session_days=7,
+        )[READ_OWN_SESSIONS]
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_a_session_that_read_mail_carries_its_bookmarks_and_an_expiry(self) -> None:
+        result = self.read({})
+        provenance = result.provenance
+        self.assertIsNotNone(provenance)
+        self.assertEqual([ref.uid for ref in provenance.mail_references], ["61560"])
+        self.assertEqual(provenance.content_expires_at, datetime(2026, 11, 15, 8, 59, 10, tzinfo=UTC))
+
+    def test_the_goal_audit_keeps_only_which_sessions_were_read(self) -> None:
+        result = self.read({})
+        self.assertEqual(dict(result.durable_values),
+                         {"sessions": ("2026-11-08/085910-cccccccc.jsonl",), "truncated": False})
+
+    def test_one_named_session_returns_the_whole_detail(self) -> None:
+        brief = self.read({}).values["sessions"][0]["answer"]["detail"]
+        self.assertLess(len(brief), len(self.long_detail.strip()))
+        full = self.read({"session": "2026-11-08/085910-cccccccc.jsonl"})
+        self.assertEqual(full.values["sessions"][0]["answer"]["detail"], self.long_detail.strip())
+
+    def test_a_session_name_cannot_point_outside_the_records(self) -> None:
+        for name in ("../../etc/passwd", "2026-11-08/../../x.jsonl", "/etc/hosts"):
+            with self.subTest(name=name):
+                self.assertEqual(self.read({"session": name}).failure["code"], "arguments_unusable")
+
+    def test_failures_are_masked_like_everything_else(self) -> None:
+        step = self.read({}).values["sessions"][0]["steps"][0]
+        self.assertNotIn("abc123secretvalue", json.dumps(dict(step["result"]["failure"])))
+
+
 def _goal(status: GoalStatus, result_state: CapabilityResultState) -> GoalState:
     call = CapabilityCall("c-1", "capture_supplier_invoice", {}, None)
     attempt = CapabilityAttempt(

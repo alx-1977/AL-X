@@ -7,12 +7,15 @@ and whether and how to put it right, is hers.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
 from alx.contracts.diagnostics import mask_credentials
+from alx.contracts.mail import MailReference
+from alx.contracts.provenance import ContentOrigin, ContentProvenance
 
 from alx.contracts import (
     CapabilityDefinition,
@@ -28,6 +31,13 @@ READ_OWN_LOG = "read_own_log"
 READ_OWN_SESSIONS = "read_own_sessions"
 _SESSIONS_MAX = 20
 _SESSIONS_DEFAULT = 5
+_SESSION_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}/\d{6}-[0-9a-f]{8}\.jsonl$")
+# Text kept per field: a list of sessions is brief; one named session is read
+# in full, so a long detail can be read back (with read_full_result beyond the
+# per-string bound).
+_BRIEF = {"said": 400, "reference": 200, "arguments": 200, "result": 300,
+          "values": 240, "response": 600, "detail": 1200}
+_FULL = {name: 20000 for name in _BRIEF}
 _MAX = 500
 _DEFAULT_WINDOW = timedelta(hours=24)
 _FAILURES = ("arguments_unusable", "unavailable")
@@ -98,11 +108,13 @@ SESSIONS_DEFINITION = CapabilityDefinition(
     "state. Use it to find out why something you did happened. Window from/to, ISO "
     "8601 (a time without an offset is local); default the last 24 hours, kept for "
     "7 days. goal_id or contains keeps sessions that mention it. Default 5 sessions, "
-    "up to 20, the newest kept; truncated says when more matched.",
+    "up to 20, the newest kept; truncated says when more matched. Each is brief; "
+    "session (its name, as returned) reads that one session in full, including the "
+    "whole detail of your answer.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"from": _STRING, "to": _STRING, "goal_id": _STRING, "contains": _STRING,
-         "limit": _INTEGER},
+         "limit": _INTEGER, "session": _STRING},
         (), extra_properties=False),
     StructuredSchema(
         ValueKind.OBJECT, {"sessions": _OBJECTS, "truncated": _BOOLEAN},
@@ -120,28 +132,62 @@ def _short(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _result_summary(raw: Any) -> Any:
+def _masked(value: Any) -> Any:
+    """A structured value with anything key-shaped masked, structure kept."""
+    if value is None:
+        return None
+    try:
+        return json.loads(mask_credentials(json.dumps(value, ensure_ascii=False, default=str)))
+    except ValueError:
+        return _short(value, 300)
+
+
+def _result_summary(raw: Any, limits: Mapping[str, int]) -> Any:
     """The part of a tool result that says what happened, before any detail."""
     try:
         value = json.loads(raw) if isinstance(raw, str) else raw
     except ValueError:
-        return _short(raw, 300)
+        return _short(raw, limits["result"])
     if isinstance(value, Mapping) and isinstance(value.get("goal_updated"), Mapping):
         goal = value["goal_updated"]
-        return {key: goal.get(key) for key in ("goal_id", "status", "stop_reason", "blockers")}
+        return {key: _masked(goal.get(key)) for key in ("goal_id", "status", "stop_reason", "blockers")}
     if isinstance(value, Mapping) and "result_state" in value:
         return {"state": value.get("result_state") or value.get("disposition"),
-                "failure": value.get("failure") or value.get("reason_code"),
-                "values": _short(value.get("result_values"), 240)}
-    return _short(value, 300)
+                "failure": _masked(value.get("failure") or value.get("reason_code")),
+                "values": _short(value.get("result_values"), limits["values"])}
+    return _short(value, limits["result"])
 
 
-def _session_summary(path: Path) -> dict[str, Any] | None:
-    """One recorded session, reduced to its trigger, steps and answer."""
+def _collect_mail_references(value: Any, found: set[MailReference]) -> None:
+    """Every typed mail bookmark a record carries, wherever it sits in it."""
+    if isinstance(value, str):
+        if value[:1] in "{[":
+            try:
+                _collect_mail_references(json.loads(value), found)
+            except ValueError:
+                pass
+        return
+    if isinstance(value, Mapping):
+        parts = [value.get(name) for name in ("mailbox_id", "uid_validity", "uid")]
+        if all(isinstance(part, str) and part for part in parts):
+            found.add(MailReference(*parts))
+        for item in value.values():
+            _collect_mail_references(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_mail_references(item, found)
+
+
+def _session_summary(path: Path, limits: Mapping[str, int] = _BRIEF,
+                     ) -> tuple[dict[str, Any], set[MailReference]] | None:
+    """One recorded session, reduced to its trigger, steps and answer, and the
+    mail bookmarks in it, so mail-derived content keeps its D-013 expiry."""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     if not lines:
         return None
     header = json.loads(lines[0])
+    mail: set[MailReference] = set()
+    _collect_mail_references(header.get("user_prompt"), mail)
     trigger: dict[str, Any] = {}
     try:
         state = json.loads(header.get("user_prompt") or "{}")
@@ -149,9 +195,9 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
         trigger = {"kind": current.get("kind")}
         conversation = state.get("conversation") or []
         if current.get("kind") == "conversation_turn" and conversation:
-            trigger["said"] = _short(conversation[-1].get("content", ""), 400)
+            trigger["said"] = _short(conversation[-1].get("content", ""), limits["said"])
         elif current.get("reference") is not None:
-            trigger["reference"] = _short(current.get("reference"), 200)
+            trigger["reference"] = _short(current.get("reference"), limits["reference"])
     except (ValueError, AttributeError, TypeError):
         trigger = {}
     steps: list[dict[str, Any]] = []
@@ -162,6 +208,7 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
             event = json.loads(line)
         except ValueError:
             continue
+        _collect_mail_references(event, mail)
         content = (event.get("message") or {}).get("content") if isinstance(event, Mapping) else None
         if not isinstance(content, list):
             continue
@@ -174,14 +221,14 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
                 if name == "StructuredOutput":
                     action = arguments.get("action") if isinstance(arguments, Mapping) else None
                     answer = {"type": (action or {}).get("type"),
-                              "response": _short((action or {}).get("response", ""), 600),
-                              "detail": _short((action or {}).get("detail", ""), 1200)}
+                              "response": _short((action or {}).get("response", ""), limits["response"]),
+                              "detail": _short((action or {}).get("detail", ""), limits["detail"])}
                     continue
                 step = {"tool": name}
                 if isinstance(arguments, Mapping) and arguments.get("capability_id"):
                     step["capability"] = arguments["capability_id"]
                     arguments = arguments.get("arguments_json", "")
-                step["arguments"] = _short(arguments, 200)
+                step["arguments"] = _short(arguments, limits["arguments"])
                 pending[str(item.get("id"))] = step
                 steps.append(step)
             elif item.get("type") == "tool_result":
@@ -191,11 +238,11 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
                 result = item.get("content")
                 if isinstance(result, list):
                     result = " ".join(part.get("text", "") for part in result if isinstance(part, Mapping))
-                step["result"] = _result_summary(result)
-    return {"session": f"{path.parent.name}/{path.name}", "started_at": header.get("started_at"),
-            "ended_at": header.get("ended_at"), "purpose": header.get("purpose"),
-            "outcome": header.get("outcome"), "trigger": trigger, "steps": steps,
-            "answer": answer}
+                step["result"] = _result_summary(result, limits)
+    return ({"session": f"{path.parent.name}/{path.name}", "started_at": header.get("started_at"),
+             "ended_at": header.get("ended_at"), "purpose": header.get("purpose"),
+             "outcome": header.get("outcome"), "trigger": trigger, "steps": steps,
+             "answer": answer}, mail)
 
 
 def _window(arguments: Mapping[str, Any], now: datetime) -> tuple[datetime, datetime, int]:
@@ -223,6 +270,7 @@ def build_self_diagnosis_executors(
     clock: Callable[[], datetime] | None = None,
     read_usage: Callable[..., dict[str, Any]] | None = None,
     sessions_dir: Path | None = None,
+    session_days: int = 7,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
@@ -279,29 +327,72 @@ def build_self_diagnosis_executors(
                 raise ValueError(f"limit must be 1 to {_SESSIONS_MAX}")
             needles = [str(arguments[name]) for name in ("goal_id", "contains")
                        if str(arguments.get(name) or "").strip()]
+            named = str(arguments.get("session") or "").strip()
+            if named and not _SESSION_NAME.match(named):
+                raise ValueError("session must be a name read_own_sessions returned")
         except (TypeError, ValueError) as error:
             return failed(READ_OWN_SESSIONS, "arguments_unusable", str(error))
         if sessions_dir is None:
             return failed(READ_OWN_SESSIONS, "unavailable", "no session records are kept")
+
+        def recorded(path: Path) -> datetime:
+            # Named for when the session ended; the record is deleted after
+            # session_days, which bounds anything derived from it.
+            return datetime.strptime(
+                f"{path.parent.name} {path.name[:6]}", "%Y-%m-%d %H%M%S").replace(tzinfo=UTC)
+
         try:
-            matched: list[Path] = []
-            for folder in sorted(sessions_dir.glob("????-??-??")):
-                for path in sorted(folder.glob("*.jsonl")):
-                    stamp = datetime.strptime(
-                        f"{folder.name} {path.name[:6]}", "%Y-%m-%d %H%M%S").replace(tzinfo=UTC)
-                    if not start <= stamp <= end:
-                        continue
-                    if needles:
-                        raw = path.read_text(encoding="utf-8", errors="replace")
-                        if not all(needle in raw for needle in needles):
+            if named:
+                path = sessions_dir / named
+                if not path.is_file():
+                    return failed(READ_OWN_SESSIONS, "arguments_unusable", "no such session")
+                matched = kept = [path]
+                limits = _FULL
+            else:
+                matched = []
+                for folder in sorted(sessions_dir.glob("????-??-??")):
+                    for path in sorted(folder.glob("*.jsonl")):
+                        if not start <= recorded(path) <= end:
                             continue
-                    matched.append(path)
-            kept = matched[-limit:]
-            sessions = [summary for summary in map(_session_summary, kept) if summary]
+                        if needles:
+                            raw = path.read_text(encoding="utf-8", errors="replace")
+                            if not all(needle in raw for needle in needles):
+                                continue
+                        matched.append(path)
+                kept = matched[-limit:]
+                limits = _BRIEF
+            sessions: list[dict[str, Any]] = []
+            mail: set[MailReference] = set()
+            expiries: list[datetime] = []
+            for path in kept:
+                read = _session_summary(path, limits)
+                if read is None:
+                    continue
+                summary, references = read
+                sessions.append(summary)
+                if references:
+                    mail.update(references)
+                    expiries.append(recorded(path) + timedelta(days=session_days))
         except (OSError, ValueError) as error:
             return failed(READ_OWN_SESSIONS, "unavailable", type(error).__name__)
-        return CapabilityResult(call_id_source(), READ_OWN_SESSIONS, CapabilityResultState.SUCCEEDED,
-                                {"sessions": sessions, "truncated": len(matched) > len(kept)})
+        moment = now()
+        # A session that read mail may quote it. Whatever she derives from it
+        # carries those bookmarks and ends no later than the record does (D-013).
+        provenance = None if not mail else ContentProvenance(
+            origins=frozenset({ContentOrigin.MAIL_MESSAGE, ContentOrigin.ALX}),
+            recorded_at=moment,
+            mail_references=tuple(sorted(mail, key=lambda item: (item.mailbox_id, item.uid_validity, item.uid))),
+            content_expires_at=max(moment, min(expiries)),
+        )
+        truncated = len(matched) > len(kept)
+        return CapabilityResult(
+            call_id_source(), READ_OWN_SESSIONS, CapabilityResultState.SUCCEEDED,
+            {"sessions": sessions, "truncated": truncated},
+            # The words stay in the session records; the goal's audit keeps
+            # only which sessions were read.
+            durable_values={"sessions": [item["session"] for item in sessions],
+                            "truncated": truncated},
+            provenance=provenance)
 
     return {READ_OWN_TRACE: read_trace, READ_OWN_LOG: read_own_log,
             READ_OWN_SESSIONS: read_own_sessions}

@@ -147,7 +147,7 @@ from alx.tools.goal_history import (
     DEFINITION as GOAL_HISTORY_DEFINITION,
     build_goal_history_executors,
 )
-from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
+from alx.providers.claude_subscription import SESSION_RECORD_DAYS, ClaudeSubscriptionReasoningModel
 from alx.providers.claude_usage import ClaudeUsageReader
 from alx.tools.claude_usage import (
     DEFINITION as CLAUDE_USAGE_DEFINITION, build_claude_usage_executors,
@@ -609,6 +609,7 @@ async def run(repository_root: Path) -> None:
         current_call_id.get,
         read_usage=usage.between,
         sessions_dir=storage_root / "reasoning-sessions",
+        session_days=SESSION_RECORD_DAYS,
     ))
     permissions.add("self.read")
 
