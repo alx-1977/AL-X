@@ -1,14 +1,18 @@
-"""AL/X reads her own execution trace and runtime log (D-050).
+"""AL/X reads her own execution trace, runtime log and session records (D-050).
 
-Two read-only primitives. They report what happened; deciding what it means,
+Three read-only primitives. They report what happened; deciding what it means,
 and whether and how to put it right, is hers.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Mapping
+
+from alx.contracts.diagnostics import mask_credentials
 
 from alx.contracts import (
     CapabilityDefinition,
@@ -21,6 +25,9 @@ from alx.contracts import (
 
 READ_OWN_TRACE = "read_own_trace"
 READ_OWN_LOG = "read_own_log"
+READ_OWN_SESSIONS = "read_own_sessions"
+_SESSIONS_MAX = 20
+_SESSIONS_DEFAULT = 5
 _MAX = 500
 _DEFAULT_WINDOW = timedelta(hours=24)
 _FAILURES = ("arguments_unusable", "unavailable")
@@ -82,7 +89,113 @@ LOG_DEFINITION = CapabilityDefinition(
     _FAILURES,
 )
 
-DEFINITIONS = (TRACE_DEFINITION, LOG_DEFINITION)
+SESSIONS_DEFINITION = CapabilityDefinition(
+    READ_OWN_SESSIONS,
+    "Read your own reasoning sessions as recorded: what started each one (Friedl's "
+    "words or an event), every tool and capability you called with its result - "
+    "including each change of a goal's status, with its stop reason - and what you "
+    "answered. This is the full history; read_own_goals shows only a goal's latest "
+    "state. Use it to find out why something you did happened. Window from/to, ISO "
+    "8601 (a time without an offset is local); default the last 24 hours, kept for "
+    "7 days. goal_id or contains keeps sessions that mention it. Default 5 sessions, "
+    "up to 20, the newest kept; truncated says when more matched.",
+    StructuredSchema(
+        ValueKind.OBJECT,
+        {"from": _STRING, "to": _STRING, "goal_id": _STRING, "contains": _STRING,
+         "limit": _INTEGER},
+        (), extra_properties=False),
+    StructuredSchema(
+        ValueKind.OBJECT, {"sessions": _OBJECTS, "truncated": _BOOLEAN},
+        ("sessions", "truncated"), extra_properties=False),
+    SideEffect.NONE,
+    _FAILURES,
+)
+
+DEFINITIONS = (TRACE_DEFINITION, LOG_DEFINITION, SESSIONS_DEFINITION)
+
+
+def _short(value: Any, limit: int) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    text = mask_credentials(" ".join(text.split()))
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _result_summary(raw: Any) -> Any:
+    """The part of a tool result that says what happened, before any detail."""
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return _short(raw, 300)
+    if isinstance(value, Mapping) and isinstance(value.get("goal_updated"), Mapping):
+        goal = value["goal_updated"]
+        return {key: goal.get(key) for key in ("goal_id", "status", "stop_reason", "blockers")}
+    if isinstance(value, Mapping) and "result_state" in value:
+        return {"state": value.get("result_state") or value.get("disposition"),
+                "failure": value.get("failure") or value.get("reason_code"),
+                "values": _short(value.get("result_values"), 240)}
+    return _short(value, 300)
+
+
+def _session_summary(path: Path) -> dict[str, Any] | None:
+    """One recorded session, reduced to its trigger, steps and answer."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines:
+        return None
+    header = json.loads(lines[0])
+    trigger: dict[str, Any] = {}
+    try:
+        state = json.loads(header.get("user_prompt") or "{}")
+        current = state.get("current_trigger") or {}
+        trigger = {"kind": current.get("kind")}
+        conversation = state.get("conversation") or []
+        if current.get("kind") == "conversation_turn" and conversation:
+            trigger["said"] = _short(conversation[-1].get("content", ""), 400)
+        elif current.get("reference") is not None:
+            trigger["reference"] = _short(current.get("reference"), 200)
+    except (ValueError, AttributeError, TypeError):
+        trigger = {}
+    steps: list[dict[str, Any]] = []
+    pending: dict[str, dict[str, Any]] = {}
+    answer: Any = None
+    for line in lines[1:]:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        content = (event.get("message") or {}).get("content") if isinstance(event, Mapping) else None
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("type") == "tool_use":
+                name = str(item.get("name", "")).removeprefix("mcp__alx__")
+                arguments = item.get("input") or {}
+                if name == "StructuredOutput":
+                    action = arguments.get("action") if isinstance(arguments, Mapping) else None
+                    answer = {"type": (action or {}).get("type"),
+                              "response": _short((action or {}).get("response", ""), 600),
+                              "detail": _short((action or {}).get("detail", ""), 1200)}
+                    continue
+                step = {"tool": name}
+                if isinstance(arguments, Mapping) and arguments.get("capability_id"):
+                    step["capability"] = arguments["capability_id"]
+                    arguments = arguments.get("arguments_json", "")
+                step["arguments"] = _short(arguments, 200)
+                pending[str(item.get("id"))] = step
+                steps.append(step)
+            elif item.get("type") == "tool_result":
+                step = pending.get(str(item.get("tool_use_id")))
+                if step is None:
+                    continue
+                result = item.get("content")
+                if isinstance(result, list):
+                    result = " ".join(part.get("text", "") for part in result if isinstance(part, Mapping))
+                step["result"] = _result_summary(result)
+    return {"session": f"{path.parent.name}/{path.name}", "started_at": header.get("started_at"),
+            "ended_at": header.get("ended_at"), "purpose": header.get("purpose"),
+            "outcome": header.get("outcome"), "trigger": trigger, "steps": steps,
+            "answer": answer}
 
 
 def _window(arguments: Mapping[str, Any], now: datetime) -> tuple[datetime, datetime, int]:
@@ -109,6 +222,7 @@ def build_self_diagnosis_executors(
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
     read_usage: Callable[..., dict[str, Any]] | None = None,
+    sessions_dir: Path | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
@@ -157,7 +271,41 @@ def build_self_diagnosis_executors(
         return CapabilityResult(call_id_source(), READ_OWN_LOG, CapabilityResultState.SUCCEEDED,
                                 {"entries": entries, "truncated": truncated})
 
-    return {READ_OWN_TRACE: read_trace, READ_OWN_LOG: read_own_log}
+    def read_own_sessions(arguments: Mapping[str, Any]) -> CapabilityResult:
+        try:
+            start, end, _ = _window(arguments, now())
+            limit = int(arguments.get("limit", _SESSIONS_DEFAULT))
+            if not 0 < limit <= _SESSIONS_MAX:
+                raise ValueError(f"limit must be 1 to {_SESSIONS_MAX}")
+            needles = [str(arguments[name]) for name in ("goal_id", "contains")
+                       if str(arguments.get(name) or "").strip()]
+        except (TypeError, ValueError) as error:
+            return failed(READ_OWN_SESSIONS, "arguments_unusable", str(error))
+        if sessions_dir is None:
+            return failed(READ_OWN_SESSIONS, "unavailable", "no session records are kept")
+        try:
+            matched: list[Path] = []
+            for folder in sorted(sessions_dir.glob("????-??-??")):
+                for path in sorted(folder.glob("*.jsonl")):
+                    stamp = datetime.strptime(
+                        f"{folder.name} {path.name[:6]}", "%Y-%m-%d %H%M%S").replace(tzinfo=UTC)
+                    if not start <= stamp <= end:
+                        continue
+                    if needles:
+                        raw = path.read_text(encoding="utf-8", errors="replace")
+                        if not all(needle in raw for needle in needles):
+                            continue
+                    matched.append(path)
+            kept = matched[-limit:]
+            sessions = [summary for summary in map(_session_summary, kept) if summary]
+        except (OSError, ValueError) as error:
+            return failed(READ_OWN_SESSIONS, "unavailable", type(error).__name__)
+        return CapabilityResult(call_id_source(), READ_OWN_SESSIONS, CapabilityResultState.SUCCEEDED,
+                                {"sessions": sessions, "truncated": len(matched) > len(kept)})
+
+    return {READ_OWN_TRACE: read_trace, READ_OWN_LOG: read_own_log,
+            READ_OWN_SESSIONS: read_own_sessions}
 
 
-__all__ = ["DEFINITIONS", "READ_OWN_LOG", "READ_OWN_TRACE", "build_self_diagnosis_executors"]
+__all__ = ["DEFINITIONS", "READ_OWN_LOG", "READ_OWN_SESSIONS", "READ_OWN_TRACE",
+           "build_self_diagnosis_executors"]

@@ -608,6 +608,7 @@ async def run(repository_root: Path) -> None:
             start, end, level, contains, limit),
         current_call_id.get,
         read_usage=usage.between,
+        sessions_dir=storage_root / "reasoning-sessions",
     ))
     permissions.add("self.read")
 
