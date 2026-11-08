@@ -274,6 +274,12 @@ This file records approved product and architecture decisions that guide impleme
 
   This changes no authority. The same capabilities, the same standing scopes, the same evidence rules and the same read-back verification apply at either ceiling; a higher ceiling permits more reasoning about one bill, never a different write. Recovery stays bounded and is not reissued per call, so a stopped task cannot reason indefinitely by re-entering it, and background continuity turns cannot consume the recovery allowance reserved for the person waiting on the conversation. The larger number exists to fit a provider's call shape, not to tolerate an indefinite loop: twenty-four calls on one bill is still unmistakably a loop, and it is still stopped.
 
+- **Amendment (2026-11-08): discounts and credits are their own negative lines.** Greptile invoice GIH8AVKI-0004 (USD 193.00, startup discount −96.50, total 96.50, then −2.00 applied, 94.50 due) was refused three times as a source mismatch: the bill was one 193.00 line checked against the 96.50 total. Friedl: "the easiest way to deal with discounts I have found in Xero is to add it as line items with '-' amount", and "We see something wrong, we fix it."
+  1. The invoice reading also returns each deduction the document prints (discount or credit, with its printed label and a negative amount) and the amount due. A payment already received is not a deduction.
+  2. With deductions, the bill is one line for the subtotal plus one negative line per deduction. Subtotal, tax and deductions must equal a printed figure, the total or the amount due; matching neither is reported, never resolved. A positive "adjustment" or a missing subtotal is reported.
+  3. A taxed invoice with deductions is returned to AL/X: splitting VAT across a discount is a judgment.
+  4. A line-total refusal now carries both figures ("bill lines come to …, the invoice total is …"), so AL/X can see why instead of guessing.
+  Real case before merging (D-072): the new reading of the real Greptile PDF gave both deductions as printed and a verified 94.50 bill total, with no Xero write.
 - **Review condition.** Revisit if an incorrect bill is created, a duplicate reaches Xero, an attachment is attached to the wrong bill, a read-back mismatch occurs, or Friedl decides an amount threshold or a return to attended writes is warranted.
 
 ## D-019 — Discarding a draft supplier bill on request

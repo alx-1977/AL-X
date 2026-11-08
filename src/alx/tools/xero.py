@@ -816,7 +816,12 @@ def _draft_payload(
         raise ValueError("expected_total")
     lines, calculated_total = _line_items(arguments)
     if calculated_total != expected_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP):
-        raise XeroAccessError("source_mismatch")
+        # The figures travel with the refusal: a bare code left AL/X guessing
+        # why a verified Greptile invoice was refused three times.
+        raise XeroAccessError(
+            "source_mismatch",
+            f"bill lines come to {calculated_total}, the invoice total is {expected_total}",
+        )
     line_amount_types = _required(arguments, "line_amount_types")
     _validate_line_mappings(account, lines, line_amount_types)
     return (
@@ -1650,6 +1655,34 @@ def build_xero_executors(
             return failed(capability_id, error.code, error)
 
         resolved_lines = None
+        adjustments = tuple(invoice.get("adjustments") or ())
+        if adjustments and invoice_lines is None:
+            # A discount or credit is entered as its own negative line, the
+            # way Friedl enters them in Xero. Splitting VAT across a deduction
+            # is a judgment, so a taxed invoice with deductions is returned.
+            if _decimal_or_zero(invoice["tax_amount"]) != 0:
+                return returned("tax_allocation_unresolved", "VAT across a discount or credit is not stated", invoice)
+            resolved_lines = [
+                {
+                    "description": invoice["description"] or "Supplier invoice",
+                    "quantity": "1",
+                    "unit_amount": invoice["subtotal"],
+                    "account_code": coding["account_code"],
+                    "tax_type": coding["tax_type"],
+                    "tax_amount": "0",
+                },
+                *(
+                    {
+                        "description": item["description"],
+                        "quantity": "1",
+                        "unit_amount": item["amount"],
+                        "account_code": coding["account_code"],
+                        "tax_type": coding["tax_type"],
+                        "tax_amount": "0",
+                    }
+                    for item in adjustments
+                ),
+            ]
         if invoice_lines is not None:
             # Provider lines are exclusive merchandise values. Without per-line
             # tax evidence, allocating tax or converting inclusive prices is a
@@ -1693,7 +1726,7 @@ def build_xero_executors(
                 "reference": _bill_reference(context_line, invoice, filename),
                 "reference_supplied": bool(context_line.strip()),
                 "line_amount_types": line_amount_types,
-                "expected_total": invoice["total"],
+                "expected_total": invoice.get("bill_total") or invoice["total"],
                 "line_items": resolved_lines or [
                     {
                         "description": invoice["description"] or "Supplier invoice",

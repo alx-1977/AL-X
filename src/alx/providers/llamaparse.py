@@ -52,6 +52,7 @@ _INVOICE_FIELDS = (
     "subtotal",
     "tax_amount",
     "total",
+    "amount_due",
     "description",
 )
 _ALLOWED_MEDIA = frozenset(
@@ -292,8 +293,15 @@ def _json_object(response: httpx.Response) -> dict[str, Any]:
     return body
 
 
-def _invoice_fields(values: Mapping[str, Any]) -> dict[str, str]:
-    return {name: _as_text(values.get(name)) for name in _INVOICE_FIELDS}
+def _invoice_fields(values: Mapping[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {name: _as_text(values.get(name)) for name in _INVOICE_FIELDS}
+    raw = values.get("adjustments")
+    fields["adjustments"] = [
+        {"description": _as_text(item.get("description")), "amount": _as_text(item.get("amount"))}
+        for item in (raw if isinstance(raw, list) else ())
+        if isinstance(item, Mapping)
+    ]
+    return fields
 
 
 def _as_text(value: Any) -> str:
