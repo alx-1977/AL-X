@@ -521,6 +521,27 @@ class KiCadProvider:
             return bounded(raw, self.design_roots)
         return reference_path(raw)
 
+    def section(self, arguments):
+        """One window of a board as geometry, for the viewer (D-073).
+
+        `board` is a path in a design root (read, never written: it is copied
+        into AL/X's storage first); `work_copy_id` is one of her own copies.
+        """
+        from alx.providers.kicad_section import SectionError, read_section
+        if self.execute_python is None:
+            raise KiCadError('engine_unavailable')
+        if arguments.get('work_copy_id'):
+            root, meta = self._load(arguments['work_copy_id'])
+            board = root / 'project' / meta['board']
+        else:
+            board = bounded(self._source(arguments.get('board') or ''), self.design_roots)
+        try:
+            return read_section(board, arguments, scratch_root=self.work_root / 'sections',
+                                kicad_python=self.settings.kicad_python,
+                                execute_python=self.execute_python)
+        except SectionError as error:
+            raise KiCadError(error.code, {'detail': error.detail}) from error
+
     def read_reference(self, arguments):
         raw = Path(arguments['path']).expanduser().absolute()
         if not raw.resolve().is_relative_to(self.work_root):

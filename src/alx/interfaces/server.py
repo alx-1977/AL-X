@@ -92,6 +92,8 @@ class LiveVoiceServer:
         sample_rate_hz: int,
         asset_root: Path,
         reader_tile: Callable[[], dict[str, Any] | None] | None = None,
+        # D-073: what AL/X is showing on the viewer, and its version.
+        display: Callable[[], dict[str, Any]] | None = None,
         # Copies a delivered reply into the conversation Friedl is in.
         relay: Callable[[str, str, str], bool] | None = None,
         locate: Callable[[str, str], tuple[str, Any] | None] | None = None,
@@ -117,6 +119,7 @@ class LiveVoiceServer:
         self._live_conversations: list[str] = []
         # D-041: the BHL tile's current data, or None on a day without events.
         self._reader_tile = reader_tile
+        self._display = display
         self._host = host
         self._port = port
         self._sample_rate_hz = sample_rate_hz
@@ -684,6 +687,11 @@ class LiveVoiceServer:
             return self._reader_tile_response()
         if parsed.path == "/presence.json":
             return self._presence_response()
+        if parsed.path == "/display.json":
+            snapshot = ({"id": "", "version": 0, "display": None} if self._display is None
+                        else self._display())
+            return self._response(200, json.dumps(snapshot).encode(),
+                                  "application/json; charset=utf-8")
         relative = {
             "/": "index.html",
             "/app.css": "app.css",
@@ -700,6 +708,10 @@ class LiveVoiceServer:
             "/reader-traces": "reader-traces.html",
             "/reader-traces-fixtures.js": "reader-traces-fixtures.js",
             "/bhl-field": "bhl-field.html",
+            "/show": "show.html",
+            "/show.js": "show.js",
+            "/show.css": "show.css",
+            "/display.js": "display.js",
             "/presence.js": "presence.js",
             "/menubar.js": "menubar.js",
         }.get(parsed.path)

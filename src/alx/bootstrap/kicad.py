@@ -16,6 +16,7 @@ class KiCadRuntime:
     policies: dict
     executors: dict
     permissions: frozenset
+    provider: KiCadProvider | None = None
 
 
 def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
@@ -38,4 +39,4 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
         d.capability_id: AuthorityPolicy(frozenset({permission}),
             approval_required=d.capability_id == 'write_back_kicad_board')
         for d in DEFINITIONS
-    }, build_kicad_executors(provider, call_id_source), frozenset({permission}))
+    }, build_kicad_executors(provider, call_id_source), frozenset({permission}), provider)
