@@ -219,10 +219,34 @@ class SessionContextProvenanceTests(unittest.TestCase):
         self.directory.cleanup()
 
     def read(self, lookup):
+        self.batches = []
+
+        def batch(keys):
+            self.batches.append(list(keys))
+            return {key: lookup(*key) for key in keys}
         return build_self_diagnosis_executors(
             None, None, lambda: "call-1", clock=lambda: datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
-            sessions_dir=self.root, turn_provenance=lookup,
+            sessions_dir=self.root, turn_provenance=batch,
         )[READ_OWN_SESSIONS]({})
+
+    def test_all_turns_are_looked_up_in_one_batch(self) -> None:
+        self.read(lambda cid, tid: (True, None))
+        self.assertEqual(self.batches, [[("conv-1", "turn-mail"), ("conv-1", "turn-said")]])
+
+    def test_the_live_lookup_loads_each_conversation_once(self) -> None:
+        from alx.bootstrap.live_voice import _turn_provenance
+
+        class Store:
+            loads = 0
+
+            def load(self, conversation_id):
+                Store.loads += 1
+                from types import SimpleNamespace
+                return SimpleNamespace(turns=(SimpleNamespace(turn_id="turn-mail", provenance=None),))
+        found = _turn_provenance(Store())([("conv-1", "turn-mail"), ("conv-1", "turn-gone")])
+        self.assertEqual(Store.loads, 1)
+        self.assertEqual(found[("conv-1", "turn-mail")], (True, None))
+        self.assertEqual(found[("conv-1", "turn-gone")], (False, None))
 
     def test_words_from_a_mail_turn_inherit_its_earlier_expiry(self) -> None:
         result = self.read(lambda cid, tid: (True, self.mail if (cid, tid) == self.TURN else None))

@@ -180,14 +180,20 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _turn_provenance(store: SQLiteConversationStore):
-    """Whether a conversation turn still exists, and its D-013 sources (D-050)."""
-    def lookup(conversation_id: str, turn_id: str):
-        try:
-            turns = store.load(conversation_id).turns
-        except Exception:  # noqa: BLE001 - a missing conversation is a missing turn
-            return False, None
-        turn = next((item for item in turns if item.turn_id == turn_id), None)
-        return (turn is not None), (None if turn is None else turn.provenance)
+    """Whether each conversation turn still exists, and its D-013 sources (D-050).
+
+    One read asks about many turns at once; each conversation is loaded once.
+    """
+    def lookup(keys):
+        found = {}
+        for conversation_id in {key[0] for key in keys}:
+            try:
+                turns = store.load(conversation_id).turns
+            except Exception:  # noqa: BLE001 - a missing conversation is a missing turn
+                continue
+            for turn in turns:
+                found[(conversation_id, turn.turn_id)] = turn.provenance
+        return {key: ((key in found), found.get(key)) for key in keys}
     return lookup
 
 

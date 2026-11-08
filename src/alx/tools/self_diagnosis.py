@@ -298,7 +298,8 @@ def build_self_diagnosis_executors(
     read_usage: Callable[..., dict[str, Any]] | None = None,
     sessions_dir: Path | None = None,
     session_days: int = 7,
-    turn_provenance: Callable[[str, str], tuple[bool, ContentProvenance | None]] | None = None,
+    turn_provenance: Callable[[list[tuple[str, str]]],
+                              Mapping[tuple[str, str], tuple[bool, ContentProvenance | None]]] | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
 
@@ -393,9 +394,11 @@ def build_self_diagnosis_executors(
             sessions: list[dict[str, Any]] = []
             mail: set[MailReference] = set()
             expiries: list[datetime] = []
-            looked_up: dict[tuple[str, str], tuple[bool, ContentProvenance | None]] = {}
-            for path in kept:
-                read = _session_summary(path, limits)
+            reads = [(path, _session_summary(path, limits)) for path in kept]
+            # Every turn the kept sessions saw, looked up together.
+            looked_up = {} if turn_provenance is None else turn_provenance(
+                sorted({key for _, read in reads if read is not None for key in read[2]}))
+            for path, read in reads:
                 if read is None:
                     continue
                 summary, references, seen = read
@@ -405,9 +408,7 @@ def build_self_diagnosis_executors(
                 # words are withheld and only its shape remains.
                 expired = False
                 for key in (seen if turn_provenance is not None else ()):
-                    if key not in looked_up:
-                        looked_up[key] = turn_provenance(*key)
-                    found, source = looked_up[key]
+                    found, source = looked_up.get(key, (False, None))
                     if not found or (source is not None and source.is_expired(moment)):
                         expired = True
                     elif source is not None and source.governed_by_retention():
