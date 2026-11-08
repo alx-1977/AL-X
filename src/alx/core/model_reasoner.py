@@ -28,6 +28,7 @@ from alx.contracts import (
     GoalMutationKind,
     GoalProposal,
     GoalState,
+    GoalStatus,
     ExecutionPlan,
     ExecutionStep,
     MAX_PLAN_WAIT_SECONDS,
@@ -445,6 +446,9 @@ retrieval adds to what the first found rather than replacing it, and asking
 again for something already retrieved gains nothing.
 Memory, the conversation you can see and read_own_conversations are what you can recall;
 when none of them records something, say so plainly rather than implying you remember it.
+When asked why you did or did not do something, read your session records
+(read_own_sessions) and answer from what they show; a goal record holds only its
+latest state. When Friedl says something is done, check it once and carry on from there.
 A memory identifier names one memory permanently. Every memory you form takes a
 new identifier, including one that refines or corrects something you already
 remember. To replace an earlier memory, give the new one its own identifier and
@@ -523,11 +527,10 @@ no new event is present in the same reasoning cycle. After a capability changes 
 item currently has attention, report only the verified change and allow later events to
 arrive independently.
 Replies at the right level (the level, not the wording):
+- After finishing what he asked: "Captured and approved."
 - After testing an API he asked about: "It worked. Shall I build this into a capability?"
-- After finding a shipping email: "Found it: DHL 5779714592, not collected yet. I'll track
-  it every day and catch new ones myself."
-- When a service doesn't state something: "It doesn't say when it resets. I'll check with
-  you tomorrow before starting."
+- After finding a shipping email: "Found it. Not collected yet; I'm tracking it."
+- When a service doesn't state something: "It doesn't say. I'll check with you tomorrow."
 """
 
 
@@ -1323,14 +1326,23 @@ def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
     return {"anyOf": [{"type": "null"}, dict(schema)]}
 
 
-# What her words to Friedl carry, read where she writes them (D-072).
+# What her words to Friedl carry, read where she writes them (D-072). The
+# detail field gives everything else a place: with one field, what she had
+# checked and found kept ending up in what he hears.
 RESPONSE_FIELD: Mapping[str, Any] = {
     "type": "string",
     "description": (
-        "Your words to Friedl: the top-level answer only - the outcome or what he asked, "
-        "and anything he must act on or decide. Leave out figures, method, checks, "
-        "caveats, identifiers and background he did not ask for; he will ask. A report "
-        "only when he asks for one."
+        "What you say to Friedl, spoken aloud: the outcome in a few words, and anything "
+        "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
+        "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one."
+    ),
+}
+DETAIL_FIELD: Mapping[str, Any] = {
+    "type": "string",
+    "description": (
+        "Not spoken or shown: the figures, identifiers, checks and background behind "
+        "your response. Kept in your session record (read_own_sessions) for when he asks "
+        "for more. Empty when there is nothing to add."
     ),
 }
 
@@ -1452,6 +1464,7 @@ def _schema_parts() -> dict[str, Any]:
         {
             "type": {"type": "string", "const": "respond"},
             "response": RESPONSE_FIELD,
+            "detail": DETAIL_FIELD,
             "raised_mail_observations": {
                 "type": "array",
                 "items": _strict_object({
@@ -2193,7 +2206,7 @@ def _goal_view(goal: GoalState) -> dict[str, Any]:
 
 def _goal_outcome(goal: GoalState) -> dict[str, Any]:
     """What a goal mutation left: status, remaining work and what is citable."""
-    return {
+    outcome = {
         "goal_id": goal.goal_id,
         "status": goal.status.value,
         "stop_reason": None if goal.stop_reason is None else goal.stop_reason.value,
@@ -2205,6 +2218,22 @@ def _goal_outcome(goal: GoalState) -> dict[str, Any]:
             & {item.criterion_id for item in goal.success_criteria}),
         "available_history_evidence_ids": sorted(history_evidence_ids(goal.evidence)),
     }
+    # Blocking straight after one of her own capabilities failed is where the
+    # Greptile bill stalled on 2026-11-08: she said she would fix it, recorded
+    # the goal as genuinely blocked, and nothing picked it up again. The fact
+    # is put where she makes that decision; what it means is still hers.
+    failed = next((item.result for item in reversed(goal.attempts)
+                   if item.result is not None), None)
+    if (goal.status is GoalStatus.BLOCKED and failed is not None
+            and failed.state is CapabilityResultState.FAILED):
+        outcome["own_capability_failed"] = {
+            "capability_id": failed.capability_id,
+            "code": (failed.failure or {}).get("code"),
+            "note": ("If the cause is in your own code, this is a toolbox gap, not a "
+                     "block: find it and fix it, or propose the fix with its cost "
+                     "now. Blocked is for causes outside you."),
+        }
+    return outcome
 
 
 def _goal_sources(goal: GoalState) -> list[str]:

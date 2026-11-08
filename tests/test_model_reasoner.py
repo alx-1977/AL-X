@@ -44,6 +44,7 @@ def base_output(**changes):
         action = {
             "type": "respond",
             "response": changes.pop("response", "A normal response."),
+            "detail": changes.pop("detail", ""),
             "raised_mail_observations": changes.pop("raised_mail_observations", []),
         }
     else:
@@ -1023,8 +1024,11 @@ class RelationshipMemoryPayloadTests(unittest.TestCase):
         from alx.core.model_reasoner import decision_schema, response_only_schema
         for schema in (decision_schema(), response_only_schema()):
             text = json.dumps(schema)
-            self.assertIn("the top-level answer only", text)
+            self.assertIn("Captured and approved.", text)
             self.assertIn("A report only when he asks for one.", text)
+            # 2026-11-08: everything else has its own unspoken place.
+            self.assertIn("Not spoken or shown", text)
+            self.assertIn('"detail"', text)
 
     def test_the_conversation_policy_asks_for_high_level_plain_replies(self) -> None:
         from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS

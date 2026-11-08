@@ -147,7 +147,7 @@ from alx.tools.goal_history import (
     DEFINITION as GOAL_HISTORY_DEFINITION,
     build_goal_history_executors,
 )
-from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel
+from alx.providers.claude_subscription import SESSION_RECORD_DAYS, ClaudeSubscriptionReasoningModel
 from alx.providers.claude_usage import ClaudeUsageReader
 from alx.tools.claude_usage import (
     DEFINITION as CLAUDE_USAGE_DEFINITION, build_claude_usage_executors,
@@ -177,6 +177,24 @@ def _bill_budget_for_turn(
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _turn_provenance(store: SQLiteConversationStore):
+    """Whether each conversation turn still exists, and its D-013 sources (D-050).
+
+    One read asks about many turns at once; each conversation is loaded once.
+    """
+    def lookup(keys):
+        found = {}
+        for conversation_id in {key[0] for key in keys}:
+            try:
+                turns = store.load(conversation_id).turns
+            except Exception:  # noqa: BLE001 - a missing conversation is a missing turn
+                continue
+            for turn in turns:
+                found[(conversation_id, turn.turn_id)] = turn.provenance
+        return {key: ((key in found), found.get(key)) for key in keys}
+    return lookup
 
 
 def load_environment(path: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -608,6 +626,9 @@ async def run(repository_root: Path) -> None:
             start, end, level, contains, limit),
         current_call_id.get,
         read_usage=usage.between,
+        sessions_dir=storage_root / "reasoning-sessions",
+        session_days=SESSION_RECORD_DAYS,
+        turn_provenance=_turn_provenance(conversation_store),
     ))
     permissions.add("self.read")
 

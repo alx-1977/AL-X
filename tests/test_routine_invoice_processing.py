@@ -423,9 +423,8 @@ class CompletionGuidanceTests(unittest.TestCase):
         # D-072 (2026-11-07): the rule sits on the field she writes into.
         from alx.core.model_reasoner import RESPONSE_FIELD
         text = RESPONSE_FIELD["description"]
-        self.assertIn("the top-level answer only - the outcome or what he asked", text)
-        self.assertIn("Leave out figures, method, checks, caveats, identifiers and "
-                      "background he did not ask for", text)
+        self.assertIn("the outcome in a few words, and anything he must act on or decide", text)
+        self.assertIn("Figures, identifiers, checks, method and background go in detail", text)
 
     def test_decided_calls_are_steered_to_a_plan(self):
         text = " ".join(PROTOCOL_INSTRUCTIONS.split())
