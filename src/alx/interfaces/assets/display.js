@@ -2,7 +2,7 @@
 // reader field does: an overlay, the scene softened behind it. She publishes;
 // this page notices a new version and opens /show. Esc or Close shuts it.
 (() => {
-  let seen = null;
+  let seen = null; // "<board id>:<version>": a restart gives a new id
   let frame = null;
   let shade = null;
   const close = () => {
@@ -26,10 +26,11 @@
     try {
       const response = await fetch('/display.json', { cache: 'no-store' });
       if (!response.ok) return;
-      const { version, display } = await response.json();
+      const { id, version, display } = await response.json();
+      const key = `${id}:${version}`;
       // On load, what was shown before is not reopened.
-      if (seen === null) { seen = version; return; }
-      if (version > seen && display) { seen = version; open(); }
+      if (seen === null) { seen = key; return; }
+      if (key !== seen) { seen = key; if (display) open(); }
     } catch { /* the next poll tries again */ }
   }
   window.addEventListener('message', (event) => {

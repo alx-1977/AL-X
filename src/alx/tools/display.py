@@ -10,6 +10,7 @@ copies, so what he sees is his actual copper.
 from __future__ import annotations
 
 import threading
+import uuid
 from collections.abc import Callable
 from typing import Any, Mapping
 
@@ -85,6 +86,9 @@ class DisplayBoard:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Each run has its own id, so a screen left open across a restart
+        # never mistakes a new display for one it has already seen.
+        self._id = uuid.uuid4().hex
         self._version = 0
         self._display: dict[str, Any] | None = None
 
@@ -96,7 +100,7 @@ class DisplayBoard:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            return {"version": self._version, "display": self._display}
+            return {"id": self._id, "version": self._version, "display": self._display}
 
 
 def _tone(value: Any) -> str | None:
@@ -150,6 +154,8 @@ def build_display_executors(
             if len(views) > MAX_VIEWS:
                 raise ValueError(f"at most {MAX_VIEWS} views")
             for view in views:
+                _text(view.get("label"), 40, "label")
+                _text(view.get("sublabel"), 60, "sublabel")
                 if bool(view.get("board")) == bool(view.get("work_copy_id")):
                     raise ValueError("each view names a board or a work_copy_id, not both")
                 for key, value in dict(view.get("marks") or {}).items():

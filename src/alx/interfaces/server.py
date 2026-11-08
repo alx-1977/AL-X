@@ -688,7 +688,8 @@ class LiveVoiceServer:
         if parsed.path == "/presence.json":
             return self._presence_response()
         if parsed.path == "/display.json":
-            snapshot = {"version": 0, "display": None} if self._display is None else self._display()
+            snapshot = ({"id": "", "version": 0, "display": None} if self._display is None
+                        else self._display())
             return self._response(200, json.dumps(snapshot).encode(),
                                   "application/json; charset=utf-8")
         relative = {

@@ -123,9 +123,34 @@ for drawing in board.GetDrawings():
     if drawing.GetLayer() != pcbnew.Edge_Cuts:
         continue
     try:
-        if drawing.GetShape() == pcbnew.SHAPE_T_ARC:
-            shape = [[mm(q.x), mm(q.y)] for q in (drawing.GetStart(), drawing.GetArcMid(), drawing.GetEnd())]
-        elif drawing.GetShape() == pcbnew.SHAPE_T_POLY:
+        kind = drawing.GetShape()
+        if kind == pcbnew.SHAPE_T_ARC:
+            # Through start, middle and end: the circle they lie on, sampled.
+            (ax, ay), (bx, by), (cx, cy) = [(mm(q.x), mm(q.y)) for q in
+                                            (drawing.GetStart(), drawing.GetArcMid(), drawing.GetEnd())]
+            d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+            if abs(d) < 1e-12:
+                shape = [[ax, ay], [cx, cy]]
+            else:
+                ux = ((ax*ax + ay*ay) * (by - cy) + (bx*bx + by*by) * (cy - ay) + (cx*cx + cy*cy) * (ay - by)) / d
+                uy = ((ax*ax + ay*ay) * (cx - bx) + (bx*bx + by*by) * (ax - cx) + (cx*cx + cy*cy) * (bx - ax)) / d
+                r = math.hypot(ax - ux, ay - uy)
+                a0, am, a1 = (math.atan2(py - uy, px - ux) for px, py in ((ax, ay), (bx, by), (cx, cy)))
+                turn = lambda a: (a + 2 * math.pi) % (2 * math.pi)
+                sweep = turn(a1 - a0)
+                if turn(am - a0) > sweep:
+                    sweep -= 2 * math.pi
+                shape = [[ux + r * math.cos(a0 + sweep * k / 24), uy + r * math.sin(a0 + sweep * k / 24)]
+                         for k in range(25)]
+        elif kind == pcbnew.SHAPE_T_RECT:
+            (ax, ay), (bx, by) = (mm(drawing.GetStart().x), mm(drawing.GetStart().y)), \
+                                 (mm(drawing.GetEnd().x), mm(drawing.GetEnd().y))
+            shape = [[ax, ay], [bx, ay], [bx, by], [ax, by], [ax, ay]]
+        elif kind == pcbnew.SHAPE_T_CIRCLE:
+            c, r = drawing.GetCenter(), mm(drawing.GetRadius())
+            shape = [[mm(c.x) + r * math.cos(2 * math.pi * k / 48), mm(c.y) + r * math.sin(2 * math.pi * k / 48)]
+                     for k in range(49)]
+        elif kind == pcbnew.SHAPE_T_POLY:
             for item in polys(drawing.GetPolyShape()):
                 if crosses(item["outer"]):
                     out["edges"].append(item["outer"] + item["outer"][:1])

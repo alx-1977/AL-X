@@ -88,6 +88,22 @@ class ShowOnScreenTests(unittest.TestCase):
         self.assertEqual(result.failure["code"], "board_unavailable")
         self.assertEqual(self.board.snapshot()["display"], None)
 
+    def test_a_restart_gives_the_board_a_new_identity(self) -> None:
+        # A screen left open across a restart must not take version 1 of the
+        # new run for one it has already seen.
+        self.assertNotEqual(DisplayBoard().snapshot()["id"], DisplayBoard().snapshot()["id"])
+        script = (ASSETS / "display.js").read_text()
+        self.assertIn("${id}:${version}", script)
+
+    def test_an_overlong_label_is_named_before_the_board_is_read(self) -> None:
+        for view in ({"label": "x" * 41}, {"label": "x", "sublabel": "y" * 61}):
+            with self.subTest(view=view):
+                bad = display(views=[{**display()["views"][0], **view}])
+                result = self.show(bad)
+                self.assertEqual(result.failure["code"], "arguments_unusable")
+                self.assertIn("label", result.failure["reason"])
+        self.assertEqual(self.read, [])
+
     def test_it_changes_nothing_outside_her_screen(self) -> None:
         self.assertEqual(DEFINITIONS[0].side_effect.name, "NONE")
 
@@ -149,6 +165,19 @@ class ViewerAssetTests(unittest.TestCase):
         self.assertIn("has('backdrop')", field)
         # The backdrop polls nothing and shows no readers.
         self.assertIn("if(!document.documentElement.classList.contains('backdrop')){poll();", field)
+
+    def test_a_rotated_view_is_turned_not_mirrored(self) -> None:
+        # Swapping the axes alone mirrors the board; one axis must be reversed.
+        self.assertIn("(x, y) => [(y - y0) * S, (x1 - x) * S]", (ASSETS / "show.js").read_text())
+
+    def test_planes_take_their_net_tone_and_the_column_scrolls(self) -> None:
+        self.assertIn("tone(marks['net:' + plane.net], COPPER)", (ASSETS / "show.js").read_text())
+        css = (ASSETS / "show.css").read_text()
+        self.assertIn("max-height: 72vh; overflow-y: auto;", css)
+
+    def test_board_outlines_keep_their_shape(self) -> None:
+        for kind in ("SHAPE_T_ARC", "SHAPE_T_RECT", "SHAPE_T_CIRCLE", "SHAPE_T_POLY"):
+            self.assertIn(kind, SECTION_SCRIPT)
 
     def test_her_screen_opens_the_viewer_on_a_new_version(self) -> None:
         self.assertIn('src="/display.js"', (ASSETS / "index.html").read_text())

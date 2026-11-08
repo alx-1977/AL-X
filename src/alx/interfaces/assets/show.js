@@ -52,8 +52,10 @@
     const geometry = item.geometry;
     const [x0, y0, x1, y1] = geometry.window;
     const marks = item.marks || {};
-    // Rotated, the board's y runs left to right and its x top to bottom.
-    const P = item.rotate ? (x, y) => [(y - y0) * S, (x - x0) * S] : (x, y) => [(x - x0) * S, (y - y0) * S];
+    // Rotated a quarter turn anticlockwise: the board's y runs left to right
+    // and its x bottom to top. One axis is reversed, so the board is turned,
+    // never mirrored.
+    const P = item.rotate ? (x, y) => [(y - y0) * S, (x1 - x) * S] : (x, y) => [(x - x0) * S, (y - y0) * S];
     const width = (item.rotate ? y1 - y0 : x1 - x0) * S;
     const height = (item.rotate ? x1 - x0 : y1 - y0) * S;
     const path = (polygons) => polygons.map((poly) => [poly.outer, ...(poly.holes || [])]
@@ -64,7 +66,8 @@
 
     el('rect', { x: 0, y: 0, width, height, fill: 'rgba(6,34,58,.6)' }, c);
     for (const plane of geometry.planes || []) {
-      el('path', { d: path(plane.polygons), fill: 'rgba(47,168,255,.10)', 'fill-rule': 'evenodd' }, c);
+      el('path', { d: path(plane.polygons), fill: tone(marks['net:' + plane.net], COPPER),
+        'fill-opacity': 0.12, 'fill-rule': 'evenodd' }, c);
     }
     for (const keepout of geometry.keepouts || []) {
       el('path', { d: path(keepout.polygons), fill: 'none', 'stroke-dasharray': '6 4', 'stroke-width': 1.2,
