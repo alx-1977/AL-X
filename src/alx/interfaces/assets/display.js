@@ -27,11 +27,16 @@
     document.body.append(shade, frame);
     frame.addEventListener('load', () => frame?.contentWindow?.focus());
   };
+  // A stalled request is abandoned after this long, body included, so the
+  // next tick can try again rather than waiting on it for ever.
+  const POLL_TIMEOUT_MS = 8000;
   async function poll() {
     if (polling) return;
     polling = true;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
     try {
-      const response = await fetch('/display.json', { cache: 'no-store' });
+      const response = await fetch('/display.json', { cache: 'no-store', signal: controller.signal });
       if (!response.ok) return;
       const { id, version, display } = await response.json();
       // On load, what was shown before is not reopened.
@@ -41,7 +46,10 @@
       seenId = id;
       seenVersion = version;
       if (display) open();
-    } catch { /* the next poll tries again */ } finally { polling = false; }
+    } catch { /* the next poll tries again */ } finally {
+      clearTimeout(timer);
+      polling = false;
+    }
   }
   window.addEventListener('message', (event) => {
     if (event.source === frame?.contentWindow && event.data?.type === 'show-close') close();

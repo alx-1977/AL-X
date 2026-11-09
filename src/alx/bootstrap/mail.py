@@ -23,6 +23,7 @@ from alx.providers import (
     SQLiteMailObservationState,
 )
 from alx.safety import AuthorityPolicy
+from alx.contracts.mail import recorded_mail_action
 from alx.tools import (
     CAPTURE_SUPPLIER_INVOICE,
     PROCESS_DHL_IMPORT,
@@ -161,8 +162,8 @@ def mail_post_reply_standing_scopes(
         ))
         for attempt in state.attempts
         if attempt.call is not None
-        and attempt.call.capability_id == MAIL
-        and attempt.call.arguments.get("action") == MailAction.TRASH.value
+        and recorded_mail_action(attempt.call.capability_id, attempt.call.arguments)
+        is MailAction.TRASH
         and attempt.implementation_invoked
     }
     for attempt in state.attempts:

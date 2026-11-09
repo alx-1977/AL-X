@@ -3,7 +3,6 @@ and the separately authorised reply."""
 
 from __future__ import annotations
 
-from enum import Enum
 
 from alx.contracts.diagnostics import failure_details
 
@@ -13,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from email.utils import getaddresses
 
+from alx.contracts.mail import MailAction, recorded_mail_action
 from alx.contracts import (
     CapabilityDefinition,
     CapabilityResult,
@@ -40,18 +40,6 @@ MAIL = "mail"
 SEND_MAIL_REPLY = "send_mail_reply"
 
 
-class MailAction(str, Enum):
-    """Every mail job except sending, a closed list like the KiCad actions (D-074)."""
-
-    SEARCH = "search"
-    READ = "read"
-    LIST_ATTACHMENTS = "list_attachments"
-    READ_ATTACHMENT = "read_attachment"
-    ACKNOWLEDGE = "acknowledge"
-    MARK_SEEN = "mark_seen"
-    FLAG = "flag"
-    FILE = "file"
-    TRASH = "trash"
 
 
 _FAILURES = (

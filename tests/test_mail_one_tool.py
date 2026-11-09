@@ -78,12 +78,20 @@ class OneCapabilityTests(unittest.TestCase):
         self.assertEqual([item.capability_id for item in SEND_DEFINITIONS], ["send_mail_reply"])
 
     def test_no_superseded_mail_id_remains_in_production_code(self) -> None:
-        """Law 0: the nine ids are gone, not hidden, wrapped or renamed."""
+        """Law 0: the nine ids are gone, not hidden, wrapped or renamed. They are
+        only recognised in goals saved before D-074, in one place, and none can
+        be called."""
+        recognised = ROOT / "src/alx/contracts/mail.py"
         for path in (ROOT / "src/alx").rglob("*.py"):
+            if path == recognised:
+                continue
             source = path.read_text(encoding="utf-8")
             for old in OLD_IDS:
                 with self.subTest(path=path.name, old=old):
                     self.assertNotIn(old, source)
+        from alx.contracts.mail import _RECORDED_BEFORE_D074
+        self.assertEqual(set(_RECORDED_BEFORE_D074), set(OLD_IDS))
+        self.assertFalse(set(OLD_IDS) & {item.capability_id for item in DEFINITIONS})
         for name in dir(mail_tools):
             self.assertFalse(name.endswith(("_MAIL_MESSAGE", "_MAIL_MESSAGES", "_MAIL_ATTACHMENT",
                                             "_MAIL_ATTACHMENTS", "_MAIL_FLAG_COLOUR")), name)
@@ -308,6 +316,28 @@ class ReadSubjectLookupTests(unittest.TestCase):
                 state = GoalState("goal-1", Objective("turn:1", "Reply"),
                                   (SuccessCriterion("c1", "sent"),), attempts=(self.attempt(action),))
                 self.assertIs(CoreAgent._unheard_authored_text(conversation, send, state), unheard)
+
+    def test_a_read_saved_before_d074_still_supplies_the_subject(self) -> None:
+        """Review of c53ffdd: goals reload old calls unchanged."""
+        from alx.goals.store import _goal_from_data, _goal_to_data
+        old = CapabilityAttempt(CapabilityCall("r-0", "read_mail_message", dict(REFERENCE)),
+                                CapabilityAttemptDisposition.EXECUTED, True,
+                                CapabilityResult("r-0", "read_mail_message",
+                                                 CapabilityResultState.SUCCEEDED, {"subject": "Parts"}))
+        state = GoalState("goal-1", Objective("turn:1", "Reply"),
+                          (SuccessCriterion("c1", "sent"),), attempts=(old,))
+        reloaded = _goal_from_data("goal-1", _goal_to_data(state))
+        conversation = ConversationSnapshot("c", (), 1, NOW + timedelta(days=1))
+        send = CapabilityCall("s-1", "send_mail_reply", {**REFERENCE, "to": ["a@b"],
+                                                         "subject": "RE: Parts", "body": ""})
+        self.assertFalse(CoreAgent._unheard_authored_text(conversation, send, reloaded))
+
+    def test_a_trash_saved_before_d074_is_still_known(self) -> None:
+        from alx.contracts.mail import MailAction, recorded_mail_action
+        self.assertIs(recorded_mail_action("move_mail_message_to_trash", {}), MailAction.TRASH)
+        self.assertIs(recorded_mail_action("mail", {"action": "trash"}), MailAction.TRASH)
+        self.assertIsNone(recorded_mail_action("mail", {"action": "nope"}))
+        self.assertIsNone(recorded_mail_action("kicad", {"action": "read"}))
 
 
 if __name__ == "__main__":
