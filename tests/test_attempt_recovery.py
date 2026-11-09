@@ -191,10 +191,11 @@ def test_invoice_completion_and_copied_mail_subject_survive_reload(tmp_path):
     from alx.contracts import ConversationSnapshot
     subject = 'source subject ' * 1000
     state = goal({'subject': subject, **{f'item_{i}': i for i in range(1000)}, 'completed': True},
-                 capability_id='read_mail_message')
+                 capability_id='mail')
     attempt = state.attempts[0]
     reference = {'mailbox_id': 'mail', 'uid_validity': 'v', 'uid': '1'}
-    state = replace(state, attempts=(replace(attempt, call=replace(attempt.call, arguments=reference, durable_arguments=None)),))
+    state = replace(state, attempts=(replace(attempt, call=replace(
+        attempt.call, arguments={'action': 'read', **reference}, durable_arguments=None)),))
     with reload_goal(tmp_path, state) as store:
         loaded = store.load(state.goal_id).state
         assert _completed(loaded.attempts[0])

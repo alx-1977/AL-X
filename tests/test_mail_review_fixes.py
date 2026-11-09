@@ -34,6 +34,7 @@ from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate  # noqa: E4
 NOW = datetime(2026, 8, 29, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=30)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
+# The ids D-010 and D-015 recorded; since D-074 they are actions of `mail`.
 TRASH = "move_mail_message_to_trash"
 SEEN = "mark_mail_message_seen"
 ARGS = {"mailbox_id": "INBOX", "uid": "58603", "uid_validity": "1376545928"}
@@ -520,17 +521,15 @@ class TrashAuthorisationTests(unittest.TestCase):
         )
 
     def test_only_authorised_mail_mutations_carry_external_side_effects(self) -> None:
-        from alx.tools import DEFINITIONS
+        from alx.tools import DEFINITIONS, MailAction
 
-        effectful = [item.capability_id for item in DEFINITIONS
-                     if item.side_effect is SideEffect.EFFECTFUL]
-        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE, SET_MAIL_FLAG_COLOUR
+        # One mail capability (D-074); its effect is decided per action.
+        (mail,) = DEFINITIONS
+        effectful = [item.value for item in MailAction
+                     if mail.effect_for({"action": item.value}) is SideEffect.EFFECTFUL]
 
         # The orange flag on a drafted DHL import is D-020 (amended 2026-10-14).
-        self.assertEqual(
-            effectful,
-            [SEEN, SET_MAIL_FLAG_COLOUR, FILE_PROCESSED_MAIL_MESSAGE, TRASH],
-        )
+        self.assertEqual(effectful, ["mark_seen", "flag", "file", "trash"])
 
     def test_no_permanent_deletion_is_reachable(self) -> None:
         source = (Path(__file__).resolve().parents[1]

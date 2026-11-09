@@ -197,7 +197,7 @@ class FirstPassTests(unittest.TestCase):
         )
         schema = StructuredSchema(ValueKind.OBJECT)
         self.capabilities = (
-            CapabilityDefinition("read_mail_message", "read", schema, schema, SideEffect.NONE),
+            CapabilityDefinition("read_record", "read", schema, schema, SideEffect.NONE),
             CapabilityDefinition("merge_pull_request", "merge", schema, schema,
                                  SideEffect.EFFECTFUL),
         )
@@ -215,7 +215,7 @@ class FirstPassTests(unittest.TestCase):
         for decision in (
             AgentDecision(response="nothing needed"),
             AgentDecision(finish_silently=True),
-            AgentDecision(call=self.call("read_mail_message")),
+            AgentDecision(call=self.call("read_record")),
         ):
             with self.subTest(decision=decision):
                 self.first.next = decision

@@ -43,12 +43,14 @@ from alx.core import ModelReasoner  # noqa: E402
 from alx.core.model_reasoner import (  # noqa: E402
     PROTOCOL_INSTRUCTIONS, native_tools,
 )
-from alx.tools import MOVE_MAIL_MESSAGE_TO_TRASH  # noqa: E402
+from alx.tools import MAIL  # noqa: E402
+from alx.tools.mail import SEND_REPLY_DEFINITION  # noqa: E402
 
 from datetime import UTC, datetime  # noqa: E402
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
-TRASH = "move_mail_message_to_trash"
+# Moving to Trash is the trash action of the one mail capability (D-074).
+TRASH = "mail"
 
 
 def mail_settings() -> MailSettings:
@@ -151,7 +153,7 @@ class LiveDefinitionReachesCore(unittest.TestCase):
         entries = {item["id"]: item for item in catalogue["capabilities"]}
         # The exact identifier, not a near miss, and not a description.
         self.assertIn(TRASH, entries)
-        self.assertEqual(TRASH, MOVE_MAIL_MESSAGE_TO_TRASH)
+        self.assertEqual(TRASH, MAIL)
         self.assertEqual(entries[TRASH]["side_effect"], "effectful")
         # Its full entry, from describe_capabilities (D-067), is enough for
         # Core to call it without guessing anything.
@@ -159,9 +161,11 @@ class LiveDefinitionReachesCore(unittest.TestCase):
         (entry,) = json.loads(_capability_details(
             registry.list_definitions(), [TRASH]))["capabilities"]
         self.assertEqual(entry["side_effect"], "effectful")
-        self.assertEqual(
-            sorted(entry["input_schema"]["required"]),
-            ["mailbox_id", "uid", "uid_validity"],
+        self.assertEqual(entry["input_schema"]["required"], ["action"])
+        self.assertIn(
+            "[trash] fields: mailbox_id, uid_validity, uid; "
+            "required: mailbox_id, uid_validity, uid.",
+            entry["purpose"],
         )
 
     def test_the_catalogue_states_that_its_entries_are_available_and_exact(self) -> None:
@@ -283,16 +287,16 @@ class AnAbsentCapabilityStaysAbsent(unittest.TestCase):
             without_trash = tuple(
                 item for item in runtime.definitions
                 if item.capability_id != TRASH
-            )
+            ) + (SEND_REPLY_DEFINITION,)
             model = FakeModel(response_output())
             ModelReasoner(model, "laws", "identity").decide(context(without_trash))
         offered = {
             item["id"] for item in catalogue_of(model.requests[0])["capabilities"]
         }
         self.assertNotIn(TRASH, offered)
-        # Reading mail was never withheld, so the absence is specific rather
+        # Replying was never withheld, so the absence is specific rather
         # than the whole catalogue having gone missing.
-        self.assertIn("read_mail_message", offered)
+        self.assertIn("send_mail_reply", offered)
 
     def test_an_invented_capability_cannot_be_dispatched(self) -> None:
         """The broker resolves against the registry, so invention fails."""
@@ -315,7 +319,7 @@ class AnAbsentCapabilityStaysAbsent(unittest.TestCase):
             )
             attempt = broker.dispatch(
                 CapabilityCall("call-1", TRASH, {
-                    "mailbox_id": "INBOX", "uid_validity": "777", "uid": "59093",
+                    "action": "trash", "mailbox_id": "INBOX", "uid_validity": "777", "uid": "59093",
                 }),
                 AuthorityContext("friedl", frozenset(runtime.permissions), NOW),
             )

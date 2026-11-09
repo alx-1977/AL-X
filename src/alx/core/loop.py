@@ -2046,7 +2046,8 @@ class CoreAgent:
                 )
                 for attempt in reversed(read_attempts):
                     if (attempt.call is None or attempt.result is None
-                            or attempt.call.capability_id != "read_mail_message"
+                            or attempt.call.capability_id != "mail"
+                            or attempt.call.arguments.get("action") != "read"
                             or tuple(attempt.call.arguments.get(key) for key in (
                                 "mailbox_id", "uid_validity", "uid"
                             )) != reference):

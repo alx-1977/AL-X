@@ -143,6 +143,7 @@ from alx.tools.self_diagnosis import (
 from alx.specialists.worker import MechanicalWorker
 from alx.tools.worker import (
     DEFINITION as WORKER_DEFINITION, WORKER_CAPABILITIES, build_worker_executors,
+    worker_call_refusal,
 )
 from alx.tools.conversation_history import (
     DEFINITION as CONVERSATION_HISTORY_DEFINITION,
@@ -1122,8 +1123,12 @@ async def run(repository_root: Path) -> None:
 
     # D-070: the worker carries out her mechanical briefs. Its calls go
     # through this same broker and gate, with her permissions and none of her
-    # approvals, so anything needing one is refused to it.
+    # approvals, so anything needing one is refused to it. D-074: an action
+    # outside its limit on a capability it holds is refused before the broker.
     def worker_dispatch(call):
+        refusal = worker_call_refusal(call)
+        if refusal is not None:
+            return refusal
         token = current_call_id.set(call.call_id)
         try:
             return broker.dispatch(call, AuthorityContext(

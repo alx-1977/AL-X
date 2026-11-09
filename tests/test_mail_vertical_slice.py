@@ -46,12 +46,12 @@ from alx.safety import (  # noqa: E402
     SafetyGate,
 )
 from alx.tools import (  # noqa: E402
-    ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
-    MARK_MAIL_MESSAGE_SEEN,
-    MOVE_MAIL_MESSAGE_TO_TRASH,
-    READ_MAIL_MESSAGE,
+    MAIL,
     build_mail_executors,
+)
+from mail_actions import (  # noqa: E402
+    ACKNOWLEDGE, MARK_SEEN, READ, TRASH, by_action, is_mail, mail_arguments, mail_call, mail_scope,
 )
 
 
@@ -370,9 +370,9 @@ class MailProviderTests(unittest.TestCase):
         self.adapter.record_delivery(event.event_id)
         self.imap.store_status = "NO"
         current = ["seen-1"]
-        result = build_mail_executors(
+        result = by_action(build_mail_executors(
             self.adapter, self.adapter, lambda: current[0]
-        )[MARK_MAIL_MESSAGE_SEEN]({
+        ))[MARK_SEEN]({
             "mailbox_id": "INBOX", "uid_validity": "777", "uid": "2",
         })
         self.assertEqual(result.failure["code"], "flag_update_failed")
@@ -606,7 +606,7 @@ class MailPrimitiveTests(unittest.TestCase):
     def test_read_body_is_available_to_core_but_excluded_from_durable_values(self) -> None:
         account = FakeAccount()
         current = ["call-1"]
-        read = build_mail_executors(account, account, lambda: current[0])[READ_MAIL_MESSAGE]
+        read = by_action(build_mail_executors(account, account, lambda: current[0]))[READ]
         result = read({"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2"})
         self.assertEqual(result.values["body"], "private body")
         self.assertNotIn("body", result.durable_values)
@@ -619,13 +619,13 @@ class MailPrimitiveTests(unittest.TestCase):
     def test_acknowledge_and_trash_are_separate_primitive_effects(self) -> None:
         account = FakeAccount()
         current = ["call-1"]
-        executors = build_mail_executors(account, account, lambda: current[0])
+        executors = by_action(build_mail_executors(account, account, lambda: current[0]))
         arguments = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2"}
-        acknowledged = executors[ACKNOWLEDGE_MAIL_MESSAGE](arguments)
+        acknowledged = executors[ACKNOWLEDGE](arguments)
         current[0] = "call-seen"
-        seen = executors[MARK_MAIL_MESSAGE_SEEN](arguments)
+        seen = executors[MARK_SEEN](arguments)
         current[0] = "call-2"
-        trashed = executors[MOVE_MAIL_MESSAGE_TO_TRASH](arguments)
+        trashed = executors[TRASH](arguments)
         self.assertTrue(acknowledged.values["acknowledged"])
         self.assertTrue(seen.values["seen"])
         self.assertTrue(trashed.values["moved"])
@@ -634,15 +634,15 @@ class MailPrimitiveTests(unittest.TestCase):
         self.assertEqual(len(account.trashed), 1)
         definitions = {item.capability_id: item for item in DEFINITIONS}
         self.assertEqual(
-            definitions[ACKNOWLEDGE_MAIL_MESSAGE].side_effect.value,
+            definitions[MAIL].effect_for(mail_arguments(ACKNOWLEDGE)).value,
             "attention_state",
         )
         self.assertIn(
             "changes no mail item or Seen/Unseen state",
-            definitions[ACKNOWLEDGE_MAIL_MESSAGE].purpose,
+            definitions[MAIL].purpose,
         )
         self.assertEqual(
-            definitions[MOVE_MAIL_MESSAGE_TO_TRASH].side_effect.value,
+            definitions[MAIL].effect_for(mail_arguments(TRASH)).value,
             "effectful",
         )
 
@@ -659,11 +659,11 @@ class MailPrimitiveTests(unittest.TestCase):
                 Path(directory.name),
                 lambda: "call-1",
             )
-            for capability_id in (
-                MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH,
-            ):
-                # D-051: housekeeping that can be undone needs no approval.
-                self.assertFalse(runtime.policies[capability_id].approval_required)
+            # D-051: housekeeping that can be undone needs no approval; every
+            # mail action is one capability under one policy (D-074).
+            self.assertEqual(set(runtime.policies), {MAIL})
+            self.assertFalse(runtime.policies[MAIL].approval_required)
+            self.assertFalse(runtime.policies[MAIL].approval_exempt_when)
             runtime.observations.close()
         finally:
             directory.cleanup()
@@ -675,7 +675,7 @@ class MailPrimitiveTests(unittest.TestCase):
             reference = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2"}
             result = CapabilityResult(
                 "call-1",
-                READ_MAIL_MESSAGE,
+                MAIL,
                 CapabilityResultState.SUCCEEDED,
                 {"reference": reference, "body": "private body"},
                 durable_values={"reference": reference},
@@ -685,7 +685,7 @@ class MailPrimitiveTests(unittest.TestCase):
                 Objective("turn:turn-1", "Handle mail"),
                 (SuccessCriterion("criterion-1", "handled"),),
                 attempts=(CapabilityAttempt(
-                    CapabilityCall("call-1", READ_MAIL_MESSAGE, reference),
+                    mail_call("call-1", READ, reference),
                     CapabilityAttemptDisposition.EXECUTED,
                     True,
                     result,
@@ -917,12 +917,10 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
         root = Path(directory.name)
         goals = SQLiteGoalStore(root / "goals.sqlite3")
         arguments = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "2"}
-        call = CapabilityCall(
-            "call-1", MOVE_MAIL_MESSAGE_TO_TRASH, arguments, "approval-1"
-        )
+        call = mail_call("call-1", TRASH, arguments, "approval-1")
         proposal = ApprovalProposal(
             "approval-1",
-            ApprovalScope(MOVE_MAIL_MESSAGE_TO_TRASH, arguments),
+            mail_scope(TRASH, arguments),
             "turn:turn-1",
         )
         reasoner = Queued(
@@ -943,7 +941,7 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
         broker = CapabilityBroker(
             registry,
             SafetyGate({
-                MOVE_MAIL_MESSAGE_TO_TRASH: AuthorityPolicy(
+                MAIL: AuthorityPolicy(
                     frozenset({"mail.trash"}), approval_required=True
                 ),
             }),
@@ -992,8 +990,7 @@ class BackgroundEventBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 len([
                     item for item in outcome.snapshot.state.attempts
-                    if item.call is not None
-                    and item.call.capability_id == MOVE_MAIL_MESSAGE_TO_TRASH
+                    if is_mail(item.call, TRASH)
                 ]),
                 1,
             )

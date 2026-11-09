@@ -106,7 +106,7 @@ class IsolationTests(unittest.TestCase):
         """It cannot call a capability, so it is never told any exist."""
         for capability_id in (
             "execute_xero_bill",
-            "search_mail_messages",
+            "delegate_mechanical_work",
             "send_mail_reply",
             "delete_xero_draft_bill",
         ):

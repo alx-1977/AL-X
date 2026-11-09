@@ -26,16 +26,9 @@ from alx.safety import AuthorityPolicy
 from alx.tools import (
     CAPTURE_SUPPLIER_INVOICE,
     PROCESS_DHL_IMPORT,
-    ACKNOWLEDGE_MAIL_MESSAGE,
     DEFINITIONS,
-    MARK_MAIL_MESSAGE_SEEN,
-    LIST_MAIL_ATTACHMENTS,
-    FILE_PROCESSED_MAIL_MESSAGE,
-    SET_MAIL_FLAG_COLOUR,
-    MOVE_MAIL_MESSAGE_TO_TRASH,
-    READ_MAIL_MESSAGE,
-    READ_MAIL_ATTACHMENT,
-    SEARCH_MAIL_MESSAGES,
+    MAIL,
+    MailAction,
     SEND_DEFINITIONS,
     SEND_MAIL_REPLY,
     build_mail_executors,
@@ -49,6 +42,11 @@ MAIL_TRASH_PERMISSION = "mail.trash"
 MAIL_SEEN_PERMISSION = "mail.seen"
 # Sending is a separate authority. Granting reading never grants sending.
 MAIL_SEND_PERMISSION = "mail.send"
+
+
+def mail_scope(action: MailAction, values: Mapping[str, str]) -> ApprovalScope:
+    """The exact scope of one `mail` action on one message (D-074)."""
+    return ApprovalScope(MAIL, {"action": action.value, **values})
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +89,7 @@ def captured_invoice_filing_scopes(
         }
         if any(not isinstance(value, str) or not value for value in reference.values()):
             continue
-        scope = ApprovalScope(FILE_PROCESSED_MAIL_MESSAGE, reference)
+        scope = mail_scope(MailAction.FILE, reference)
         if scope not in scopes:
             scopes.append(scope)
     return tuple(scopes)
@@ -138,11 +136,11 @@ def dhl_mail_scopes(state: GoalState | None) -> tuple[ApprovalScope, ...]:
             continue
         drafted = result.recovery_values().get("stage") == "customs_documents"
         for reference in references(result.recovery_values().get("source_mail")):
-            add(ApprovalScope(FILE_PROCESSED_MAIL_MESSAGE, reference))
+            add(mail_scope(MailAction.FILE, reference))
             if drafted:
-                add(ApprovalScope(SET_MAIL_FLAG_COLOUR, {**reference, "colour": "orange"}))
+                add(mail_scope(MailAction.FLAG, {**reference, "colour": "orange"}))
         for reference in references(result.recovery_values().get("customs_mail")):
-            add(ApprovalScope(SET_MAIL_FLAG_COLOUR, {**reference, "colour": "none"}))
+            add(mail_scope(MailAction.FLAG, {**reference, "colour": "none"}))
     return tuple(scopes)
 
 
@@ -163,7 +161,8 @@ def mail_post_reply_standing_scopes(
         ))
         for attempt in state.attempts
         if attempt.call is not None
-        and attempt.call.capability_id == MOVE_MAIL_MESSAGE_TO_TRASH
+        and attempt.call.capability_id == MAIL
+        and attempt.call.arguments.get("action") == MailAction.TRASH.value
         and attempt.implementation_invoked
     }
     for attempt in state.attempts:
@@ -184,7 +183,7 @@ def mail_post_reply_standing_scopes(
         }
         if any(not isinstance(value, str) or not value for value in reference.values()):
             continue
-        scopes.append(ApprovalScope(MARK_MAIL_MESSAGE_SEEN, reference))
+        scopes.append(mail_scope(MailAction.MARK_SEEN, reference))
         reference_key = tuple(reference[name] for name in (
             "mailbox_id", "uid_validity", "uid"
         ))
@@ -192,7 +191,7 @@ def mail_post_reply_standing_scopes(
             attempt.result.recovery_values().get("source_has_attachments") is False
             and reference_key not in invoked_trash
         ):
-            scopes.append(ApprovalScope(MOVE_MAIL_MESSAGE_TO_TRASH, reference))
+            scopes.append(mail_scope(MailAction.TRASH, reference))
     return tuple(scopes)
 
 
@@ -233,24 +232,19 @@ def mail_authority_policies() -> dict[str, AuthorityPolicy]:
     Named rather than inline so the declarations can be read without building
     a runtime, and so a test binds to the real policies instead of a copy.
 
-    The cleanup capabilities (mark read, flag, file, Trash) are hers under
-    plain permission since D-051: each can be undone.
+    D-074: the one `mail` capability needs every permission its actions did
+    (read, observation, Seen, Trash); the runtime grants all four together.
+    None of its actions needs approval: D-051 (Friedl, 2026-10-15) made mail
+    housekeeping hers. Marking read, flagging, filing and moving to Trash can
+    all be undone (Trash is recoverable).
     """
     return {
-        SEARCH_MAIL_MESSAGES: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
-        READ_MAIL_MESSAGE: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
-        LIST_MAIL_ATTACHMENTS: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
-        READ_MAIL_ATTACHMENT: AuthorityPolicy(frozenset({MAIL_READ_PERMISSION})),
-        ACKNOWLEDGE_MAIL_MESSAGE: AuthorityPolicy(
-            frozenset({MAIL_OBSERVATION_PERMISSION})
-        ),
-        # D-051 (Friedl, 2026-10-15): mail housekeeping is hers. Marking read,
-        # flagging, filing and moving to Trash can all be undone (Trash is
-        # recoverable), so none of them waits for his approval any more.
-        MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(frozenset({MAIL_SEEN_PERMISSION})),
-        MOVE_MAIL_MESSAGE_TO_TRASH: AuthorityPolicy(frozenset({MAIL_TRASH_PERMISSION})),
-        SET_MAIL_FLAG_COLOUR: AuthorityPolicy(frozenset({MAIL_SEEN_PERMISSION})),
-        FILE_PROCESSED_MAIL_MESSAGE: AuthorityPolicy(frozenset({MAIL_TRASH_PERMISSION})),
+        MAIL: AuthorityPolicy(frozenset({
+            MAIL_READ_PERMISSION,
+            MAIL_OBSERVATION_PERMISSION,
+            MAIL_SEEN_PERMISSION,
+            MAIL_TRASH_PERMISSION,
+        })),
     }
 
 

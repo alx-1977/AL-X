@@ -1,6 +1,9 @@
-"""Language-blind primitive capabilities for one observed mail item."""
+"""Language-blind mail capabilities: one `mail` capability with an action per job (D-074),
+and the separately authorised reply."""
 
 from __future__ import annotations
+
+from enum import Enum
 
 from alx.contracts.diagnostics import failure_details
 
@@ -33,16 +36,23 @@ from alx.contracts import (
 from alx.contracts.provenance import RetentionPolicy
 
 
-READ_MAIL_MESSAGE = "read_mail_message"
-SEARCH_MAIL_MESSAGES = "search_mail_messages"
-LIST_MAIL_ATTACHMENTS = "list_mail_attachments"
-READ_MAIL_ATTACHMENT = "read_mail_attachment"
-ACKNOWLEDGE_MAIL_MESSAGE = "acknowledge_mail_message"
-MARK_MAIL_MESSAGE_SEEN = "mark_mail_message_seen"
-MOVE_MAIL_MESSAGE_TO_TRASH = "move_mail_message_to_trash"
-FILE_PROCESSED_MAIL_MESSAGE = "file_processed_mail_message"
-SET_MAIL_FLAG_COLOUR = "set_mail_flag_colour"
+MAIL = "mail"
 SEND_MAIL_REPLY = "send_mail_reply"
+
+
+class MailAction(str, Enum):
+    """Every mail job except sending, a closed list like the KiCad actions (D-074)."""
+
+    SEARCH = "search"
+    READ = "read"
+    LIST_ATTACHMENTS = "list_attachments"
+    READ_ATTACHMENT = "read_attachment"
+    ACKNOWLEDGE = "acknowledge"
+    MARK_SEEN = "mark_seen"
+    FLAG = "flag"
+    FILE = "file"
+    TRASH = "trash"
+
 
 _FAILURES = (
     "arguments_unusable",
@@ -62,6 +72,7 @@ _FAILURES = (
     "recipients_refused",
     "send_rejected",
     "send_outcome_unknown",
+    "result_output_invalid",
 )
 
 _STRING = StructuredSchema(ValueKind.STRING)
@@ -90,7 +101,7 @@ def _input() -> StructuredSchema:
 
 
 READ_DEFINITION = CapabilityDefinition(
-    READ_MAIL_MESSAGE,
+    MailAction.READ.value,
     "Retrieve the content of one identified mail item without changing its server state.",
     _input(),
     StructuredSchema(
@@ -141,7 +152,7 @@ _SEARCH_ITEM = StructuredSchema(
 )
 
 SEARCH_DEFINITION = CapabilityDefinition(
-    SEARCH_MAIL_MESSAGES,
+    MailAction.SEARCH.value,
     "Search one mailbox with structured sender, subject, date, Seen-state and attachment criteria; return stable message references without changing mail or notification state.",
     StructuredSchema(
         ValueKind.OBJECT,
@@ -186,7 +197,7 @@ _ATTACHMENT = StructuredSchema(
 )
 
 LIST_ATTACHMENTS_DEFINITION = CapabilityDefinition(
-    LIST_MAIL_ATTACHMENTS,
+    MailAction.LIST_ATTACHMENTS.value,
     "List the explicit MIME attachments on one identified mail item without changing it or returning file content.",
     _input(),
     StructuredSchema(
@@ -200,7 +211,7 @@ LIST_ATTACHMENTS_DEFINITION = CapabilityDefinition(
 )
 
 READ_ATTACHMENT_DEFINITION = CapabilityDefinition(
-    READ_MAIL_ATTACHMENT,
+    MailAction.READ_ATTACHMENT.value,
     "Read provider-extracted text from one exact attachment on an identified mail item without changing the message.",
     StructuredSchema(
         ValueKind.OBJECT,
@@ -219,7 +230,7 @@ READ_ATTACHMENT_DEFINITION = CapabilityDefinition(
 )
 
 ACKNOWLEDGE_DEFINITION = CapabilityDefinition(
-    ACKNOWLEDGE_MAIL_MESSAGE,
+    MailAction.ACKNOWLEDGE.value,
     "Release one current mail notification after it has been handled, dismissed, or explicitly skipped so a later notification can become current; this changes no mail item or Seen/Unseen state.",
     _input(),
     StructuredSchema(
@@ -233,7 +244,7 @@ ACKNOWLEDGE_DEFINITION = CapabilityDefinition(
 )
 
 MARK_SEEN_DEFINITION = CapabilityDefinition(
-    MARK_MAIL_MESSAGE_SEEN,
+    MailAction.MARK_SEEN.value,
     "Set the standard Seen flag on one identified mail item without moving, deleting, replying to, or otherwise changing it.",
     _input(),
     StructuredSchema(
@@ -247,7 +258,7 @@ MARK_SEEN_DEFINITION = CapabilityDefinition(
 )
 
 FLAG_DEFINITION = CapabilityDefinition(
-    SET_MAIL_FLAG_COLOUR,
+    MailAction.FLAG.value,
     "Flag one identified mail item orange, or clear its flag with colour none. Orange marks mail whose processing has started and waits on something else, such as a DHL import drafted before its invoice; red stays Friedl's own. Flag a message before filing it: filing changes its reference.",
     StructuredSchema(
         ValueKind.OBJECT,
@@ -266,7 +277,7 @@ FLAG_DEFINITION = CapabilityDefinition(
 )
 
 FILE_DEFINITION = CapabilityDefinition(
-    FILE_PROCESSED_MAIL_MESSAGE,
+    MailAction.FILE.value,
     "Move one identified mail item to the configured processed mailbox once its invoice is in Xero; the destination is configured, not chosen. Returns partial mail_move_unconfirmed when the move may have happened but destination confirmation is unavailable.",
     _input(),
     StructuredSchema(
@@ -281,7 +292,7 @@ FILE_DEFINITION = CapabilityDefinition(
 )
 
 TRASH_DEFINITION = CapabilityDefinition(
-    MOVE_MAIL_MESSAGE_TO_TRASH,
+    MailAction.TRASH.value,
     "Move one identified mail item to the account's recoverable Trash mailbox. Returns partial mail_move_unconfirmed when the move may have happened but destination confirmation is unavailable.",
     _input(),
     StructuredSchema(
@@ -343,17 +354,54 @@ SEND_REPLY_DEFINITION = CapabilityDefinition(
     transmits_authored_text=True,
 )
 
-DEFINITIONS = (
-    SEARCH_DEFINITION,
-    READ_DEFINITION,
-    LIST_ATTACHMENTS_DEFINITION,
-    READ_ATTACHMENT_DEFINITION,
-    ACKNOWLEDGE_DEFINITION,
-    MARK_SEEN_DEFINITION,
-    FLAG_DEFINITION,
-    FILE_DEFINITION,
-    TRASH_DEFINITION,
+# Each action keeps its own input and result contract; the capability is one
+# (D-074). These are contracts, not capabilities: nothing registers them.
+CONTRACTS = {
+    MailAction.SEARCH: SEARCH_DEFINITION,
+    MailAction.READ: READ_DEFINITION,
+    MailAction.LIST_ATTACHMENTS: LIST_ATTACHMENTS_DEFINITION,
+    MailAction.READ_ATTACHMENT: READ_ATTACHMENT_DEFINITION,
+    MailAction.ACKNOWLEDGE: ACKNOWLEDGE_DEFINITION,
+    MailAction.MARK_SEEN: MARK_SEEN_DEFINITION,
+    MailAction.FLAG: FLAG_DEFINITION,
+    MailAction.FILE: FILE_DEFINITION,
+    MailAction.TRASH: TRASH_DEFINITION,
+}
+# What changes nothing: the reads need no active goal.
+READ_ONLY = tuple((("action", item.value),) for item in (
+    MailAction.SEARCH, MailAction.READ, MailAction.LIST_ATTACHMENTS, MailAction.READ_ATTACHMENT))
+# Releasing a notification changes only her own attention, never the mail.
+ATTENTION_ONLY = ((("action", MailAction.ACKNOWLEDGE.value),),)
+
+_FIELDS: dict[str, StructuredSchema] = {}
+_RESULT_FIELDS: dict[str, StructuredSchema] = {}
+for _contract in CONTRACTS.values():
+    _FIELDS.update(_contract.input_schema.properties)
+    _RESULT_FIELDS.update(_contract.output_schema.properties)
+
+DEFINITION = CapabilityDefinition(
+    MAIL,
+    "Everything with Friedl's mail except sending: search, read messages and attachments, "
+    "acknowledge, mark read, flag, file and move to Trash. action names which; a message is "
+    "named by mailbox_id, uid_validity and uid. None needs his approval; search, read, "
+    "list_attachments and read_attachment change nothing, acknowledge changes only which "
+    "notification holds your attention, and the rest change the mailbox. The result carries "
+    "the action's own fields. Each action below lists its fields and the ones it requires. "
+    + " ".join(
+        f"[{name.value}] fields: {', '.join(contract.input_schema.properties) or 'none'}; "
+        f"required: {', '.join(contract.input_schema.required) or 'none'}. {contract.purpose}"
+        for name, contract in CONTRACTS.items()
+    ),
+    StructuredSchema(ValueKind.OBJECT, {"action": _STRING, **_FIELDS}, ("action",),
+                     extra_properties=False),
+    StructuredSchema(ValueKind.OBJECT, _RESULT_FIELDS, extra_properties=False),
+    SideEffect.EFFECTFUL,
+    _FAILURES,
+    trace_fields=("action",),
+    read_only_when=READ_ONLY,
+    attention_only_when=ATTENTION_ONLY,
 )
+DEFINITIONS = (DEFINITION,)
 
 # Sending is irreversible and configured separately under D-011, so a runtime
 # without send credentials can still read mail without being able to transmit.
@@ -460,16 +508,16 @@ def build_mail_executors(
     processed_mailbox: str = "",
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     now = clock or (lambda: datetime.now(UTC))
-    def failed(capability_id: str, code: str, error: BaseException | None = None) -> CapabilityResult:
+    def failed(code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
-            capability_id,
+            MAIL,
             CapabilityResultState.FAILED,
             failure={"code": code, **(failure_details(error) if error else {})},
         )
 
     def move_result(
-        capability_id: str, reference: MailReference, outcome: MailMoveResult,
+        reference: MailReference, outcome: MailMoveResult,
         destination_key: str, confirmed_key: str,
     ) -> CapabilityResult:
         """Turn one mail-move outcome into a capability result.
@@ -499,7 +547,7 @@ def build_mail_executors(
         if confirmed:
             values["destination_reference"] = _reference_values(outcome.destination_reference)
         return CapabilityResult(
-            call_id_source(), capability_id,
+            call_id_source(), MAIL,
             CapabilityResultState.SUCCEEDED if confirmed else CapabilityResultState.PARTIAL,
             values,
             failure=None if confirmed else {"code": "mail_move_unconfirmed"},
@@ -510,9 +558,9 @@ def build_mail_executors(
             reference = _reference(arguments)
             content = account.read(reference)
         except ValueError:
-            return failed(READ_MAIL_MESSAGE, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(READ_MAIL_MESSAGE, error.code, error)
+            return failed(error.code, error)
         # durable_values records the reference, subject, sender, received_at,
         # participants, threading identifiers, and has_attachments. The body is
         # copied only into the result values, so it is not durable.
@@ -530,7 +578,7 @@ def build_mail_executors(
         }
         return CapabilityResult(
             call_id_source(),
-            READ_MAIL_MESSAGE,
+            MAIL,
             CapabilityResultState.SUCCEEDED,
             {**durable, "body": content.body},
             durable_values=durable,
@@ -557,9 +605,9 @@ def build_mail_executors(
             )
             messages, truncated = account.search(criteria)
         except (TypeError, ValueError):
-            return failed(SEARCH_MAIL_MESSAGES, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(SEARCH_MAIL_MESSAGES, error.code, error)
+            return failed(error.code, error)
         values = {
             "messages": tuple(
                 {
@@ -577,7 +625,7 @@ def build_mail_executors(
         references = tuple(item.reference for item in messages)
         return CapabilityResult(
             call_id_source(),
-            SEARCH_MAIL_MESSAGES,
+            MAIL,
             CapabilityResultState.SUCCEEDED,
             values,
             provenance=(
@@ -592,12 +640,12 @@ def build_mail_executors(
             reference = _reference(arguments)
             observations.acknowledge(reference)
         except ValueError:
-            return failed(ACKNOWLEDGE_MAIL_MESSAGE, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(ACKNOWLEDGE_MAIL_MESSAGE, error.code, error)
+            return failed(error.code, error)
         return CapabilityResult(
             call_id_source(),
-            ACKNOWLEDGE_MAIL_MESSAGE,
+            MAIL,
             CapabilityResultState.SUCCEEDED,
             {"reference": _reference_values(reference), "acknowledged": True},
         )
@@ -607,15 +655,15 @@ def build_mail_executors(
             reference = _reference(arguments)
             attachments = account.list_attachments(reference)
         except ValueError:
-            return failed(LIST_MAIL_ATTACHMENTS, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(LIST_MAIL_ATTACHMENTS, error.code, error)
+            return failed(error.code, error)
         values = {
             "reference": _reference_values(reference),
             "attachments": tuple(_attachment_values(item) for item in attachments),
         }
         return CapabilityResult(
-            call_id_source(), LIST_MAIL_ATTACHMENTS,
+            call_id_source(), MAIL,
             CapabilityResultState.SUCCEEDED, values,
             provenance=RetentionPolicy().direct_mail(now(), (reference,)),
         )
@@ -628,12 +676,12 @@ def build_mail_executors(
                 raise ValueError("attachment_id")
             attachment, _payload_bytes = account.read_attachment(reference, attachment_id)
         except ValueError:
-            return failed(READ_MAIL_ATTACHMENT, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(READ_MAIL_ATTACHMENT, error.code, error)
+            return failed(error.code, error)
         durable = {"reference": _reference_values(reference), **_attachment_values(attachment)}
         return CapabilityResult(
-            call_id_source(), READ_MAIL_ATTACHMENT,
+            call_id_source(), MAIL,
             CapabilityResultState.SUCCEEDED,
             {**durable, "text": attachment.text},
             durable_values=durable,
@@ -642,16 +690,16 @@ def build_mail_executors(
 
     def file_processed(arguments: StructuredData) -> CapabilityResult:
         if not processed_mailbox:
-            return failed(FILE_PROCESSED_MAIL_MESSAGE, "mailbox_unavailable")
+            return failed("mailbox_unavailable")
         try:
             reference = _reference(arguments)
             outcome = account.file_message(reference, processed_mailbox)
         except ValueError:
-            return failed(FILE_PROCESSED_MAIL_MESSAGE, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(FILE_PROCESSED_MAIL_MESSAGE, error.code, error)
+            return failed(error.code, error)
         return move_result(
-            FILE_PROCESSED_MAIL_MESSAGE, reference, outcome, "mailbox_id", "filed",
+            reference, outcome, "mailbox_id", "filed",
         )
 
     def move_to_trash(arguments: StructuredData) -> CapabilityResult:
@@ -659,11 +707,11 @@ def build_mail_executors(
             reference = _reference(arguments)
             outcome = account.move_to_trash(reference)
         except ValueError:
-            return failed(MOVE_MAIL_MESSAGE_TO_TRASH, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(MOVE_MAIL_MESSAGE_TO_TRASH, error.code, error)
+            return failed(error.code, error)
         return move_result(
-            MOVE_MAIL_MESSAGE_TO_TRASH, reference, outcome, "trash_mailbox_id", "moved",
+            reference, outcome, "trash_mailbox_id", "moved",
         )
 
     def mark_seen(arguments: StructuredData) -> CapabilityResult:
@@ -671,12 +719,12 @@ def build_mail_executors(
             reference = _reference(arguments)
             account.mark_seen(reference)
         except ValueError:
-            return failed(MARK_MAIL_MESSAGE_SEEN, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(MARK_MAIL_MESSAGE_SEEN, error.code, error)
+            return failed(error.code, error)
         return CapabilityResult(
             call_id_source(),
-            MARK_MAIL_MESSAGE_SEEN,
+            MAIL,
             CapabilityResultState.SUCCEEDED,
             {"reference": _reference_values(reference), "seen": True},
         )
@@ -689,27 +737,55 @@ def build_mail_executors(
                 raise ValueError("colour")
             account.set_flag_colour(reference, colour)
         except ValueError:
-            return failed(SET_MAIL_FLAG_COLOUR, "arguments_unusable")
+            return failed("arguments_unusable")
         except MailAccessError as error:
-            return failed(SET_MAIL_FLAG_COLOUR, error.code, error)
+            return failed(error.code, error)
         return CapabilityResult(
             call_id_source(),
-            SET_MAIL_FLAG_COLOUR,
+            MAIL,
             CapabilityResultState.SUCCEEDED,
             {"reference": _reference_values(reference), "colour": colour},
         )
 
-    return {
-        SET_MAIL_FLAG_COLOUR: set_flag_colour,
-        SEARCH_MAIL_MESSAGES: search,
-        READ_MAIL_MESSAGE: read,
-        LIST_MAIL_ATTACHMENTS: list_attachments,
-        READ_MAIL_ATTACHMENT: read_attachment,
-        ACKNOWLEDGE_MAIL_MESSAGE: acknowledge,
-        MARK_MAIL_MESSAGE_SEEN: mark_seen,
-        FILE_PROCESSED_MAIL_MESSAGE: file_processed,
-        MOVE_MAIL_MESSAGE_TO_TRASH: move_to_trash,
+    methods = {
+        MailAction.SEARCH: search,
+        MailAction.READ: read,
+        MailAction.LIST_ATTACHMENTS: list_attachments,
+        MailAction.READ_ATTACHMENT: read_attachment,
+        MailAction.ACKNOWLEDGE: acknowledge,
+        MailAction.MARK_SEEN: mark_seen,
+        MailAction.FLAG: set_flag_colour,
+        MailAction.FILE: file_processed,
+        MailAction.TRASH: move_to_trash,
     }
+
+    def invoke(arguments: StructuredData) -> CapabilityResult:
+        """Run one action under its own contract (D-074).
+
+        The action's result passes through unwrapped, with its provenance and
+        durable values, so mail content keeps its D-013 expiry and what later
+        code reads from a result (a read's subject, a move's destination)
+        stays where it was.
+        """
+        try:
+            action = MailAction(arguments.get("action"))
+        except ValueError:
+            return CapabilityResult(
+                call_id_source(), MAIL, CapabilityResultState.FAILED,
+                failure={"code": "arguments_unusable",
+                         "reason": "action must be one of " + ", ".join(item.value for item in MailAction)},
+            )
+        contract = CONTRACTS[action]
+        values = {key: value for key, value in arguments.items() if key != "action"}
+        if not contract.input_schema.accepts(values):
+            return failed("arguments_unusable")
+        result = methods[action](values)
+        if (result.state is not CapabilityResultState.FAILED
+                and not contract.output_schema.accepts(result.values)):
+            return failed("result_output_invalid")
+        return result
+
+    return {MAIL: invoke}
 
 
 def build_send_executors(

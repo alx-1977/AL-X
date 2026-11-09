@@ -2,7 +2,7 @@
 
 A multipart/alternative whose text/plain part is "." or otherwise empty used
 to hide the text/html part. These tests build that shape with the standard
-library and read it through the one extractor `read_mail_message` uses.
+library and read it through the one extractor the mail read action uses.
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ class MailBodyExtractionTests(unittest.TestCase):
         self.assertNotIn("#cc0000", text)
         self.assertNotIn(".header", text)
 
-    def test_read_mail_message_returns_the_html_text(self) -> None:
+    def test_the_mail_read_action_returns_the_html_text(self) -> None:
         """The capability reads this body through the adapter, not a second path."""
         raw = alternative(".", digikey_html())
         with tempfile.TemporaryDirectory() as directory:

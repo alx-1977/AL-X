@@ -558,7 +558,7 @@ class StandingScopeTests(unittest.TestCase):
         from alx.safety import AuthorityPolicy
 
         policies = {
-            "mark_mail_message_seen": AuthorityPolicy(
+            "mail": AuthorityPolicy(
                 frozenset({"mail.seen"}),
                 approval_required=True,
                 standing_scope_allowed=True,
@@ -572,23 +572,14 @@ class StandingScopeTests(unittest.TestCase):
     def test_the_real_mail_cleanup_policies_stay_repeatable(self) -> None:
         """The actual policies the mail runtime declares, not a restatement."""
         from alx.bootstrap.mail import mail_authority_policies
-        from alx.tools.mail import (
-            FILE_PROCESSED_MAIL_MESSAGE,
-            MARK_MAIL_MESSAGE_SEEN,
-            MOVE_MAIL_MESSAGE_TO_TRASH,
-        )
+        from alx.tools.mail import MAIL
 
         policies = mail_authority_policies()
         bound = self._bound(policies)
-        for capability_id in (
-            MARK_MAIL_MESSAGE_SEEN,
-            MOVE_MAIL_MESSAGE_TO_TRASH,
-            FILE_PROCESSED_MAIL_MESSAGE,
-        ):
-            with self.subTest(capability=capability_id):
-                # D-051: plain permission, so no turn ever spends it.
-                self.assertFalse(policies[capability_id].approval_required)
-                self.assertNotIn(capability_id, bound)
+        # D-051: plain permission, so no turn ever spends it. Every cleanup
+        # action (mark read, flag, file, Trash) is one capability (D-074).
+        self.assertFalse(policies[MAIL].approval_required)
+        self.assertNotIn(MAIL, bound)
 
 
 class BackgroundReadTests(unittest.TestCase):

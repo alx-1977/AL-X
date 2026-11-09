@@ -43,7 +43,7 @@ NOW = datetime(2026, 9, 4, 6, 0, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=30)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
 TRASH = CapabilityDefinition(
-    "move_mail_message_to_trash", "Move one message to Trash",
+    "mail", "Move one message to Trash",
     SCHEMA, SCHEMA, SideEffect.EFFECTFUL,
 )
 MAIL_EVENT_ID = "mail:777:3"
@@ -193,7 +193,7 @@ class BlockedDispatchTest(unittest.TestCase):
     def test_the_refusal_returns_to_the_core_with_the_reason(self) -> None:
         outcome = self.run_turn(
             AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),   # bad prefix
-            AgentDecision(call=CapabilityCall("call-1", "move_mail_message_to_trash", {})),
+            AgentDecision(call=CapabilityCall("call-1", "mail", {"action": "trash"})),
             AgentDecision(response="I cannot ground that safely yet."),
         )
         self.assertGreaterEqual(
@@ -211,7 +211,7 @@ class BlockedDispatchTest(unittest.TestCase):
             item for item in refusals if item["reason"] == "active_goal_required"
         )
         self.assertEqual(
-            dispatch_refusal["capability_id"], "move_mail_message_to_trash",
+            dispatch_refusal["capability_id"], "mail",
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual(outcome.response, "I cannot ground that safely yet.")
@@ -219,7 +219,7 @@ class BlockedDispatchTest(unittest.TestCase):
     def test_nothing_is_dispatched_behind_the_refusal(self) -> None:
         self.run_turn(
             AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
-            AgentDecision(call=CapabilityCall("call-1", "move_mail_message_to_trash", {})),
+            AgentDecision(call=CapabilityCall("call-1", "mail", {"action": "trash"})),
             AgentDecision(response="I cannot do that yet."),
         )
         self.assertEqual(self.dispatched, [])
@@ -236,7 +236,7 @@ class BlockedDispatchTest(unittest.TestCase):
         """
         outcome = self.run_turn(
             AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
-            AgentDecision(call=CapabilityCall("call-1", "move_mail_message_to_trash", {})),
+            AgentDecision(call=CapabilityCall("call-1", "mail", {"action": "trash"})),
             AgentDecision(goal_proposal=goal_proposal(MAIL_EVENT_ID)),
             AgentDecision(response="I could not do that."),
             budget=6,
@@ -260,7 +260,7 @@ class BlockedDispatchTest(unittest.TestCase):
             CapabilityResultState,
         )
         call = CapabilityCall(
-            "call-1", "move_mail_message_to_trash", {}, "approval-1")
+            "call-1", "mail", {"action": "trash"}, "approval-1")
         dispatched: list = []
 
         def dispatch(proposed, state):
@@ -279,7 +279,7 @@ class BlockedDispatchTest(unittest.TestCase):
                 call=call,
                 approval_proposal=ApprovalProposal(
                     "approval-1",
-                    ApprovalScope("move_mail_message_to_trash", {}),
+                    ApprovalScope("mail", {"action": "trash"}),
                     "turn:t1",
                 ),
             ),
@@ -291,7 +291,7 @@ class BlockedDispatchTest(unittest.TestCase):
         self.assertEqual(outcome.state, CoreState.RESPONDED, outcome.reason)
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(
-            dispatched[0].capability_id, "move_mail_message_to_trash",
+            dispatched[0].capability_id, "mail",
         )
         self.assertEqual(reasoner.contexts[1].refused_calls, ())
         self.assertEqual(reasoner.contexts[2].refused_calls, ())

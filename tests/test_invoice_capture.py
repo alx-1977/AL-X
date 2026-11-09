@@ -940,7 +940,8 @@ class ProcessedFilingTests(unittest.TestCase):
 
     def test_filing_needs_a_configured_mailbox(self) -> None:
         """The destination is configured, never chosen by AL/X."""
-        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE, build_mail_executors
+        from alx.tools import build_mail_executors
+        from mail_actions import FILE, by_action
 
         class Mail:
             def __init__(self) -> None:
@@ -952,9 +953,9 @@ class ProcessedFilingTests(unittest.TestCase):
                 return MailMoveResult(mailbox, MailReference(mailbox, "888", "7"))
 
         mail = Mail()
-        unconfigured = build_mail_executors(
+        unconfigured = by_action(build_mail_executors(
             mail, mail, lambda: "call-1"
-        )[FILE_PROCESSED_MAIL_MESSAGE]
+        ))[FILE]
         result = unconfigured(
             {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "12"}
         )
@@ -962,7 +963,8 @@ class ProcessedFilingTests(unittest.TestCase):
         self.assertEqual(mail.filed, [], "nothing may move without a destination")
 
     def test_a_configured_mailbox_receives_the_message(self) -> None:
-        from alx.tools import FILE_PROCESSED_MAIL_MESSAGE, build_mail_executors
+        from alx.tools import build_mail_executors
+        from mail_actions import FILE, by_action
 
         class Mail:
             def __init__(self) -> None:
@@ -974,9 +976,9 @@ class ProcessedFilingTests(unittest.TestCase):
                 return MailMoveResult(mailbox, MailReference(mailbox, "888", "7"))
 
         mail = Mail()
-        configured = build_mail_executors(
+        configured = by_action(build_mail_executors(
             mail, mail, lambda: "call-1", processed_mailbox="FireFli/Processed"
-        )[FILE_PROCESSED_MAIL_MESSAGE]
+        ))[FILE]
         result = configured(
             {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "12"}
         )

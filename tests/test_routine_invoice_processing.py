@@ -56,7 +56,7 @@ from test_execution_plan import (  # noqa: E402
 )
 from test_invoice_capture import FakeMail, FakeXero, arguments, extracted  # noqa: E402
 
-FILE = "file_processed_mail_message"
+FILE = "mail"
 DEFINITIONS = (
     CAPTURE_INVOICE_DEFINITION,
     CapabilityDefinition(FILE, FILE, SCHEMA, SCHEMA, SideEffect.EFFECTFUL),
@@ -86,7 +86,7 @@ def capture_step(uid: str, *, completion=FINISHED, authorise=True) -> ExecutionS
 
 
 def file_step(uid: str) -> ExecutionStep:
-    return ExecutionStep(CapabilityCall(f"file-{uid}", FILE, {"uid": uid}))
+    return ExecutionStep(CapabilityCall(f"file-{uid}", FILE, {"action": "file", "uid": uid}))
 
 
 class PlannedCaptureTests(PlanHarness):

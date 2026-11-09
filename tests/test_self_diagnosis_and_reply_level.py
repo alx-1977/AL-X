@@ -137,8 +137,8 @@ class SessionPrivacyAndDetailTests(unittest.TestCase):
         self.long_detail = "Figure. " * 400
         _record(self.root / "2026-11-08", "085910-cccccccc.jsonl", "Capture the bill", [
             _event("tool_use", id="t1", name="mcp__alx__call_capability",
-                   input={"capability_id": "list_mail_attachments", "arguments_json": json.dumps(
-                       {"mailbox_id": "INBOX", "uid_validity": "1376545928", "uid": "61560"})}),
+                   input={"capability_id": "mail", "arguments_json": json.dumps(
+                       {"action": "list_attachments", "mailbox_id": "INBOX", "uid_validity": "1376545928", "uid": "61560"})}),
             _event("tool_result", tool_use_id="t1", content=[{"type": "text", "text": json.dumps({
                 "result_state": "failed",
                 "failure": {"code": "provider_failed", "service_message": "api_key=abc123secretvalue"},

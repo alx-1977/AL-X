@@ -6,10 +6,12 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from alx.contracts import (
-    CapabilityDefinition, CapabilityResult, CapabilityResultState, SideEffect,
-    StructuredSchema, ValueKind,
+    CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityDefinition,
+    CapabilityResult, CapabilityResultState, SideEffect, StructuredSchema, ValueKind,
 )
+from alx.contracts.capabilities import ArgumentAlternatives, arguments_match
 from alx.specialists.worker import MechanicalWorker, WorkerError
+from alx.tools.mail import MAIL, MailAction
 
 DELEGATE_MECHANICAL_WORK = "delegate_mechanical_work"
 DEFAULT_CALLS = 40
@@ -25,8 +27,36 @@ WORKER_CAPABILITIES = (
     "compile_particle_firmware",
     "read_own_goals",
     "read_mail_document",
-    "read_mail_attachment",
+    MAIL,
 )
+# D-074: a capability of which the worker may use only some actions, and the
+# exact argument alternatives it may call. Mail needs no approval, so holding
+# no approvals would not keep the worker from searching, acknowledging, marking,
+# flagging, filing or trashing; it may only read an attachment.
+WORKER_LIMITS: tuple[tuple[str, ArgumentAlternatives], ...] = (
+    (MAIL, ((("action", MailAction.READ_ATTACHMENT.value),),)),
+)
+
+
+def worker_call_refusal(call: CapabilityCall) -> CapabilityAttempt | None:
+    """A refusal for a call outside the worker's limit, or None when it may go on.
+
+    Exact structured values only. A refused call never reaches the broker, so
+    nothing is invoked; the worker sees it as rejected, as any gate refusal.
+    """
+    for capability_id, allowed in WORKER_LIMITS:
+        if call.capability_id == capability_id and not arguments_match(allowed, call.arguments):
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
+                                     reason_code="worker_action_not_allowed")
+    return None
+
+
+def _limits() -> str:
+    return " ".join(
+        f"Of {capability_id} it may use only "
+        + " or ".join(", ".join(f"{key} {value}" for key, value in alternative)
+                      for alternative in allowed) + "."
+        for capability_id, allowed in WORKER_LIMITS)
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _OBJECTS = StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.OBJECT))
@@ -37,7 +67,7 @@ DEFINITION = CapabilityDefinition(
     "hand one brief to your worker, a cheaper model with its own small context, and get one "
     "checked report back. Keep judgement for yourself. It cannot run general programs. Write the brief as you would for a careful technician: what to run or measure, "
     "on which of your copies, what counts as a checked result, and when to stop. The worker "
-    "can call only " + ", ".join(WORKER_CAPABILITIES) + ", through the same safety gate as "
+    "can call only " + ", ".join(WORKER_CAPABILITIES) + ". " + _limits() + " It calls them through the same safety gate as "
     "you, with no approvals: it cannot send, spend, merge or change Friedl's files. It "
     "reports status (done, stopped or blocked), results each with how it was checked, open "
     "points it could not settle, and files it touched; calls lists every call it made and "
@@ -101,5 +131,5 @@ def build_worker_executors(
     return {DELEGATE_MECHANICAL_WORK: delegate}
 
 
-__all__ = ["DEFINITION", "DELEGATE_MECHANICAL_WORK", "WORKER_CAPABILITIES",
-           "build_worker_executors"]
+__all__ = ["DEFINITION", "DELEGATE_MECHANICAL_WORK", "WORKER_CAPABILITIES", "WORKER_LIMITS",
+           "build_worker_executors", "worker_call_refusal"]

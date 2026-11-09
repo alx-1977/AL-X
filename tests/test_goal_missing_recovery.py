@@ -4,7 +4,7 @@ The live trace, 2026-09-11 09:03 UTC. Friedl said the two emails he had asked
 to have deleted were still in his inbox. The Core decided to act, and the turn
 went:
 
-    step 1  call move_mail_message_to_trash, no goal
+    step 1  call mail (action trash), no goal
             -> "Dispatch blocked before approval: active_goal_required"
     step 2  call again, now offering an *update* goal mutation
             -> "Goal proposal rejected: goal_missing"
@@ -53,7 +53,7 @@ SCHEMA = StructuredSchema(ValueKind.OBJECT)
 # An effectful capability standing in for the live one. Nothing here is about
 # mail: the rule is about which mutation may start work.
 TRASH = CapabilityDefinition(
-    "move_mail_message_to_trash", "Move one mail item to Trash",
+    "mail", "Move one mail item to Trash",
     SCHEMA, SCHEMA, SideEffect.EFFECTFUL,
 )
 
@@ -73,8 +73,8 @@ def conversation() -> ConversationSnapshot:
 
 def call() -> CapabilityCall:
     return CapabilityCall(
-        "call-trash-1", "move_mail_message_to_trash",
-        {"mailbox_id": "INBOX", "uid_validity": "1376545928", "uid": "59134"},
+        "call-trash-1", "mail",
+        {"action": "trash", "mailbox_id": "INBOX", "uid_validity": "1376545928", "uid": "59134"},
     )
 
 
@@ -169,7 +169,7 @@ class TheLiveComplaintTrace(Harness):
         # The call ran through the ordinary create-goal-and-dispatch path.
         self.assertEqual(len(self.dispatched), 1)
         self.assertEqual(
-            self.dispatched[0].capability_id, "move_mail_message_to_trash"
+            self.dispatched[0].capability_id, "mail"
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         stored = self.store.load("goal-1").state

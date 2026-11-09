@@ -146,11 +146,18 @@ class CapabilityDefinition:
     # Argument values under which an EFFECTFUL capability only reads (D-074):
     # one tool can then look without an active goal and change with one.
     read_only_when: ArgumentAlternatives = ()
+    # Argument values under which an EFFECTFUL capability changes only her own
+    # attention, such as releasing a mail notification: like a read, such a
+    # call needs no active goal.
+    attention_only_when: ArgumentAlternatives = ()
 
     def effect_for(self, arguments: Mapping[str, Any]) -> SideEffect:
-        """This call's effect: NONE when its arguments make it a read."""
-        if self.side_effect is SideEffect.EFFECTFUL and arguments_match(self.read_only_when, arguments):
-            return SideEffect.NONE
+        """This call's effect: NONE for a read, ATTENTION_STATE for an attention change."""
+        if self.side_effect is SideEffect.EFFECTFUL:
+            if arguments_match(self.read_only_when, arguments):
+                return SideEffect.NONE
+            if arguments_match(self.attention_only_when, arguments):
+                return SideEffect.ATTENTION_STATE
         return self.side_effect
 
     def __post_init__(self) -> None:
