@@ -93,7 +93,9 @@ class ShowOnScreenTests(unittest.TestCase):
         # new run for one it has already seen.
         self.assertNotEqual(DisplayBoard().snapshot()["id"], DisplayBoard().snapshot()["id"])
         script = (ASSETS / "display.js").read_text()
-        self.assertIn("${id}:${version}", script)
+        self.assertIn("id !== seenId || version > seenVersion", script)
+        # One poll at a time: a late, older answer cannot reopen a closed viewer.
+        self.assertIn("if (polling) return;", script)
 
     def test_an_overlong_label_is_named_before_the_board_is_read(self) -> None:
         for view in ({"label": "x" * 41}, {"label": "x", "sublabel": "y" * 61}):
