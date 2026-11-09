@@ -81,7 +81,9 @@ def changes_anything(decision: AgentDecision, context) -> bool:
     definition = next((item for item in context.capabilities
                        if item.capability_id == decision.call.capability_id), None)
     # An unknown capability is treated as effectful rather than guessed safe.
-    return definition is None or definition.side_effect is SideEffect.EFFECTFUL
+    # EX-001 as amended 2026-11-09: the class the capability declares for these
+    # exact arguments (D-074), so one tool's reads stay reads.
+    return definition is None or definition.effect_for(decision.call.arguments) is SideEffect.EFFECTFUL
 
 
 class AutonomousReasonerUnavailable(AutonomousReasoningDisabled):

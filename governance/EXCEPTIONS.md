@@ -337,3 +337,24 @@ back, goes to the autonomous Opus instance directly, chosen by origin alone.
 Measured on 2026-11-03 under D-065: such turns almost always called an
 effectful capability, so the first pass started a session, handed over and
 was abandoned, paying the context twice.
+
+### Amendment — 2026-11-09: the effect class is read per declared action
+
+- **Approved by Friedl:** 2026-11-09, in conversation ("A"), choosing between
+  keeping the test on a capability's own class and reading the class it
+  declares per action.
+- **Why:** under D-074 one capability serves several jobs. `mail` reads,
+  changes attention and files or trashes, and it is declared `EFFECTFUL` for
+  its changing actions. Read on the capability alone, every background mail
+  read became "a change" and was reasoned again by Opus, so each new mail cost
+  more.
+
+**Approved behaviour:** `changes_anything` uses the effect class the
+capability declares for the call's exact arguments
+(`CapabilityDefinition.effect_for`): `NONE` for an action declared read-only,
+`ATTENTION_STATE` for one declared attention-only, and otherwise the
+capability's own class. The declarations are exact argument values fixed in
+the capability's definition, never wording. The test still cannot read what a
+call says or what a turn is about. `scripts/check_architecture.py` admits
+exactly `effect_for` and `arguments` beside the attributes it already named.
+An unknown capability is still treated as effectful.
