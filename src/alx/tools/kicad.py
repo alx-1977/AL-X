@@ -229,8 +229,10 @@ DEFINITION = CapabilityDefinition(KICAD,
     'copper, simulate a circuit, read reference files, export manufacturing files or apply '
     'an approved copy to his project. action names which; its fields are listed per action '
     'below. export and write_back change his project and need his approval of the exact '
-    'call; every other action is free. ' + ' '.join(
-        f'[{name.value}] {definition.purpose}' for name, definition in CONTRACTS.items()),
+    'call; every other action is free. Each action below lists its fields and the ones it requires. ' + ' '.join(
+        f'[{name.value}] fields: {", ".join(definition.input_schema.properties) or "none"}; '
+        f'required: {", ".join(definition.input_schema.required) or "none"}. {definition.purpose}'
+        for name, definition in CONTRACTS.items()),
     StructuredSchema(ValueKind.OBJECT, {'action': S, **_FIELDS}, ('action',), extra_properties=False),
     obj({'action': S, 'result': MAP}),
     SideEffect.EFFECTFUL, FAILURES,

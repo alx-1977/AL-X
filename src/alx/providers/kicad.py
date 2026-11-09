@@ -533,7 +533,8 @@ class KiCadProvider:
             boards = sorted(project.glob('*.kicad_pcb'))
             if len(boards) != 1:
                 raise KiCadError('unsupported_project')
-            return boards[0]
+            # The board itself is checked too: a link must not lead outside.
+            return bounded(boards[0], self.design_roots)
         raise KiCadError('arguments_unusable')
 
     def inspect(self, arguments):

@@ -100,6 +100,58 @@ class InspectTests(unittest.TestCase):
         self.assertIn("pcbnew.F_Cu", INSPECT_SCRIPT)
 
 
+class TurnBoundByActionTests(unittest.TestCase):
+    """Review of c19c8c4: one free kicad call spent the turn's instruction."""
+
+    def core(self):
+        from alx.core.loop import CoreAgent
+        core = CoreAgent.__new__(CoreAgent)
+        core._turn_bound_capabilities = frozenset({"kicad", "send_mail_reply"})
+        core._approval_exempt_when = {"kicad": ((("action", "inspect"),), (("action", "check"),))}
+        return core
+
+    def test_free_actions_are_not_bound_to_the_turn(self) -> None:
+        core = self.core()
+        self.assertFalse(core._call_turn_bound(CapabilityCall("c", "kicad", {"action": "inspect"})))
+        self.assertFalse(core._call_turn_bound(CapabilityCall("c", "kicad", {"action": "check"})))
+        self.assertTrue(core._call_turn_bound(CapabilityCall("c", "kicad", {"action": "write_back"})))
+        self.assertTrue(core._call_turn_bound(CapabilityCall("c", "send_mail_reply", {})))
+        self.assertFalse(core._call_turn_bound(CapabilityCall("c", "read_mail_message", {})))
+
+    def test_the_runtime_passes_each_capabilitys_free_actions(self) -> None:
+        source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
+        self.assertIn("approval_exempt_when={", source)
+        loop = (REPOSITORY_ROOT / "src/alx/core/loop.py").read_text()
+        # Every turn-bound decision goes through the per-call test; the only
+        # direct membership test left is inside it.
+        self.assertEqual(loop.count(".capability_id in self._turn_bound_capabilities"), 1)
+        self.assertEqual(loop.count("self._call_turn_bound("), 5)
+
+
+class KiCadDescriptionAndPathTests(unittest.TestCase):
+    def test_each_action_lists_its_fields_and_required_ones(self) -> None:
+        from alx.tools.kicad import DEFINITION
+        self.assertIn("[check] fields: project_dir; required: project_dir.", DEFINITION.purpose)
+        self.assertIn("[write_back] fields: work_copy_id, work_copy_revision, project_dir; required:",
+                      DEFINITION.purpose)
+
+    def test_a_linked_board_outside_the_design_folders_is_refused(self) -> None:
+        from alx.providers.kicad import KiCadError, KiCadProvider
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside.kicad_pcb"
+            outside.write_text("(kicad_pcb)")
+            project = root / "designs" / "P1"
+            project.mkdir(parents=True)
+            (project / "board.kicad_pcb").symlink_to(outside)
+            settings = SimpleNamespace(design_roots=(root / "designs",), work_root=root / "work",
+                                       kicad_python=Path("python"))
+            provider = KiCadProvider(settings, None)
+            with self.assertRaises(KiCadError) as raised:
+                provider._board_for({"project_dir": str(project)})
+            self.assertEqual(str(raised.exception), "path_denied")
+
+
 class WorkerTests(unittest.TestCase):
     def test_the_worker_has_the_one_kicad_capability(self) -> None:
         # It works without approvals, so export and write_back stay out of its reach.

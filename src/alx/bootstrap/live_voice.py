@@ -1416,6 +1416,12 @@ async def run(repository_root: Path) -> None:
             for capability_id, policy in policies.items()
             if policy.approval_required and not policy.standing_scope_allowed
         ),
+        # D-074: the actions of those capabilities that need no approval.
+        approval_exempt_when={
+            capability_id: policy.approval_exempt_when
+            for capability_id, policy in policies.items()
+            if policy.approval_exempt_when
+        },
         # The other half of the same reading: capabilities that reach outside
         # but need only permission. Without it the Core cannot tell that an
         # approval was never required, so a volunteered one is validated

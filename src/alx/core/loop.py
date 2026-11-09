@@ -31,6 +31,7 @@ from alx.contracts import (
     ReasoningPurpose, TraceSink, TraceStatus, TraceSubsystem,
     emit_trace, history_evidence_ids,
 )
+from alx.contracts.capabilities import arguments_match
 from alx.contracts.mail import MailReference
 
 from alx.core.plan_results import (
@@ -341,6 +342,7 @@ class CoreAgent:
                  approval_ttl_seconds: int | None = None,
                  budget_check: Callable[[str], None] | None = None,
                  turn_bound_capabilities: frozenset[str] = frozenset(),
+                 approval_exempt_when: Mapping[str, Any] | None = None,
                  approval_free_capabilities: frozenset[str] = frozenset(),
                  open_thoughts: Callable[[], tuple] | None = None,
                  pending_revisits: Callable[[], tuple] | None = None,
@@ -422,6 +424,9 @@ class CoreAgent:
         # because for them a repeat is ordinary work rather than a second
         # authorised action.
         self._turn_bound_capabilities = frozenset(turn_bound_capabilities)
+        # D-074: actions of a turn-bound capability that need no approval are
+        # not bound to the turn, so one free call does not spend the instruction.
+        self._approval_exempt_when = dict(approval_exempt_when or {})
         # Capabilities that reach outside but whose policy requires no
         # approval. Supplied from the same policies as the turn-bound set, so
         # the Core can tell "needs Friedl's word" from "needs only permission"
@@ -1388,7 +1393,7 @@ class CoreAgent:
                 })
                 continue
             if (
-                decision.call.capability_id in self._turn_bound_capabilities
+                self._call_turn_bound(decision.call)
                 and decision.call.capability_id in approved_dispatches
             ):
                 # The same invariant as the approval check above, enforced on
@@ -1473,7 +1478,7 @@ class CoreAgent:
             if attempt.call != decision.call:
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="attempt_invalid")
             if (
-                decision.call.capability_id in self._turn_bound_capabilities
+                self._call_turn_bound(decision.call)
                 and attempt.implementation_invoked
             ):
                 # The instruction is spent only once an implementation may
@@ -2098,6 +2103,12 @@ class CoreAgent:
             " ".join(item.split()) not in spoken for item in authored
         )
 
+    def _call_turn_bound(self, call: CapabilityCall) -> bool:
+        """Whether this exact call is authorised by Friedl's latest instruction."""
+        return (call.capability_id in self._turn_bound_capabilities
+                and not arguments_match(self._approval_exempt_when.get(call.capability_id, ()),
+                                        call.arguments))
+
     def _approval_proposal_error(
         self, conversation, state, decision, already_dispatched=frozenset(),
         transient_attempts: tuple[CapabilityAttempt, ...] = (),
@@ -2123,7 +2134,7 @@ class CoreAgent:
         ):
             return "approval_source_not_latest_person_turn"
         if (
-            call.capability_id in self._turn_bound_capabilities
+            self._call_turn_bound(call)
             and call.capability_id in already_dispatched
         ):
             # Already done once on this instruction. A second needs a second
@@ -2904,7 +2915,7 @@ class CoreAgent:
             return "plan_capability_unknown"
         if step.wait_seconds and not definition.plan_observation:
             return "plan_wait_unsafe"
-        if step.call.capability_id in self._turn_bound_capabilities:
+        if self._call_turn_bound(step.call):
             return "plan_requires_fresh_authority"
         if self._dispatch_blocked_reason(step.call, snapshot.state) is not None:
             return "plan_dispatch_blocked"
@@ -3064,7 +3075,7 @@ class CoreAgent:
                 definition = self._definition(step.call.capability_id)
                 if definition is None:
                     return "plan_capability_unknown"
-                if step.call.capability_id in self._turn_bound_capabilities:
+                if self._call_turn_bound(step.call):
                     return "plan_requires_fresh_authority"
                 if step.wait_seconds and not definition.plan_observation:
                     return "plan_wait_unsafe"
