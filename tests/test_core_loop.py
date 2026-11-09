@@ -1352,7 +1352,7 @@ class CoreTests(unittest.TestCase):
                                   "approval-0750")
         retry = CapabilityCall("send-0825", "send_mail_reply", arguments,
                                "approval-0825")
-        read = CapabilityCall("read-source", "read_mail_message", reference)
+        read = CapabilityCall("read-source", "mail", {"action": "read", **reference})
         attempts = (CapabilityAttempt(
             read, CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(read.call_id, read.capability_id,

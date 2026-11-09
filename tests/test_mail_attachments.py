@@ -14,11 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import CapabilityResultState, MailAccessError, MailReference  # noqa: E402
 from alx.providers import ICloudMailAdapter, SQLiteMailObservationState  # noqa: E402
-from alx.tools import (  # noqa: E402
-    LIST_MAIL_ATTACHMENTS,
-    READ_MAIL_ATTACHMENT,
-    build_mail_executors,
-)
+from alx.tools import build_mail_executors as build_by_id  # noqa: E402
+from mail_actions import LIST_ATTACHMENTS, READ_ATTACHMENT, by_action  # noqa: E402
+
+
+def build_mail_executors(*args, **kwargs):
+    """The one mail executor, addressed by action (D-074)."""
+    return by_action(build_by_id(*args, **kwargs))
 from pypdf import PdfWriter  # noqa: E402
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject  # noqa: E402
 
@@ -169,10 +171,10 @@ class MailAttachmentTests(unittest.TestCase):
             "uid_validity": "777",
             "uid": "1",
         }
-        listed = executors[LIST_MAIL_ATTACHMENTS](arguments)
+        listed = executors[LIST_ATTACHMENTS](arguments)
         self.assertEqual(listed.state, CapabilityResultState.SUCCEEDED)
         attachment_id = listed.values["attachments"][0]["attachment_id"]
-        read = executors[READ_MAIL_ATTACHMENT](
+        read = executors[READ_ATTACHMENT](
             {**arguments, "attachment_id": attachment_id}
         )
         self.assertIn("SUP-42", read.values["text"])
@@ -185,7 +187,7 @@ class MailAttachmentTests(unittest.TestCase):
             observations=type("Observation", (), {"acknowledge": lambda *_: None})(),
             call_id_source=lambda: "missing",
         )
-        result = executors[READ_MAIL_ATTACHMENT](
+        result = executors[READ_ATTACHMENT](
             {
                 "mailbox_id": "INBOX",
                 "uid_validity": "777",

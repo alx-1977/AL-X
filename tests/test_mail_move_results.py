@@ -16,9 +16,8 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.core import CoreAgent  # noqa: E402
 from alx.providers.icloud_mail import ICloudMailAdapter, SQLiteMailObservationState  # noqa: E402
-from alx.tools import (  # noqa: E402
-    FILE_PROCESSED_MAIL_MESSAGE, MOVE_MAIL_MESSAGE_TO_TRASH, build_mail_executors,
-)
+from alx.tools import build_mail_executors  # noqa: E402
+from mail_actions import FILE, TRASH, by_action, mail_call  # noqa: E402
 
 
 SOURCE = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "42"}
@@ -106,9 +105,9 @@ class MoveResultTests(unittest.TestCase):
             "imap.test", 993, "person@test", "secret", self.observations, 15,
             connection_factory=lambda *_, **__: self.connection,
         )
-        self.executors = build_mail_executors(
+        self.executors = by_action(build_mail_executors(
             self.account, self.account, lambda: "call-1", processed_mailbox="Processed"
-        )
+        ))
 
     def run_move(self, capability):
         return self.executors[capability](SOURCE)
@@ -144,7 +143,7 @@ class MoveResultTests(unittest.TestCase):
         )
 
     def test_confirmed_move_with_done_or_absent_observation_for_both_capabilities(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for settled in (False, True):
                 with self.subTest(capability=capability, settled=settled):
                     self._reset()
@@ -153,13 +152,13 @@ class MoveResultTests(unittest.TestCase):
                     result = self.run_move(capability)
                     self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
                     self.assertEqual(result.values["destination_reference"], DESTINATION)
-                    self.assertTrue(result.values["moved" if capability == MOVE_MAIL_MESSAGE_TO_TRASH else "filed"])
+                    self.assertTrue(result.values["moved" if capability == TRASH else "filed"])
                     self.assertIn(("SELECT", "Processed", True), self.connection.commands)
                     self.assertIn(("UID", "search", None, "UID", "7"), self.connection.commands)
                     self.assert_one_move()
 
     def test_missing_or_malformed_copyuid_is_partial_for_both_capabilities(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for value in (None, b"bad", b"888 41 7", b"0 42 7"):
                 with self.subTest(capability=capability, value=value):
                     self._reset()
@@ -171,7 +170,7 @@ class MoveResultTests(unittest.TestCase):
                     self.assert_one_move()
 
     def test_destination_read_back_unavailable_is_partial_for_both_capabilities(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for unavailable in ("select", "validity", "search", "absent"):
                 with self.subTest(capability=capability, unavailable=unavailable):
                     self._reset()
@@ -191,12 +190,12 @@ class MoveResultTests(unittest.TestCase):
     def test_copyuid_in_move_response_is_used_when_response_code_is_unavailable(self):
         self.connection.copyuid = None
         self.connection.move_data = [b"[COPYUID 888 42 7] Move completed"]
-        result = self.run_move(FILE_PROCESSED_MAIL_MESSAGE)
+        result = self.run_move(FILE)
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(result.values["destination_reference"], DESTINATION)
 
     def test_rejected_uid_move_is_definite_failure_for_both_capabilities(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             with self.subTest(capability=capability):
                 self._reset()
                 self.connection.move_status = "NO"
@@ -207,7 +206,7 @@ class MoveResultTests(unittest.TestCase):
 
     def test_failed_move_keeps_attention_for_both_capabilities(self):
         """move_failed leaves the source in the INBOX, so attention stays."""
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for name in ("source_still_present", "rejected_without_destination"):
                 with self.subTest(capability=capability, case=name):
                     self._reset()
@@ -229,7 +228,7 @@ class MoveResultTests(unittest.TestCase):
                     self.assert_one_move()
 
     def test_successful_or_unconfirmed_move_releases_attention_for_both_capabilities(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for name, prepare, state, code in (
                 ("succeeded", lambda: None, CapabilityResultState.SUCCEEDED, None),
                 (
@@ -269,7 +268,7 @@ class MoveResultTests(unittest.TestCase):
 
     def test_presence_confirms_a_move_copyuid_and_observation_cannot(self):
         quoted = f'"{MESSAGE_ID}"'
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for lost in (False, True):
                 with self.subTest(capability=capability, lost=lost):
                     self._reset()
@@ -279,7 +278,7 @@ class MoveResultTests(unittest.TestCase):
                     self.assertIsNone(result.failure)
                     self.assertEqual(result.values["destination_reference"], DESTINATION)
                     self.assertTrue(
-                        result.values["moved" if capability == MOVE_MAIL_MESSAGE_TO_TRASH else "filed"]
+                        result.values["moved" if capability == TRASH else "filed"]
                     )
                     operations = [
                         item[1] for item in self.connection.commands if item[0] == "UID"
@@ -293,7 +292,7 @@ class MoveResultTests(unittest.TestCase):
                     self.assert_one_move()
 
     def test_presence_failure_is_move_failed_for_both_capabilities(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for lost in (False, True):
                 with self.subTest(capability=capability, lost=lost):
                     self._reset()
@@ -310,7 +309,7 @@ class MoveResultTests(unittest.TestCase):
             "left_without_match": (("OK", [b""]), ("OK", [b""])),
             "several_matches": (("OK", [b""]), ("OK", [b"7 9"])),
         }
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for lost in (False, True):
                 for name, (source, header) in shapes.items():
                     with self.subTest(capability=capability, lost=lost, shape=name):
@@ -328,7 +327,7 @@ class MoveResultTests(unittest.TestCase):
             "accepted": ("OK", False, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
             "lost": ("OK", True, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
         }
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for name, (status, lost, state, code) in responses.items():
                 with self.subTest(capability=capability, response=name):
                     self._reset()
@@ -356,7 +355,7 @@ class MoveResultTests(unittest.TestCase):
             "lost": ("OK", True, CapabilityResultState.PARTIAL, "mail_move_unconfirmed"),
         }
         quoted = f'"{MESSAGE_ID}"'
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for name, (status, lost, state, code) in responses.items():
                 with self.subTest(capability=capability, response=name):
                     self._reset()
@@ -379,7 +378,7 @@ class MoveResultTests(unittest.TestCase):
                     self.assert_one_move()
 
     def test_local_acknowledge_error_does_not_downgrade_confirmed_move(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             with self.subTest(capability=capability):
                 self._reset()
                 self.observations.acknowledge = lambda _reference: (_ for _ in ()).throw(
@@ -389,7 +388,7 @@ class MoveResultTests(unittest.TestCase):
                 self.assert_one_move()
 
     def test_only_confirmed_move_can_support_completion_for_both_capabilities(self):
-        for capability in (MOVE_MAIL_MESSAGE_TO_TRASH, FILE_PROCESSED_MAIL_MESSAGE):
+        for capability in (TRASH, FILE):
             for confirmed in (False, True):
                 with self.subTest(capability=capability, confirmed=confirmed):
                     self._reset()
@@ -397,7 +396,7 @@ class MoveResultTests(unittest.TestCase):
                         self.connection.copyuid = None
                     result = self.run_move(capability)
                     attempt = CapabilityAttempt(
-                        CapabilityCall("call-1", capability, SOURCE),
+                        mail_call("call-1", capability, SOURCE),
                         CapabilityAttemptDisposition.EXECUTED, True, result,
                     )
                     state = GoalState(

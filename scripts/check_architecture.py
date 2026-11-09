@@ -717,6 +717,8 @@ FIRST_PASS_TEST_ATTRIBUTES = frozenset(
         "plan_update", "approval_proposal", "goal_proposal", "kind", "call",
         "capabilities", "capability_id", "side_effect",
         "REQUEST_COMPLETION", "CANCEL", "EFFECTFUL",
+        # EX-001 as amended 2026-11-09: the class declared per exact arguments.
+        "effect_for", "arguments",
     }
 )
 

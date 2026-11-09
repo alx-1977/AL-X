@@ -33,7 +33,8 @@ from alx.contracts import (  # noqa: E402
     SuccessCriterion,
 )
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
-from alx.tools import CAPTURE_SUPPLIER_INVOICE, FILE_PROCESSED_MAIL_MESSAGE  # noqa: E402
+from alx.tools import CAPTURE_SUPPLIER_INVOICE, MAIL  # noqa: E402
+from mail_actions import FILE, READ, mail_arguments  # noqa: E402
 
 
 REFERENCE = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "12"}
@@ -68,8 +69,8 @@ class ScopeDerivationTests(unittest.TestCase):
     def test_a_completed_capture_authorises_filing_that_message(self) -> None:
         scopes = captured_invoice_filing_scopes(goal(attempt(completed=True)))
         self.assertEqual(len(scopes), 1)
-        self.assertEqual(scopes[0].capability_id, FILE_PROCESSED_MAIL_MESSAGE)
-        self.assertEqual(dict(scopes[0].arguments), REFERENCE)
+        self.assertEqual(scopes[0].capability_id, MAIL)
+        self.assertEqual(dict(scopes[0].arguments), mail_arguments(FILE, REFERENCE))
 
     def test_a_returned_capture_authorises_nothing(self) -> None:
         """A capture that stopped for ambiguity did not process the invoice."""
@@ -79,13 +80,14 @@ class ScopeDerivationTests(unittest.TestCase):
 
     def test_a_capture_of_one_message_does_not_authorise_another(self) -> None:
         scopes = captured_invoice_filing_scopes(goal(attempt(completed=True)))
-        self.assertNotIn(OTHER, [dict(item.arguments) for item in scopes])
+        self.assertNotIn(mail_arguments(FILE, OTHER), [dict(item.arguments) for item in scopes])
 
     def test_reading_a_message_authorises_nothing(self) -> None:
         """Merely looking at mail must not permit filing it."""
         self.assertEqual(
             captured_invoice_filing_scopes(
-                goal(attempt(completed=True, capability="read_mail_message"))
+                goal(attempt(completed=True, capability=MAIL,
+                             arguments=mail_arguments(READ, REFERENCE)))
             ),
             (),
         )
@@ -116,7 +118,7 @@ class GateEnforcementTests(unittest.TestCase):
     def outcome(self, state, arguments):
         gate, permissions = self.gate()
         return gate.evaluate(
-            CapabilityCall("call-2", FILE_PROCESSED_MAIL_MESSAGE, arguments),
+            CapabilityCall("call-2", MAIL, mail_arguments(FILE, arguments)),
             AuthorityContext(
                 "friedl",
                 frozenset(permissions),

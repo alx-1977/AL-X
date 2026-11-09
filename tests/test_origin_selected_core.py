@@ -197,9 +197,13 @@ class FirstPassTests(unittest.TestCase):
         )
         schema = StructuredSchema(ValueKind.OBJECT)
         self.capabilities = (
-            CapabilityDefinition("read_mail_message", "read", schema, schema, SideEffect.NONE),
+            CapabilityDefinition("read_record", "read", schema, schema, SideEffect.NONE),
             CapabilityDefinition("merge_pull_request", "merge", schema, schema,
                                  SideEffect.EFFECTFUL),
+            # D-074: one capability, its reads and attention changes declared per action.
+            CapabilityDefinition("mail", "mail", schema, schema, SideEffect.EFFECTFUL,
+                                 read_only_when=((("action", "read"),),),
+                                 attention_only_when=((("action", "acknowledge"),),)),
         )
         self.call = lambda capability: CapabilityCall("c", capability, {}, None)
         self.person = RecordingReasoner("opus-person")
@@ -215,7 +219,7 @@ class FirstPassTests(unittest.TestCase):
         for decision in (
             AgentDecision(response="nothing needed"),
             AgentDecision(finish_silently=True),
-            AgentDecision(call=self.call("read_mail_message")),
+            AgentDecision(call=self.call("read_record")),
         ):
             with self.subTest(decision=decision):
                 self.first.next = decision
@@ -239,6 +243,18 @@ class FirstPassTests(unittest.TestCase):
             with self.subTest(decision=decision):
                 self.first.next = decision
                 self.assertEqual(self.reasoner.decide(self.context()).response, "opus")
+
+    def test_the_class_is_read_per_declared_action(self) -> None:
+        """EX-001 as amended 2026-11-09: one tool's reads stay reads."""
+        from alx.contracts import CapabilityCall
+        for action in ("read", "acknowledge"):
+            with self.subTest(action=action):
+                decision = AgentDecision(call=CapabilityCall("c", "mail", {"action": action}, None))
+                self.first.next = decision
+                self.assertIs(self.reasoner.decide(self.context()), decision)
+        self.assertEqual(self.deep.contexts, [])
+        self.first.next = AgentDecision(call=CapabilityCall("c", "mail", {"action": "trash"}, None))
+        self.assertEqual(self.reasoner.decide(self.context()).response, "opus")
 
     def test_a_person_turn_never_uses_the_first_pass(self) -> None:
         self.first.next = AgentDecision(response="first")

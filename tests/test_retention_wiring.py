@@ -290,10 +290,10 @@ class CapabilityResultProvenanceTests(unittest.TestCase):
                 self.assertFalse(snapshot.provenance.governed_by_retention())
 
                 # Reading a message returns a result carrying mail provenance.
-                call = CapabilityCall("call-1", "read_mail_message", {})
+                call = CapabilityCall("call-1", "mail", {"action": "read"})
                 result = CapabilityResult(
                     "call-1",
-                    "read_mail_message",
+                    "mail",
                     CapabilityResultState.SUCCEEDED,
                     {"subject": "Quote"},
                     provenance=policy.direct_mail(NOW, (REFERENCE,)),

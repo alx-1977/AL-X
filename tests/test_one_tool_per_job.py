@@ -58,6 +58,19 @@ class ArgumentAlternativesTests(unittest.TestCase):
                                        read_only_when=((("action", "x"),),))
         self.assertIs(reading.effect_for({}), SideEffect.NONE)
 
+    def test_an_attention_action_of_a_changing_capability_is_attention_state(self) -> None:
+        # Mail's acknowledge releases a notification and changes no mail (D-074, 2026-11-09).
+        definition = CapabilityDefinition("mail", "Mail.", OBJECT, OBJECT, SideEffect.EFFECTFUL,
+                                          read_only_when=((("action", "read"),),),
+                                          attention_only_when=((("action", "acknowledge"),),))
+        self.assertIs(definition.effect_for({"action": "read"}), SideEffect.NONE)
+        self.assertIs(definition.effect_for({"action": "acknowledge"}), SideEffect.ATTENTION_STATE)
+        self.assertIs(definition.effect_for({"action": "trash"}), SideEffect.EFFECTFUL)
+        # Only an effectful capability is narrowed; a read stays a read.
+        reading = CapabilityDefinition("r", "Reads.", OBJECT, OBJECT, SideEffect.NONE,
+                                       attention_only_when=((("action", "x"),),))
+        self.assertIs(reading.effect_for({"action": "x"}), SideEffect.NONE)
+
 
 class InspectTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -116,7 +129,7 @@ class TurnBoundByActionTests(unittest.TestCase):
         self.assertFalse(core._call_turn_bound(CapabilityCall("c", "kicad", {"action": "check"})))
         self.assertTrue(core._call_turn_bound(CapabilityCall("c", "kicad", {"action": "write_back"})))
         self.assertTrue(core._call_turn_bound(CapabilityCall("c", "send_mail_reply", {})))
-        self.assertFalse(core._call_turn_bound(CapabilityCall("c", "read_mail_message", {})))
+        self.assertFalse(core._call_turn_bound(CapabilityCall("c", "mail", {"action": "read"})))
 
     def test_the_runtime_passes_each_capabilitys_free_actions(self) -> None:
         source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()

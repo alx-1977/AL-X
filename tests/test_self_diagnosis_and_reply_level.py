@@ -137,8 +137,8 @@ class SessionPrivacyAndDetailTests(unittest.TestCase):
         self.long_detail = "Figure. " * 400
         _record(self.root / "2026-11-08", "085910-cccccccc.jsonl", "Capture the bill", [
             _event("tool_use", id="t1", name="mcp__alx__call_capability",
-                   input={"capability_id": "list_mail_attachments", "arguments_json": json.dumps(
-                       {"mailbox_id": "INBOX", "uid_validity": "1376545928", "uid": "61560"})}),
+                   input={"capability_id": "mail", "arguments_json": json.dumps(
+                       {"action": "list_attachments", "mailbox_id": "INBOX", "uid_validity": "1376545928", "uid": "61560"})}),
             _event("tool_result", tool_use_id="t1", content=[{"type": "text", "text": json.dumps({
                 "result_state": "failed",
                 "failure": {"code": "provider_failed", "service_message": "api_key=abc123secretvalue"},
@@ -309,6 +309,26 @@ class ReplyLevelTests(unittest.TestCase):
         self.assertIn('"Captured and approved."', PROTOCOL_INSTRUCTIONS)
         # An example carrying an identifier taught the opposite of the rule.
         self.assertNotIn("5779714592", PROTOCOL_INSTRUCTIONS)
+
+    def test_her_examples_cover_a_request_by_email_and_a_status_question(self) -> None:
+        # 2026-11-09: she narrated a parcel's journey and asked whether to
+        # look something up she could simply read.
+        self.assertIn("\"DHL emailed about an overdue payment. It's already recorded.\"",
+                      PROTOCOL_INSTRUCTIONS)
+        self.assertIn("\"The JLC parcel is due on the 19th and the DigiKey one on the 12th. "
+                      "I can't track the Communica one.\"", PROTOCOL_INSTRUCTIONS)
+
+    def test_a_free_read_is_done_not_offered_and_approval_is_asked_plainly(self) -> None:
+        text = " ".join(PROTOCOL_INSTRUCTIONS.split())
+        self.assertIn("A check that only reads and costs nothing needs no asking: do it, "
+                      "then answer from it.", text)
+        self.assertIn("When something needs his approval anyway, ask for it; "
+                      "do not list what you have not done.", text)
+
+    def test_a_status_answer_is_dates_and_what_he_must_act_on(self) -> None:
+        from alx.core.model_reasoner import RESPONSE_FIELD
+        self.assertIn("For a status question: the dates and anything he must act on, "
+                      "not journeys, reasons or reassurance.", RESPONSE_FIELD["description"])
 
     def test_why_questions_are_answered_from_her_session_records(self) -> None:
         self.assertIn("read your session records", PROTOCOL_INSTRUCTIONS)

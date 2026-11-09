@@ -34,11 +34,11 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.tools import (  # noqa: E402
-    FILE_PROCESSED_MAIL_MESSAGE,
+    MAIL,
     PROCESS_DHL_IMPORT,
-    SET_MAIL_FLAG_COLOUR,
     build_mail_executors,
 )
+from mail_actions import FILE, FLAG, by_action, mail_arguments  # noqa: E402
 
 DOCS = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "60692"}
 FILED_DOCS = {"mailbox_id": "FireFli/Processed", "uid_validity": "888", "uid": "41"}
@@ -75,28 +75,28 @@ def scopes_of(state):
             for item in dhl_mail_scopes(state)}
 
 
-def scope(capability, arguments):
-    return (capability, tuple(sorted(arguments.items())))
+def scope(action, arguments):
+    return (MAIL, tuple(sorted(mail_arguments(action, arguments).items())))
 
 
 class ScopeDerivationTests(unittest.TestCase):
     def test_a_drafted_import_authorises_filing_and_an_orange_flag(self) -> None:
         scopes = scopes_of(goal(dhl("customs_documents")))
         self.assertEqual(scopes, {
-            scope(FILE_PROCESSED_MAIL_MESSAGE, DOCS),
-            scope(SET_MAIL_FLAG_COLOUR, {**DOCS, "colour": "orange"}),
+            scope(FILE, DOCS),
+            scope(FLAG, {**DOCS, "colour": "orange"}),
         })
 
     def test_an_authorised_bill_authorises_filing_its_invoice_and_clearing_the_flag(self) -> None:
         scopes = scopes_of(goal(dhl("dhl_invoice", source=(INVOICE,), customs=(FILED_DOCS,))))
         self.assertEqual(scopes, {
-            scope(FILE_PROCESSED_MAIL_MESSAGE, INVOICE),
-            scope(SET_MAIL_FLAG_COLOUR, {**FILED_DOCS, "colour": "none"}),
+            scope(FILE, INVOICE),
+            scope(FLAG, {**FILED_DOCS, "colour": "none"}),
         })
 
     def test_a_duty_tax_paid_bill_is_filed_but_never_flagged(self) -> None:
         scopes = scopes_of(goal(dhl("dhl_duty_tax_invoice", source=(INVOICE,))))
-        self.assertEqual(scopes, {scope(FILE_PROCESSED_MAIL_MESSAGE, INVOICE)})
+        self.assertEqual(scopes, {scope(FILE, INVOICE)})
 
     def test_a_returned_import_authorises_nothing(self) -> None:
         self.assertEqual(dhl_mail_scopes(goal(dhl("customs_documents", completed=False))), ())
@@ -115,7 +115,7 @@ class GateEnforcementTests(unittest.TestCase):
                 lambda: "call-1",
             )
         return SafetyGate(runtime.policies).evaluate(
-            CapabilityCall("call-2", capability, arguments),
+            CapabilityCall("call-2", MAIL, mail_arguments(capability, arguments)),
             AuthorityContext("friedl", frozenset(runtime.permissions),
                              datetime(2026, 10, 14, tzinfo=UTC),
                              standing_scopes=dhl_mail_scopes(state)),
@@ -124,20 +124,20 @@ class GateEnforcementTests(unittest.TestCase):
     def test_flagging_the_drafted_documents_email_orange_is_allowed(self) -> None:
         state = goal(dhl("customs_documents"))
         self.assertEqual(
-            self.outcome(state, SET_MAIL_FLAG_COLOUR, {**DOCS, "colour": "orange"}),
+            self.outcome(state, FLAG, {**DOCS, "colour": "orange"}),
             SafetyState.ALLOWED,
         )
         self.assertEqual(
-            self.outcome(state, FILE_PROCESSED_MAIL_MESSAGE, DOCS), SafetyState.ALLOWED
+            self.outcome(state, FILE, DOCS), SafetyState.ALLOWED
         )
 
     def test_flagging_and_filing_are_hers_since_d_051(self) -> None:
         """D-051: flags and filing can be undone, so they no longer wait on a DHL result."""
         state = goal(dhl("customs_documents"))
         for capability, arguments in (
-            (SET_MAIL_FLAG_COLOUR, {**DOCS, "colour": "none"}),
-            (SET_MAIL_FLAG_COLOUR, {**OTHER, "colour": "orange"}),
-            (FILE_PROCESSED_MAIL_MESSAGE, OTHER),
+            (FLAG, {**DOCS, "colour": "none"}),
+            (FLAG, {**OTHER, "colour": "orange"}),
+            (FILE, OTHER),
         ):
             with self.subTest(capability=capability, arguments=arguments):
                 self.assertEqual(self.outcome(state, capability, arguments), SafetyState.ALLOWED)
@@ -156,7 +156,7 @@ class FlagAccount:
 
 class FlagCapabilityTests(unittest.TestCase):
     def run_flag(self, account, colour):
-        return build_mail_executors(account, account, lambda: "call-1")[SET_MAIL_FLAG_COLOUR](
+        return by_action(build_mail_executors(account, account, lambda: "call-1"))[FLAG](
             {**DOCS, "colour": colour}
         )
 

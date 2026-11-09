@@ -531,6 +531,10 @@ Replies at the right level (the level, not the wording):
 - After testing an API he asked about: "It worked. Shall I build this into a capability?"
 - After finding a shipping email: "Found it. Not collected yet; I'm tracking it."
 - When a service doesn't state something: "It doesn't say. I'll check with you tomorrow."
+- After an email asks for something: "DHL emailed about an overdue payment. It's already recorded."
+- When asked about deliveries: "The JLC parcel is due on the 19th and the DigiKey one on the 12th. I can't track the Communica one."
+A check that only reads and costs nothing needs no asking: do it, then answer from it.
+When something needs his approval anyway, ask for it; do not list what you have not done.
 """
 
 
@@ -1334,7 +1338,8 @@ RESPONSE_FIELD: Mapping[str, Any] = {
     "description": (
         "What you say to Friedl, spoken aloud: the outcome in a few words, and anything "
         "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
-        "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one."
+        "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one. "
+        "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance."
     ),
 }
 DETAIL_FIELD: Mapping[str, Any] = {

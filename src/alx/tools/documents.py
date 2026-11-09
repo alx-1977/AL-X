@@ -41,7 +41,7 @@ _MAX_TEXT = 2_000
 
 DEFINITION = CapabilityDefinition(
     READ_MAIL_DOCUMENT,
-    "Read one commercial document attached to a mail (a purchase order, quotation, invoice, delivery note or statement; PDF or image) and return what it states: document_type, document_number, issued_by, issued_to, date, currency, the other document numbers it references, subtotal, tax_amount, total and every line with description, quantity, unit_price and amount, as printed. Empty strings mean the document does not state it. Name the exact attachment and its sha256 from list_mail_attachments. Read the document rather than relying on an attachment's filename.",
+    "Read one commercial document attached to a mail (a purchase order, quotation, invoice, delivery note or statement; PDF or image) and return what it states: document_type, document_number, issued_by, issued_to, date, currency, the other document numbers it references, subtotal, tax_amount, total and every line with description, quantity, unit_price and amount, as printed. Empty strings mean the document does not state it. Name the exact attachment and its sha256 from mail's list_attachments action. Read the document rather than relying on an attachment's filename.",
     StructuredSchema(
         ValueKind.OBJECT,
         {

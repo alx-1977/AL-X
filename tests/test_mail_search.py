@@ -15,7 +15,8 @@ from alx.contracts import (  # noqa: E402
     MailSearchCriteria,
 )
 from alx.providers import ICloudMailAdapter, SQLiteMailObservationState  # noqa: E402
-from alx.tools import SEARCH_MAIL_MESSAGES, build_mail_executors  # noqa: E402
+from alx.tools import build_mail_executors  # noqa: E402
+from mail_actions import SEARCH, by_action  # noqa: E402
 
 
 def message(subject: str, *, attachment: bool = False) -> bytes:
@@ -137,10 +138,10 @@ class MailSearchTests(unittest.TestCase):
                 "imap.example.test", 993, "friedl@example.test", "secret", state, 1,
                 connection_factory=lambda *args, **kwargs: connection,
             )
-            executor = build_mail_executors(
+            executor = by_action(build_mail_executors(
                 account, state, lambda: "search-1",
                 clock=lambda: datetime(2026, 8, 31, tzinfo=UTC),
-            )[SEARCH_MAIL_MESSAGES]
+            ))[SEARCH]
             result = executor({"mailbox_id": "INBOX", "limit": 1})
             state.close()
 

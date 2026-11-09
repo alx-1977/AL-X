@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from dataclasses import dataclass
 from datetime import date
-from typing import AsyncIterator, Protocol
+from typing import Any, AsyncIterator, Mapping, Protocol
 
 from alx.contracts.diagnostics import service_message
 
@@ -296,3 +298,43 @@ class MailAccount(Protocol):
 
 class MailObservationControl(Protocol):
     def acknowledge(self, reference: MailReference) -> None: ...
+
+
+class MailAction(str, Enum):
+    """Every mail job except sending, a closed list like the KiCad actions (D-074)."""
+
+    SEARCH = "search"
+    READ = "read"
+    LIST_ATTACHMENTS = "list_attachments"
+    READ_ATTACHMENT = "read_attachment"
+    ACKNOWLEDGE = "acknowledge"
+    MARK_SEEN = "mark_seen"
+    FLAG = "flag"
+    FILE = "file"
+    TRASH = "trash"
+
+
+# Goals saved before D-074 hold calls under the nine former capability ids.
+# They are only recognised here, so a resumed goal still knows what it already
+# read or trashed; none of them can be called (Law 0).
+_RECORDED_BEFORE_D074 = {
+    "search_mail_messages": MailAction.SEARCH,
+    "read_mail_message": MailAction.READ,
+    "list_mail_attachments": MailAction.LIST_ATTACHMENTS,
+    "read_mail_attachment": MailAction.READ_ATTACHMENT,
+    "acknowledge_mail_message": MailAction.ACKNOWLEDGE,
+    "mark_mail_message_seen": MailAction.MARK_SEEN,
+    "set_mail_flag_colour": MailAction.FLAG,
+    "file_processed_mail_message": MailAction.FILE,
+    "move_mail_message_to_trash": MailAction.TRASH,
+}
+
+
+def recorded_mail_action(capability_id: str, arguments: Mapping[str, Any]) -> MailAction | None:
+    """Which mail job a recorded call was, in today's form or as saved before D-074."""
+    if capability_id == "mail":
+        try:
+            return MailAction(arguments.get("action"))
+        except ValueError:
+            return None
+    return _RECORDED_BEFORE_D074.get(capability_id)

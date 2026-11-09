@@ -62,7 +62,7 @@ FAKE_CLI = textwrap.dedent('''\
     seen = []
     for number, (name, arguments) in enumerate((
             ("select_goal", {{"goal_id": "g1"}}),
-            ("call_capability", {{"call_id": "c2", "capability_id": "read_mail_message",
+            ("call_capability", {{"call_id": "c2", "capability_id": "read_record",
                                  "arguments_json": "{{}}", "approval_id": None,
                                  "approval_source_reference": None}}))):
         assistant(f"m{{number}}", 1000 * (number + 1),
@@ -142,7 +142,7 @@ class NativeSessionTests(unittest.TestCase):
             "Reasoning session call 1/3: tool=select_goal capability=None input=3 "
             "cache_read=1000 cache_write=100 result_chars=%d"
             % len(json.dumps([{"type": "text", "text": "goal one"}])),
-            "Reasoning session call 2/3: tool=call_capability capability=read_mail_message "
+            "Reasoning session call 2/3: tool=call_capability capability=read_record "
             "input=3 cache_read=2000 cache_write=100 result_chars=%d"
             % len(json.dumps([{"type": "text", "text": "mail two"}])),
             "Reasoning session call 3/3: tool=StructuredOutput capability=None input=3 "

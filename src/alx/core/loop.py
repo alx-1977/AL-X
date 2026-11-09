@@ -32,7 +32,7 @@ from alx.contracts import (
     emit_trace, history_evidence_ids,
 )
 from alx.contracts.capabilities import arguments_match
-from alx.contracts.mail import MailReference
+from alx.contracts.mail import MailAction, MailReference, recorded_mail_action
 
 from alx.core.plan_results import (
     PlanResultClassification, PlanResultKind,
@@ -2046,7 +2046,8 @@ class CoreAgent:
                 )
                 for attempt in reversed(read_attempts):
                     if (attempt.call is None or attempt.result is None
-                            or attempt.call.capability_id != "read_mail_message"
+                            or recorded_mail_action(attempt.call.capability_id,
+                                                    attempt.call.arguments) is not MailAction.READ
                             or tuple(attempt.call.arguments.get(key) for key in (
                                 "mailbox_id", "uid_validity", "uid"
                             )) != reference):

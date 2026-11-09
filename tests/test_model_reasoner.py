@@ -627,9 +627,9 @@ class ModelReasonerTests(unittest.TestCase):
         self.assertEqual(decision.call.durable_arguments["entry_id"], "entry-1")
 
     def test_exact_action_approval_proposal_stays_bound_to_same_call(self) -> None:
-        arguments = '{"mailbox_id":"INBOX","uid_validity":"777","uid":"2"}'
+        arguments = '{"action":"trash","mailbox_id":"INBOX","uid_validity":"777","uid":"2"}'
         output = call_tool(
-            capability_id="move_mail_message_to_trash",
+            capability_id="mail",
             arguments_json=arguments,
             approval_id="approval-1",
             approval_source_reference="turn:turn-1",

@@ -155,7 +155,8 @@ class ReadExposesReplyDataTests(unittest.TestCase):
         self.assertEqual(content.threading.reply_references(), ("<p@example.test>",))
 
     def test_the_read_capability_declares_the_reply_fields(self) -> None:
-        read = next(d for d in DEFINITIONS if d.capability_id == "read_mail_message")
+        from alx.tools.mail import CONTRACTS, MailAction
+        read = CONTRACTS[MailAction.READ]
         for field_name in ("reply_to", "recipients", "carbon_copy",
                            "message_id", "reply_references"):
             self.assertIn(field_name, read.output_schema.properties)
@@ -277,25 +278,22 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
 
     def test_successful_attachment_free_reply_grants_exact_seen_and_trash_scopes(self) -> None:
         from alx.bootstrap.mail import mail_post_reply_standing_scopes
-        from alx.tools import MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH
+        from mail_actions import MARK_SEEN, TRASH, mail_scope
 
         scopes = mail_post_reply_standing_scopes(self.state(False))
-        expected = {
-            (MARK_MAIL_MESSAGE_SEEN, "2"),
-            (MOVE_MAIL_MESSAGE_TO_TRASH, "2"),
-        }
+        reference = {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"}
         self.assertEqual(
-            {(item.capability_id, item.arguments["uid"]) for item in scopes},
-            expected,
+            list(scopes),
+            [mail_scope(MARK_SEEN, reference), mail_scope(TRASH, reference)],
         )
 
     def test_attachment_reply_grants_seen_but_never_automatic_trash(self) -> None:
         from alx.bootstrap.mail import mail_post_reply_standing_scopes
-        from alx.tools import MARK_MAIL_MESSAGE_SEEN
+        from mail_actions import MARK_SEEN
 
         scopes = mail_post_reply_standing_scopes(self.state(True))
-        self.assertEqual([item.capability_id for item in scopes],
-                         [MARK_MAIL_MESSAGE_SEEN])
+        self.assertEqual([item.arguments["action"] for item in scopes],
+                         [MARK_SEEN])
 
     def test_partial_failed_or_unaccepted_reply_grants_nothing(self) -> None:
         from alx.bootstrap.mail import mail_post_reply_standing_scopes
@@ -341,7 +339,8 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
         from alx.contracts import CapabilityCall
         from alx.goals import SQLiteGoalStore
         from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate, SafetyState
-        from alx.tools import MARK_MAIL_MESSAGE_SEEN
+        from alx.tools import MAIL
+        from mail_actions import MARK_SEEN, mail_call
 
         directory = tempfile.TemporaryDirectory()
         store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3")
@@ -351,7 +350,7 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
             recovered = store.load("goal-1").state
             scopes = mail_post_reply_standing_scopes(recovered)
             gate = SafetyGate({
-                MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(
+                MAIL: AuthorityPolicy(
                     frozenset({MAIL_SEEN_PERMISSION}),
                     approval_required=True,
                     standing_scope_allowed=True,
@@ -361,12 +360,21 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
                 "friedl", frozenset({MAIL_SEEN_PERMISSION}), now,
                 standing_scopes=scopes,
             )
-            exact = CapabilityCall("seen-1", MARK_MAIL_MESSAGE_SEEN, {
+            exact = mail_call("seen-1", MARK_SEEN, {
                 "mailbox_id": "INBOX", "uid_validity": "1", "uid": "2",
             })
-            wrong = CapabilityCall("seen-2", MARK_MAIL_MESSAGE_SEEN, {
+            wrong = mail_call("seen-2", MARK_SEEN, {
                 "mailbox_id": "INBOX", "uid_validity": "1", "uid": "3",
             })
+            # The scope is for one action: the same message under another
+            # action is not covered.
+            other_action = mail_call("trash-9", "flag", {
+                "mailbox_id": "INBOX", "uid_validity": "1", "uid": "2", "colour": "orange",
+            })
+            self.assertEqual(
+                gate.evaluate(other_action, authority).state,
+                SafetyState.APPROVAL_REQUIRED,
+            )
             self.assertEqual(gate.evaluate(exact, authority).state, SafetyState.ALLOWED)
             self.assertEqual(
                 gate.evaluate(wrong, authority).state,
@@ -382,10 +390,11 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
             CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall,
             CapabilityResult,
         )
-        from alx.tools import MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH
+        from alx.tools import MAIL
+        from mail_actions import MARK_SEEN, TRASH, mail_call
 
-        trash_call = CapabilityCall(
-            "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH,
+        trash_call = mail_call(
+            "trash-1", TRASH,
             {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"},
         )
         attempted = CapabilityAttempt(
@@ -393,15 +402,15 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
             CapabilityAttemptDisposition.EXECUTED,
             True,
             CapabilityResult(
-                "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH,
+                "trash-1", MAIL,
                 CapabilityResultState.FAILED, failure={"code": "move_failed"},
             ),
         )
         scopes = mail_post_reply_standing_scopes(
             self.state(False, extra_attempts=(attempted,))
         )
-        self.assertEqual([item.capability_id for item in scopes],
-                         [MARK_MAIL_MESSAGE_SEEN])
+        self.assertEqual([item.arguments["action"] for item in scopes],
+                         [MARK_SEEN])
 
     def test_each_post_reply_result_returns_to_core_before_the_next_action(self) -> None:
         import tempfile
@@ -418,52 +427,41 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
         from alx.core import CoreAgent, CoreState
         from alx.goals import SQLiteGoalStore
         from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
-        from alx.tools import (
-            DEFINITIONS, MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH,
-        )
+        from alx.tools import DEFINITIONS, MAIL
+        from mail_actions import MARK_SEEN, TRASH, mail_call
 
         now = datetime(2026, 8, 30, tzinfo=UTC)
         reference = {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"}
-        seen_call = CapabilityCall("seen-1", MARK_MAIL_MESSAGE_SEEN, reference)
-        trash_call = CapabilityCall(
-            "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH, reference
-        )
+        seen_call = mail_call("seen-1", MARK_SEEN, reference)
+        trash_call = mail_call("trash-1", TRASH, reference)
         calls = []
 
-        def seen(_arguments):
-            calls.append(MARK_MAIL_MESSAGE_SEEN)
+        def mail(arguments):
+            # A controlled stand-in for the one mail executor.
+            calls.append(arguments["action"])
+            if arguments["action"] == MARK_SEEN:
+                return CapabilityResult(
+                    "seen-1", MAIL,
+                    CapabilityResultState.SUCCEEDED,
+                    {"reference": reference, "seen": True},
+                )
             return CapabilityResult(
-                "seen-1", MARK_MAIL_MESSAGE_SEEN,
-                CapabilityResultState.SUCCEEDED,
-                {"reference": reference, "seen": True},
-            )
-
-        def trash(_arguments):
-            calls.append(MOVE_MAIL_MESSAGE_TO_TRASH)
-            return CapabilityResult(
-                "trash-1", MOVE_MAIL_MESSAGE_TO_TRASH,
+                "trash-1", MAIL,
                 CapabilityResultState.SUCCEEDED,
                 {"reference": reference, "trash_mailbox_id": "Trash", "moved": True},
             )
 
-        selected = tuple(item for item in DEFINITIONS if item.capability_id in {
-            MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH,
-        })
+        selected = tuple(item for item in DEFINITIONS if item.capability_id == MAIL)
         broker = CapabilityBroker(
             CapabilityRegistry(selected),
             SafetyGate({
-                MARK_MAIL_MESSAGE_SEEN: AuthorityPolicy(
-                    frozenset({MAIL_SEEN_PERMISSION}),
-                    approval_required=True,
-                    standing_scope_allowed=True,
-                ),
-                MOVE_MAIL_MESSAGE_TO_TRASH: AuthorityPolicy(
-                    frozenset({MAIL_TRASH_PERMISSION}),
+                MAIL: AuthorityPolicy(
+                    frozenset({MAIL_SEEN_PERMISSION, MAIL_TRASH_PERMISSION}),
                     approval_required=True,
                     standing_scope_allowed=True,
                 ),
             }),
-            {MARK_MAIL_MESSAGE_SEEN: seen, MOVE_MAIL_MESSAGE_TO_TRASH: trash},
+            {MAIL: mail},
         )
         reasoner = Queued(
             AgentDecision(goal_id="goal-1"),
@@ -492,14 +490,14 @@ class PostReplyStandingAuthorityTests(unittest.TestCase):
                 4,
             )
             self.assertEqual(outcome.state, CoreState.RESPONDED)
-            self.assertEqual(calls, [MARK_MAIL_MESSAGE_SEEN, MOVE_MAIL_MESSAGE_TO_TRASH])
+            self.assertEqual(calls, [MARK_SEEN, TRASH])
             self.assertEqual(
-                reasoner.contexts[2].active_goal.attempts[-1].call.capability_id,
-                MARK_MAIL_MESSAGE_SEEN,
+                reasoner.contexts[2].active_goal.attempts[-1].call.arguments["action"],
+                MARK_SEEN,
             )
             self.assertEqual(
-                reasoner.contexts[3].active_goal.attempts[-1].call.capability_id,
-                MOVE_MAIL_MESSAGE_TO_TRASH,
+                reasoner.contexts[3].active_goal.attempts[-1].call.arguments["action"],
+                TRASH,
             )
         finally:
             store.close()
@@ -761,13 +759,13 @@ class UnheardTextTests(unittest.TestCase):
 
     def test_a_capability_carrying_no_authored_text_is_unaffected(self) -> None:
         """Reading, acknowledging and trashing are untouched by this rule."""
-        from alx.contracts import CapabilityCall
         from alx.core.loop import CoreAgent
+        from mail_actions import ACKNOWLEDGE, READ, TRASH, mail_call
 
         conversation = self._conversation((False, "Trash that one."))
-        for capability_id in ("read_mail_message", "move_mail_message_to_trash"):
-            call = CapabilityCall(
-                "call-1", capability_id,
+        for action in (READ, ACKNOWLEDGE, TRASH):
+            call = mail_call(
+                "call-1", action,
                 {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"},
             )
             self.assertFalse(CoreAgent._unheard_authored_text(conversation, call))
@@ -851,10 +849,10 @@ class UnheardTextTests(unittest.TestCase):
             (False, "Go on."),
         )
         # No send is proposed, so nothing is constrained at all.
-        from alx.contracts import CapabilityCall
+        from mail_actions import READ, mail_call
 
-        unrelated = CapabilityCall(
-            "call-1", "read_mail_message",
+        unrelated = mail_call(
+            "call-1", READ,
             {"mailbox_id": "INBOX", "uid_validity": "1", "uid": "2"},
         )
         self.assertFalse(CoreAgent._unheard_authored_text(free, unrelated))

@@ -93,7 +93,9 @@ class ShowOnScreenTests(unittest.TestCase):
         # new run for one it has already seen.
         self.assertNotEqual(DisplayBoard().snapshot()["id"], DisplayBoard().snapshot()["id"])
         script = (ASSETS / "display.js").read_text()
-        self.assertIn("${id}:${version}", script)
+        self.assertIn("id !== seenId || version > seenVersion", script)
+        # One poll at a time: a late, older answer cannot reopen a closed viewer.
+        self.assertIn("if (polling) return;", script)
 
     def test_an_overlong_label_is_named_before_the_board_is_read(self) -> None:
         for view in ({"label": "x" * 41}, {"label": "x", "sublabel": "y" * 61}):
@@ -155,6 +157,34 @@ class ReadSectionTests(unittest.TestCase):
         self.assertIn("pcbnew.F_Cu", SECTION_SCRIPT)
         self.assertNotIn('"F.Cu"', SECTION_SCRIPT)
         self.assertIn("Edge_Cuts", SECTION_SCRIPT)
+
+
+class ViewerBehaviourTests(unittest.TestCase):
+    """Review of c53ffdd: run display.js itself against scripted answers."""
+
+    def test_closed_stays_closed_and_a_stalled_poll_does_not_stop_polling(self) -> None:
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        answers = [
+            {"id": "a", "version": 1, "display": {}},   # on load: not reopened
+            {"id": "a", "version": 2, "display": {}},   # new: opens
+            {"id": "a", "version": 1, "display": {}},   # closed, then a late older answer
+            {"id": "a", "version": 2, "display": {}},   # the same version again
+            "stall",                                    # never answers: abandoned
+            "error",                                    # network error
+            {"id": "b", "version": 1, "display": {}},   # after a restart: opens
+        ]
+        output = subprocess.run(
+            [node, str(REPOSITORY_ROOT / "tests/display_harness.mjs"),
+             str(ASSETS / "display.js"), json.dumps(answers)],
+            capture_output=True, text=True, timeout=60, check=True).stdout
+        result = json.loads(output)
+        self.assertEqual(result["open_after_each_step"], [1, 0, 0, 0, 0, 1])
+        self.assertEqual(result["opened"], 2)
+        self.assertEqual(result["requests"], len(answers))
 
 
 class ViewerAssetTests(unittest.TestCase):

@@ -58,8 +58,9 @@ from alx.core import CoreAgent, CoreState
 from alx.core.model_reasoner import _attempt_payload
 from alx.goals import SQLiteGoalStore
 from alx.tools import ASK_WEB_SEARCH, WEB_SEARCH_DEFINITION
-from alx.tools.mail import (READ_DEFINITION, READ_MAIL_MESSAGE,
+from alx.tools.mail import (DEFINITION as MAIL_DEFINITION, MAIL,
                             SEND_MAIL_REPLY, SEND_REPLY_DEFINITION)
+from mail_actions import READ, is_mail, mail_call
 
 
 NOW = datetime(2026, 9, 5, 10, 33, tzinfo=UTC)
@@ -123,7 +124,7 @@ class GuardScopeTestCase(unittest.TestCase):
             # any other outside system from these tests.
             self.dispatched.append(call.capability_id)
             values = ({"subject": read_subject}
-                      if call.capability_id == READ_MAIL_MESSAGE
+                      if is_mail(call, READ)
                       and read_subject is not None else {"ok": True})
             return CapabilityAttempt(
                 call, CapabilityAttemptDisposition.EXECUTED, True,
@@ -248,8 +249,8 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
     def run_with_pre_goal_read(self, *, subject: str, read_uid: str = "2",
                                goal_id: str = "goal-1",
                                spoken: str = "The parts arrive Tuesday."):
-        read = CapabilityCall(
-            "read-1", READ_MAIL_MESSAGE,
+        read = mail_call(
+            "read-1", READ,
             {"mailbox_id": "INBOX", "uid_validity": "1", "uid": read_uid},
         )
         send = self.send_call("The parts arrive Tuesday.")
@@ -263,7 +264,7 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
             AgentDecision(response="I handled the reply."),
         )
         outcome = self.agent(
-            reasoner, (READ_DEFINITION, SEND_REPLY_DEFINITION),
+            reasoner, (MAIL_DEFINITION, SEND_REPLY_DEFINITION),
             identifiers=(goal_id,), read_subject="October tax calculation",
         ).process(conversation(spoken=spoken, asked="send it"),
                   RETENTION, 4)
@@ -281,12 +282,12 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
                     subject=subject, goal_id=f"goal-{index}")
                 self.assertEqual(outcome.state, CoreState.RESPONDED)
                 self.assertEqual(self.dispatched,
-                                 [READ_MAIL_MESSAGE, SEND_MAIL_REPLY])
+                                 [MAIL, SEND_MAIL_REPLY])
                 self.assertFalse(reasoner.contexts[-1].refused_calls)
 
     def test_pre_goal_read_does_not_exempt_changed_subject(self) -> None:
         reasoner, _ = self.run_with_pre_goal_read(subject="New parts schedule")
-        self.assertEqual(self.dispatched, [READ_MAIL_MESSAGE])
+        self.assertEqual(self.dispatched, [MAIL])
         self.assertEqual(reasoner.contexts[-1].refused_calls[0]["reason"],
                          "approval_covers_unheard_text")
 
@@ -296,12 +297,12 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
             spoken="New parts schedule. The parts arrive Tuesday.",
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(self.dispatched, [READ_MAIL_MESSAGE, SEND_MAIL_REPLY])
+        self.assertEqual(self.dispatched, [MAIL, SEND_MAIL_REPLY])
 
     def test_unrelated_pre_goal_read_does_not_exempt_copied_subject(self) -> None:
         reasoner, _ = self.run_with_pre_goal_read(
             subject="RE: October tax calculation", read_uid="3")
-        self.assertEqual(self.dispatched, [READ_MAIL_MESSAGE])
+        self.assertEqual(self.dispatched, [MAIL])
         self.assertEqual(reasoner.contexts[-1].refused_calls[0]["reason"],
                          "approval_covers_unheard_text")
 
@@ -364,10 +365,10 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
 
         source = conversation(spoken="The parts arrive Tuesday.", asked="send it")
         call = self.send_call("The parts arrive Tuesday.")
-        read_call = CapabilityCall("read-1", "read_mail_message",
-                                   {"mailbox_id": "INBOX", "uid_validity": "1",
-                                    "uid": "2"})
-        result = CapabilityResult("read-1", "read_mail_message",
+        read_call = mail_call("read-1", READ,
+                              {"mailbox_id": "INBOX", "uid_validity": "1",
+                               "uid": "2"})
+        result = CapabilityResult("read-1", MAIL,
                                   CapabilityResultState.SUCCEEDED,
                                   {"subject": "parts"})
         goal = GoalState("goal-1", Objective("turn:turn-2", "Reply"),
@@ -376,15 +377,15 @@ class OutboundTextIsStillProtectedTests(GuardScopeTestCase):
                              read_call, CapabilityAttemptDisposition.EXECUTED,
                              True, result),))
         self.assertFalse(CoreAgent._unheard_authored_text(source, call, goal))
-        wrong_uid = CapabilityCall("read-2", "read_mail_message",
-                                   {"mailbox_id": "INBOX", "uid_validity": "1",
-                                    "uid": "3"})
+        wrong_uid = mail_call("read-2", READ,
+                              {"mailbox_id": "INBOX", "uid_validity": "1",
+                               "uid": "3"})
         other_goal = GoalState("goal-2", Objective("turn:turn-2", "Reply"),
                                goal.success_criteria,
                                attempts=(CapabilityAttempt(
                                    wrong_uid, CapabilityAttemptDisposition.EXECUTED,
                                    True, CapabilityResult(
-                                       "read-2", "read_mail_message",
+                                       "read-2", MAIL,
                                        CapabilityResultState.SUCCEEDED,
                                        {"subject": "parts"})),))
         self.assertTrue(CoreAgent._unheard_authored_text(source, call, other_goal))

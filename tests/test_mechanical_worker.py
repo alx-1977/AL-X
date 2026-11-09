@@ -216,12 +216,16 @@ class DelegateCapabilityTests(unittest.TestCase):
     def test_the_worker_list_names_no_capability_that_sends_spends_or_merges(self) -> None:
         from alx.tools import mail, program, repository, research, review, web
         forbidden = {
-            mail.SEND_MAIL_REPLY, mail.MOVE_MAIL_MESSAGE_TO_TRASH, repository.MERGE_PULL_REQUEST,
+            mail.SEND_MAIL_REPLY, repository.MERGE_PULL_REQUEST,
             research.ASK_RESEARCH_QUESTION, review.REQUEST_EXTERNAL_REVIEW,
             web.ASK_WEB_SEARCH, web.ASK_WEB_PAGE, "write_back_kicad_board",
             "export_kicad_manufacturing", "flash_bench_reader_usb", DELEGATE_MECHANICAL_WORK,
         }
         self.assertFalse(forbidden & set(WORKER_CAPABILITIES))
+        # Mail is listed, but only to read an attachment (D-074): Trash and
+        # the other mail changes are outside its limit.
+        from alx.tools.worker import WORKER_LIMITS
+        self.assertEqual(dict(WORKER_LIMITS)[mail.MAIL], ((("action", "read_attachment"),),))
         # Review of #207: run_program runs any command as Friedl's user, so
         # no fixed list could bound what the worker did with it.
         self.assertNotIn(program.RUN_PROGRAM, WORKER_CAPABILITIES)
