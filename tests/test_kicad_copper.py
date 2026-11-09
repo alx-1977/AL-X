@@ -275,8 +275,8 @@ class CopperProvider(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout='converged', stderr='')
         self.provider.execute_engine = runner
         result = self.provider.analyse_copper(self.arguments)
-        from alx.tools.kicad import DEFINITIONS
-        definition = next(d for d in DEFINITIONS if d.capability_id == 'analyse_kicad_copper')
+        from alx.tools.kicad import CONTRACTS, KiCadAction
+        definition = CONTRACTS[KiCadAction.ANALYSE_COPPER]
         self.assertTrue(definition.output_schema.accepts(result))
         self.assertEqual(len(calls), 2)                       # FastHenry only, once per mesh
         self.assertTrue(all(not directory.exists() for directory in calls))

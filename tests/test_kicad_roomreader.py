@@ -6,6 +6,9 @@ scripts, work copies and exports have only pytest's temporary lifetime.
 """
 from collections import Counter
 from decimal import Decimal
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from kicad_actions import kicad_call  # noqa: E402
 import json
 import os
 from pathlib import Path
@@ -201,7 +204,7 @@ def test_reference_mapping_reports_archive_inventory():
 
 
 def _succeeded(runtime, capability, arguments):
-    result = runtime.executors[capability](arguments)
+    result = kicad_call(runtime.executors, capability, arguments)
     # Never include stdout, board diffs or reference geometry in assertion output.
     assert result.state == CapabilityResultState.SUCCEEDED, (capability, result.failure)
     return result.values

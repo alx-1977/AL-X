@@ -83,7 +83,7 @@ def build_reader_runtime(
     # Friedl's approval. Exact calls use the existing approval scope machinery.
     policies['particle_api_request'] = AuthorityPolicy(
         frozenset({PARTICLE_FULL_PERMISSION}), approval_required=True,
-        approval_exempt_arguments=(('method', 'GET'),))
+        approval_exempt_when=((('method', 'GET'),),))
     executors = dict(build_reader_executors(
         particle,
         BehaviorLiveConfig(settings.config_url, settings.timeout_seconds),

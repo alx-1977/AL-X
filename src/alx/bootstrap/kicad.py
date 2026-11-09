@@ -7,7 +7,7 @@ from alx.config.settings import KiCadSettings
 from alx.providers.coding_process import run_kicad_cli, run_kicad_python, run_kicad_engine
 from alx.providers.kicad import KiCadProvider
 from alx.safety import AuthorityPolicy
-from alx.tools.kicad import DEFINITIONS, build_kicad_executors
+from alx.tools.kicad import DEFINITIONS, FREE_ACTIONS, KICAD, build_kicad_executors
 
 
 @dataclass(frozen=True)
@@ -35,8 +35,9 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
     provider.execute_engine = partial(run_kicad_engine, runner=runner,
                                       timeout_seconds=settings.cli_timeout_seconds)
     permission = 'design.kicad'
+    # D-074: one capability. export and write_back change his project and need
+    # his approval of the exact call; every other action is free.
     return KiCadRuntime(DEFINITIONS, {
-        d.capability_id: AuthorityPolicy(frozenset({permission}),
-            approval_required=d.capability_id == 'write_back_kicad_board')
-        for d in DEFINITIONS
+        KICAD: AuthorityPolicy(frozenset({permission}), approval_required=True,
+                               approval_exempt_when=tuple((('action', name),) for name in FREE_ACTIONS)),
     }, build_kicad_executors(provider, call_id_source), frozenset({permission}), provider)

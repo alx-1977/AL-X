@@ -96,6 +96,19 @@ class SideEffect(str, Enum):
     EFFECTFUL = "effectful"
 
 
+ArgumentAlternatives = tuple[tuple[tuple[str, str], ...], ...]
+
+
+def arguments_match(alternatives: ArgumentAlternatives, arguments: Mapping[str, Any]) -> bool:
+    """Whether a call's arguments equal every pair of at least one alternative.
+
+    Exact structured values only; no language or domain interpretation. Lets
+    one capability treat some of its actions differently from others (D-074).
+    """
+    return any(alternative and all(arguments.get(key) == value for key, value in alternative)
+               for alternative in alternatives)
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityDefinition:
     capability_id: str
@@ -130,6 +143,15 @@ class CapabilityDefinition:
     # an identifier rather than content. The broker still shows a value only
     # when it is a short identifier token.
     trace_fields: tuple[str, ...] = ()
+    # Argument values under which an EFFECTFUL capability only reads (D-074):
+    # one tool can then look without an active goal and change with one.
+    read_only_when: ArgumentAlternatives = ()
+
+    def effect_for(self, arguments: Mapping[str, Any]) -> SideEffect:
+        """This call's effect: NONE when its arguments make it a read."""
+        if self.side_effect is SideEffect.EFFECTFUL and arguments_match(self.read_only_when, arguments):
+            return SideEffect.NONE
+        return self.side_effect
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():

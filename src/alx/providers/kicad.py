@@ -521,6 +521,35 @@ class KiCadProvider:
             return bounded(raw, self.design_roots)
         return reference_path(raw)
 
+    def _board_for(self, arguments):
+        """The one board a read names: her work copy, a board path or a project folder."""
+        if arguments.get('work_copy_id'):
+            root, meta = self._load(arguments['work_copy_id'])
+            return root / 'project' / meta['board']
+        if arguments.get('board'):
+            return bounded(self._source(arguments['board']), self.design_roots)
+        if arguments.get('project_dir'):
+            project = bounded(self._source(arguments['project_dir']), self.design_roots)
+            boards = sorted(project.glob('*.kicad_pcb'))
+            if len(boards) != 1:
+                raise KiCadError('unsupported_project')
+            # The board itself is checked too: a link must not lead outside.
+            return bounded(boards[0], self.design_roots)
+        raise KiCadError('arguments_unusable')
+
+    def inspect(self, arguments):
+        """Every part, net and zone of a board, read from a copy (D-074)."""
+        from alx.providers.kicad_section import SectionError, read_overview
+        if self.execute_python is None:
+            raise KiCadError('engine_unavailable')
+        board = self._board_for(arguments)
+        try:
+            return read_overview(board, arguments, scratch_root=self.work_root / 'sections',
+                                 kicad_python=self.settings.kicad_python,
+                                 execute_python=self.execute_python)
+        except SectionError as error:
+            raise KiCadError(error.code, {'detail': error.detail}) from error
+
     def section(self, arguments):
         """One window of a board as geometry, for the viewer (D-073).
 
@@ -530,11 +559,7 @@ class KiCadProvider:
         from alx.providers.kicad_section import SectionError, read_section
         if self.execute_python is None:
             raise KiCadError('engine_unavailable')
-        if arguments.get('work_copy_id'):
-            root, meta = self._load(arguments['work_copy_id'])
-            board = root / 'project' / meta['board']
-        else:
-            board = bounded(self._source(arguments.get('board') or ''), self.design_roots)
+        board = self._board_for(arguments)
         try:
             return read_section(board, arguments, scratch_root=self.work_root / 'sections',
                                 kicad_python=self.settings.kicad_python,
