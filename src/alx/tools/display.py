@@ -81,6 +81,15 @@ DEFINITION = CapabilityDefinition(
 DEFINITIONS = (DEFINITION,)
 
 
+def _json_value(value: Any) -> Any:
+    """Copy frozen structured containers into frontend JSON containers."""
+    if isinstance(value, Mapping):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_value(item) for item in value]
+    return value
+
+
 class DisplayBoard:
     """What is on the viewer now; the screen polls it and opens on a new version."""
 
@@ -100,7 +109,8 @@ class DisplayBoard:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            return {"id": self._id, "version": self._version, "display": self._display}
+            return {"id": self._id, "version": self._version,
+                    "display": _json_value(self._display)}
 
 
 def _tone(value: Any) -> str | None:

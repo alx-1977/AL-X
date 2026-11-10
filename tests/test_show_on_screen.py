@@ -13,6 +13,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import CapabilityResultState  # noqa: E402
+from alx.contracts.records import freeze_data  # noqa: E402
+from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.providers.kicad_section import SECTION_SCRIPT, SectionError, read_section  # noqa: E402
 from alx.tools.display import (  # noqa: E402
     DEFINITIONS,
@@ -67,6 +69,41 @@ class ShowOnScreenTests(unittest.TestCase):
     def test_each_show_is_a_new_version(self) -> None:
         self.show(display())
         self.assertEqual(self.show(display(views=[])).values["version"], 2)
+
+    def test_frozen_views_serialize_through_the_asset_handshake(self) -> None:
+        payload = display()
+        view = payload["views"][0]
+        view["planes"] = ["GND"]
+        view["dims"] = [{"from": [150.2, 119.6], "to": [160, 119.6],
+                         "text": "9.8 mm", "tone": "info"}]
+        # Capability arguments arrive deeply frozen, including each dimension.
+        arguments = freeze_data(payload)
+        result = self.show(arguments)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        supplied = []
+
+        def snapshot():
+            value = self.board.snapshot()
+            supplied.append(value)
+            return value
+
+        server = LiveVoiceServer(session=None, host="127.0.0.1", port=0,
+                                 sample_rate_hz=16_000, asset_root=ASSETS, display=snapshot)
+        response = server._serve_asset(None, SimpleNamespace(path="/display.json"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body), json.loads(json.dumps(supplied[0])))
+        shown = supplied[0]["display"]
+        for key in ("title", "subtitle", "verdict", "items"):
+            self.assertEqual(shown[key], payload[key])
+        self.assertEqual(shown["views"][0]["marks"], view["marks"])
+        self.assertEqual(shown["views"][0]["dims"], view["dims"])
+        self.assertEqual(shown["views"][0]["geometry"], GEOMETRY)
+        for key in ("board", "window", "refs", "planes"):
+            self.assertEqual(self.read[0][key], arguments["views"][0][key])
+        # Mutating a frontend snapshot must not alter the stored display or input.
+        shown["views"][0]["dims"][0]["from"][0] = 0
+        self.assertEqual(self.board.snapshot()["display"]["views"][0]["dims"], view["dims"])
+        self.assertEqual(arguments["views"][0]["dims"][0]["from"][0], 150.2)
 
     def test_unknown_tones_and_ambiguous_boards_are_refused(self) -> None:
         for bad in (
