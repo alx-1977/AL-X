@@ -224,6 +224,204 @@ class ViewerBehaviourTests(unittest.TestCase):
         self.assertEqual(result["requests"], len(answers))
 
 
+class BoardLabelLayoutTests(unittest.TestCase):
+    def render(self, rotate=False, view=None):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        # The real asset runs with SVG font metrics supplied by this DOM double.
+        # Negative glyph bearings catch incorrect baseline/box conversions.
+        script = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const api = { module: { exports: {} } };
+vm.runInNewContext(source, api);
+const all = [];
+// Model the cascade relevant to these labels using the loaded stylesheet:
+// svg text overrides presentation attributes, while inline styles win.
+const css = fs.readFileSync(process.argv[3], 'utf8');
+const svgFont = css.match(/svg text\s*\{[^}]*font-family:\s*([^;}]+)/)[1];
+const font = n => String(n.attrs.style || '').match(/font-family:\s*([^;]+)/)?.[1] || svgFont;
+function element(tag) {
+  const n = { tag, attrs: {}, children: [], textContent: '',
+    setAttribute(k,v) { this.attrs[k] = v; },
+    getAttribute(k) { return this.attrs[k]; },
+    removeAttribute(k) { delete this.attrs[k]; },
+    appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter(x => x !== c);
+      this.children.push(c); c.parent = this; },
+    replaceChildren() { this.children = []; }, append() {}, addEventListener() {},
+    getBBox() { const size = Number(this.attrs['font-size']);
+      return { x: -1.5, y: -size * .8, width: this.textContent.length * size * .8, height: size }; }
+  };
+  all.push(n); return n;
+}
+const ids = {};
+const display = JSON.parse(process.argv[2]);
+const context = { document: { getElementById(id) { return ids[id] ||= element(id); },
+  createElementNS(ns, tag) { return element(tag); }, createElement: element },
+  window: { addEventListener() {}, parent: { postMessage() { throw Error('viewer closed'); } } },
+  fetch: async () => ({ json: async () => ({ display }) }) };
+vm.runInNewContext(source, context);
+setImmediate(() => {
+  const texts = all.filter(n => n.tag === 'text').map(n => {
+    const m = n.getBBox(); return { text: n.textContent, size: n.attrs['font-size'],
+      font: font(n), hidden: n.attrs.visibility, clipped: !!n.parent.attrs['clip-path'],
+      box: { x: Number(n.attrs.x) + m.x, y: Number(n.attrs.y) + m.y, width: m.width, height: m.height } };
+  });
+  const arrows = all.filter(n => n.tag === 'polygon').map(n => n.attrs.points.split(' ').map(p => p.split(',').map(Number)));
+  const lines = all.filter(n => n.tag === 'line').map(n => n.attrs);
+  const labels = texts.map(t => ({ kind: 'title', text: t.text, anchor: [100, 100], width: t.box.width, height: t.box.height }));
+  const place = api.module.exports.placeLabels;
+  const layout = place(labels, []);
+  // Change the stable sort keys so the long leader is placed both before
+  // and after the small reference's text, rather than just reversing input.
+  const leaderOrders = [false, true].map(reverse => place([
+    {kind: 'ref', text: reverse ? 'B' : 'A', anchor: [0, 0],
+      part: [-5, -100, 5, 100], width: 10, height: 10},
+    {kind: 'ref', text: reverse ? 'A' : 'B', anchor: [0, -50],
+      part: [-5, -55, 5, -45], width: 10, height: 10}
+  ], []));
+  console.log(JSON.stringify({ texts, arrows, lines, layout,
+    leaderOrders,
+    repeated: place(labels, []), reversed: place([...labels].reverse(), []),
+    viewBox: ids.view.attrs.viewBox, transforms: ids.view.children.map(n => n.attrs.transform) }));
+});
+"""
+        def pad(ref, x, y):
+            return {"ref": ref, "polygons": [{"outer": [[x, y], [x+.6, y], [x+.6, y+.5], [x, y+.5]]}]}
+        view = view or {"geometry": {"window": [142, 114, 162, 136], "pads": [
+            pad("AE1", 148.7, 124), pad("C61", 149.2, 124.6), pad("L3", 149.6, 125)]},
+            "rotate": rotate, "label": "Crowded board", "sublabel": "Readable dimensions",
+            "dims": [
+                {"from": [149.626, 122], "to": [149.626, 126.55], "text": "4.55"},
+                {"from": [148, 124], "to": [149.2, 124], "text": "1.20"},
+                {"from": [148.8, 124], "to": [148.8, 124.45], "text": "0.45"},
+                {"from": [147.8, 122], "to": [147.8, 127], "text": "5.00"}]}
+        result = subprocess.run([node, "-e", script, str(ASSETS / "show.js"),
+                                 json.dumps({"views": [view, view]}), str(ASSETS / "show.css")],
+                                capture_output=True, text=True, check=True, timeout=30)
+        return json.loads(result.stdout)
+
+    def test_offscreen_parts_do_not_change_labels_or_view_bounds(self):
+        def pad(ref, box):
+            x0, y0, x1, y1 = box
+            return {"ref": ref, "polygons": [{"outer": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}]}
+        for rotate in (False, True):
+            with self.subTest(rotate=rotate):
+                view = {"geometry": {"window": [10, 20, 30, 40], "pads": []}, "rotate": rotate}
+                empty = self.render(view=view)
+                view["geometry"]["pads"] = [pad("OFF", [1000, -500, 1001, -499]),
+                                             pad("TOUCH", [30, 25, 31, 26])]
+                outside = self.render(view=view)
+                self.assertEqual(outside["texts"], [])
+                self.assertEqual(outside["viewBox"], empty["viewBox"])
+                for full, clipped in (([5, 25, 12, 26], [10, 25, 12, 26]),
+                                      ([28, 39, 35, 45], [28, 39, 30, 40])):
+                    view["geometry"]["pads"] = [pad("EDGE", full)]
+                    edge = self.render(view=view)
+                    view["geometry"]["pads"] = [pad("EDGE", clipped)]
+                    visible = self.render(view=view)
+                    self.assertEqual(edge["texts"], visible["texts"])
+                    self.assertEqual(edge["lines"], visible["lines"])
+                    self.assertEqual(edge["viewBox"], visible["viewBox"])
+
+    def test_reference_font_wins_over_the_loaded_svg_text_rule(self):
+        for text in self.render()["texts"]:
+            if text["text"] in ("AE1", "C61", "L3"):
+                self.assertEqual(text["font"], '"Helvetica Neue",Arial,sans-serif')
+            else:
+                self.assertIn("Courier New", text["font"])
+
+    def test_leaders_clear_all_text_including_the_unrotated_045_500_case(self):
+        # Independently intersect each rendered segment with each ink box.
+        def crosses(line, box):
+            lo, hi = 0.0, 1.0
+            for start, end, lower, size in ((line["x1"], line["x2"], box["x"], box["width"]),
+                                             (line["y1"], line["y2"], box["y"], box["height"])):
+                delta = end - start
+                if abs(delta) < 1e-10:
+                    if not lower <= start <= lower + size:
+                        return False
+                else:
+                    a, b = sorted(((lower-start)/delta, (lower+size-start)/delta))
+                    lo, hi = max(lo, a), min(hi, b)
+                    if lo > hi:
+                        return False
+            return True
+        for rotate in (False, True):
+            result = self.render(rotate)
+            for leader in result["lines"]:
+                if leader.get("stroke-width") == .6:
+                    for text in result["texts"]:
+                        self.assertFalse(crosses(leader, text["box"]), (rotate, leader, text))
+            for layout in result["leaderOrders"]:
+                for label in layout:
+                    a, b = label["leader"]
+                    line = dict(x1=a[0], y1=a[1], x2=b[0], y2=b[1])
+                    for other in layout:
+                        if other is not label:
+                            self.assertFalse(crosses(line, other["box"]), (label, other))
+
+    def test_crowded_labels_clear_each_other_and_all_arrowheads(self):
+        for rotate in (False, True):
+            with self.subTest(rotate=rotate):
+                result = self.render(rotate)
+                # Two identical views have identical local layouts and disjoint
+                # outer bounds. Every text kind is included in the same search.
+                texts = result["texts"][:9]
+                self.assertEqual(texts, result["texts"][9:])
+                self.assertEqual(len(texts), 9)
+                def overlaps(a, b):
+                    return (a["x"] < b["x"] + b["width"] and b["x"] < a["x"] + a["width"]
+                            and a["y"] < b["y"] + b["height"] and b["y"] < a["y"] + a["height"])
+                for index, label in enumerate(texts):
+                    self.assertGreaterEqual(label["size"], 12)
+                    self.assertNotIn("hidden", label)
+                    self.assertFalse(label["clipped"])
+                    for other in texts[index+1:]:
+                        self.assertFalse(overlaps(label["box"], other["box"]), (label, other))
+                    for arrow in result["arrows"][:8]:
+                        xs, ys = zip(*arrow)
+                        self.assertFalse(overlaps(label["box"], {"x": min(xs), "y": min(ys),
+                            "width": max(xs)-min(xs), "height": max(ys)-min(ys)}))
+                # The 0.45 mm and 1.20 mm spans cannot fit their text. Both
+                # must have a leader from their dimension midpoint to the box.
+                for text, midpoint, endpoint, direction in (
+                        ("0.45", (148.8, 124.225), (148.8, 124.45), (0, 1)),
+                        ("1.20", (148.6, 124), (149.2, 124), (1, 0))):
+                    x, y = midpoint
+                    ax, ay = ((y-114)*10, (162-x)*10) if rotate else ((x-142)*10, (y-114)*10)
+                    leaders = [l for l in result["lines"] if l.get("stroke-width") == .6
+                               and abs(l["x1"]-ax) < .0001 and abs(l["y1"]-ay) < .0001]
+                    self.assertTrue(leaders)
+                    ex, ey = endpoint
+                    dx, dy = direction
+                    if rotate:
+                        ex, ey, dx, dy = (ey-114)*10, (162-ex)*10, dy, -dx
+                    else:
+                        ex, ey = (ex-142)*10, (ey-114)*10
+                    box = next(t["box"] for t in texts if t["text"] == text)
+                    # Even the nearest corner lies beyond the dimension span.
+                    self.assertTrue(all((cx-ex)*dx + (cy-ey)*dy > 0
+                        for cx in (box["x"], box["x"]+box["width"])
+                        for cy in (box["y"], box["y"]+box["height"])))
+                self.assertEqual(result["layout"], result["repeated"])
+                self.assertEqual(result["layout"], result["reversed"])
+                # The expanded viewBox encloses labels in both adjacent views.
+                import re
+                _, _, width, height = map(float, result["viewBox"].split())
+                bounds = []
+                for transform in result["transforms"]:
+                    tx, ty = map(float, re.findall(r"[-0-9.]+", transform))
+                    boxes = [t["box"] for t in texts]
+                    self.assertTrue(all(b["x"]+tx >= 0 and b["y"]+ty >= 0
+                        and b["x"]+tx+b["width"] <= width and b["y"]+ty+b["height"] <= height for b in boxes))
+                    bounds.append((min(b["x"]+tx for b in boxes), max(b["x"]+tx+b["width"] for b in boxes)))
+                self.assertLess(bounds[0][1], bounds[1][0])
+
+
 class ViewerAssetTests(unittest.TestCase):
     def test_the_viewer_sits_on_the_reader_wave(self) -> None:
         page = (ASSETS / "show.html").read_text()
