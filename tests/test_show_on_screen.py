@@ -418,6 +418,93 @@ setImmediate(() => {
                 self.assertLess(bounds[0][1], bounds[1][0])
 
 
+    def routing_case(self, labels, obstacles, budget=2_000_000):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        # Count both collision tests and band/obstacle visits. The VM timeout
+        # also catches work that bypasses these counters.
+        script = """
+const fs = require('fs'), vm = require('vm');
+let source = fs.readFileSync(process.argv[1], 'utf8');
+source = source.replace('function intersects([a, b], box) {',
+  'function intersects([a, b], box) { if (++work > budget) throw Error("routing_work_exceeded");');
+source = source.replace('for (const b of rects) {',
+  'for (const b of rects) { if (++work > budget) throw Error("routing_work_exceeded");');
+const context = {module: {exports: {}}, work: 0, budget: Number(process.argv[3])};
+vm.createContext(context);
+vm.runInContext(source, context);
+context.fixture = JSON.parse(process.argv[2]);
+vm.runInContext('layout = module.exports.placeLabels(fixture.labels, fixture.obstacles)', context, {timeout: 3000});
+console.log(JSON.stringify({layout: context.layout, work: context.work}));
+"""
+        result = subprocess.run([node, "-e", script, str(ASSETS / "show.js"),
+                                 json.dumps({"labels": labels, "obstacles": obstacles}), str(budget)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def assert_segment_misses(self, a, b, box):
+        lo, hi = 0, 1
+        for axis, lower, size in ((0, box["x"], box["width"]),
+                                  (1, box["y"], box["height"])):
+            delta = b[axis] - a[axis]
+            if abs(delta) < 1e-10:
+                if not lower <= a[axis] <= lower + size:
+                    return
+            else:
+                ends = sorted(((lower-a[axis])/delta, (lower+size-a[axis])/delta))
+                lo, hi = max(lo, ends[0]), min(hi, ends[1])
+                if lo > hi:
+                    return
+        self.fail(f"Leader segment {a}, {b} intersects {box}")
+
+    def test_overflow_leader_escapes_another_parts_pad(self):
+        ref = {"kind": "ref", "text": "R1", "anchor": [0, 0],
+               "part": [-5, -5, 5, 5], "width": 20, "height": 12}
+        obstacles = [{"x": -40, "y": -40, "width": 80, "height": 80, "owner": "U1"},
+                     {"x": 45, "y": -20, "width": 10, "height": 40, "owner": "U2"}]
+        for extra in ([], [{"x": -20, "y": -50, "width": 70, "height": 70, "owner": "U3"}]):
+            with self.subTest(extra_origin_pad=bool(extra)):
+                label = self.routing_case([ref], obstacles + extra)["layout"][0]
+                self.assertTrue(label["displaced"])
+                self.assertTrue(label["leader"])
+                self.assertEqual(label["leader"][0], ref["anchor"])
+                self.assertGreater(label["box"]["x"], 55)
+                # Every segment after the escape stays outside all origin
+                # pads, and even the escape must avoid the unrelated pad.
+                for index, (a, b) in enumerate(zip(label["leader"], label["leader"][1:])):
+                    for obstacle in (obstacles + extra if index else obstacles[1:]):
+                        self.assert_segment_misses(a, b, obstacle)
+        # Exercise load() too: the render harness fails if the viewer closes.
+        def pad(ref, lo, hi):
+            return {"ref": ref, "polygons": [{"outer": [[lo, lo], [hi, lo], [hi, hi], [lo, hi]]}]}
+        rendered = self.render(view={"geometry": {"window": [-10, -10, 10, 10],
+            "pads": [pad("R1", -.5, .5), pad("U1", -4, 4)]}})
+        self.assertEqual({t["text"] for t in rendered["texts"]}, {"R1", "U1"})
+
+    def test_many_pad_overflow_routing_has_bounded_work(self):
+        refs = [{"kind": "ref", "text": f"R{i:02}", "anchor": [0, 0],
+                 "part": [-5, -5, 5, 5], "width": 20, "height": 12} for i in range(12)]
+        # Force repeated overflow destinations as text accumulates. The wall
+        # blocks straight leaders; the remote pads still count as obstacles.
+        obstacles = [{"x": -40, "y": -40, "width": 80, "height": 80, "copper": True},
+                     {"x": 10, "y": -200, "width": 4, "height": 400, "owner": "WALL"}]
+        obstacles += [{"x": 30 + x*8, "y": -180 + y*8, "width": 3, "height": 3,
+                       "owner": "U1"} for x in range(30) for y in range(40)]
+        result = self.routing_case(refs, obstacles)
+        self.assertEqual(len(result["layout"]), len(refs))
+        self.assertTrue(all(l["displaced"] and l["leader"] for l in result["layout"]))
+        self.assertGreater(len({l["center"][1] for l in result["layout"]}), 1)
+        self.assertLess(result["work"], 2_000_000)
+        for label in result["layout"]:
+            for a, b in zip(label["leader"], label["leader"][1:]):
+                for obstacle in obstacles[1:] + [l["box"] for l in result["layout"]]:
+                    self.assert_segment_misses(a, b, obstacle)
+        self.assertEqual(result["layout"], self.routing_case(list(reversed(refs)), obstacles)["layout"])
+
     def test_preferred_sides_overflow_columns_and_dimension_angles(self):
         import math
         import shutil
@@ -528,6 +615,8 @@ console.log(JSON.stringify(cases.map(c => ({layout: placeLabels(c.labels, c.obst
         source = (ASSETS / "show.js").read_text()
         self.assertEqual(source.count("function placeLabels("), 1)
         self.assertEqual(source.count("const layout = placeLabels("), 1)
+        self.assertEqual(source.count("function leaderRouter("), 1)
+        self.assertNotIn("routeLeader(", source)
         self.assertNotIn("Math.cos(angle) * radius", source)
 
 

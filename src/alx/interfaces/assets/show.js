@@ -39,40 +39,115 @@
   const segments = (points) => points.slice(1).map((p, i) => [points[i], p]);
   const crosses = (points, box) => segments(points).some(s => intersects(s, box));
 
-  // Visibility routing is only for displaced references. Corners sit just
-  // outside the clearance envelopes; shortest paths have stable tie breaks.
-  function routeLeader(start, target, boxes) {
-    const clear = (a, b) => !boxes.some(box => intersects([a, b], box));
-    if (clear(start, target)) return [start, target];
-    if (boxes.some(box => intersects([start, start], box))) return null;
-    const corners = boxes.flatMap(b => [b.x - 0.1, b.x + b.width + 0.1]
-      .flatMap(x => [b.y - 0.1, b.y + b.height + 0.1].map(y => [x, y])))
-      .filter(p => !boxes.some(b => intersects([p, p], b)))
-      .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    const points = [start, target, ...corners], distance = points.map(() => Infinity);
-    const previous = [], visited = new Set();
-    distance[0] = 0;
-    for (let step = 0; step < points.length; step += 1) {
-      let index = -1;
-      for (let i = 0; i < points.length; i += 1) {
-        if (!visited.has(i) && (index < 0 || distance[i] < distance[index])) index = i;
+  // One router per reference, reused for every overflow destination. Horizontal
+  // free-space bands form a sparse, complete rectilinear graph: at most
+  // (2N + 1)(N + 1) cells and four overlaps per cell on average. Construction
+  // and traversal are O(N²), rather than an all-pairs corner visibility search
+  // against N obstacles for each destination. There is no search cutoff that
+  // can turn an otherwise reachable overflow column into layout exhaustion.
+  function leaderRouter(start, boxes) {
+    const contains = (p, b) => intersects([p, p], b);
+    const origins = new Set(boxes.filter(b => contains(start, b)));
+    const clear = (a, b, escaping = false) => !boxes.some(box =>
+      !(escaping && origins.has(box)) && intersects([a, b], box));
+    let graph = null;
+    function build() {
+      // The extra tenth keeps graph edges outside the closed collision boxes.
+      const rects = boxes.map(b => {
+        // Do not swallow an otherwise free origin in the numerical margin.
+        const distance = Math.max(b.x - start[0], start[0] - b.x - b.width,
+          b.y - start[1], start[1] - b.y - b.height, 0);
+        return expand(b, distance ? Math.min(0.1, distance / 2) : 0.1);
+      }).sort((a, b) => a.x - b.x);
+      const cuts = [...new Set(rects.flatMap(b => [b.y, b.y + b.height]))].sort((a, b) => a - b);
+      const levels = [-Infinity, ...cuts, Infinity], bands = [], queue = [];
+      for (let row = 1; row < levels.length; row += 1) {
+        const top = levels[row - 1], bottom = levels[row], cells = [];
+        let left = -Infinity;
+        const cell = (right) => {
+          if (left < right) cells.push({ left, right, edges: [], reached: false });
+        };
+        for (const b of rects) {
+          if (b.y >= bottom || b.y + b.height <= top) continue;
+          cell(b.x);
+          left = Math.max(left, b.x + b.width);
+        }
+        cell(Infinity);
+        const previous = bands[bands.length - 1] || [];
+        let i = 0, j = 0;
+        while (i < previous.length && j < cells.length) {
+          const a = previous[i], b = cells[j];
+          const lo = Math.max(a.left, b.left), hi = Math.min(a.right, b.right);
+          if (lo < hi) {
+            const x = Number.isFinite(lo) && Number.isFinite(hi) ? (lo + hi) / 2
+              : Number.isFinite(lo) ? Math.max(start[0], lo + 1)
+                : Number.isFinite(hi) ? Math.min(start[0], hi - 1) : start[0];
+            const crossing = [x, top];
+            a.edges.push({ cell: b, crossing }); b.edges.push({ cell: a, crossing });
+          }
+          if (a.right <= b.right) i += 1;
+          else j += 1;
+        }
+        bands.push(cells);
       }
-      if (index < 0 || !Number.isFinite(distance[index])) return null;
-      if (index === 1) {
-        const result = [];
-        for (let i = 1; i !== undefined; i = previous[i]) result.unshift(points[i]);
-        return result;
-      }
-      visited.add(index);
-      for (let i = 0; i < points.length; i += 1) {
-        if (visited.has(i)) continue;
-        const next = distance[index] + Math.hypot(points[i][0] - points[index][0], points[i][1] - points[index][1]);
-        if (next < distance[i] && clear(points[index], points[i])) {
-          distance[i] = next; previous[i] = index;
+      const locate = (p) => {
+        let lo = 0, hi = cuts.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (cuts[mid] <= p[1]) lo = mid + 1;
+          else hi = mid;
+        }
+        const cells = bands[lo];
+        lo = 0; hi = cells.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (cells[mid].right <= p[0]) lo = mid + 1;
+          else hi = mid;
+        }
+        return cells[lo]?.left < p[0] ? cells[lo] : null;
+      };
+      const seed = (p) => {
+        const cell = locate(p);
+        if (!cell || cell.reached || !clear(start, p, true)) return;
+        cell.reached = true; cell.seed = p; queue.push(cell);
+      };
+      seed(start);
+      if (origins.size) {
+        // A visible obstacle corner is a possible first bend of any escaping
+        // path. Only this initial straight segment may cross origin boxes;
+        // every subsequent edge uses free space, including around those boxes.
+        for (const b of rects) for (const x of [b.x - 0.1, b.x + b.width + 0.1]) {
+          for (const y of [b.y - 0.1, b.y + b.height + 0.1]) seed([x, y]);
         }
       }
+      for (let head = 0; head < queue.length; head += 1) {
+        const cell = queue[head];
+        for (const edge of cell.edges) if (!edge.cell.reached) {
+          edge.cell.reached = true; edge.cell.previous = cell;
+          edge.cell.crossing = edge.crossing; queue.push(edge.cell);
+        }
+      }
+      return locate;
     }
-    return null;
+    return (target) => {
+      if ([...origins].some(box => contains(target, box))) return null;
+      if (clear(start, target, true)) return [start, target];
+      if (!graph) graph = build();
+      let cell = graph(target);
+      if (!cell?.reached) return null;
+      const crossings = [];
+      while (cell.previous) {
+        crossings.push(cell.crossing); cell = cell.previous;
+      }
+      const points = [start];
+      if (cell.seed !== start) points.push(cell.seed);
+      for (const p of [...crossings.reverse(), target]) {
+        const last = points[points.length - 1];
+        if (last[0] !== p[0]) points.push([p[0], last[1]]);
+        if (points[points.length - 1][1] !== p[1]) points.push(p);
+      }
+      return points;
+    };
   }
 
   // The sole label-position authority, shared by both board views. Measured
@@ -93,7 +168,15 @@
     const left = Math.min(0, ...allBoxes.map(b => b.x));
     const right = Math.max(0, ...allBoxes.map(b => b.x + b.width));
     const rowHeight = Math.max(12, ...labels.filter(l => l.kind === 'ref').map(l => l.height)) + 2 * CLEARANCE;
+    // Normalize static pad/measurement geometry once, not at each destination.
+    const routingObstacles = obstacles.filter(o => !o.copper && !o.body).map(o => {
+      if (!o.segment) return { box: expand(o, 0.8), owner: o.owner };
+      const [a, b] = o.segment;
+      return { box: { x: Math.min(a[0], b[0]) - 1, y: Math.min(a[1], b[1]) - 1,
+        width: Math.abs(b[0] - a[0]) + 2, height: Math.abs(b[1] - a[1]) + 2 } };
+    });
     for (const label of ordered) {
+      let router = null;
       let angle = label.kind === 'dim' ? Math.atan2(label.direction[1], label.direction[0]) * 180 / Math.PI : 0;
       if (angle >= 90) angle -= 180;
       if (angle < -90) angle += 180;
@@ -109,20 +192,12 @@
           const gap = CLEARANCE + 0.5;
           const target = [Math.max(box.x - gap, Math.min(ax, box.x + w + gap)),
             Math.max(box.y - gap, Math.min(ay, box.y + h + gap))];
-          const routeBoxes = placed.map(p => expand(p.box, gap));
-          for (const o of obstacles) {
-            if (o.segment) {
-              const [a, b] = o.segment;
-              const envelope = { x: Math.min(a[0], b[0]) - 1, y: Math.min(a[1], b[1]) - 1,
-                width: Math.abs(b[0] - a[0]) + 2, height: Math.abs(b[1] - a[1]) + 2 };
-              // A measurement through this part cannot obstruct its origin.
-              if (!intersects([label.anchor, label.anchor], envelope)) routeBoxes.push(envelope);
-            } else if (!o.copper && !o.body && o.owner !== label.text) {
-              const envelope = expand(o, 0.8);
-              if (!o.dimension || !intersects([label.anchor, label.anchor], envelope)) routeBoxes.push(envelope);
-            }
+          if (!router) {
+            const routeBoxes = routingObstacles.filter(o => o.owner !== label.text).map(o => o.box);
+            routeBoxes.push(...placed.map(p => expand(p.box, gap)));
+            router = leaderRouter(label.anchor, routeBoxes);
           }
-          leader = routeLeader(label.anchor, target, routeBoxes);
+          leader = router(target);
           if (!leader) return false;
         }
         // Keep future reference leader origins free.
