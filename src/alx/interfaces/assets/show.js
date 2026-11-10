@@ -17,16 +17,32 @@
   const tone = (value, fallback) => TONE[value] || fallback;
 
   // The sole label-position authority. All coordinates and measured ink boxes
-  // are in SVG units. Finite obstacles cannot exhaust the expanding search.
+  // are in SVG units. Search is bounded; an impossible layout is never drawn
+  // with a leader through text.
   function placeLabels(labels, obstacles) {
     const occupied = [...obstacles], placed = [];
+    const intersects = ([a, b], box) => {
+      let low = 0, high = 1;
+      for (const [axis, start, size] of [[0, box.x, box.width], [1, box.y, box.height]]) {
+        const delta = b[axis] - a[axis];
+        if (Math.abs(delta) < 1e-10) {
+          if (a[axis] < start || a[axis] > start + size) return false;
+        } else {
+          const ends = [(start - a[axis]) / delta, (start + size - a[axis]) / delta];
+          low = Math.max(low, Math.min(...ends));
+          high = Math.min(high, Math.max(...ends));
+          if (low > high) return false;
+        }
+      }
+      return true;
+    };
     const key = (l) => JSON.stringify([l.kind, l.text, l.anchor, l.part, l.end]);
     for (const input of [...labels].sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0)) {
       const label = { ...input, short: input.kind === 'dim' && input.length < input.width + 16 };
       const w = label.width + 6, h = label.height + 6;
       const [ax, ay] = label.anchor;
       let found = false;
-      for (let ring = 0; !found; ring += 1) {
+      for (let ring = 0; !found && ring < 256; ring += 1) {
         const gap = 6 + ring * (Math.max(w, h) + 6);
         let candidates;
         if (label.kind === 'ref') {
@@ -41,19 +57,43 @@
           candidates = [1, -1].map((sign) => [base[0] + dx * beyond + sign * nx * side,
             base[1] + dy * beyond + sign * ny * side]);
         } else candidates = [[ax, ay - ring * (h + 6)]];
+        // Once the preferred sides are blocked, explore directions around the
+        // anchor as well as distance. Merely extending the same rays can keep
+        // every leader behind an earlier text box forever.
+        if (ring > 0) {
+          const radius = gap + Math.max(w, h, ...(label.part ?
+            [label.part[2] - label.part[0], label.part[3] - label.part[1]] : []));
+          for (let step = 0; step < 8 * ring; step += 1) {
+            const angle = step * 2 * Math.PI / (8 * ring);
+            candidates.push([ax + Math.cos(angle) * radius, ay + Math.sin(angle) * radius]);
+          }
+        }
         for (const [cx, cy] of candidates) {
+          if (label.short) {
+            const [dx, dy] = label.direction;
+            if ((cx - label.end[0]) * dx + (cy - label.end[1]) * dy
+              <= Math.abs(dx) * w / 2 + Math.abs(dy) * h / 2) continue;
+          }
           const box = { x: cx - w / 2, y: cy - h / 2, width: w, height: h };
           if (occupied.some((b) => box.x < b.x + b.width && b.x < box.x + w
             && box.y < b.y + b.height && b.y < box.y + h)) continue;
           const target = [Math.max(box.x, Math.min(ax, box.x + w)),
             Math.max(box.y, Math.min(ay, box.y + h))];
+          const leader = label.kind === 'ref' || label.short || ring > 0 ? [label.anchor, target] : null;
+          if (placed.some((other) => (leader && intersects(leader, other.box))
+            || (other.leader && intersects(other.leader, box)))) continue;
+          // Keep future leader origins free, too: no straight leader could
+          // escape a text box covering its anchor, regardless of search radius.
+          if (labels.some((other) => (other !== input || leader)
+            && intersects([other.anchor, other.anchor], box))) continue;
           placed.push({ ...label, box, x: box.x + 3, y: box.y + 3,
-            leader: label.kind === 'ref' || label.short || ring > 0 ? [label.anchor, target] : null });
+            leader });
           occupied.push(box);
           found = true;
           break;
         }
       }
+      if (!found) throw new Error('label_layout_exhausted');
     }
     return placed;
   }
@@ -157,7 +197,7 @@
     const measure = (text, kind, size, spacing, weight, colour, attrs) => {
       if (!text) return;
       const node = el('text', { fill: colour, 'font-size': Math.max(12, size),
-        'font-family': kind === 'ref' ? '"Helvetica Neue",Arial,sans-serif' : '"Courier New",monospace',
+        style: 'font-family:' + (kind === 'ref' ? '"Helvetica Neue",Arial,sans-serif' : '"Courier New",monospace'),
         'font-weight': weight, 'letter-spacing': spacing + 'em', visibility: 'hidden' }, g);
       node.textContent = text;
       const measured = node.getBBox();
@@ -166,8 +206,11 @@
     };
     for (const [ref, box] of Object.entries(extent)) {
       rect(box, 0.22, { fill: 'none', stroke: large(box) ? 'rgba(127,233,255,.8)' : SILK, 'stroke-width': 0.8 });
-      const [ax, ay] = P(box[0] - 0.22, box[1] - 0.22);
-      const [bx, by] = P(box[2] + 0.22, box[3] + 0.22);
+      const visible = [Math.max(x0, box[0]), Math.max(y0, box[1]),
+        Math.min(x1, box[2]), Math.min(y1, box[3])];
+      if (visible[0] >= visible[2] || visible[1] >= visible[3]) continue;
+      const [ax, ay] = P(Math.max(x0, visible[0] - 0.22), Math.max(y0, visible[1] - 0.22));
+      const [bx, by] = P(Math.min(x1, visible[2] + 0.22), Math.min(y1, visible[3] + 0.22));
       measure(ref, 'ref', 12, 0.03, 400, SILK, {
         anchor: [(ax + bx) / 2, (ay + by) / 2],
         part: [Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)] });
