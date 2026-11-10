@@ -16,89 +16,157 @@
   };
   const tone = (value, fallback) => TONE[value] || fallback;
 
-  // The sole label-position authority. All coordinates and measured ink boxes
-  // are in SVG units. Search is bounded; an impossible layout is never drawn
-  // with a leader through text.
-  function placeLabels(labels, obstacles) {
-    const occupied = [...obstacles], placed = [];
-    const intersects = ([a, b], box) => {
-      let low = 0, high = 1;
-      for (const [axis, start, size] of [[0, box.x, box.width], [1, box.y, box.height]]) {
-        const delta = b[axis] - a[axis];
-        if (Math.abs(delta) < 1e-10) {
-          if (a[axis] < start || a[axis] > start + size) return false;
-        } else {
-          const ends = [(start - a[axis]) / delta, (start + size - a[axis]) / delta];
-          low = Math.max(low, Math.min(...ends));
-          high = Math.min(high, Math.max(...ends));
-          if (low > high) return false;
+  const CLEARANCE = 4; // SVG units, measured from ink / stroke edges
+  const expand = (b, gap) => ({ x: b.x - gap, y: b.y - gap,
+    width: b.width + 2 * gap, height: b.height + 2 * gap });
+  const overlap = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width
+    && a.y < b.y + b.height && b.y < a.y + a.height;
+  function intersects([a, b], box) {
+    let low = 0, high = 1;
+    for (const [axis, start, size] of [[0, box.x, box.width], [1, box.y, box.height]]) {
+      const delta = b[axis] - a[axis];
+      if (Math.abs(delta) < 1e-10) {
+        if (a[axis] < start || a[axis] > start + size) return false;
+      } else {
+        const ends = [(start - a[axis]) / delta, (start + size - a[axis]) / delta];
+        low = Math.max(low, Math.min(...ends));
+        high = Math.min(high, Math.max(...ends));
+        if (low > high) return false;
+      }
+    }
+    return true;
+  }
+  const segments = (points) => points.slice(1).map((p, i) => [points[i], p]);
+  const crosses = (points, box) => segments(points).some(s => intersects(s, box));
+
+  // Visibility routing is only for displaced references. Corners sit just
+  // outside the clearance envelopes; shortest paths have stable tie breaks.
+  function routeLeader(start, target, boxes) {
+    const clear = (a, b) => !boxes.some(box => intersects([a, b], box));
+    if (clear(start, target)) return [start, target];
+    if (boxes.some(box => intersects([start, start], box))) return null;
+    const corners = boxes.flatMap(b => [b.x - 0.1, b.x + b.width + 0.1]
+      .flatMap(x => [b.y - 0.1, b.y + b.height + 0.1].map(y => [x, y])))
+      .filter(p => !boxes.some(b => intersects([p, p], b)))
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const points = [start, target, ...corners], distance = points.map(() => Infinity);
+    const previous = [], visited = new Set();
+    distance[0] = 0;
+    for (let step = 0; step < points.length; step += 1) {
+      let index = -1;
+      for (let i = 0; i < points.length; i += 1) {
+        if (!visited.has(i) && (index < 0 || distance[i] < distance[index])) index = i;
+      }
+      if (index < 0 || !Number.isFinite(distance[index])) return null;
+      if (index === 1) {
+        const result = [];
+        for (let i = 1; i !== undefined; i = previous[i]) result.unshift(points[i]);
+        return result;
+      }
+      visited.add(index);
+      for (let i = 0; i < points.length; i += 1) {
+        if (visited.has(i)) continue;
+        const next = distance[index] + Math.hypot(points[i][0] - points[index][0], points[i][1] - points[index][1]);
+        if (next < distance[i] && clear(points[index], points[i])) {
+          distance[i] = next; previous[i] = index;
         }
       }
-      return true;
-    };
-    const key = (l) => JSON.stringify([l.kind, l.text, l.anchor, l.part, l.end]);
-    for (const input of [...labels].sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0)) {
-      const label = { ...input, short: input.kind === 'dim' && input.length < input.width + 16 };
-      const w = label.width + 6, h = label.height + 6;
+    }
+    return null;
+  }
+
+  // The sole label-position authority, shared by both board views. Measured
+  // ink bounds (including rotated dimensions) drive clearance and framing.
+  function placeLabels(labels, obstacles) {
+    const placed = [];
+    const key = (l) => JSON.stringify([l.text, l.anchor, l.part, l.end]);
+    const rank = { dim: 0, ref: 1, subtitle: 2, title: 3 };
+    const ordered = [...labels].sort((a, b) => (rank[a.kind] - rank[b.kind])
+      || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+    const blocked = (box) => obstacles.some((o) => o.segment
+      ? intersects(o.segment, expand(box, CLEARANCE + (o.stroke || 0) / 2))
+      : overlap(expand(box, CLEARANCE), o))
+      || placed.some((p) => overlap(expand(box, CLEARANCE), p.box)
+        || (p.leader && crosses(p.leader, expand(box, CLEARANCE + 0.3))));
+    const allBoxes = obstacles.filter(o => !o.segment).concat(labels.filter(l => l.part)
+      .map(l => ({ x: l.part[0], y: l.part[1], width: l.part[2] - l.part[0], height: l.part[3] - l.part[1] })));
+    const left = Math.min(0, ...allBoxes.map(b => b.x));
+    const right = Math.max(0, ...allBoxes.map(b => b.x + b.width));
+    const rowHeight = Math.max(12, ...labels.filter(l => l.kind === 'ref').map(l => l.height)) + 2 * CLEARANCE;
+    for (const label of ordered) {
+      let angle = label.kind === 'dim' ? Math.atan2(label.direction[1], label.direction[0]) * 180 / Math.PI : 0;
+      if (angle >= 90) angle -= 180;
+      if (angle < -90) angle += 180;
+      const radians = angle * Math.PI / 180;
+      const w = Math.abs(Math.cos(radians)) * label.width + Math.abs(Math.sin(radians)) * label.height;
+      const h = Math.abs(Math.sin(radians)) * label.width + Math.abs(Math.cos(radians)) * label.height;
       const [ax, ay] = label.anchor;
+      const attempt = (cx, cy, displaced = false) => {
+        const box = { x: cx - w / 2, y: cy - h / 2, width: w, height: h };
+        if (blocked(box)) return false;
+        let leader = null;
+        if (displaced) {
+          const gap = CLEARANCE + 0.5;
+          const target = [Math.max(box.x - gap, Math.min(ax, box.x + w + gap)),
+            Math.max(box.y - gap, Math.min(ay, box.y + h + gap))];
+          const routeBoxes = placed.map(p => expand(p.box, gap));
+          for (const o of obstacles) {
+            if (o.segment) {
+              const [a, b] = o.segment;
+              const envelope = { x: Math.min(a[0], b[0]) - 1, y: Math.min(a[1], b[1]) - 1,
+                width: Math.abs(b[0] - a[0]) + 2, height: Math.abs(b[1] - a[1]) + 2 };
+              // A measurement through this part cannot obstruct its origin.
+              if (!intersects([label.anchor, label.anchor], envelope)) routeBoxes.push(envelope);
+            } else if (!o.copper && !o.body && o.owner !== label.text) {
+              const envelope = expand(o, 0.8);
+              if (!o.dimension || !intersects([label.anchor, label.anchor], envelope)) routeBoxes.push(envelope);
+            }
+          }
+          leader = routeLeader(label.anchor, target, routeBoxes);
+          if (!leader) return false;
+        }
+        // Keep future reference leader origins free.
+        if (labels.some(l => l.kind === 'ref' && l !== label
+          && intersects([l.anchor, l.anchor], expand(box, CLEARANCE)))) return false;
+        placed.push({ ...label, box, center: [cx, cy], angle,
+          x: cx - label.width / 2, y: cy - label.height / 2, displaced, leader });
+        return true;
+      };
       let found = false;
-      for (let ring = 0; !found && ring < 256; ring += 1) {
-        const gap = 6 + ring * (Math.max(w, h) + 6);
-        let candidates;
-        if (label.kind === 'ref') {
-          const [left, top, right, bottom] = label.part;
-          candidates = [[ax, top - gap - h / 2], [ax, bottom + gap + h / 2],
-            [left - gap - w / 2, ay], [right + gap + w / 2, ay]];
-        } else if (label.kind === 'dim') {
-          const [dx, dy] = label.direction, nx = -dy, ny = dx;
-          const side = Math.abs(nx) * w / 2 + Math.abs(ny) * h / 2 + gap;
-          const base = label.short ? label.end : label.anchor;
-          const beyond = label.short ? Math.abs(dx) * w / 2 + Math.abs(dy) * h / 2 + gap : 0;
-          candidates = [1, -1].map((sign) => [base[0] + dx * beyond + sign * nx * side,
-            base[1] + dy * beyond + sign * ny * side]);
-        } else candidates = [[ax, ay - ring * (h + 6)]];
-        // Once the preferred sides are blocked, explore directions around the
-        // anchor as well as distance. Merely extending the same rays can keep
-        // every leader behind an earlier text box forever.
-        if (ring > 0) {
-          const radius = gap + Math.max(w, h, ...(label.part ?
-            [label.part[2] - label.part[0], label.part[3] - label.part[1]] : []));
-          for (let step = 0; step < 8 * ring; step += 1) {
-            const angle = step * 2 * Math.PI / (8 * ring);
-            candidates.push([ax + Math.cos(angle) * radius, ay + Math.sin(angle) * radius]);
+      if (label.kind === 'ref') {
+        const [l, t, r, b] = label.part, gap = CLEARANCE + 0.5;
+        for (const [cx, cy] of [[ax, t - gap - h / 2], [r + gap + w / 2, ay],
+          [ax, b + gap + h / 2], [l - gap - w / 2, ay]]) {
+          if (attempt(cx, cy)) { found = true; break; }
+        }
+        // Fixed column edges and row pitch, no radial scatter.
+        const row = Math.round(ay / rowHeight);
+        const columns = [right + CLEARANCE * 3 + w / 2, left - CLEARANCE * 3 - w / 2];
+        for (let step = 0; !found && step < 512; step += 1) {
+          for (const y of step ? [row - step, row + step] : [row]) {
+            for (const x of columns) if (attempt(x, y * rowHeight, true)) { found = true; break; }
+            if (found) break;
           }
         }
-        for (const [cx, cy] of candidates) {
-          if (label.short) {
-            const [dx, dy] = label.direction;
-            if ((cx - label.end[0]) * dx + (cy - label.end[1]) * dy
-              <= Math.abs(dx) * w / 2 + Math.abs(dy) * h / 2) continue;
-          }
-          const box = { x: cx - w / 2, y: cy - h / 2, width: w, height: h };
-          if (occupied.some((b) => box.x < b.x + b.width && b.x < box.x + w
-            && box.y < b.y + b.height && b.y < box.y + h)) continue;
-          const target = [Math.max(box.x, Math.min(ax, box.x + w)),
-            Math.max(box.y, Math.min(ay, box.y + h))];
-          const leader = label.kind === 'ref' || label.short || ring > 0 ? [label.anchor, target] : null;
-          if (placed.some((other) => (leader && intersects(leader, other.box))
-            || (other.leader && intersects(other.leader, box)))) continue;
-          // Keep future leader origins free, too: no straight leader could
-          // escape a text box covering its anchor, regardless of search radius.
-          if (labels.some((other) => (other !== input || leader)
-            && intersects([other.anchor, other.anchor], box))) continue;
-          placed.push({ ...label, box, x: box.x + 3, y: box.y + 3,
-            leader });
-          occupied.push(box);
-          found = true;
-          break;
+      } else if (label.kind === 'dim') {
+        // Keep the midpoint centred along the segment, even for short spans.
+        const nx = -Math.sin(radians), ny = Math.cos(radians);
+        const offset = label.height / 2 + CLEARANCE + 1;
+        for (let row = 0; !found && row < 512; row += 1) {
+          const distance = offset + row * (label.height + CLEARANCE);
+          found = attempt(ax - nx * distance, ay - ny * distance);
         }
+      } else {
+        // Headings remain centred in ordered rows above the drawing.
+        const top = Math.min(ay, ...placed.map(p => p.box.y - CLEARANCE - h / 2));
+        for (let row = 0; !found && row < 512; row += 1) found = attempt(ax, top - row * (h + CLEARANCE));
       }
       if (!found) throw new Error('label_layout_exhausted');
     }
     return placed;
   }
   // Node tests exercise the same pure function as the renderer.
-  if (typeof module !== 'undefined') { module.exports = { placeLabels }; return; }
+  if (typeof module !== 'undefined') { module.exports = { placeLabels, CLEARANCE }; return; }
 
   function close() { window.parent.postMessage({ type: 'show-close' }, '*'); }
   $('close').addEventListener('click', close);
@@ -194,6 +262,30 @@
       el('path', { d: path(pad.polygons), fill: tone(marks[pad.ref] ?? marks['net:' + pad.net], COPPER) }, c);
     }
     const labels = [], obstacles = [], dimensionPoints = [];
+    // Only visible geometry contributes obstacles: offscreen copper must not
+    // move annotations or enlarge either view. Bounding boxes are conservative
+    // around polygon holes; text goes outside copper rather than into it.
+    const obstacle = (points, margin = 0, attrs = {}) => {
+      if (!points.length) return;
+      const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
+      const l = Math.max(0, Math.min(...xs) - margin), t = Math.max(0, Math.min(...ys) - margin);
+      const r = Math.min(width, Math.max(...xs) + margin), b = Math.min(height, Math.max(...ys) + margin);
+      if (r > l && b > t) obstacles.push({ x: l, y: t, width: r - l, height: b - t, ...attrs });
+    };
+    for (const pad of geometry.pads || []) for (const poly of pad.polygons) {
+      obstacle(poly.outer.map(p => P(...p)), 0, { owner: pad.ref });
+    }
+    for (const track of geometry.tracks || []) {
+      const points = track.points.map(p => P(...p));
+      for (let i = 1; i < points.length; i += 1) {
+        obstacle([points[i - 1], points[i]], Math.max(1, track.width * S) / 2, { copper: true });
+      }
+    }
+    for (const plane of geometry.planes || []) for (const poly of plane.polygons) {
+      obstacle(poly.outer.map(p => P(...p)), 0, { copper: true });
+    }
+    for (const via of geometry.vias || []) obstacle([P(...via.at)],
+      Math.max(1.5, via.diameter / 2 * S) + 0.5, { copper: true });
     const measure = (text, kind, size, spacing, weight, colour, attrs) => {
       if (!text) return;
       const node = el('text', { fill: colour, 'font-size': Math.max(12, size),
@@ -214,6 +306,7 @@
       measure(ref, 'ref', 12, 0.03, 400, SILK, {
         anchor: [(ax + bx) / 2, (ay + by) / 2],
         part: [Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)] });
+      obstacle([[ax, ay], [bx, by]], 0.4, { owner: ref, body: true });
     }
     for (const dim of item.dims || []) {
       const colour = tone(dim.tone, TONE.info);
@@ -221,13 +314,14 @@
       const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
       const direction = length ? [(b[0] - a[0]) / length, (b[1] - a[1]) / length] : [1, 0];
       el('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: colour }, g);
+      obstacles.push({ segment: [a, b], stroke: 1 });
       for (const [point, sign] of [[a, 1], [b, -1]]) {
         const [x, y] = point, [dx, dy] = direction;
         const base = [x + sign * dx * 4, y + sign * dy * 4];
         const vertices = [point, [base[0] - dy * 2, base[1] + dx * 2],
           [base[0] + dy * 2, base[1] - dx * 2]];
         el('polygon', { points: vertices.map((p) => p.join(',')).join(' '), fill: colour }, g);
-        obstacles.push({ x: x - 5, y: y - 5, width: 10, height: 10 });
+        obstacles.push({ x: x - 5, y: y - 5, width: 10, height: 10, dimension: true });
         dimensionPoints.push(point);
       }
       measure(dim.text, 'dim', 12, 0.08, 600, colour, {
@@ -244,19 +338,22 @@
         && entry.anchor[0] === label.anchor[0] && entry.anchor[1] === label.anchor[1]);
       const { node, measured } = unused.splice(index, 1)[0];
       if (label.leader) {
-        const [a, b] = label.leader;
-        el('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1],
-          stroke: node.getAttribute('fill'), 'stroke-width': 0.6 }, g);
+        for (const [a, b] of segments(label.leader)) {
+          el('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+            stroke: node.getAttribute('fill'), 'stroke-width': 0.6 }, g);
+        }
       }
       node.setAttribute('x', label.x - measured.x);
       node.setAttribute('y', label.y - measured.y);
+      if (label.angle) node.setAttribute('transform', `rotate(${label.angle},${label.center.join(',')})`);
       node.removeAttribute('visibility');
       g.appendChild(node);
     }
-    const left = Math.min(0, ...layout.map((l) => l.box.x), ...dimensionPoints.map((p) => p[0] - 5)) - 10;
-    const top = Math.min(0, ...layout.map((l) => l.box.y), ...dimensionPoints.map((p) => p[1] - 5)) - 10;
-    const right = Math.max(width, ...layout.map((l) => l.box.x + l.box.width), ...dimensionPoints.map((p) => p[0] + 5)) + 10;
-    const bottom = Math.max(height, ...layout.map((l) => l.box.y + l.box.height), ...dimensionPoints.map((p) => p[1] + 5)) + 10;
+    const leaderPoints = layout.flatMap(l => l.leader || []);
+    const left = Math.min(0, ...layout.map((l) => l.box.x), ...dimensionPoints.map((p) => p[0] - 5), ...leaderPoints.map(p => p[0])) - 10;
+    const top = Math.min(0, ...layout.map((l) => l.box.y), ...dimensionPoints.map((p) => p[1] - 5), ...leaderPoints.map(p => p[1])) - 10;
+    const right = Math.max(width, ...layout.map((l) => l.box.x + l.box.width), ...dimensionPoints.map((p) => p[0] + 5), ...leaderPoints.map(p => p[0])) + 10;
+    const bottom = Math.max(height, ...layout.map((l) => l.box.y + l.box.height), ...dimensionPoints.map((p) => p[1] + 5), ...leaderPoints.map(p => p[1])) + 10;
     g.setAttribute('transform', `translate(${offsetX - left},${-top})`);
     return [right - left, bottom - top];
   }
