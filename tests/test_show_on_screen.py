@@ -266,25 +266,27 @@ const context = { document: { getElementById(id) { return ids[id] ||= element(id
 vm.runInNewContext(source, context);
 setImmediate(() => {
   const texts = all.filter(n => n.tag === 'text').map(n => {
-    const m = n.getBBox(); return { text: n.textContent, size: n.attrs['font-size'],
+    const m = n.getBBox();
+    let box = { x: Number(n.attrs.x) + m.x, y: Number(n.attrs.y) + m.y, width: m.width, height: m.height };
+    const rotation = String(n.attrs.transform || '').match(/rotate\(([-.0-9]+),([-.0-9]+),([-.0-9]+)\)/);
+    const angle = rotation ? Number(rotation[1]) : 0;
+    if (rotation) {
+      const [a, cx, cy] = rotation.slice(1).map(Number), r = a * Math.PI / 180;
+      const points = [box.x, box.x + box.width].flatMap(x => [box.y, box.y + box.height].map(y =>
+        [cx + (x-cx)*Math.cos(r) - (y-cy)*Math.sin(r), cy + (x-cx)*Math.sin(r) + (y-cy)*Math.cos(r)]));
+      const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
+      box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs)-Math.min(...xs), height: Math.max(...ys)-Math.min(...ys) };
+    }
+    return { angle, text: n.textContent, size: n.attrs['font-size'],
       font: font(n), hidden: n.attrs.visibility, clipped: !!n.parent.attrs['clip-path'],
-      box: { x: Number(n.attrs.x) + m.x, y: Number(n.attrs.y) + m.y, width: m.width, height: m.height } };
+      box };
   });
   const arrows = all.filter(n => n.tag === 'polygon').map(n => n.attrs.points.split(' ').map(p => p.split(',').map(Number)));
   const lines = all.filter(n => n.tag === 'line').map(n => n.attrs);
   const labels = texts.map(t => ({ kind: 'title', text: t.text, anchor: [100, 100], width: t.box.width, height: t.box.height }));
   const place = api.module.exports.placeLabels;
   const layout = place(labels, []);
-  // Change the stable sort keys so the long leader is placed both before
-  // and after the small reference's text, rather than just reversing input.
-  const leaderOrders = [false, true].map(reverse => place([
-    {kind: 'ref', text: reverse ? 'B' : 'A', anchor: [0, 0],
-      part: [-5, -100, 5, 100], width: 10, height: 10},
-    {kind: 'ref', text: reverse ? 'A' : 'B', anchor: [0, -50],
-      part: [-5, -55, 5, -45], width: 10, height: 10}
-  ], []));
   console.log(JSON.stringify({ texts, arrows, lines, layout,
-    leaderOrders,
     repeated: place(labels, []), reversed: place([...labels].reverse(), []),
     viewBox: ids.view.attrs.viewBox, transforms: ids.view.children.map(n => n.attrs.transform) }));
 });
@@ -356,14 +358,6 @@ setImmediate(() => {
                 if leader.get("stroke-width") == .6:
                     for text in result["texts"]:
                         self.assertFalse(crosses(leader, text["box"]), (rotate, leader, text))
-            for layout in result["leaderOrders"]:
-                for label in layout:
-                    a, b = label["leader"]
-                    line = dict(x1=a[0], y1=a[1], x2=b[0], y2=b[1])
-                    for other in layout:
-                        if other is not label:
-                            self.assertFalse(crosses(line, other["box"]), (label, other))
-
     def test_crowded_labels_clear_each_other_and_all_arrowheads(self):
         for rotate in (False, True):
             with self.subTest(rotate=rotate):
@@ -381,32 +375,34 @@ setImmediate(() => {
                     self.assertNotIn("hidden", label)
                     self.assertFalse(label["clipped"])
                     for other in texts[index+1:]:
-                        self.assertFalse(overlaps(label["box"], other["box"]), (label, other))
+                        expanded = {**label["box"], "x": label["box"]["x"]-4, "y": label["box"]["y"]-4,
+                                    "width": label["box"]["width"]+8, "height": label["box"]["height"]+8}
+                        self.assertFalse(overlaps(expanded, other["box"]), (label, other))
                     for arrow in result["arrows"][:8]:
                         xs, ys = zip(*arrow)
                         self.assertFalse(overlaps(label["box"], {"x": min(xs), "y": min(ys),
                             "width": max(xs)-min(xs), "height": max(ys)-min(ys)}))
-                # The 0.45 mm and 1.20 mm spans cannot fit their text. Both
-                # must have a leader from their dimension midpoint to the box.
-                for text, midpoint, endpoint, direction in (
-                        ("0.45", (148.8, 124.225), (148.8, 124.45), (0, 1)),
-                        ("1.20", (148.6, 124), (149.2, 124), (1, 0))):
-                    x, y = midpoint
-                    ax, ay = ((y-114)*10, (162-x)*10) if rotate else ((x-142)*10, (y-114)*10)
-                    leaders = [l for l in result["lines"] if l.get("stroke-width") == .6
-                               and abs(l["x1"]-ax) < .0001 and abs(l["y1"]-ay) < .0001]
-                    self.assertTrue(leaders)
-                    ex, ey = endpoint
-                    dx, dy = direction
-                    if rotate:
-                        ex, ey, dx, dy = (ey-114)*10, (162-ex)*10, dy, -dx
-                    else:
-                        ex, ey = (ex-142)*10, (ey-114)*10
-                    box = next(t["box"] for t in texts if t["text"] == text)
-                    # Even the nearest corner lies beyond the dimension span.
-                    self.assertTrue(all((cx-ex)*dx + (cy-ey)*dy > 0
-                        for cx in (box["x"], box["x"]+box["width"])
-                        for cy in (box["y"], box["y"]+box["height"])))
+                # Even short dimensions remain centred along their segment.
+                # Clearance is perpendicular, with no endpoint callout.
+                for dim in (
+                    {"text": "4.55", "from": [149.626, 122], "to": [149.626, 126.55]},
+                    {"text": "1.20", "from": [148, 124], "to": [149.2, 124]},
+                    {"text": "0.45", "from": [148.8, 124], "to": [148.8, 124.45]},
+                    {"text": "5.00", "from": [147.8, 122], "to": [147.8, 127]},
+                ):
+                    def point(p):
+                        x, y = p
+                        return ((y-114)*10, (162-x)*10) if rotate else ((x-142)*10, (y-114)*10)
+                    a, b = point(dim["from"]), point(dim["to"])
+                    text = next(t for t in texts if t["text"] == dim["text"])
+                    box = text["box"]
+                    cx, cy = box["x"]+box["width"]/2, box["y"]+box["height"]/2
+                    dx, dy = b[0]-a[0], b[1]-a[1]
+                    self.assertAlmostEqual((cx-(a[0]+b[0])/2)*dx + (cy-(a[1]+b[1])/2)*dy, 0)
+                    self.assertTrue(-90 <= text["angle"] <= 90)
+                    import math
+                    self.assertAlmostEqual(math.sin(math.radians(text["angle"]))*dx -
+                                           math.cos(math.radians(text["angle"]))*dy, 0)
                 self.assertEqual(result["layout"], result["repeated"])
                 self.assertEqual(result["layout"], result["reversed"])
                 # The expanded viewBox encloses labels in both adjacent views.
@@ -416,10 +412,212 @@ setImmediate(() => {
                 for transform in result["transforms"]:
                     tx, ty = map(float, re.findall(r"[-0-9.]+", transform))
                     boxes = [t["box"] for t in texts]
-                    self.assertTrue(all(b["x"]+tx >= 0 and b["y"]+ty >= 0
-                        and b["x"]+tx+b["width"] <= width and b["y"]+ty+b["height"] <= height for b in boxes))
+                    self.assertTrue(all(b["x"]+tx >= 4 and b["y"]+ty >= 4
+                        and b["x"]+tx+b["width"] <= width-4 and b["y"]+ty+b["height"] <= height-4 for b in boxes))
                     bounds.append((min(b["x"]+tx for b in boxes), max(b["x"]+tx+b["width"] for b in boxes)))
                 self.assertLess(bounds[0][1], bounds[1][0])
+
+
+    def routing_case(self, labels, obstacles, budget=2_000_000):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        # Count both collision tests and band/obstacle visits. The VM timeout
+        # also catches work that bypasses these counters.
+        script = """
+const fs = require('fs'), vm = require('vm');
+let source = fs.readFileSync(process.argv[1], 'utf8');
+source = source.replace('function intersects([a, b], box) {',
+  'function intersects([a, b], box) { if (++work > budget) throw Error("routing_work_exceeded");');
+source = source.replace('for (const b of rects) {',
+  'for (const b of rects) { if (++work > budget) throw Error("routing_work_exceeded");');
+const context = {module: {exports: {}}, work: 0, budget: Number(process.argv[3])};
+vm.createContext(context);
+vm.runInContext(source, context);
+context.fixture = JSON.parse(process.argv[2]);
+vm.runInContext('layout = module.exports.placeLabels(fixture.labels, fixture.obstacles)', context, {timeout: 3000});
+console.log(JSON.stringify({layout: context.layout, work: context.work}));
+"""
+        result = subprocess.run([node, "-e", script, str(ASSETS / "show.js"),
+                                 json.dumps({"labels": labels, "obstacles": obstacles}), str(budget)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def assert_segment_misses(self, a, b, box):
+        lo, hi = 0, 1
+        for axis, lower, size in ((0, box["x"], box["width"]),
+                                  (1, box["y"], box["height"])):
+            delta = b[axis] - a[axis]
+            if abs(delta) < 1e-10:
+                if not lower <= a[axis] <= lower + size:
+                    return
+            else:
+                ends = sorted(((lower-a[axis])/delta, (lower+size-a[axis])/delta))
+                lo, hi = max(lo, ends[0]), min(hi, ends[1])
+                if lo > hi:
+                    return
+        self.fail(f"Leader segment {a}, {b} intersects {box}")
+
+    def test_overflow_leader_escapes_another_parts_pad(self):
+        ref = {"kind": "ref", "text": "R1", "anchor": [0, 0],
+               "part": [-5, -5, 5, 5], "width": 20, "height": 12}
+        obstacles = [{"x": -40, "y": -40, "width": 80, "height": 80, "owner": "U1"},
+                     {"x": 45, "y": -20, "width": 10, "height": 40, "owner": "U2"}]
+        for extra in ([], [{"x": -20, "y": -50, "width": 70, "height": 70, "owner": "U3"}]):
+            with self.subTest(extra_origin_pad=bool(extra)):
+                label = self.routing_case([ref], obstacles + extra)["layout"][0]
+                self.assertTrue(label["displaced"])
+                self.assertTrue(label["leader"])
+                self.assertEqual(label["leader"][0], ref["anchor"])
+                self.assertGreater(label["box"]["x"], 55)
+                # Every segment after the escape stays outside all origin
+                # pads, and even the escape must avoid the unrelated pad.
+                for index, (a, b) in enumerate(zip(label["leader"], label["leader"][1:])):
+                    for obstacle in (obstacles + extra if index else obstacles[1:]):
+                        self.assert_segment_misses(a, b, obstacle)
+        # Exercise load() too: the render harness fails if the viewer closes.
+        def pad(ref, lo, hi):
+            return {"ref": ref, "polygons": [{"outer": [[lo, lo], [hi, lo], [hi, hi], [lo, hi]]}]}
+        rendered = self.render(view={"geometry": {"window": [-10, -10, 10, 10],
+            "pads": [pad("R1", -.5, .5), pad("U1", -4, 4)]}})
+        self.assertEqual({t["text"] for t in rendered["texts"]}, {"R1", "U1"})
+
+    def test_many_pad_overflow_routing_has_bounded_work(self):
+        refs = [{"kind": "ref", "text": f"R{i:02}", "anchor": [0, 0],
+                 "part": [-5, -5, 5, 5], "width": 20, "height": 12} for i in range(12)]
+        # Force repeated overflow destinations as text accumulates. The wall
+        # blocks straight leaders; the remote pads still count as obstacles.
+        obstacles = [{"x": -40, "y": -40, "width": 80, "height": 80, "copper": True},
+                     {"x": 10, "y": -200, "width": 4, "height": 400, "owner": "WALL"}]
+        obstacles += [{"x": 30 + x*8, "y": -180 + y*8, "width": 3, "height": 3,
+                       "owner": "U1"} for x in range(30) for y in range(40)]
+        result = self.routing_case(refs, obstacles)
+        self.assertEqual(len(result["layout"]), len(refs))
+        self.assertTrue(all(l["displaced"] and l["leader"] for l in result["layout"]))
+        self.assertGreater(len({l["center"][1] for l in result["layout"]}), 1)
+        self.assertLess(result["work"], 2_000_000)
+        for label in result["layout"]:
+            for a, b in zip(label["leader"], label["leader"][1:]):
+                for obstacle in obstacles[1:] + [l["box"] for l in result["layout"]]:
+                    self.assert_segment_misses(a, b, obstacle)
+        self.assertEqual(result["layout"], self.routing_case(list(reversed(refs)), obstacles)["layout"])
+
+    def test_preferred_sides_overflow_columns_and_dimension_angles(self):
+        import math
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        ref = {"kind": "ref", "text": "R1", "anchor": [0, 0],
+               "part": [-5, -5, 5, 5], "width": 20, "height": 12}
+        cases = [
+            {"labels": [ref], "obstacles": []},
+            {"labels": [ref], "obstacles": [{"x": -40, "y": -25, "width": 80, "height": 14}]},
+            {"labels": [{**ref, "text": f"R{i}", "anchor": [0, i*30],
+                         "part": [-5, i*30-5, 5, i*30+5]} for i in range(4)],
+             "obstacles": [{"x": -40, "y": -40, "width": 80, "height": 180, "copper": True}]},
+            {"labels": [ref], "obstacles": [
+                {"x": -40, "y": -40, "width": 80, "height": 80, "copper": True},
+                {"x": -5, "y": -5, "width": 10, "height": 10, "dimension": True},
+                {"x": 10, "y": -40, "width": 4, "height": 80, "owner": "R2"}]},
+        ]
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (3, 4), (-3, -4), (-3, 4), (3, -4)):
+            cases.append({"labels": [{"kind": "dim", "text": "0.45", "anchor": [0, 0],
+                                      "width": 48, "height": 12, "direction": [dx/math.hypot(dx, dy), dy/math.hypot(dx, dy)]}],
+                          "obstacles": [{"segment": [[-dx, -dy], [dx, dy]], "stroke": 1}]})
+        script = """
+const {placeLabels} = require(process.argv[1]);
+const cases = JSON.parse(process.argv[2]);
+console.log(JSON.stringify(cases.map(c => ({layout: placeLabels(c.labels, c.obstacles),
+  again: placeLabels(c.labels, c.obstacles), reversed: placeLabels([...c.labels].reverse(), c.obstacles)}))));
+"""
+        result = json.loads(subprocess.run([node, "-e", script, str(ASSETS / "show.js"), json.dumps(cases)],
+                            capture_output=True, text=True, check=True, timeout=30).stdout)
+        for case in result:
+            self.assertEqual(case["layout"], case["again"])
+            self.assertEqual(case["layout"], case["reversed"])
+        above, right = result[0]["layout"][0], result[1]["layout"][0]
+        self.assertLess(above["box"]["y"] + above["box"]["height"], -5)
+        self.assertGreater(right["box"]["x"], 5)
+        for label in (above, right):
+            self.assertEqual(label["angle"], 0)
+            self.assertIsNone(label["leader"])
+            self.assertFalse(label["displaced"])
+        overflow = result[2]["layout"]
+        self.assertEqual(len({l["box"]["x"] for l in overflow}), 1)
+        for label in overflow:
+            self.assertTrue(label["displaced"])
+            self.assertTrue(label["leader"])
+            self.assertEqual(label["angle"], 0)
+            self.assertAlmostEqual(label["center"][1] % 20, 0)
+        routed = result[3]["layout"][0]
+        self.assertTrue(routed["displaced"])
+        self.assertGreater(len(routed["leader"]), 2)
+        for case, source in zip(result[4:], cases[4:]):
+            label = case["layout"][0]
+            dx, dy = source["labels"][0]["direction"]
+            cx, cy = label["center"]
+            self.assertAlmostEqual(cx*dx + cy*dy, 0)
+            self.assertTrue(-90 <= label["angle"] <= 90)
+            self.assertAlmostEqual(math.sin(math.radians(label["angle"]))*dx -
+                                   math.cos(math.radians(label["angle"]))*dy, 0)
+            self.assertIsNone(label["leader"])
+            if dx == 0 or dy == 0:
+                self.assertAlmostEqual(math.hypot(cx, cy), 11)
+        for a, b in ((4, 5), (6, 7), (8, 9), (10, 11)):
+            self.assertEqual(result[a]["layout"][0]["center"], result[b]["layout"][0]["center"])
+
+    def test_every_label_clears_pads_and_full_dimension_segments(self):
+        # Representative P0020 AE1 feed components and short dimensions, in both
+        # orientations and both side-by-side views. Check rendered ink, not
+        # the placement routine's own collision predicate.
+        def crosses(a, b, box):
+            low, high = 0, 1
+            for axis, lower, size in ((0, box["x"], box["width"]), (1, box["y"], box["height"])):
+                delta = b[axis]-a[axis]
+                if abs(delta) < 1e-10:
+                    if not lower <= a[axis] <= lower+size:
+                        return False
+                else:
+                    ends = sorted(((lower-a[axis])/delta, (lower+size-a[axis])/delta))
+                    low, high = max(low, ends[0]), min(high, ends[1])
+                    if low > high:
+                        return False
+            return True
+        for rotate in (False, True):
+            def point(x, y):
+                return ((y-114)*10, (162-x)*10) if rotate else ((x-142)*10, (y-114)*10)
+            result = self.render(rotate)
+            refs = [t for t in result["texts"] if t["text"] in ("AE1", "C61", "L3")]
+            self.assertEqual({t["size"] for t in refs}, {12})
+            self.assertEqual({t["angle"] for t in refs}, {0})
+            for text in result["texts"]:
+                b = text["box"]
+                box = {**b, "x": b["x"]-4, "y": b["y"]-4, "width": b["width"]+8, "height": b["height"]+8}
+                for x, y in ((148.7, 124), (149.2, 124.6), (149.6, 125)):
+                    a, c = point(x, y), point(x+.6, y+.5)
+                    pad = {"x": min(a[0], c[0]), "y": min(a[1], c[1]),
+                           "width": abs(a[0]-c[0]), "height": abs(a[1]-c[1])}
+                    self.assertFalse(box["x"] < pad["x"]+pad["width"] and pad["x"] < box["x"]+box["width"]
+                                     and box["y"] < pad["y"]+pad["height"] and pad["y"] < box["y"]+box["height"], text)
+                for line in result["lines"]:
+                    if line.get("stroke-width") != .6:
+                        # Include half of the dimension stroke in the clearance.
+                        stroke_box = {**box, "x": box["x"]-.49, "y": box["y"]-.49,
+                                      "width": box["width"]+.98, "height": box["height"]+.98}
+                        self.assertFalse(crosses([line["x1"], line["y1"]], [line["x2"], line["y2"]], stroke_box), text)
+
+    def test_only_one_board_annotation_path_exists(self):
+        source = (ASSETS / "show.js").read_text()
+        self.assertEqual(source.count("function placeLabels("), 1)
+        self.assertEqual(source.count("const layout = placeLabels("), 1)
+        self.assertEqual(source.count("function leaderRouter("), 1)
+        self.assertNotIn("routeLeader(", source)
+        self.assertNotIn("Math.cos(angle) * radius", source)
 
 
 class ViewerAssetTests(unittest.TestCase):
