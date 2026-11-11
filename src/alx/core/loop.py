@@ -679,6 +679,7 @@ class CoreAgent:
                     conversation_id, conversation, snapshot, reasoning_context,
                     transient_attempts, reason, decision_provenance, refused_calls,
                     park=False,
+                    budget_exempt=True,
                 )
             return CoreOutcome(state, snapshot, reason=reason)
 
@@ -817,6 +818,7 @@ class CoreAgent:
                         (*refused_calls, {"reason": "decision_rejected",
                                           "subject": error.reason}),
                         park=False,
+                        budget_exempt=True,
                     )
                 return CoreOutcome(CoreState.ERROR, snapshot, reason="decision_rejected")
             except Exception as error:
@@ -1105,6 +1107,7 @@ class CoreAgent:
                                 reasoning_context, transient_attempts,
                                 approval_error, decision_provenance,
                                 refused_calls, park=False,
+                                budget_exempt=True,
                             )
                         return stopped(CoreState.CHECKPOINTED, approval_error)
                     refused_calls = (*refused_calls, {
@@ -1387,6 +1390,7 @@ class CoreAgent:
                         conversation_id, conversation, snapshot, reasoning_context,
                         transient_attempts, coding_exhaustion, decision_provenance,
                         refused_calls,
+                        budget_exempt=True,
                     )
                 if already_exhausted:
                     mechanical_blocker = coding_exhaustion
@@ -1456,6 +1460,7 @@ class CoreAgent:
                         conversation_id, conversation, snapshot, reasoning_context,
                         transient_attempts, "repeated_rejected_call",
                         decision_provenance, refused_calls,
+                        budget_exempt=True,
                     )
                 return CoreOutcome(
                     CoreState.CHECKPOINTED, snapshot,
@@ -1507,6 +1512,7 @@ class CoreAgent:
                     return self._respond_to_terminal_blocker(
                         conversation_id, conversation, snapshot, reasoning_context,
                         transient_attempts, mechanical_blocker, decision_provenance,
+                        budget_exempt=True,
                     )
             continuation_notice_issued = False
         if (
@@ -1540,6 +1546,7 @@ class CoreAgent:
                 conversation_id, conversation, snapshot, reasoning_context,
                 transient_attempts, "approval_covers_unheard_text",
                 decision_provenance, refused_calls, park=False,
+                budget_exempt=True,
             )
         # A turn never ends in silence when it runs out of steps: on
         # 2026-11-06 the Dual Coil request stopped without a word, and on
@@ -1550,6 +1557,7 @@ class CoreAgent:
             conversation_id, conversation, snapshot, reasoning_context,
             transient_attempts, "budget_exhausted", decision_provenance,
             refused_calls, park=False,
+            budget_exempt=origin is CognitionOrigin.PERSON_TURN,
         )
 
     def _respond_to_terminal_blocker(
@@ -1567,9 +1575,10 @@ class CoreAgent:
     ) -> CoreOutcome:
         """Allow one response-only decision for a person, parking stopped work.
 
-        After the execution budget itself stopped the turn, that one step is
-        exempt from it: it uses no capability, and a person's turn reaches it
-        at most once, so it cannot run away.
+        For a person's turn that one step is exempt from the execution
+        budget, however the turn ended: it uses no capability, and a turn
+        reaches it at most once, so it cannot run away. A background turn
+        stays under the budget.
 
         A refused plan change stops nothing that was running, so it parks
         nothing: she only says what happened. There may be no goal at all,

@@ -117,6 +117,44 @@ class SelectionContinuationTests(Fixture):
         self.assertEqual(result.reason, "budget_exhausted")
         self.assertEqual(reasoner.contexts[-1].response_only_reason, "budget_exhausted")
 
+    def test_a_person_whose_last_step_spends_the_ceiling_is_still_answered(self):
+        """Review of f498186: the last regular step used the remaining bill
+        allowance, so the step-limit answer was refused by the ceiling."""
+        from alx.observability import BudgetExceeded
+        self.store.create(paused_goal(), "conversation-1", RETENTION)
+        reasoner = Queued(*self.selection(),
+                          AgentDecision(response="I ran out of steps; the goal is saved."))
+        core = self.core(reasoner)
+        checks = []
+
+        def check(task_id):
+            checks.append(task_id)
+            if len(checks) > 2:  # the two regular steps pass; the ceiling is then spent
+                raise BudgetExceeded(task_id, 26, 26)
+
+        core._budget_check = check
+        result = core.process(conversation(), RETENTION, 2)
+        self.assertEqual(result.state, CoreState.RESPONDED)
+        self.assertEqual(result.response, "I ran out of steps; the goal is saved.")
+
+    def test_a_background_turn_stays_under_the_ceiling_at_its_last_step(self):
+        from alx.contracts import CognitionOrigin
+        from alx.observability import BudgetExceeded
+        self.store.create(paused_goal(), "conversation-1", RETENTION)
+        reasoner = Queued(*self.selection(), AgentDecision(response="never asked"))
+        core = self.core(reasoner)
+        checks = []
+
+        def check(task_id):
+            checks.append(task_id)
+            if len(checks) > 2:
+                raise BudgetExceeded(task_id, 26, 26)
+
+        core._budget_check = check
+        result = core.process(conversation(), RETENTION, 2, origin=CognitionOrigin.SELF_REQUESTED)
+        self.assertEqual(result.state, CoreState.CHECKPOINTED)
+        self.assertEqual(len(reasoner.contexts), 2)
+
     def test_reselecting_the_same_goal_does_not_buy_an_extra_step(self):
         self.store.create(active_goal(), "conversation-1", RETENTION)
         # Re-selecting the selected goal with nothing new is refused once
