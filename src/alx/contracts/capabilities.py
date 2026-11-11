@@ -109,6 +109,20 @@ def arguments_match(alternatives: ArgumentAlternatives, arguments: Mapping[str, 
                for alternative in alternatives)
 
 
+def _alternatives_overlap(first: tuple[tuple[str, str], ...],
+                          second: tuple[tuple[str, str], ...]) -> bool:
+    """Whether one call could match both alternatives: they agree on every key they share.
+
+    Two different alternatives can still match the same call, as one naming
+    only the action and one naming the action and an operation (PR #229
+    review), so whole alternatives are not compared.
+    """
+    if not first or not second:
+        return False
+    left, right = dict(first), dict(second)
+    return all(left[key] == right[key] for key in left.keys() & right.keys())
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityDefinition:
     capability_id: str
@@ -150,6 +164,12 @@ class CapabilityDefinition:
     # attention, such as releasing a mail notification: like a read, such a
     # call needs no active goal.
     attention_only_when: ArgumentAlternatives = ()
+    # Argument values under which a call carries her wording to someone else,
+    # or is an observation a plan may repeat while it waits (D-074): one tool
+    # whose actions differ declares it per action rather than for every call.
+    # The capability-wide flags above still mean every call.
+    transmits_authored_text_when: ArgumentAlternatives = ()
+    plan_observation_when: ArgumentAlternatives = ()
 
     def effect_for(self, arguments: Mapping[str, Any]) -> SideEffect:
         """This call's effect: NONE for a read, ATTENTION_STATE for an attention change."""
@@ -159,6 +179,20 @@ class CapabilityDefinition:
             if arguments_match(self.attention_only_when, arguments):
                 return SideEffect.ATTENTION_STATE
         return self.side_effect
+
+    def transmits_authored_text_for(self, arguments: Mapping[str, Any]) -> bool:
+        """Whether this call can carry wording AL/X composed to someone else."""
+        return self.transmits_authored_text or arguments_match(
+            self.transmits_authored_text_when, arguments)
+
+    def plan_observation_for(self, arguments: Mapping[str, Any]) -> bool:
+        """Whether a plan may repeat this call while it waits."""
+        return self.plan_observation or arguments_match(self.plan_observation_when, arguments)
+
+    @property
+    def offers_plan_observation(self) -> bool:
+        """Whether any call of this capability is a plan observation."""
+        return self.plan_observation or bool(self.plan_observation_when)
 
     def __post_init__(self) -> None:
         if not self.capability_id.strip() or not self.purpose.strip():
@@ -173,6 +207,12 @@ class CapabilityDefinition:
             raise TypeError("plan_observation must be a bool")
         if self.plan_observation and self.transmits_authored_text:
             raise ValueError("a capability that sends cannot be a plan observation")
+        if (self.plan_observation and self.transmits_authored_text_when) or (
+                self.transmits_authored_text and self.plan_observation_when) or any(
+                _alternatives_overlap(sending, observing)
+                for sending in self.transmits_authored_text_when
+                for observing in self.plan_observation_when):
+            raise ValueError("an action that sends cannot be a plan observation")
         codes = tuple(self.possible_failure_codes)
         object.__setattr__(self, "possible_failure_codes", codes)
         if any(not isinstance(item, str) or not item.strip() for item in codes):

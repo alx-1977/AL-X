@@ -27,7 +27,8 @@ from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
 from alx.providers.coding_git import continue_feature_branch, _WRITE_SHAPES
 from alx.safety import AuthorityContext, SafetyGate
-from alx.tools.coding import DEFINITION, build_coding_executors, goal_coding_branch, parse_coding_arguments
+from alx.tools.coding import RUN_CONTRACT, build_coding_executors, goal_coding_branch, parse_coding_arguments
+from code_actions import GIT, RUN_JOB, addressed, code_arguments, code_call, code_runtime
 from test_coding_agent import NOW, PlanningModel, RecordingSession, _FIXED, _worktree
 
 
@@ -36,10 +37,11 @@ def goal(*attempts):
                      (SuccessCriterion('c', 'done'),), attempts=attempts)
 
 
-def recorded(branch, sha, identity='record', *, capability='run_coding_task',
+def recorded(branch, sha, identity='record', *, action=RUN_JOB, capability='code',
              succeeded=True, durable=True, implementation_reached=None):
     values = {'commit': {'branch': branch, 'commit_sha': sha}}
-    call = CapabilityCall(identity, capability, {'task': 'work'})
+    arguments = code_arguments(action, {'task': 'work'}) if capability == 'code' else {'task': 'work'}
+    call = CapabilityCall(identity, capability, arguments)
     failure = None
     if not succeeded:
         failure = {"code": "task_failed"}
@@ -63,9 +65,9 @@ class Ownership(unittest.TestCase):
         resumed = {'resume_job_id': 'job-1'}
 
         def failed(job_id, arguments):
-            call = CapabilityCall(job_id, 'run_coding_task', arguments)
+            call = code_call(job_id, RUN_JOB, arguments)
             result = CapabilityResult(
-                job_id, 'run_coding_task', CapabilityResultState.FAILED,
+                job_id, 'code', CapabilityResultState.FAILED,
                 failure={'code': 'required_verification_failed'},
                 durable_values={'checkpoint': json.dumps({
                     'job_id': job_id, 'branch': 'feat/a-2', 'stage': 'test',
@@ -80,9 +82,9 @@ class Ownership(unittest.TestCase):
             captured.append(request)
             raise CodingError('coding_unavailable')
 
-        result = build_coding_executors(
+        result = addressed(build_coding_executors(
             run_job, lambda: 'job-3', lambda: state,
-        )['run_coding_task']({**resumed, 'resume_job_id': 'job-2'})
+        ), RUN_JOB)({**resumed, 'resume_job_id': 'job-2'})
         self.assertEqual(result.failure['code'], 'coding_unavailable')
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].context, 'original context')
@@ -96,26 +98,28 @@ class Ownership(unittest.TestCase):
                      recorded('feat/c', 'c', '3', succeeded=False),
                      recorded('feat/d', 'd', '4', succeeded=False,
                               implementation_reached=False),
-                     recorded('feat/e', 'e', '5', capability='repository_git'),
-                     recorded('feat/f', 'f', '6', durable=False))
-        for branch in ('feat/a', 'feat/b', 'feat/c'):
+                     recorded('feat/e', 'e', '5', action=GIT),
+                     recorded('feat/f', 'f', '6', durable=False),
+                     # Saved before D-074 under the former id, still this goal's.
+                     recorded('feat/g', 'g', '7', capability='run_coding_task'))
+        for branch in ('feat/a', 'feat/b', 'feat/c', 'feat/g'):
             with self.subTest(branch=branch):
                 self.assertEqual(goal_coding_branch(state, branch),
                                  BranchContinuation(branch))
-        # Refused before implementation, another capability, nothing recorded.
+        # Refused before implementation, another code action, nothing recorded.
         for branch in ('feat/d', 'feat/e', 'feat/f', 'feat/missing', ' feat/a', 'main'):
             with self.subTest(branch=branch):
                 self.assertIsNone(goal_coding_branch(state, branch))
         self.assertIsNone(goal_coding_branch(goal(), 'feat/a'))
         self.assertIsNone(goal_coding_branch(None, 'feat/a'))
-        self.assertIn('created or worked on', DEFINITION.purpose)
-        self.assertIn('hand commit', DEFINITION.purpose)
+        self.assertIn('created or worked on', RUN_CONTRACT.purpose)
+        self.assertIn('hand commit', RUN_CONTRACT.purpose)
 
     def test_requested_name_counts_only_when_no_branch_was_recorded(self):
         def attempt(arguments, values, identity, *, failure=None):
-            call = CapabilityCall(identity, 'run_coding_task', arguments)
+            call = code_call(identity, RUN_JOB, arguments)
             result = CapabilityResult(
-                identity, 'run_coding_task',
+                identity, 'code',
                 CapabilityResultState.FAILED if failure else CapabilityResultState.SUCCEEDED,
                 values, failure=failure, durable_values=values)
             return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
@@ -184,8 +188,8 @@ class Ownership(unittest.TestCase):
             self.assertEqual(error['invalid_field'], 'continuation')
         for value in ('true', 1, None):
             self.assertIsNotNone(parse_coding_arguments({**arguments, 'continue_goal_branch': value}, 'job')[1])
-        self.assertNotIn('continuation', DEFINITION.input_schema.properties)
-        self.assertIn('continue_goal_branch', DEFINITION.durable_input_fields)
+        self.assertNotIn('continuation', RUN_CONTRACT.input_schema.properties)
+        self.assertIn('continue_goal_branch', RUN_CONTRACT.durable_input_fields)
 
     def test_write_shapes_are_exactly_unchanged(self):
         self.assertEqual(_WRITE_SHAPES, {
@@ -228,13 +232,14 @@ class ContinuationJobs(unittest.TestCase):
             repository=self.root,
             goal_state_source=lambda: self.state, telemetry_sink=self.telemetry.append,
         )
-        broker = CapabilityBroker(CapabilityRegistry(runtime.definitions),
-                                  SafetyGate(runtime.policies), runtime.executors)
-        call = CapabilityCall(identity, 'run_coding_task', {
+        code = code_runtime(runtime, call_id_source=lambda: identity)
+        broker = CapabilityBroker(CapabilityRegistry(code.definitions),
+                                  SafetyGate(code.policies), code.executors)
+        call = code_call(identity, RUN_JOB, {
             'task': 'make the bounded change', 'repair_branch': branch,
             'commit_message': identity, 'continue_goal_branch': continuation,
         })
-        attempt = broker.dispatch(call, AuthorityContext('friedl', runtime.permissions, NOW))
+        attempt = broker.dispatch(call, AuthorityContext('friedl', code.permissions, NOW))
         self.state = replace(self.state, attempts=(*self.state.attempts, attempt))
         self.sessions.append(session)
         return attempt.result

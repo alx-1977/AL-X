@@ -29,7 +29,6 @@ from alx.bootstrap.coding import (  # noqa: E402
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.contracts import CapabilityCall, CapabilityResultState  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
 
 from test_coding_agent import (  # noqa: E402
     FIXTURE_BRANCH,
@@ -41,6 +40,7 @@ from test_coding_agent import (  # noqa: E402
     _git,
     _worktree,
 )
+from code_actions import RUN_JOB, code_call, code_runtime  # noqa: E402
 
 
 class GitOutcome(unittest.TestCase):
@@ -61,13 +61,14 @@ class GitOutcome(unittest.TestCase):
             session=session,
             repository=self.root,
         )
+        code = code_runtime(runtime)
         broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         )
         result = broker.dispatch(
-            CapabilityCall("call-1", RUN_CODING_TASK, arguments),
+            code_call("call-1", RUN_JOB, arguments),
             AuthorityContext(
                 "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
             ),

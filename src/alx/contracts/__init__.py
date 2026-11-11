@@ -228,6 +228,7 @@ from alx.contracts.mail import (
     OutboundReply,
     ReplyOutcome,
 )
+from alx.contracts.code import CODE, CodeAction, is_code_action, recorded_code_action
 from alx.contracts.xero import (
     CONTACT_CREATION_UNCONFIRMED,
     xero_date,
@@ -363,6 +364,7 @@ __all__ = [
     "xero_date",
     "XERO", "XeroAction", "recorded_xero_action",
     "RESEARCH", "ResearchAction",
+    "CODE", "CodeAction", "is_code_action", "recorded_code_action",
     "XeroAccessError", "XeroAccountingAccount", "CONTACT_CREATION_UNCONFIRMED",
     "DHL_DOCUMENT_FAILURES", "DhlDocumentError", "DhlImportAnalyzer",
 ]

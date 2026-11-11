@@ -33,6 +33,8 @@ from alx.providers.coding_agent import CodingAgent
 from alx.providers.coding_process import run_coding_subprocess
 from alx.providers import coding_agent as coding_agent_module
 from alx.tools.coding import build_coding_executors
+from alx.contracts import CodeAction
+from code_actions import RUN_JOB, STOP_JOB, addressed, code_call, code_runtime
 
 
 def _wait_in_child(started: threading.Event) -> None:
@@ -147,13 +149,13 @@ class CodingRecoveryTests(unittest.TestCase):
             **json.loads(first.checkpoint), "retained_evidence": "x" * 10_000,
         }))
         original = CapabilityAttempt(
-            CapabilityCall("job-1", "run_coding_task", {
+            code_call("job-1", RUN_JOB, {
                 "task": "fix add", "repair_branch": "fix/job-1",
                 "commit_message": "fix add",
             }),
             CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(
-                "job-1", "run_coding_task", CapabilityResultState.PARTIAL,
+                "job-1", "code", CapabilityResultState.PARTIAL,
                 first.as_values(), durable_values=first.durable_values(),
             ),
         )
@@ -168,9 +170,9 @@ class CodingRecoveryTests(unittest.TestCase):
         goal = reopened.load("goal").state
         resumed_session = RecordingSession(edits={"app.py": _FIXED})
         agent = self._agent(session=resumed_session)
-        result = build_coding_executors(
+        result = addressed(build_coding_executors(
             agent.run, lambda: "job-2", lambda: goal,
-        )["run_coding_task"]({"resume_job_id": "job-1"})
+        ), RUN_JOB)({"resume_job_id": "job-1"})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
         self.assertTrue(result.values["commit_sha"])
         self.assertTrue(result.values["all_required_verification_passed"])
@@ -377,16 +379,14 @@ class CodingRecoveryTests(unittest.TestCase):
         self.assertIn("COMMIT completed", transitions)
         self.assertNotIn("FAILED", transitions)
 
-    def test_stop_coding_job_stops_only_the_named_running_job(self):
+    def test_stop_job_stops_only_the_named_running_job(self):
         """AL/X stops a job herself; it replaced the console's Stop button."""
-        from alx.tools.coding import STOP_CODING_JOB, build_coding_executors
-
         asked = []
         executors = build_coding_executors(
             lambda request: None, lambda: "call-stop",
             stop_job=lambda job_id: asked.append(job_id) or job_id in (None, "job-1"),
         )
-        stop = executors[STOP_CODING_JOB]
+        stop = addressed(executors, STOP_JOB)
         self.assertTrue(stop({"job_id": "job-1"}).values["stopped"])
         self.assertFalse(stop({"job_id": "job-2"}).values["stopped"])
         self.assertTrue(stop({}).values["stopped"])
@@ -397,16 +397,19 @@ class CodingRecoveryTests(unittest.TestCase):
 
     def test_stopping_is_registered_under_the_coding_permission(self):
         from alx.bootstrap.coding import CODING_EXECUTE_PERMISSION
-        from alx.tools.coding import STOP_CODING_JOB
 
         runtime = build_coding_runtime(
             True, None, lambda: "call-1", agent=self._agent(),
             repository=self.root,
         )
-        self.assertIn(STOP_CODING_JOB, runtime.executors)
-        self.assertIn(STOP_CODING_JOB, {item.capability_id for item in runtime.definitions})
-        policy = runtime.policies[STOP_CODING_JOB]
+        self.assertIn(CodeAction.STOP_JOB, runtime.actions)
+        self.assertEqual(runtime.action_permissions[CodeAction.STOP_JOB],
+                         frozenset({CODING_EXECUTE_PERMISSION}))
+        code = code_runtime(runtime)
+        self.assertIn(CodeAction.STOP_JOB, code.offered)
+        self.assertIn(f"[{STOP_JOB}]", code.definitions[0].purpose)
+        policy = code.policies["code"]
         self.assertEqual(policy.permission_references, frozenset({CODING_EXECUTE_PERMISSION}))
         self.assertFalse(policy.approval_required)
         # Nothing is running, so there is nothing to stop.
-        self.assertFalse(runtime.executors[STOP_CODING_JOB]({}).values["stopped"])
+        self.assertFalse(code.executors["code"]({"action": STOP_JOB}).values["stopped"])

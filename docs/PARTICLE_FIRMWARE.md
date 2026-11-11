@@ -13,7 +13,7 @@ belongs in GitHub. An iCloud project contains only a `firmware.md` link to it.
 - `ALX_PARTICLE_CLI`: default `particle` on PATH.
 - `ALX_PARTICLE_TOOLCHAIN_ROOT`: default `~/.particle/toolchains`.
 
-`run_coding_task` accepts `firmware_repository` beside its existing job fields.
+The `code` action `run_job` accepts `firmware_repository` beside its existing job fields.
 It creates `firmware/jobs/<call-id>/source`, clones and fetches origin main,
 then uses the existing CodingAgent branch/session/verification/commit path.
 Only the verified feature commit is pushed to that feature ref. An empty-ref
@@ -52,7 +52,7 @@ Temporary build snapshots are cleaned after each compile.
 
 ## Authority and architecture evidence
 
-The production coding outcome retains `run_coding_task` → `CodingAgent`. The
+The production coding outcome retains `code` `run_job` → `CodingAgent`. The
 four new outcomes each have one `ParticleLocal` method, one catalogue definition
 and one executor, composed in `bootstrap/particle_local.py`. The architecture
 manifest declares those entries. Searches of the existing Particle provider,

@@ -44,11 +44,10 @@ from alx.core.plan_results import (  # noqa: E402
     plan_invalidation_facts,
 )
 from alx.goals import SQLiteGoalStore  # noqa: E402
-from alx.tools.pull_request_checks import (  # noqa: E402
-    DEFINITION as CHECKS_DEFINITION, build_pull_request_checks_executors,
-)
-from alx.tools.review_content import (  # noqa: E402
-    DEFINITION as REVIEW_DEFINITION, build_review_content_executors,
+from alx.tools.pull_request_checks import build_pull_request_checks_executors  # noqa: E402
+from alx.tools.review_content import build_review_content_executors  # noqa: E402
+from code_actions import (  # noqa: E402
+    READ_CHECKS, READ_REVIEW, RUN_JOB, STOP_JOB, addressed, code_call, definition, is_code,
 )
 
 NOW = datetime(2026, 10, 1, tzinfo=UTC)
@@ -533,26 +532,24 @@ class ResultIdentityTests(PlanHarness):
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
 
     def test_stopping_the_running_job_is_admitted_while_its_step_is_in_flight(self):
-        """2026-10-15: AL/X called stop_coding_job twice and both were refused.
+        """2026-10-15: AL/X called stop_coding_job (now code stop_job) twice; both were refused.
 
         The goal running the coding step admits no other call, and the stop
         was refused as just another call, so only killing the process could
         end a job that had been coding for two hours.
         """
-        from alx.tools.coding import STOP_DEFINITION
-
         agent = self.installed(step("coding"), agent=self.agent(
             Reasoner(*install(plan(step("coding")))),
-            definitions=(*DEFINITIONS, STOP_DEFINITION),
+            definitions=(*DEFINITIONS, definition(STOP_JOB)),
         ))
         (job,) = agent.advance_due_plans()
         reasoner = Reasoner(
             SELECT,
-            AgentDecision(call=CapabilityCall("stop", "stop_coding_job", {})),
+            AgentDecision(call=code_call("stop", STOP_JOB)),
             AgentDecision(response="Stopped."),
         )
         self.person(self.same_process(agent, reasoner))
-        self.assertIn("stop_coding_job", self.names())
+        self.assertTrue(any(is_code(call, STOP_JOB) for call in self.calls))
         self.assertFalse([item for context in reasoner.contexts
                           for item in context.refused_calls
                           if item.get("reason") == "plan_step_in_flight"])
@@ -575,8 +572,8 @@ class FailureContractTests(PlanHarness):
         def read(_request):
             return PullRequestChecks(95, HEAD, tuple(runs), tuple(statuses))
         executor = build_pull_request_checks_executors(read, lambda: "read-1")
-        return executor["read_pull_request_checks"]({"pull_request_number": 95,
-                                                     "head_sha": HEAD})
+        return addressed(executor, READ_CHECKS)({"pull_request_number": 95,
+                                                 "head_sha": HEAD})
 
     @staticmethod
     def run_(status, conclusion=None, steps=None):
@@ -610,43 +607,47 @@ class FailureContractTests(PlanHarness):
 
         def read(_request):
             raise CheckReadError("rate_limited")
-        result = build_pull_request_checks_executors(read, lambda: "r")[
-            "read_pull_request_checks"]({"pull_request_number": 95, "head_sha": HEAD})
+        result = addressed(build_pull_request_checks_executors(read, lambda: "r"),
+                           READ_CHECKS)({"pull_request_number": 95, "head_sha": HEAD})
         self.assertEqual(result.outcome, ExecutionOutcome.TEMPORARILY_UNAVAILABLE)
 
     def test_review_reports_pending_only_while_the_reviewer_is_working(self):
         def reader(content):
-            return build_review_content_executors(lambda _request: content, lambda: "r")[
-                "read_external_review"]({"pull_request_number": 95, "head_sha": HEAD})
+            return addressed(
+                build_review_content_executors(lambda _request: content, lambda: "r"),
+                READ_REVIEW)({"pull_request_number": 95, "head_sha": HEAD})
         working = ReviewContent(95, HEAD, "reviewer", False,
                                 unavailable_reason=REVIEW_IN_PROGRESS)
         failed = ReviewContent(95, HEAD, "reviewer", False, unavailable_reason=REVIEW_FAILED)
         published = ReviewContent(95, HEAD, "reviewer", True, summary="One finding.",
                                   submitted_at=NOW, retrieved_at=NOW)
         self.assertEqual(reader(working).outcome, ExecutionOutcome.PENDING)
+        review = {"pull_request_number": 95, "head_sha": HEAD}
         self.assertEqual(classify_planned_result(
-            step("review", wait=10), self.attempt(reader(failed)), REVIEW_DEFINITION).kind,
+            ExecutionStep(code_call("call-review", READ_REVIEW, review), (), 10, 600),
+            self.attempt(reader(failed), READ_REVIEW, review),
+            definition(READ_REVIEW)).kind,
             PlanResultKind.WAKE_CORE)
         self.assertEqual(reader(published).outcome, ExecutionOutcome.AMBIGUOUS)
 
     @staticmethod
-    def attempt(result):
-        call = CapabilityCall(result.call_id, result.capability_id, {})
+    def attempt(result, action, arguments):
+        call = code_call(result.call_id, action, arguments)
         return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
 
     def test_failed_check_beside_a_pending_one_wakes_her_at_once(self):
-        definitions = (*DEFINITIONS, CHECKS_DEFINITION)
+        definitions = (*DEFINITIONS, definition(READ_CHECKS))
         agent = self.installed(
-            ExecutionStep(CapabilityCall("read", "read_pull_request_checks",
-                                         {"pull_request_number": 95, "head_sha": HEAD}),
+            ExecutionStep(code_call("read", READ_CHECKS,
+                                    {"pull_request_number": 95, "head_sha": HEAD}),
                           (), 60, 3600),
             agent=self.agent(Reasoner(*install(plan(ExecutionStep(
-                CapabilityCall("read", "read_pull_request_checks",
-                               {"pull_request_number": 95, "head_sha": HEAD}),
+                code_call("read", READ_CHECKS,
+                          {"pull_request_number": 95, "head_sha": HEAD}),
                 (), 60, 3600)))), definitions=definitions),
         )
         result = self.check_reader(self.run_("completed", "failure"), self.run_("queued"))
-        self.outputs["read_pull_request_checks"] = lambda call: CapabilityAttempt(
+        self.outputs["code"] = lambda call: CapabilityAttempt(
             call, CapabilityAttemptDisposition.EXECUTED, True,
             replace(result, call_id=call.call_id))
         self.work(agent)
@@ -1198,7 +1199,7 @@ class AvailabilityTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
 class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
     """A person turn never waits behind coding: it runs only as a plan step.
 
-    Production, 2026-10-03: Core dispatched run_coding_task directly inside a
+    Production, 2026-10-03: Core dispatched a coding job directly inside a
     person turn, held the Core-turn lock for the whole job, and an unrelated
     question waited minutes behind it.
     """
@@ -1207,12 +1208,12 @@ class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         PlanHarness.setUp(self)
 
     async def test_direct_coding_is_refused_and_planned_coding_leaves_turns_free(self):
-        coding = CapabilityDefinition("run_coding_task", "code", SCHEMA, SCHEMA,
-                                      SideEffect.EFFECTFUL)
-        direct = AgentDecision(call=CapabilityCall("call-direct", "run_coding_task", {}))
+        coding = definition(RUN_JOB)
+        direct = AgentDecision(call=code_call("call-direct", RUN_JOB))
         chat = AgentDecision(response="Quiet so far.")
         reasoner = Reasoner(SELECT, direct,
-                            *install(plan(step("run_coding_task"), step("merge")),
+                            *install(plan(ExecutionStep(code_call("call-code", RUN_JOB), ()),
+                                          step("merge")),
                                      select=False),
                             chat)
         agent = self.agent(reasoner, definitions=(*DEFINITIONS, coding))
@@ -1226,7 +1227,7 @@ class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
             return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
                                      CapabilityResult(call.call_id, call.capability_id,
                                                       CapabilityResultState.SUCCEEDED))
-        self.outputs["run_coding_task"] = blocked_coding
+        self.outputs["code"] = blocked_coding
         conversations = SQLiteConversationStore(Path(self.path).with_name("turns.sqlite3"))
         self.addCleanup(conversations.close)
         gateway = ConversationGateway(agent, conversations, clock=lambda: self.now)
@@ -1244,8 +1245,8 @@ class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         # Refused before dispatch, returned to her once, and corrected by her.
         self.assertEqual(self.calls, [])
         self.assertEqual(reasoner.contexts[2].refused_calls, ({
-            "call_id": "call-direct", "capability_id": "run_coding_task",
-            "reason": "coding_requires_execution_plan", "subject": "run_coding_task",
+            "call_id": "call-direct", "capability_id": "code",
+            "reason": "coding_requires_execution_plan", "subject": "code",
         },))
         self.assertEqual(self.plan_of().status, PlanStatus.RUNNING)
 
@@ -1262,10 +1263,10 @@ class ForegroundCodingTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
 
         release.set()
         await workers.drain()
-        self.assertEqual(self.names(), ["run_coding_task", "merge"])
+        self.assertEqual(self.names(), ["code", "merge"])
+        self.assertTrue(is_code(self.calls[0], RUN_JOB))
         self.assertNotIn("call-direct", [call.call_id for call in self.calls])
-        recorded = [item for item in self.state().attempts
-                    if item.call.capability_id == "run_coding_task"]
+        recorded = [item for item in self.state().attempts if is_code(item.call, RUN_JOB)]
         self.assertEqual([(item.call.call_id, item.disposition) for item in recorded],
                          [(self.calls[0].call_id, CapabilityAttemptDisposition.EXECUTED)])
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
@@ -1772,8 +1773,8 @@ class CheckPrecedenceTests(unittest.TestCase):
     def outcome(self, *runs, statuses=()):
         def read(_request):
             return PullRequestChecks(95, HEAD, tuple(runs), tuple(statuses))
-        return build_pull_request_checks_executors(read, lambda: "r")[
-            "read_pull_request_checks"]({"pull_request_number": 95, "head_sha": HEAD}).outcome
+        return addressed(build_pull_request_checks_executors(read, lambda: "r"), READ_CHECKS)(
+            {"pull_request_number": 95, "head_sha": HEAD}).outcome
 
     @staticmethod
     def run_(status, conclusion=None):
@@ -1962,8 +1963,8 @@ class CheckStepPrecedenceTests(unittest.TestCase):
     def outcome(*runs):
         def read(_request):
             return PullRequestChecks(95, HEAD, tuple(runs), ())
-        return build_pull_request_checks_executors(read, lambda: "r")[
-            "read_pull_request_checks"]({"pull_request_number": 95, "head_sha": HEAD}).outcome
+        return addressed(build_pull_request_checks_executors(read, lambda: "r"), READ_CHECKS)(
+            {"pull_request_number": 95, "head_sha": HEAD}).outcome
 
     @staticmethod
     def run_(status, conclusion=None, steps=None):
@@ -2369,7 +2370,8 @@ class PlannedCallIdentityTests(PlanHarness):
 
     def test_a_planned_coding_step_passes_the_real_coding_validation(self):
         from alx.contracts.coding import job_id_permitted
-        from alx.tools.coding import DEFINITION as CODING, build_coding_executors
+        from alx.tools.coding import build_coding_executors
+        from code_actions import executors as code_executors
 
         current = {"call_id": ""}
         jobs = []
@@ -2377,16 +2379,16 @@ class PlannedCallIdentityTests(PlanHarness):
         def run_job(request):
             jobs.append(request)
             raise RuntimeError("the job itself is not under test")
-        executors = build_coding_executors(run_job, lambda: current["call_id"],
-                                           lambda: self.state())
+        executors = code_executors(build_coding_executors(
+            run_job, lambda: current["call_id"], lambda: self.state()))
 
         def dispatch(call, _state):
             current["call_id"] = call.call_id
             self.calls.append(call)
-            result = executors["run_coding_task"](dict(call.arguments))
+            result = executors["code"](dict(call.arguments))
             return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
         # The exact arguments Core planned in the real acceptance run.
-        workflow = plan(ExecutionStep(CapabilityCall("code", "run_coding_task", {
+        workflow = plan(ExecutionStep(code_call("code", RUN_JOB, {
             "task": "Append exactly one new line to the end of docs/FOUNDATION_PROOF.md "
                     "that reads: Acceptance run marker for PR #95 (throwaway, do not "
                     "merge).  Change nothing else in the file or repository.",
@@ -2399,7 +2401,7 @@ class PlannedCallIdentityTests(PlanHarness):
             "commit_message": "docs: add throwaway acceptance run marker for PR #95",
         }), ()))
         agent = CoreAgent(self.store, Reasoner(*install(workflow)), dispatch,
-                          (*DEFINITIONS, CODING), clock=lambda: self.now,
+                          (*DEFINITIONS, definition(RUN_JOB)), clock=lambda: self.now,
                           budget_check=self.budget, plan_continuation=True)
         self.person(agent)
         (job,) = agent.advance_due_plans()

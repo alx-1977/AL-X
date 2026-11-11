@@ -21,7 +21,7 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
+from alx.contracts import CapabilityResult, CodeAction, StructuredData
 from alx.contracts.sandbox import SandboxError, SandboxRequest
 from alx.observability.sandbox_ledger import (
     SQLiteSandboxLedger,
@@ -33,12 +33,7 @@ from alx.providers.sandbox_retention import SandboxRetention
 from alx.providers.sandbox_macos import SeatbeltSandboxRunner
 from alx.providers.sandbox_runner import SandboxRunner
 from alx.providers.sandbox_workspace import SandboxWorkspace
-from alx.safety import AuthorityPolicy
-from alx.tools.sandbox import (
-    DEFINITION as SANDBOX_DEFINITION,
-    RUN_SANDBOX_EXPERIMENT,
-    build_sandbox_executors,
-)
+from alx.tools.sandbox import build_sandbox_executors
 
 
 LOGGER = logging.getLogger(__name__)
@@ -51,16 +46,14 @@ SANDBOX_EXECUTE_PERMISSION = "sandbox.execute"
 
 @dataclass(frozen=True, slots=True)
 class SandboxRuntime:
-    """The one experimentation capability, or nothing at all."""
+    """The experiment action of `code`, or nothing at all (D-074)."""
 
     runner: SandboxRunner
     workspace: SandboxWorkspace
     ledger: SQLiteSandboxLedger
     retention: SandboxRetention
-    definitions: tuple[CapabilityDefinition, ...]
-    policies: Mapping[str, AuthorityPolicy]
-    executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
-    permissions: frozenset[str]
+    actions: Mapping[CodeAction, Callable[[StructuredData], CapabilityResult]]
+    action_permissions: Mapping[CodeAction, frozenset[str]]
 
 
 def build_sandbox_runtime(
@@ -170,7 +163,7 @@ def build_sandbox_runtime(
 
     LOGGER.info(
         "Isolated experimentation enabled: %s (%d runs, %d wall seconds per day)",
-        RUN_SANDBOX_EXPERIMENT,
+        CodeAction.EXPERIMENT.value,
         ledger.budget.daily_runs,
         ledger.budget.daily_seconds,
     )
@@ -179,8 +172,8 @@ def build_sandbox_runtime(
         workspace=workspace,
         ledger=ledger,
         retention=retention,
-        definitions=(SANDBOX_DEFINITION,),
-        policies={
+        actions=executors,
+        action_permissions={
             # Not approval gated. The confinement, the absence of network and
             # secrets, and the daily fuses are the control; asking Friedl to
             # approve each experiment would make experimentation something he
@@ -190,10 +183,6 @@ def build_sandbox_runtime(
             # autonomous and person-originated cognition use the same governed
             # path, and that a host's memory limitation must not be pushed into
             # her authority model.
-            RUN_SANDBOX_EXPERIMENT: AuthorityPolicy(
-                frozenset({SANDBOX_EXECUTE_PERMISSION})
-            ),
+            CodeAction.EXPERIMENT: frozenset({SANDBOX_EXECUTE_PERMISSION}),
         },
-        executors=executors,
-        permissions=frozenset({SANDBOX_EXECUTE_PERMISSION}),
     )

@@ -39,10 +39,14 @@ from alx.contracts.repository_authority import (  # noqa: E402
 )
 from alx.providers.repository_authority import RepositoryAuthority  # noqa: E402
 from alx.tools.repository_authority import (  # noqa: E402
-    DEFINITION,
-    REPOSITORY_OPERATION,
+    CONTRACT as DEFINITION,
     build_repository_operation_executors,
 )
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
+from code_actions import GIT, addressed, definition  # noqa: E402
+
+# The id the git action had before D-074, which no coding module may name.
+FORMER_REPOSITORY_OPERATION = "repository_operation"
 
 CANONICAL = "alx-1977/AL-X"
 
@@ -772,16 +776,17 @@ class CodingAgentAuthorityTests(unittest.TestCase):
             with self.subTest(module=name):
                 source = (self.SOURCE / name).read_text()
                 self.assertNotIn("repository_authority", source)
-                self.assertNotIn(REPOSITORY_OPERATION, source)
+                self.assertNotIn(FORMER_REPOSITORY_OPERATION, source)
+                self.assertNotIn("CodeAction.GIT", source)
 
 
 class CapabilityExecutorTests(RealRepositoryHarness):
     """The capability boundary, over the real provider."""
 
     def executor(self):
-        return build_repository_operation_executors(
+        return addressed(build_repository_operation_executors(
             self.authority, lambda: "call-1"
-        )[REPOSITORY_OPERATION]
+        ), GIT)
 
     def test_an_operation_reaches_the_repository(self) -> None:
         sha = self.commit("a.txt")
@@ -1471,7 +1476,7 @@ class CapabilityContractTests(unittest.TestCase):
         """She reads this; it has to be the whole answer."""
         from alx.contracts.repository_authority import ARGUMENTS
 
-        purpose = DEFINITION.purpose
+        purpose = definition(GIT).purpose
         for operation in Operation:
             with self.subTest(operation=operation.value):
                 self.assertIn(f"`{operation.value}`", purpose)
@@ -1555,14 +1560,9 @@ class PullRequestArgumentShapeTests(RealRepositoryHarness):
 
     def executor(self):
         """The capability as registered, not the provider directly."""
-        from alx.tools.repository_authority import (
-            REPOSITORY_OPERATION,
-            build_repository_operation_executors,
-        )
-
-        return build_repository_operation_executors(
+        return addressed(build_repository_operation_executors(
             self.authority, lambda: "call-1"
-        )[REPOSITORY_OPERATION]
+        ), GIT)
 
     def test_the_declared_shape_opens_a_pull_request(self) -> None:
         result = self.executor()({
@@ -1599,9 +1599,7 @@ class PullRequestArgumentShapeTests(RealRepositoryHarness):
         self.assertEqual(self.github.opened, [])
 
     def test_core_is_told_the_draft_option_exists(self) -> None:
-        from alx.tools.repository_authority import DEFINITION
-
-        purpose = DEFINITION.purpose
+        purpose = definition(GIT).purpose
         opening = purpose[purpose.index("`open_pull_request`"):]
         opening = opening[:opening.index("`update_pull_request`")]
         self.assertIn("`draft`", opening)

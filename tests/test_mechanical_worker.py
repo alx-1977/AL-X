@@ -214,11 +214,13 @@ class DelegateCapabilityTests(unittest.TestCase):
         self.assertEqual(self.executor(broken)({"brief": "x"}).failure["code"], "worker_failed")
 
     def test_the_worker_list_names_no_capability_that_sends_spends_or_merges(self) -> None:
-        from alx.contracts import RESEARCH
-        from alx.tools import mail, program, repository, review
+        from alx.contracts import CODE, RESEARCH
+        from alx.tools import mail, program
+        # Merging and requesting a review are actions of the one `code`
+        # capability (D-074), so none of `code` is listed.
         forbidden = {
-            mail.SEND_MAIL_REPLY, repository.MERGE_PULL_REQUEST,
-            RESEARCH, review.REQUEST_EXTERNAL_REVIEW, "write_back_kicad_board",
+            mail.SEND_MAIL_REPLY, CODE,
+            RESEARCH, "write_back_kicad_board",
             "export_kicad_manufacturing", "flash_bench_reader_usb", DELEGATE_MECHANICAL_WORK,
         }
         self.assertFalse(forbidden & set(WORKER_CAPABILITIES))

@@ -7,7 +7,7 @@ passed, yet that command never ran: verification is derived from the changed
 paths only, by design, and prose is never parsed for commands. A request
 written as prose had nowhere structured to go.
 
-`run_coding_task` now takes `verification_commands`: exact argv arrays AL/X
+`code` run_job now takes `verification_commands`: exact argv arrays AL/X
 chooses. They run beside the derived checks, through the same allowlist, and
 a requested command that is refused, fails or never runs fails verification.
 """
@@ -31,7 +31,8 @@ from alx.providers.coding_agent import (  # noqa: E402
 )
 from alx.providers.coding_workspace import CodingWorkspace  # noqa: E402
 from alx.contracts.coding_verification import required_verification  # noqa: E402
-from alx.tools.coding import DEFINITION, parse_coding_arguments  # noqa: E402
+from alx.tools.coding import RUN_CONTRACT, parse_coding_arguments  # noqa: E402
+from code_actions import RUN_JOB, definition  # noqa: E402
 
 PYTHON = Path(sys.executable).name
 
@@ -68,9 +69,13 @@ class ArgumentTests(unittest.TestCase):
                 self.assertIsNotNone(failure)
 
     def test_the_capability_declares_and_keeps_the_field(self) -> None:
-        self.assertIn("verification_commands", DEFINITION.input_schema.properties)
-        self.assertIn("verification_commands", DEFINITION.durable_input_fields)
-        self.assertIn("verification_commands", DEFINITION.purpose)
+        self.assertIn("verification_commands", RUN_CONTRACT.input_schema.properties)
+        self.assertIn("verification_commands", RUN_CONTRACT.durable_input_fields)
+        self.assertIn("verification_commands", RUN_CONTRACT.purpose)
+        # The one `code` capability carries it to the model and the audit.
+        code = definition(RUN_JOB)
+        self.assertIn("verification_commands", code.input_schema.properties)
+        self.assertIn("verification_commands", code.durable_input_fields)
 
     def test_the_session_is_told_what_will_run(self) -> None:
         request = CodingRequest(task="t", job_id="j", requested_checks=(("python", "-m", "pytest"),))

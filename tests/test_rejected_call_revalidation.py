@@ -22,12 +22,14 @@ from alx.contracts import (
 )
 from alx.core.loop import CoreAgent, CoreState
 from alx.goals import SQLiteGoalStore
+from code_actions import RUN_JOB, code_arguments, code_call
 
 
 NOW = datetime(2026, 10, 1, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=1)
+# D-074: coding is the `code` capability's run_job action.
 DEFINITION = CapabilityDefinition(
-    "run_coding_task", "Continue bounded coding work",
+    "code", "Continue bounded coding work",
     StructuredSchema(ValueKind.OBJECT), StructuredSchema(ValueKind.OBJECT),
     SideEffect.EFFECTFUL,
 )
@@ -35,11 +37,11 @@ RESUME = {"resume_job_id": "resume-01"}
 
 
 def old_timeout(call_id: str, arguments: dict[str, str], digest: str) -> CapabilityAttempt:
-    call = CapabilityCall(call_id, "run_coding_task", arguments)
+    call = code_call(call_id, RUN_JOB, arguments)
     return CapabilityAttempt(
         call, CapabilityAttemptDisposition.EXECUTED, True,
         CapabilityResult(
-            call_id, "run_coding_task", CapabilityResultState.FAILED,
+            call_id, "code", CapabilityResultState.FAILED,
             {"status": "failed", "checkpoint": json.dumps({
                 "stage": "execution", "head_sha": "a" * 40,
                 "state_digest": digest,
@@ -51,7 +53,7 @@ def old_timeout(call_id: str, arguments: dict[str, str], digest: str) -> Capabil
 
 def refused(reason: str, arguments: dict[str, str] = RESUME) -> CapabilityAttempt:
     return CapabilityAttempt(
-        CapabilityCall("old-refusal", "run_coding_task", arguments),
+        code_call("old-refusal", RUN_JOB, arguments),
         CapabilityAttemptDisposition.REJECTED, False, reason_code=reason,
     )
 
@@ -99,7 +101,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
             old_timeout("resume-01", {"resume_job_id": "first"}, "2" * 64),
             refused("coding_retry_exhausted"),
         )
-        call = CapabilityCall("new-resume", "run_coding_task", RESUME)
+        call = code_call("new-resume", RUN_JOB, RESUME)
         self.assertEqual(CoreAgent._consecutive_coding_failures(state), 0)
         self.assertIsNone(CoreAgent._coding_exhaustion_reason(state))
         self.assertFalse(CoreAgent._repeats_rejected_call(state, call, NOW))
@@ -130,16 +132,16 @@ class RejectedCallRevalidationTests(unittest.TestCase):
     def test_live_exhaustion_stops_without_dispatch_and_explains(self):
         failures = tuple(
             CapabilityAttempt(
-                CapabilityCall(call_id, "run_coding_task", {"task": call_id}),
+                code_call(call_id, RUN_JOB, {"task": call_id}),
                 CapabilityAttemptDisposition.EXECUTED, True,
-                CapabilityResult(call_id, "run_coding_task", CapabilityResultState.FAILED,
+                CapabilityResult(call_id, "code", CapabilityResultState.FAILED,
                                  failure={"code": "task_failed"}),
             ) for call_id in ("failure-1", "failure-2", "failure-3", "failure-4")
         )
         state = goal(*failures, refused("coding_retry_exhausted"))
         reasoner = Reasoner(
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(call=CapabilityCall("new-resume", "run_coding_task", RESUME)),
+            AgentDecision(call=code_call("new-resume", RUN_JOB, RESUME)),
             AgentDecision(response="Four implementation failures exhausted this job."),
         )
         outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))
@@ -154,7 +156,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         state = goal(refused("input_invalid"))
         reasoner = Reasoner(
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+            AgentDecision(call=code_call("again", RUN_JOB, RESUME)),
             AgentDecision(response="The same input is still invalid."),
         )
         outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))
@@ -171,7 +173,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         outcome = self.run_core(
             state, Reasoner(
                 AgentDecision(goal_id="goal-a"),
-                AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+                AgentDecision(call=code_call("again", RUN_JOB, RESUME)),
             ), lambda *_: self.fail("dispatched"),
             origin=CognitionOrigin.EXTERNAL_EVENT,
         )
@@ -183,7 +185,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         # there is neither dispatched nor written.
         attempted = {
             "call": AgentDecision(
-                call=CapabilityCall("unsafe", "run_coding_task", {"task": "new"}),
+                call=code_call("unsafe", RUN_JOB, {"task": "new"}),
             ),
             "mutation": AgentDecision(
                 goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION),
@@ -196,7 +198,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
                 self.store.create(state, "conversation", RETENTION)
                 reasoner = Reasoner(
                     AgentDecision(goal_id=identifier),
-                    AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+                    AgentDecision(call=code_call("again", RUN_JOB, RESUME)),
                     terminal,
                 )
                 outcome = CoreAgent(
@@ -219,7 +221,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         for path in ("person", "autonomous", "plan"):
             with self.subTest(path=path):
                 identifier = f"goal-{path}"
-                call = CapabilityCall(f"repeat-{path}", "run_coding_task", RESUME)
+                call = code_call(f"repeat-{path}", RUN_JOB, RESUME)
                 state = replace(goal(earlier), goal_id=identifier)
                 if path == "plan":
                     state = replace(state, execution_plan=ExecutionPlan(
@@ -264,7 +266,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         from alx.goals.store import _attempts
 
         legacy = _attempts({"attempts": [[
-            "old-refusal", "run_coding_task", RESUME, None,
+            "old-refusal", "code", code_arguments(RUN_JOB, RESUME), None,
             "rejected", False, None, "input_invalid",
         ]]})[0]
         self.assertIsNone(legacy.recorded_at)
@@ -272,7 +274,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
             self.run_core(
                 goal(legacy), Reasoner(
                     AgentDecision(goal_id="goal-a"),
-                    AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+                    AgentDecision(call=code_call("again", RUN_JOB, RESUME)),
                 ), lambda *_: self.fail("dispatched"),
                 origin=CognitionOrigin.EXTERNAL_EVENT,
             )
@@ -285,7 +287,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         snapshot = self.store.create(goal(earlier), "conversation", RETENTION)
         agent = CoreAgent(self.store, Reasoner(), lambda *_: self.fail("dispatched"),
                           (DEFINITION,))
-        call = CapabilityCall("again", "run_coding_task", RESUME)
+        call = code_call("again", RUN_JOB, RESUME)
         snapshot = agent._record_repeated_rejection(snapshot, call, earlier, NOW)
         permitted = replace(call, call_id="approved", approval_id="fresh-approval")
         repaired = replace(snapshot.state, approvals=(Approval(
@@ -295,7 +297,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         self.assertIsNone(CoreAgent._binding_rejected_call(repaired, permitted, NOW))
 
     def test_new_dispatch_refusal_gets_its_recorded_time(self):
-        call = CapabilityCall("first-refusal", "run_coding_task", RESUME)
+        call = code_call("first-refusal", RUN_JOB, RESUME)
         self.run_core(goal(), Reasoner(
             AgentDecision(goal_id="goal-a"),
             AgentDecision(call=call),
@@ -328,7 +330,7 @@ class RejectedCallRevalidationTests(unittest.TestCase):
         )
         reasoner = Reasoner(
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(call=CapabilityCall("again", "run_coding_task", RESUME)),
+            AgentDecision(call=code_call("again", RUN_JOB, RESUME)),
             AgentDecision(response="The prior input remains invalid."),
         )
         outcome = self.run_core(state, reasoner, lambda *_: self.fail("dispatched"))

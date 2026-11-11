@@ -143,7 +143,7 @@ class ConsoleTidyTests(unittest.TestCase):
         self.assertEqual(result["after"], "Listening")
 
     def test_the_console_has_no_stop_coding_control(self) -> None:
-        """Stopping a job is AL/X's stop_coding_job, not a console button."""
+        """Stopping a job is AL/X's code stop_job action, not a console button."""
         assets = Path(__file__).resolve().parents[1] / "src/alx/interfaces/assets"
         for name in ("index.html", "app.js", "app.css"):
             with self.subTest(asset=name):

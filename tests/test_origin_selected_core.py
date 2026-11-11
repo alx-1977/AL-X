@@ -18,6 +18,7 @@ from alx.bootstrap.reasoning import OriginSelectedReasoner  # noqa: E402
 from alx.contracts import (  # noqa: E402
     AgentDecision, CognitionOrigin, ReasoningContext,
 )
+from code_actions import MERGE, code_call, code_scope, definition  # noqa: E402
 
 
 class RecordingReasoner:
@@ -198,14 +199,15 @@ class FirstPassTests(unittest.TestCase):
         schema = StructuredSchema(ValueKind.OBJECT)
         self.capabilities = (
             CapabilityDefinition("read_record", "read", schema, schema, SideEffect.NONE),
-            CapabilityDefinition("merge_pull_request", "merge", schema, schema,
-                                 SideEffect.EFFECTFUL),
+            # D-074: merging is the `code` capability's merge action.
+            definition(),
             # D-074: one capability, its reads and attention changes declared per action.
             CapabilityDefinition("mail", "mail", schema, schema, SideEffect.EFFECTFUL,
                                  read_only_when=((("action", "read"),),),
                                  attention_only_when=((("action", "acknowledge"),),)),
         )
         self.call = lambda capability: CapabilityCall("c", capability, {}, None)
+        self.merge = lambda: code_call("c", MERGE)
         self.person = RecordingReasoner("opus-person")
         self.deep = RecordingReasoner("opus")
         self.first = ScriptedReasoner()
@@ -228,17 +230,17 @@ class FirstPassTests(unittest.TestCase):
 
     def test_anything_that_changes_something_is_reasoned_again_by_opus(self) -> None:
         from alx.contracts import (
-            ApprovalProposal, ApprovalScope, GoalMutationKind, GoalProposal, PlanOperation,
+            ApprovalProposal, GoalMutationKind, GoalProposal, PlanOperation,
             PlanUpdate,
         )
         for decision in (
-            AgentDecision(call=self.call("merge_pull_request")),
+            AgentDecision(call=self.merge()),
             AgentDecision(call=self.call("not_in_catalogue")),
             AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION)),
             AgentDecision(plan_update=PlanUpdate(PlanOperation.CANCEL)),
-            AgentDecision(call=self.call("merge_pull_request"),
+            AgentDecision(call=self.merge(),
                           approval_proposal=ApprovalProposal(
-                              "a", ApprovalScope("merge_pull_request", {}), "turn:t1")),
+                              "a", code_scope(MERGE, {}), "turn:t1")),
         ):
             with self.subTest(decision=decision):
                 self.first.next = decision
@@ -274,7 +276,7 @@ class FirstPassTests(unittest.TestCase):
                 self.assertEqual(self.reasoner.decide(self.context(origin)).response, "first")
 
     def test_escalating_ends_the_first_pass_session(self) -> None:
-        self.first.next = AgentDecision(call=self.call("merge_pull_request"))
+        self.first.next = AgentDecision(call=self.merge())
         self.reasoner.decide(self.context())
         self.assertEqual(self.first.abandoned, 1)
 

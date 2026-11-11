@@ -455,6 +455,7 @@ class WatcherCannotActTests(unittest.TestCase):
                         self.assertNotIn("github_merge", joined)
                         self.assertNotIn("tools.review", joined)
                         self.assertNotIn("tools.repository", joined)
+                        self.assertNotIn("tools.code", joined)
                     if isinstance(node, ast.Constant) and isinstance(node.value, str):
                         # No reviewer's trigger and no merge capability: the
                         # watcher reports, and nothing it can reach acts.
@@ -462,7 +463,10 @@ class WatcherCannotActTests(unittest.TestCase):
                             profile.trigger for profile in PROFILES.values()
                         ):
                             self.assertNotEqual(node.value, trigger)
+                        # D-074: merging is the `code` capability's merge action.
                         self.assertNotEqual(node.value, "merge_pull_request")
+                        self.assertNotEqual(node.value, "code")
+                        self.assertNotEqual(node.value, "merge")
 
     def test_the_observer_only_reads(self) -> None:
         """No write reaches GitHub from the status path.

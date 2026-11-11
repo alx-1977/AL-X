@@ -17,9 +17,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.bootstrap.review import build_review_runtime  # noqa: E402
 from alx.observability.review_allowance import SQLiteReviewAllowance  # noqa: E402
 from alx.providers import github_review  # noqa: E402
-from alx.tools.review import (  # noqa: E402
-    REQUEST_EXTERNAL_REVIEW,
-    REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE,
+from alx.contracts import CODE  # noqa: E402
+from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from code_actions import (  # noqa: E402
+    REQUEST_REVIEW,
+    REQUEST_REVIEW_BEYOND_ALLOWANCE,
+    addressed,
+    code_call,
+    code_runtime,
 )
 from tests.review_transcript import (  # noqa: E402
     HEAD,
@@ -81,8 +87,8 @@ class RuntimeTests(unittest.TestCase):
             allowance=self.allowance,
         )
 
-    def ask(self, name: str = REQUEST_EXTERNAL_REVIEW):
-        return self.runtime.executors[name]({"pull_request_number": 42})
+    def ask(self, name: str = REQUEST_REVIEW):
+        return addressed(self.runtime.actions, name)({"pull_request_number": 42})
 
     def test_the_fourth_review_of_a_pull_request_is_refused_unasked(self) -> None:
         for _ in range(3):
@@ -95,14 +101,21 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.github.posted), 3)
 
     def test_beyond_the_allowance_needs_friedl_s_approval(self) -> None:
-        policy = self.runtime.policies[REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE]
-        self.assertTrue(policy.approval_required)
-        self.assertFalse(self.runtime.policies[REQUEST_EXTERNAL_REVIEW].approval_required)
+        code = code_runtime(self.runtime)
+        gate = SafetyGate(code.policies)
+        authority = AuthorityContext("friedl", code.permissions, NOW)
+        arguments = {"pull_request_number": 42}
+        self.assertEqual(
+            gate.evaluate(code_call("c", REQUEST_REVIEW_BEYOND_ALLOWANCE, arguments),
+                          authority).state.value,
+            "approval_required",
+        )
+        self.assertTrue(gate.evaluate(code_call("c", REQUEST_REVIEW, arguments), authority).allowed)
 
     def test_an_approved_review_beyond_the_allowance_goes_out_and_counts(self) -> None:
         for _ in range(3):
             self.ask()
-        result = self.ask(REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE)
+        result = self.ask(REQUEST_REVIEW_BEYOND_ALLOWANCE)
         self.assertEqual(result.state.value, "succeeded")
         self.assertEqual(len(self.github.posted), 4)
         self.assertEqual(self.allowance.state(42, datetime.now(UTC)).pull_request_reviews, 4)
@@ -148,7 +161,7 @@ class RuntimeTests(unittest.TestCase):
             True, "owner/repo", "token", lambda: "call-1",
             started=lambda number, sha, at: "completed", allowance=Broken(),
         )
-        result = runtime.executors[REQUEST_EXTERNAL_REVIEW]({"pull_request_number": 42})
+        result = addressed(runtime.actions, REQUEST_REVIEW)({"pull_request_number": 42})
         self.assertEqual(result.failure["code"], "review_unavailable")
         self.assertEqual(self.github.posted, [])
 
@@ -174,7 +187,10 @@ class RuntimeTests(unittest.TestCase):
             True, "owner/repo", "token", lambda: "call-1",
             started=lambda number, sha, at: "completed",
         )
-        self.assertNotIn(REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE, runtime.executors)
+        self.assertNotIn(REQUEST_REVIEW_BEYOND_ALLOWANCE, runtime.actions)
+        code = code_runtime(runtime)
+        self.assertNotIn(REQUEST_REVIEW_BEYOND_ALLOWANCE, code.definitions[0].purpose)
+        self.assertFalse(code.policies[CODE].approval_required)
 
 
 if __name__ == "__main__":

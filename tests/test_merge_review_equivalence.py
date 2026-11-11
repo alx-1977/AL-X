@@ -16,7 +16,7 @@ from alx.providers.repository_authority import RepositoryAuthority
 from alx.providers.github_merge import GitHubMergeProvider
 from alx.contracts.repository import MergeOutcome
 from alx.bootstrap.repository import build_repository_runtime
-from alx.tools.repository import MERGE_PULL_REQUEST
+from alx.contracts import CODE, CodeAction
 
 
 class GateReuseTests(unittest.TestCase):
@@ -133,10 +133,14 @@ class GateReuseTests(unittest.TestCase):
     def test_existing_capability_is_the_only_registered_merge_path(self):
         runtime = build_repository_runtime(True, 'owner/repo', 'token', lambda: 'id',
                                            provider=object())
-        self.assertEqual(tuple(runtime.executors), (MERGE_PULL_REQUEST,))
-        self.assertEqual(len(runtime.definitions), 1)
-        from alx.tools.repository import DEFINITION
-        self.assertIs(runtime.definitions[0], DEFINITION)
+        self.assertEqual(tuple(runtime.actions), (CodeAction.MERGE,))
+        from alx.bootstrap.code import build_code_runtime
+        from alx.tools.repository import CONTRACT
+        from alx.tools.code import CONTRACTS
+        self.assertIs(CONTRACTS[CodeAction.MERGE], CONTRACT)
+        code = build_code_runtime((runtime,), lambda: 'id')
+        self.assertEqual(code.offered, (CodeAction.MERGE,))
+        self.assertEqual(tuple(code.executors), (CODE,))
 
 
 class ReviewEquivalenceTests(unittest.TestCase):

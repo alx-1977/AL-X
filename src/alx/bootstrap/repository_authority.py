@@ -19,16 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
+from alx.contracts import CapabilityResult, CodeAction, StructuredData
 from alx.contracts.repository_authority import CanonicalSystem
 from alx.providers.github_pull_request import GitHubPullRequests
 from alx.providers.repository_authority import RepositoryAuthority
-from alx.safety import AuthorityPolicy
-from alx.tools.repository_authority import (
-    DEFINITIONS,
-    REPOSITORY_OPERATION,
-    build_repository_operation_executors,
-)
+from alx.tools.repository_authority import build_repository_operation_executors
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,12 +32,10 @@ REPOSITORY_PERMISSION = "repository.operate"
 
 @dataclass(frozen=True, slots=True)
 class RepositoryAuthorityRuntime:
-    """The one repository capability, or nothing at all."""
+    """The git action of `code`, or nothing at all (D-074)."""
 
-    definitions: tuple[CapabilityDefinition, ...]
-    policies: Mapping[str, AuthorityPolicy]
-    executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
-    permissions: frozenset[str]
+    actions: Mapping[CodeAction, Callable[[StructuredData], CapabilityResult]]
+    action_permissions: Mapping[CodeAction, frozenset[str]]
     # The canonical checkout this authority recovers and switches back to
     # main. Coding composes only against this root, never a fallback.
     root: Path
@@ -138,7 +131,7 @@ def build_repository_authority_runtime(
 
     LOGGER.info(
         "Repository authority enabled: %s (canonical %s at %s)",
-        REPOSITORY_OPERATION,
+        CodeAction.GIT.value,
         system.repository,
         system.root,
     )
@@ -147,15 +140,9 @@ def build_repository_authority_runtime(
     # for each operation would be the narrow model this replaces, wearing a
     # different shape. What she may not do is enforced deterministically in the
     # provider rather than by a person answering prompts.
-    policy = AuthorityPolicy(
-        permission_references=frozenset({REPOSITORY_PERMISSION}),
-        approval_required=False,
-    )
     return RepositoryAuthorityRuntime(
-        definitions=DEFINITIONS,
-        policies={REPOSITORY_OPERATION: policy},
-        executors=build_repository_operation_executors(selected, call_id_source),
-        permissions=frozenset({REPOSITORY_PERMISSION}),
+        actions=build_repository_operation_executors(selected, call_id_source),
+        action_permissions={CodeAction.GIT: frozenset({REPOSITORY_PERMISSION})},
         root=system.root,
         authority=selected,
         repository_identity=system.repository,

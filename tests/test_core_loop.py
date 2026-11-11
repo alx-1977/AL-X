@@ -30,6 +30,7 @@ from alx.core.loop import (  # noqa: E402
     project_turns_for_reasoning,
 )
 from alx.goals import SQLiteGoalStore  # noqa: E402
+from code_actions import READ_REVIEW, code_call  # noqa: E402
 
 NOW = datetime(2026, 8, 28, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=30)
@@ -1975,11 +1976,11 @@ class TerminalCheckpointResponseTests(unittest.TestCase):
             goal(outstanding_work=(WorkItem("read-review", "Read the pending review"),)),
             "conversation-1", RETENTION,
         )
-        self.call = CapabilityCall("review-1", "read_external_review", {})
+        self.call = code_call("review-1", READ_REVIEW)
         self.attempt = CapabilityAttempt(
             self.call, CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(
-                "review-1", "read_external_review", CapabilityResultState.FAILED,
+                "review-1", "code", CapabilityResultState.FAILED,
                 failure={"code": "review_unavailable", "reason": "review_in_progress",
                          "requires_judgement": True},
             ),
@@ -1998,7 +1999,7 @@ class TerminalCheckpointResponseTests(unittest.TestCase):
 
         agent = CoreAgent(
             self.store, reasoner, dispatch,
-            (CapabilityDefinition("read_external_review", "Read a review", SCHEMA,
+            (CapabilityDefinition("code", "Read a review", SCHEMA,
                                   SCHEMA, SideEffect.NONE),),
             clock=lambda: NOW,
         )
@@ -2029,7 +2030,7 @@ class TerminalCheckpointResponseTests(unittest.TestCase):
 
     def test_final_pass_refuses_another_capability_without_retry(self):
         outcome, reasoner = self._process(AgentDecision(
-            call=CapabilityCall("review-2", "read_external_review", {}),
+            call=code_call("review-2", READ_REVIEW),
         ))
         self.assertIs(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "review_unavailable")

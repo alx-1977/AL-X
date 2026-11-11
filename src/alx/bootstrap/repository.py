@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
+from alx.contracts import CapabilityResult, CodeAction, StructuredData
 from alx.contracts.repository import MergeRequest, MergeError
 from alx.contracts.review_content import ReviewContentRequest, ReviewReadError
 from alx.contracts.review_provider import ReviewProvider, profile_for
@@ -25,12 +25,7 @@ from alx.contracts.repository_authority import Operation, RepositoryRequest, Rep
 from alx.contracts.coding import CodingError
 from alx.providers.coding_git import coding_job_lock
 from alx.providers.github_merge import GitHubMergeProvider
-from alx.safety import AuthorityPolicy
-from alx.tools.repository import (
-    DEFINITION as MERGE_DEFINITION,
-    MERGE_PULL_REQUEST,
-    build_repository_executors,
-)
+from alx.tools.repository import build_repository_executors
 
 
 LOGGER = logging.getLogger(__name__)
@@ -42,13 +37,11 @@ REPOSITORY_MERGE_PERMISSION = "repository.merge"
 
 @dataclass(frozen=True, slots=True)
 class RepositoryRuntime:
-    """One separately governed repository capability group, or nothing."""
+    """The merge action of `code`, or nothing at all (D-074)."""
 
     provider: Any
-    definitions: tuple[CapabilityDefinition, ...]
-    policies: Mapping[str, AuthorityPolicy]
-    executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
-    permissions: frozenset[str]
+    actions: Mapping[CodeAction, Callable[[StructuredData], CapabilityResult]]
+    action_permissions: Mapping[CodeAction, frozenset[str]]
 
 
 def require_clean_review(review_reader: Any, request: MergeRequest, equivalent=None) -> None:
@@ -223,21 +216,18 @@ def build_repository_runtime(
         check_review(request)
         return selected.merge(request)
 
-    LOGGER.info("Merge authority enabled: %s", MERGE_PULL_REQUEST)
+    LOGGER.info("Merge authority enabled: %s", CodeAction.MERGE.value)
     return RepositoryRuntime(
         provider=selected,
-        definitions=(MERGE_DEFINITION,),
-        policies={
+        actions=build_repository_executors(merge, call_id_source),
+        action_permissions={
             # No per-merge approval. Friedl delegated routine merge
             # authorisation in governance rather than participating in each
             # decision, so the permission is the authority and the judgement
             # about a specific reviewed head is AL/X's. Revoking the permission
             # revokes the delegation.
-            MERGE_PULL_REQUEST: AuthorityPolicy(
-                frozenset({REPOSITORY_MERGE_PERMISSION} | ({"repository.operate"} if repository_runtime else set())),
-                approval_required=False,
-            ),
+            CodeAction.MERGE: frozenset(
+                {REPOSITORY_MERGE_PERMISSION}
+                | ({"repository.operate"} if repository_runtime else set())),
         },
-        executors=build_repository_executors(merge, call_id_source),
-        permissions=frozenset({REPOSITORY_MERGE_PERMISSION}),
     )

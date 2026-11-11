@@ -23,7 +23,6 @@ from alx.contracts import (
     AgentDecision,
     CapabilityAttempt,
     CapabilityAttemptDisposition,
-    CapabilityCall,
     CognitionOrigin,
     GoalMutationKind,
     GoalProposal,
@@ -41,11 +40,10 @@ from alx.contracts.review_provider import ReviewProvider, profile_for
 from alx.providers import github_review
 from alx.providers.github_review import GitHubReviewProvider
 from alx.providers.review_status import ReviewStatusObserver, subject_reference
-from alx.tools.review_content import (
-    DEFINITION,
-    READ_EXTERNAL_REVIEW,
-    build_review_content_executors,
-)
+from alx.contracts import CODE
+from alx.tools.review_content import build_review_content_executors
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from code_actions import READ_REVIEW, code_call, definition, executors  # noqa: E402
 from tests.review_transcript import HEAD, PUBLISHED_AT, REVIEWER_LOGIN, statuses_route
 
 REVIEWER = "greptile"
@@ -85,9 +83,9 @@ class Decisions:
             )
         if len(self.contexts) == 2:
             return AgentDecision(
-                call=CapabilityCall(
+                call=code_call(
                     "read-1",
-                    READ_EXTERNAL_REVIEW,
+                    READ_REVIEW,
                     {"pull_request_number": 21, "head_sha": HEAD},
                 ),
             )
@@ -186,7 +184,8 @@ class ExternalReviewHandoffTests(unittest.TestCase):
         opportunity = source.due_opportunities()[0]
         self.assertIs(opportunity.origin, CognitionOrigin.WORK_COMPLETED)
 
-        executor = build_review_content_executors(provider.read, lambda: "read-1")
+        executor = executors(build_review_content_executors(provider.read, lambda: "read-1"),
+                             lambda: "read-1")
         attempts: list[CapabilityAttempt] = []
 
         def dispatch(call, state):
@@ -208,10 +207,10 @@ class ExternalReviewHandoffTests(unittest.TestCase):
             goals,
             decisions,
             dispatch,
-            (DEFINITION,),
+            (definition(READ_REVIEW),),
             clock=lambda: datetime(2026, 9, 7, 7, 0, tzinfo=UTC),
             identifier_factory=lambda: "goal-1",
-            approval_free_capabilities=frozenset({READ_EXTERNAL_REVIEW}),
+            approval_free_capabilities=frozenset({CODE}),
         )
         gateway = ConversationGateway(
             core,

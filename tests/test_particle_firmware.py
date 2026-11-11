@@ -22,7 +22,7 @@ from alx.providers.coding_agent import CodingAgent
 from alx.providers.coding_process import CodingCancellation, bind_cancellation, reset_cancellation
 from alx.providers.firmware_git import prepare_firmware_clone, push_firmware_branch
 from alx.providers.particle_local import ParticleLocal, ParticleLocalError, bounded_process
-from alx.tools.coding import DEFINITION, parse_coding_arguments, goal_coding_branch
+from alx.tools.coding import RUN_CONTRACT, parse_coding_arguments, goal_coding_branch
 from alx.tools.particle_local import DEFINITIONS, build_particle_local_executors
 
 REPO = 'alx-1977/RoomReader_V2'
@@ -220,13 +220,13 @@ def test_catalogue_and_settings(tmp_path):
     icloud = Path('~/Library/Mobile Documents/com~apple~CloudDocs/ALX_Storage/Projects').expanduser().resolve()
     assert icloud in roots
     assert icloud in KiCadSettings.from_environment({'ALX_KICAD_DESIGN_ROOTS': str(tmp_path)}, tmp_path).design_roots
-    assert 'firmware_repository' in DEFINITION.input_schema.properties
+    assert 'firmware_repository' in RUN_CONTRACT.input_schema.properties
 
 
 def test_firmware_branch_does_not_authorise_canonical_branch_continuation():
     values = {'branch': 'firmware/test', 'firmware_repository': REPO}
     attempt = SimpleNamespace(disposition=CapabilityAttemptDisposition.EXECUTED,
-        implementation_invoked=True, call=SimpleNamespace(capability_id='run_coding_task', arguments={}),
+        implementation_invoked=True, call=SimpleNamespace(capability_id='code', arguments={'action': 'run_job'}),
         result=SimpleNamespace(recovery_values=lambda: values, recovery_failure=lambda: None))
     state = SimpleNamespace(attempts=(attempt,))
     assert goal_coding_branch(state, 'firmware/test') is None

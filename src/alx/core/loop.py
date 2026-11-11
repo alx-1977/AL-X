@@ -32,6 +32,7 @@ from alx.contracts import (
     emit_trace, history_evidence_ids,
 )
 from alx.contracts.capabilities import arguments_match
+from alx.contracts.code import CodeAction, is_code_action, recorded_code_action
 from alx.contracts.mail import MailAction, MailReference, recorded_mail_action
 
 from alx.core.plan_results import (
@@ -61,12 +62,18 @@ PLAN_BUDGET_RETRY_SECONDS = 300
 # Why an autonomous turn did not happen when its request would not fit.
 INPUT_BOUND_EXCEEDED = "input_bound_exceeded"
 
-_RUN_CODING_TASK = "run_coding_task"
-# Stops the running coding job. A job runs as a plan step, so the goal that
-# owns it has a dispatch in flight and admits no other call; stopping it is
-# therefore permitted with no goal at all. The job's own result still returns
-# to its plan.
-_STOP_CODING_JOB = "stop_coding_job"
+# A coding job and stopping it are actions of `code` (D-074), recognised by
+# exact values, in today's form or as saved before. Stopping the running job:
+# a job runs as a plan step, so the goal that owns it has a dispatch in flight
+# and admits no other call; stopping it is therefore permitted with no goal at
+# all. The job's own result still returns to its plan.
+_RUN_CODING_TASK = CodeAction.RUN_JOB
+_STOP_CODING_JOB = CodeAction.STOP_JOB
+# The code jobs whose failure can need her judgement before anything else.
+_REVIEW_AND_MERGE = frozenset({
+    CodeAction.REQUEST_REVIEW, CodeAction.REQUEST_REVIEW_BEYOND_ALLOWANCE,
+    CodeAction.READ_REVIEW, CodeAction.MERGE,
+})
 # Friedl, 2026-10-24: at most four failed coding jobs in a row on one goal;
 # any succeeded job resets the count. Failures that say nothing about the code
 # (quota, login, CLI crash, sandbox, interruption, cancellation, refusals
@@ -1004,7 +1011,7 @@ class CoreAgent:
             effective = None if snapshot is None else snapshot.state
             if decision.call is not None:
                 if (self._plan_continuation
-                        and decision.call.capability_id == _RUN_CODING_TASK):
+                        and is_code_action(decision.call, _RUN_CODING_TASK)):
                     # A coding job runs for minutes. Dispatched from a Core
                     # turn it held that turn, and the Core-turn lock, until it
                     # returned, so on 2026-10-03 a person's unrelated question
@@ -1314,7 +1321,7 @@ class CoreAgent:
                 )
 
             if (snapshot is None or snapshot.state.status is not GoalStatus.ACTIVE
-                    or (decision.call.capability_id == _STOP_CODING_JOB
+                    or (is_code_action(decision.call, _STOP_CODING_JOB)
                         and self._has_pending_dispatch(snapshot.state))):
                 # Only a side-effect-free call, or stopping the running coding
                 # job, reaches here; any other effectful call without an
@@ -1352,7 +1359,7 @@ class CoreAgent:
             coding_exhaustion = (
                 (self._coding_exhaustion_reason(snapshot.state)
                  or self._coding_interruption_exhaustion_reason(snapshot.state, decision.call))
-                if decision.call.capability_id == _RUN_CODING_TASK
+                if is_code_action(decision.call, _RUN_CODING_TASK)
                 else None
             )
             if coding_exhaustion is not None:
@@ -1503,9 +1510,9 @@ class CoreAgent:
                 # boundary, so a corrected call may still use the same turn.
                 approved_dispatches.add(decision.call.capability_id)
             snapshot = self._finalize_dispatch(snapshot, attempt, now)
-            if (decision.call.capability_id in {
-                "request_external_review", "read_external_review", "merge_pull_request"
-            } and attempt.result is not None
+            if (recorded_code_action(decision.call.capability_id,
+                                     decision.call.arguments) in _REVIEW_AND_MERGE
+                    and attempt.result is not None
                     and (attempt.result.recovery_failure() or {}).get("requires_judgement")):
                 mechanical_blocker = str(attempt.result.recovery_failure()["code"])
                 if origin is CognitionOrigin.PERSON_TURN:
@@ -2022,7 +2029,7 @@ class CoreAgent:
         impossible rather than merely refused, and reasoning again from the
         same state cannot make it possible.
         """
-        if call.capability_id == _STOP_CODING_JOB:
+        if is_code_action(call, _STOP_CODING_JOB):
             # Stopping the running job is the one call its own goal must still
             # admit while that job runs. Blocking it here as an in-flight
             # dispatch is what left AL/X unable to stop a job on 2026-10-15.
@@ -2173,7 +2180,7 @@ class CoreAgent:
         # called `subject` once made every web search look like unsent mail,
         # and sixteen refusals in one turn told her nothing about why.
         definition = self._definition(call.capability_id)
-        if definition is not None and definition.transmits_authored_text:
+        if definition is not None and definition.transmits_authored_text_for(call.arguments):
             if CoreAgent._unheard_authored_text(
                 conversation, call, state, transient_attempts
             ):
@@ -2614,7 +2621,7 @@ class CoreAgent:
         stored = next((item for item in state.attempts
                        if item.call is not None and item.call.call_id == call_id), None)
         definition = None if stored is None else self._definition(stored.call.capability_id)
-        return definition is not None and definition.plan_observation
+        return definition is not None and definition.plan_observation_for(stored.call.arguments)
 
     def _evidence_job(self, snapshot: GoalSnapshot) -> PlannedDispatch | None:
         """Schedule the read of evidence a restart left as metadata only.
@@ -2940,7 +2947,7 @@ class CoreAgent:
         definition = self._definition(step.call.capability_id)
         if definition is None:
             return "plan_capability_unknown"
-        if step.wait_seconds and not definition.plan_observation:
+        if step.wait_seconds and not definition.plan_observation_for(step.call.arguments):
             return "plan_wait_unsafe"
         if self._call_turn_bound(step.call):
             return "plan_requires_fresh_authority"
@@ -3104,7 +3111,7 @@ class CoreAgent:
                     return "plan_capability_unknown"
                 if self._call_turn_bound(step.call):
                     return "plan_requires_fresh_authority"
-                if step.wait_seconds and not definition.plan_observation:
+                if step.wait_seconds and not definition.plan_observation_for(step.call.arguments):
                     return "plan_wait_unsafe"
             return None
         if not open_plan or rendered is None or rendered[0] != current.plan_id:
@@ -3166,7 +3173,7 @@ class CoreAgent:
         definition = self._definition(step.call.capability_id)
         attempt = next((item for item in state.attempts if item.call is not None
                         and item.call.call_id == attention.evidence_call_ids[0]), None)
-        return (definition is not None and definition.plan_observation
+        return (definition is not None and definition.plan_observation_for(step.call.arguments)
                 and attempt is not None
                 and attempt.call.capability_id == step.call.capability_id
                 and attempt.disposition is CapabilityAttemptDisposition.EXECUTED)
@@ -3620,7 +3627,7 @@ class CoreAgent:
             and item.call.capability_id == call.capability_id
             and item.call.arguments == call.arguments
             and not (
-                call.capability_id == _RUN_CODING_TASK
+                is_code_action(call, _RUN_CODING_TASK)
                 and item.reason_code in {
                     "coding_retry_exhausted",
                     "coding_interruption_no_progress", "coding_interruption_exhausted",
@@ -3701,8 +3708,7 @@ class CoreAgent:
     def _counts_as_coding_failure(item: CapabilityAttempt) -> bool:
         """A failed coding job that says something about the code it was given."""
         if (
-            item.call is None
-            or item.call.capability_id != _RUN_CODING_TASK
+            not is_code_action(item.call, _RUN_CODING_TASK)
             or item.implementation_invoked is not True
             or item.result is None
             or item.result.state is not CapabilityResultState.FAILED
@@ -3743,7 +3749,7 @@ class CoreAgent:
         for item in state.attempts:
             if (
                 item.call is not None
-                and item.call.capability_id == _RUN_CODING_TASK
+                and is_code_action(item.call, _RUN_CODING_TASK)
                 and item.implementation_invoked is True
                 and item.result is not None
                 and item.result.state is CapabilityResultState.SUCCEEDED
@@ -3763,7 +3769,7 @@ class CoreAgent:
             return None
         attempts = {
             item.call.call_id: item for item in state.attempts
-            if item.call is not None and item.call.capability_id == _RUN_CODING_TASK
+            if item.call is not None and is_code_action(item.call, _RUN_CODING_TASK)
             and item.result is not None
         }
         visited: set[str] = set()
@@ -3825,13 +3831,13 @@ class CoreAgent:
         latest = max(
             (index for index, item in enumerate(state.attempts)
              if item.call is not None
-             and item.call.capability_id == _RUN_CODING_TASK
+             and is_code_action(item.call, _RUN_CODING_TASK)
              and item.disposition is not CapabilityAttemptDisposition.REJECTED),
             default=-1,
         )
         return any(
             item.call is not None
-            and item.call.capability_id == _RUN_CODING_TASK
+            and is_code_action(item.call, _RUN_CODING_TASK)
             and item.reason_code == reason_code
             for item in state.attempts[latest + 1:]
         )

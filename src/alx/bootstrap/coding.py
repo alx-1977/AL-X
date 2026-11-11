@@ -15,22 +15,15 @@ from typing import Any
 
 from alx.contracts import (
     GoalState,
-    CapabilityDefinition,
     CapabilityResult,
+    CodeAction,
     CodingSession,
     ReasoningModel,
     StructuredData,
 )
 from alx.contracts.coding import CodingError, CodingRequest, CodingTelemetry
 from alx.providers.coding_agent import CodingAgent
-from alx.safety import AuthorityPolicy
-from alx.tools.coding import (
-    DEFINITION as CODING_DEFINITION,
-    RUN_CODING_TASK,
-    STOP_CODING_JOB,
-    STOP_DEFINITION,
-    build_coding_executors,
-)
+from alx.tools.coding import build_coding_executors
 
 
 LOGGER = logging.getLogger(__name__)
@@ -46,13 +39,11 @@ CODING_EXECUTE_PERMISSION = "coding.execute"
 
 @dataclass(frozen=True, slots=True)
 class CodingRuntime:
-    """The one coding-job capability, or nothing at all."""
+    """The coding-job actions of `code`, or nothing at all (D-074)."""
 
     agent: CodingAgent
-    definitions: tuple[CapabilityDefinition, ...]
-    policies: Mapping[str, AuthorityPolicy]
-    executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
-    permissions: frozenset[str]
+    actions: Mapping[CodeAction, Callable[[StructuredData], CapabilityResult]]
+    action_permissions: Mapping[CodeAction, frozenset[str]]
 
 
 def build_coding_runtime(
@@ -108,27 +99,16 @@ def build_coding_runtime(
     def run_job(request: CodingRequest) -> Any:
         return selected.run(request)
 
-    executors = dict(build_coding_executors(
+    actions = dict(build_coding_executors(
         run_job, call_id_source, goal_state_source,
         stop_job=lambda job_id: selected.cancel(job_id),
     ))
 
-    LOGGER.info(
-        "Coding agent enabled: %s", RUN_CODING_TASK
-    )
+    LOGGER.info("Coding agent enabled: %s", ", ".join(item.value for item in actions))
     return CodingRuntime(
         agent=selected,
-        definitions=(CODING_DEFINITION, STOP_DEFINITION),
-        policies={
-            RUN_CODING_TASK: AuthorityPolicy(
-                frozenset({CODING_EXECUTE_PERMISSION}),
-                approval_required=False,
-            ),
-            # Stopping the job she started is part of running it.
-            STOP_CODING_JOB: AuthorityPolicy(
-                frozenset({CODING_EXECUTE_PERMISSION}),
-            ),
-        },
-        executors=executors,
-        permissions=frozenset({CODING_EXECUTE_PERMISSION}),
+        actions=actions,
+        # Stopping the job she started is part of running it. Neither needs
+        # approval.
+        action_permissions={item: frozenset({CODING_EXECUTE_PERMISSION}) for item in actions},
     )

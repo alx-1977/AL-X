@@ -22,6 +22,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.bootstrap.review import (  # noqa: E402
+    REVIEW_READ_PERMISSION,
     REVIEW_REQUEST_PERMISSION,
     build_review_runtime,
 )
@@ -29,10 +30,10 @@ from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.contracts import (  # noqa: E402
     Approval,
     ApprovalLifecycle,
-    ApprovalScope,
+    CODE,
     CapabilityAttemptDisposition,
-    CapabilityCall,
     CapabilityResultState,
+    CodeAction,
     ReviewError,
     ReviewOutcome,
     ReviewRequest,
@@ -46,7 +47,16 @@ from alx.providers.review_status import (  # noqa: E402
 from alx.contracts.task import TaskState  # noqa: E402
 from alx.providers.github_review import GitHubReviewProvider  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools.review import REQUEST_EXTERNAL_REVIEW  # noqa: E402
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
+from code_actions import (  # noqa: E402
+    READ_REVIEW,
+    REQUEST_REVIEW,
+    addressed,
+    code_arguments,
+    code_call,
+    code_runtime,
+    code_scope,
+)
 from tests.review_transcript import (  # noqa: E402
     ended_round,
     install_grace_clock,
@@ -56,6 +66,9 @@ from tests.review_transcript import (  # noqa: E402
 )
 
 
+# `code` composed from the review runtime asks for every permission its
+# offered actions need, so a review call holds requesting and reading (D-074).
+REVIEW_PERMISSIONS = frozenset({REVIEW_REQUEST_PERMISSION, REVIEW_READ_PERMISSION})
 HEAD = "a" * 40
 MOVED = "b" * 40
 APPROVAL = "approval-1"
@@ -118,7 +131,7 @@ class WatchWindowTest(unittest.TestCase):
             provider=SlowProvider(),
             started=lambda number, sha, requested_at: (watched.append(requested_at) or "completed"),
         )
-        runtime.executors[REQUEST_EXTERNAL_REVIEW]({"pull_request_number": 21})
+        addressed(runtime.actions, REQUEST_REVIEW)({"pull_request_number": 21})
 
         self.assertEqual(len(watched), 1)
         self.assertEqual(len(posted_at), 1)
@@ -135,17 +148,18 @@ class ReviewRequestTest(unittest.TestCase):
         )
 
     def _broker(self, runtime):
+        code = code_runtime(runtime)
         return CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         )
 
     @staticmethod
     def _call(number: int = 21, approval: str | None = APPROVAL):
-        return CapabilityCall(
+        return code_call(
             "call-1",
-            REQUEST_EXTERNAL_REVIEW,
+            REQUEST_REVIEW,
             {"pull_request_number": number},
             approval,
         )
@@ -166,9 +180,7 @@ class ReviewRequestTest(unittest.TestCase):
         """One paid review of one pull request, not of one commit."""
         return Approval(
             APPROVAL,
-            ApprovalScope(
-                REQUEST_EXTERNAL_REVIEW, {"pull_request_number": number}
-            ),
+            code_scope(REQUEST_REVIEW, {"pull_request_number": number}),
             ApprovalLifecycle.GRANTED,
         )
 
@@ -177,7 +189,7 @@ class ReviewRequestTest(unittest.TestCase):
         attempt = self._broker(self._runtime(provider)).dispatch(
             self._call(),
             self._authority(
-                frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(),)
+                REVIEW_PERMISSIONS, (self._approval(),)
             ),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
@@ -204,7 +216,7 @@ class ReviewRequestTest(unittest.TestCase):
         provider = RecordingReviewer()
         attempt = self._broker(self._runtime(provider)).dispatch(
             self._call(approval=None),
-            self._authority(frozenset({REVIEW_REQUEST_PERMISSION})),
+            self._authority(REVIEW_PERMISSIONS),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertEqual(len(provider.requests), 1)
@@ -220,7 +232,7 @@ class ReviewRequestTest(unittest.TestCase):
         attempt = self._broker(self._runtime(provider)).dispatch(
             self._call(),
             self._authority(
-                frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(),)
+                REVIEW_PERMISSIONS, (self._approval(),)
             ),
         )
         self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
@@ -233,7 +245,7 @@ class ReviewRequestTest(unittest.TestCase):
         attempt = self._broker(self._runtime(provider)).dispatch(
             self._call(),
             self._authority(
-                frozenset({REVIEW_REQUEST_PERMISSION}), (self._approval(),)
+                REVIEW_PERMISSIONS, (self._approval(),)
             ),
         )
         self.assertEqual(attempt.result.failure["code"], "review_unavailable")
@@ -246,16 +258,13 @@ class ReviewRequestTest(unittest.TestCase):
         # The review runtime composes requesting and reading. Neither is a
         # merge, and nothing here may register one: the set is asserted exactly
         # so a merge capability cannot arrive unnoticed.
-        from alx.tools.review_content import READ_EXTERNAL_REVIEW
-
-        expected = {REQUEST_EXTERNAL_REVIEW, READ_EXTERNAL_REVIEW}
-        self.assertEqual(
-            {d.capability_id for d in runtime.definitions}, expected
-        )
-        self.assertEqual(set(runtime.executors), expected)
-        self.assertEqual(set(runtime.policies), expected)
-        self.assertNotIn("repository.merge", runtime.permissions)
-        for permission in runtime.permissions:
+        expected = {CodeAction.REQUEST_REVIEW, CodeAction.READ_REVIEW}
+        self.assertEqual(set(runtime.actions), expected)
+        self.assertEqual(set(runtime.action_permissions), expected)
+        code = code_runtime(runtime)
+        self.assertEqual(set(code.offered), expected)
+        self.assertNotIn("repository.merge", code.permissions)
+        for permission in code.permissions:
             self.assertNotIn("merge", permission)
         # The module cannot reach the merge capability: it imports nothing
         # from it and never names its identifier. Checked structurally rather
@@ -270,25 +279,25 @@ class ReviewRequestTest(unittest.TestCase):
                 names.append(getattr(node, "module", "") or "")
                 self.assertNotIn("repository", " ".join(names))
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                self.assertNotEqual(node.value, "merge_pull_request")
+                self.assertNotIn(node.value, ("merge_pull_request", CodeAction.MERGE.value))
+            if isinstance(node, ast.Attribute):
+                self.assertNotEqual(node.attr, CodeAction.MERGE.name)
 
     def test_unusable_arguments_never_reach_the_reviewer(self) -> None:
         provider = RecordingReviewer()
         attempt = self._broker(self._runtime(provider)).dispatch(
-            CapabilityCall(
+            code_call(
                 "call-1",
-                REQUEST_EXTERNAL_REVIEW,
+                REQUEST_REVIEW,
                 {"pull_request_number": 0},
                 APPROVAL,
             ),
             self._authority(
-                frozenset({REVIEW_REQUEST_PERMISSION}),
+                REVIEW_PERMISSIONS,
                 (
                     Approval(
                         APPROVAL,
-                        ApprovalScope(
-                            REQUEST_EXTERNAL_REVIEW, {"pull_request_number": 0}
-                        ),
+                        code_scope(REQUEST_REVIEW, {"pull_request_number": 0}),
                         ApprovalLifecycle.GRANTED,
                     ),
                 ),
@@ -299,17 +308,21 @@ class ReviewRequestTest(unittest.TestCase):
 
     def test_the_policy_is_plain_permission(self) -> None:
         runtime = self._runtime(RecordingReviewer())
-        policy = runtime.policies[REQUEST_EXTERNAL_REVIEW]
         self.assertEqual(
-            policy.permission_references, frozenset({REVIEW_REQUEST_PERMISSION})
+            runtime.action_permissions[CodeAction.REQUEST_REVIEW],
+            frozenset({REVIEW_REQUEST_PERMISSION}),
         )
+        policy = code_runtime(runtime).policies[CODE]
+        self.assertEqual(policy.permission_references, REVIEW_PERMISSIONS)
         self.assertFalse(policy.approval_required)
         self.assertFalse(policy.standing_scope_allowed)
 
     def test_the_capability_is_effectful_and_carries_no_authored_text(self) -> None:
-        definition = self._runtime(RecordingReviewer()).definitions[0]
+        definition = code_runtime(self._runtime(RecordingReviewer())).definitions[0]
         self.assertIs(definition.side_effect, SideEffect.EFFECTFUL)
-        self.assertFalse(definition.transmits_authored_text)
+        for action in (REQUEST_REVIEW, READ_REVIEW):
+            self.assertFalse(definition.transmits_authored_text_for(
+                code_arguments(action, {"pull_request_number": 21})))
 
     def test_an_unconfigured_runtime_registers_nothing(self) -> None:
         self.assertIsNone(build_review_runtime(False, "owner/repo", "t", lambda: "c"))

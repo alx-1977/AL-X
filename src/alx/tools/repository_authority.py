@@ -24,6 +24,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from alx.contracts import (
+    CODE,
+    CodeAction,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -41,7 +43,6 @@ from alx.contracts.repository_authority import (
 
 LOGGER = logging.getLogger(__name__)
 
-REPOSITORY_OPERATION = "repository_operation"
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _OBJECT = StructuredSchema(ValueKind.OBJECT, extra_properties=True)
@@ -58,13 +59,13 @@ _PURPOSE = (
     "deleted, force-pushed, reset or rebased. Refused, as `self_preservation`: "
     "an operation that would irrecoverably destroy the canonical AL/X system "
     "itself, and any push to main, commit on main or local merge into main, "
-    "because code reaches main only through merge_pull_request. Decides "
+    "because code reaches main only through the merge action. Decides "
     "nothing about whether an operation is a good idea."
 )
 
 
-DEFINITION = CapabilityDefinition(
-    REPOSITORY_OPERATION,
+CONTRACT = CapabilityDefinition(
+    CodeAction.GIT.value,
     _PURPOSE,
     StructuredSchema(
         ValueKind.OBJECT,
@@ -97,13 +98,11 @@ DEFINITION = CapabilityDefinition(
     trace_fields=("operation",),
 )
 
-DEFINITIONS = (DEFINITION,)
-
 
 def build_repository_operation_executors(
     authority: Any, call_id_source: Callable[[], str]
-) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
-    """Bind the one capability to the provider that performs it."""
+) -> Mapping[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]]:
+    """Bind the git action to the provider that performs it."""
 
     def perform(values: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
@@ -114,7 +113,7 @@ def build_repository_operation_executors(
             LOGGER.info("Unknown repository operation requested: %r", raw)
             return CapabilityResult(
                 call_id,
-                REPOSITORY_OPERATION,
+                CODE,
                 CapabilityResultState.FAILED,
                 failure={"code": "arguments_unusable"},
             )
@@ -122,7 +121,7 @@ def build_repository_operation_executors(
         if not isinstance(arguments, Mapping):
             return CapabilityResult(
                 call_id,
-                REPOSITORY_OPERATION,
+                CODE,
                 CapabilityResultState.FAILED,
                 failure={"code": "arguments_unusable"},
             )
@@ -131,7 +130,7 @@ def build_repository_operation_executors(
         except RepositoryAuthorityError as error:
             return CapabilityResult(
                 call_id,
-                REPOSITORY_OPERATION,
+                CODE,
                 CapabilityResultState.FAILED,
                 failure={"code": error.code, **failure_details(error)},
             )
@@ -141,24 +140,22 @@ def build_repository_operation_executors(
             # choose differently rather than merely to know it failed.
             return CapabilityResult(
                 call_id,
-                REPOSITORY_OPERATION,
+                CODE,
                 CapabilityResultState.FAILED,
                 outcome.as_values(),
                 failure={"code": outcome.failure_code or "operation_refused"},
             )
         return CapabilityResult(
             call_id,
-            REPOSITORY_OPERATION,
+            CODE,
             CapabilityResultState.SUCCEEDED,
             outcome.as_values(),
         )
 
-    return {REPOSITORY_OPERATION: perform}
+    return {CodeAction.GIT: perform}
 
 
 __all__ = [
-    "DEFINITION",
-    "DEFINITIONS",
-    "REPOSITORY_OPERATION",
+    "CONTRACT",
     "build_repository_operation_executors",
 ]

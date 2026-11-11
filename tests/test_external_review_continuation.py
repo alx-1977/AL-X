@@ -41,7 +41,6 @@ from alx.contracts import (  # noqa: E402
     AgentDecision,
     CapabilityAttempt,
     CapabilityAttemptDisposition,
-    CapabilityCall,
     CapabilityResultState,
     CognitionOrigin,
     ConversationOrigin,
@@ -79,11 +78,19 @@ from alx.tools.continuity import (  # noqa: E402
     REQUEST_FUTURE_COGNITION,
     build_continuity_executors,
 )
-from alx.tools.review_content import (  # noqa: E402
-    DEFINITION as READ_DEFINITION,
-    READ_EXTERNAL_REVIEW,
-    build_review_content_executors,
+from alx.contracts import CODE  # noqa: E402
+from alx.tools.review_content import build_review_content_executors  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from code_actions import (  # noqa: E402
+    READ_REVIEW,
+    REQUEST_REVIEW,
+    addressed,
+    code_call,
+    definition,
+    executors,
 )
+
+READ_DEFINITION = definition(READ_REVIEW)
 from tests.review_transcript import (  # noqa: E402
     BASE,
     HEAD,
@@ -462,7 +469,7 @@ class NoRedundantTriggerTests(Harness):
         runtime = build_review_runtime(
             True, "owner/repo", "token", lambda: "call-1", started=started
         )
-        result = runtime.executors["request_external_review"](
+        result = addressed(runtime.actions, REQUEST_REVIEW)(
             {"pull_request_number": NUMBER}
         )
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
@@ -562,7 +569,7 @@ class AutomaticReviewGraceTests(Harness):
         runtime = build_review_runtime(
             True, "owner/repo", "token", lambda: "call-1", started=started
         )
-        result = runtime.executors["request_external_review"](
+        result = addressed(runtime.actions, REQUEST_REVIEW)(
             {"pull_request_number": NUMBER}
         )
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
@@ -688,7 +695,7 @@ class ConsumedReviewTests(Harness):
         )
 
     def request(self, delivered):
-        return self.runtime(delivered).executors["request_external_review"](
+        return addressed(self.runtime(delivered).actions, REQUEST_REVIEW)(
             {"pull_request_number": NUMBER}
         )
 
@@ -1113,8 +1120,8 @@ class Reasoner:
             self.read = True
             # ...and reads what the reviewer said.
             return AgentDecision(
-                call=CapabilityCall(
-                    "read-1", READ_EXTERNAL_REVIEW,
+                call=code_call(
+                    "read-1", READ_REVIEW,
                     {"pull_request_number": NUMBER, "head_sha": HEAD},
                 ),
             )
@@ -1132,7 +1139,8 @@ class DurableReviewContinuationTests(Harness):
         ledger = SQLiteOpportunityLedger(self.root / "opportunities.sqlite3")
         self.addCleanup(ledger.close)
 
-        read = build_review_content_executors(self.provider.read, lambda: "read-1")
+        read = executors(build_review_content_executors(self.provider.read, lambda: "read-1"),
+                         lambda: "read-1")
         attempts: list[CapabilityAttempt] = []
 
         def dispatch(call, state):
@@ -1149,7 +1157,7 @@ class DurableReviewContinuationTests(Harness):
         core = CoreAgent(
             goals, reasoner, dispatch, (READ_DEFINITION,), clock=clock,
             identifier_factory=lambda: next(identifiers),
-            approval_free_capabilities=frozenset({READ_EXTERNAL_REVIEW}),
+            approval_free_capabilities=frozenset({CODE}),
         )
         gateway = ConversationGateway(
             core, conversations, identifier_factory=lambda: next(identifiers),

@@ -71,10 +71,11 @@ from alx.providers.subscription_retry import SubscriptionRetryPolicy  # noqa: E4
 from alx.providers import coding_agent as coding_agent_module  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.coding import (  # noqa: E402
-    DEFINITION,
-    RUN_CODING_TASK,
+    RUN_CONTRACT,
     _OUTCOME_ISSUE_CODES,
 )
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
+from code_actions import RUN_JOB, code_call, code_runtime  # noqa: E402
 
 
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
@@ -231,11 +232,12 @@ class CodingRecordTests(unittest.TestCase):
                             True, None, lambda: "call-1", agent=agent,
                             repository=Path(directory),
                         )
+                        code = code_runtime(runtime)
                         broker = CapabilityBroker(
-                            CapabilityRegistry(runtime.definitions),
-                            SafetyGate(runtime.policies), runtime.executors,
+                            CapabilityRegistry(code.definitions),
+                            SafetyGate(code.policies), code.executors,
                         )
-                        call = CapabilityCall("call-1", RUN_CODING_TASK, {
+                        call = code_call("call-1", RUN_JOB, {
                             "task": "fix parser", "repair_branch": "fix/parser",
                             "commit_message": "fix parser",
                         })
@@ -309,13 +311,14 @@ class NativeExecutionTests(unittest.TestCase):
             repository=Path(repository),
         )
         self.assertIsNotNone(runtime)
+        code = code_runtime(runtime)
         broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         )
         return broker.dispatch(
-            CapabilityCall("call-1", RUN_CODING_TASK, arguments),
+            code_call("call-1", RUN_JOB, arguments),
             AuthorityContext(
                 "friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW
             ),
@@ -616,10 +619,11 @@ class NativeExecutionTests(unittest.TestCase):
         The session has no terminal, so its report is written before
         verification runs. AL/X must be told whose account summary is.
         """
-        from alx.tools.coding import DEFINITION
+        from code_actions import definition
 
-        self.assertIn("summary is the coding session's own report", DEFINITION.purpose)
-        self.assertIn("before any check ran", DEFINITION.purpose)
+        for described in (RUN_CONTRACT, definition(RUN_JOB)):
+            self.assertIn("summary is the coding session's own report", described.purpose)
+            self.assertIn("before any check ran", described.purpose)
 
     def test_a_committed_job_diff_digest_fingerprints_the_committed_change(self) -> None:
         """The digest is the baseline..commit patch, not the empty post-commit diff."""
@@ -810,12 +814,13 @@ class NativeExecutionTests(unittest.TestCase):
             repository=Path(repository), review_reader=reader,
             goal_state_source=lambda: state, **extra,
         )
+        code = code_runtime(runtime, call_id_source=lambda: identity)
         broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions), SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions), SafetyGate(code.policies),
+            code.executors,
         )
         return broker.dispatch(
-            CapabilityCall(identity, RUN_CODING_TASK, arguments),
+            code_call(identity, RUN_JOB, arguments),
             AuthorityContext("friedl", frozenset({CODING_EXECUTE_PERMISSION}), NOW),
         )
 
@@ -1801,13 +1806,14 @@ class SessionTimeoutTests(unittest.TestCase):
             True, PlanningModel(), lambda: "call-1", session=session,
             repository=worktree,
         )
+        code = code_runtime(runtime)
         attempt = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         ).dispatch(
-            CapabilityCall(
-                "call-1", RUN_CODING_TASK,
+            code_call(
+                "call-1", RUN_JOB,
                 {"task": "fix add", "repair_branch": "fix/timeout",
                  "commit_message": "fix timeout"},
             ),
@@ -1839,13 +1845,14 @@ class SessionTimeoutTests(unittest.TestCase):
             True, PlanningModel(), lambda: "call-1", session=session,
             repository=worktree,
         )
+        code = code_runtime(runtime)
         CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         ).dispatch(
-            CapabilityCall(
-                "call-1", RUN_CODING_TASK,
+            code_call(
+                "call-1", RUN_JOB,
                 {"task": "fix add", "repair_branch": "fix/timeout",
                  "commit_message": "fix timeout"},
             ),
@@ -2050,6 +2057,8 @@ class LiveCoreCatalogueTests(unittest.TestCase):
             captured["ids"] = tuple(item.capability_id for item in capabilities)
             captured["catalogue"] = _catalogue_payload(capabilities)
             captured["approval_free"] = kwargs.get("approval_free_capabilities")
+            captured["approval_exempt_when"] = kwargs.get("approval_exempt_when")
+            captured["definitions"] = {item.capability_id: item for item in capabilities}
             original_init(self_agent, *args, **kwargs)
 
         serving = asyncio.Event()
@@ -2107,7 +2116,7 @@ class LiveCoreCatalogueTests(unittest.TestCase):
                 setattr(target, name, value)
         return captured
 
-    def test_enabled_grok_subscription_exposes_run_coding_task_to_core(self) -> None:
+    def test_enabled_grok_subscription_exposes_code_run_job_to_core(self) -> None:
         """The live Core catalogue is the inventory Claude sees."""
         captured = self._core_inventory(
             {
@@ -2125,14 +2134,24 @@ class LiveCoreCatalogueTests(unittest.TestCase):
             }
         )
         ids = captured["ids"]
-        self.assertIn(RUN_CODING_TASK, ids)
-        self.assertIn(RUN_CODING_TASK, captured["catalogue"])
-        self.assertIn(RUN_CODING_TASK, captured["approval_free"])
+        self.assertIn("code", ids)
+        self.assertIn("code", [item["id"] for item in
+                               json.loads(captured["catalogue"])["capabilities"]])
+        self.assertIn(f"[{RUN_JOB}]", captured["definitions"]["code"].purpose)
+        # A coding job needs no approval: either the whole capability is
+        # approval-free or run_job is one of its exempt actions (D-074).
+        self.assertTrue(
+            "code" in captured["approval_free"]
+            or (("action", RUN_JOB),)
+            in (captured["approval_exempt_when"] or {}).get("code", ())
+        )
 
     def test_disabled_coding_is_absent_from_the_live_core_catalogue(self) -> None:
         captured = self._core_inventory({"ALX_CODING_ENABLED": "false"})
-        self.assertNotIn(RUN_CODING_TASK, captured["ids"])
-        self.assertNotIn(RUN_CODING_TASK, captured["catalogue"])
+        code = captured["definitions"].get("code")
+        if code is not None:
+            # Other code jobs may stay composed; run_job is not offered.
+            self.assertNotIn(f"[{RUN_JOB}]", code.purpose)
 
 
 if __name__ == "__main__":

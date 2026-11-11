@@ -122,7 +122,8 @@ def classify_planned_result(
     """
     facts: list[str] = []
     result = attempt.result
-    observation = definition is not None and definition.plan_observation
+    observation = (definition is not None
+                   and definition.plan_observation_for(step.call.arguments))
     interrupted = (attempt.disposition is CapabilityAttemptDisposition.PENDING
                    or (result is not None
                        and (result.recovery_failure() or {}).get("code") == "dispatch_interrupted"))
