@@ -12,7 +12,7 @@ never read or used. Each lookup obtains a two-legged client-credentials token
 from `https://api.digikey.com/v1/oauth2/token` and sends the client and account
 headers to `https://api.digikey.com/orderstatus/v4`.
 
-`lookup_digikey_order` accepts exactly one decimal-string `sales_order_number`
+`xero` `lookup_digikey` (D-074) accepts exactly one decimal-string `sales_order_number`
 or `invoice_number`. It returns decimal-string amounts, every order line, and
 invoice/shipment facts. Absent or empty shipping/tax charges become zero; other missing facts remain empty strings.
 Invoice lookup pages through account history (`Shared=true`, from 1900 to
@@ -29,7 +29,7 @@ extension. No difference is guessed to be shipping or tax. The fixture uses the
 published v4 shape with synthetic merchandise; success tests add explicit
 charge values. It is not a retained live account response.
 
-`capture_digikey_order_bill` accepts the same identifier and optional boolean
+`xero` `capture_digikey_bill` accepts the same identifier and optional boolean
 `authorise` (default true) and `rounding_adjustment` (default false). It requires one invoice, all accepted quantities
 shipped to that invoice, one invoice/ship date, currency and a reconciled charge
 breakdown. Nonzero shipping becomes its own line. Rounded goods and shipping

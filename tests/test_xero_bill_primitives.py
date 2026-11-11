@@ -24,6 +24,16 @@ from alx.bootstrap.xero import (  # noqa: E402
     XERO_READ_PERMISSION,
     build_xero_runtime,
 )
+from xero_actions import (  # noqa: E402
+    CAPTURE_INVOICE,
+    DELETE_DRAFT_BILL,
+    READ_BILL,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+)
 from support import xero_settings  # noqa: E402
 from alx.contracts import (  # noqa: E402
     AgentDecision,
@@ -51,13 +61,18 @@ from alx.providers.xero import (  # noqa: E402
     XeroAccountingAdapter,
     XeroConnection,
 )
-from alx.tools import (  # noqa: E402
-    CAPTURE_SUPPLIER_INVOICE,
-    DELETE_XERO_DRAFT_BILL,
-    READ_XERO_BILL,
-    XERO_DEFINITIONS,
-    build_xero_executors,
-)
+from alx.tools import XeroAction, build_xero_executors, xero_definition  # noqa: E402
+
+XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
+
+
+def needs_approval(runtime, action: str) -> bool:
+    """Whether the one `xero` policy asks Friedl before this action (D-074)."""
+    gate = SafetyGate(runtime.policies)
+    outcome = gate.evaluate(xero_call("probe", action, {}),
+                            AuthorityContext("friedl", runtime.permissions,
+                                             datetime(2026, 8, 31, tzinfo=UTC)))
+    return outcome.state is SafetyState.APPROVAL_REQUIRED
 
 
 class FakeXero:
@@ -191,12 +206,12 @@ class XeroPrimitiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.xero = FakeXero()
         self.mail = FakeMail()
-        self.executors = build_xero_executors(
+        self.executors = xero_executors(
             self.xero, self.mail, lambda: "call-1"
         )
 
     def test_a_draft_bill_can_be_discarded_when_it_matches(self) -> None:
-        result = self.executors[DELETE_XERO_DRAFT_BILL](
+        result = self.executors[DELETE_DRAFT_BILL](
             {
                 "invoice_id": "bill-1",
                 "invoice_number": "SUP-42",
@@ -213,7 +228,7 @@ class XeroPrimitiveTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.xero.deleted.clear()
                 self.xero.current = {**self.xero.current, "Status": status}
-                result = self.executors[DELETE_XERO_DRAFT_BILL](
+                result = self.executors[DELETE_DRAFT_BILL](
                     {
                         "invoice_id": "bill-1",
                         "invoice_number": "SUP-42",
@@ -231,7 +246,7 @@ class XeroPrimitiveTests(unittest.TestCase):
         ):
             with self.subTest(**wrong):
                 self.xero.deleted.clear()
-                result = self.executors[DELETE_XERO_DRAFT_BILL](
+                result = self.executors[DELETE_DRAFT_BILL](
                     {"invoice_id": "bill-1", **wrong}
                 )
                 self.assertEqual(result.failure["code"], "source_mismatch")
@@ -247,11 +262,11 @@ class XeroPrimitiveTests(unittest.TestCase):
                 lambda *_: captured_invoice(),
             )
         # Unattended bill writes must not silently carry deletion with them.
-        self.assertFalse(runtime.policies[CAPTURE_SUPPLIER_INVOICE].approval_required)
-        self.assertTrue(runtime.policies[DELETE_XERO_DRAFT_BILL].approval_required)
+        self.assertFalse(needs_approval(runtime, CAPTURE_INVOICE))
+        self.assertTrue(needs_approval(runtime, DELETE_DRAFT_BILL))
         self.assertIn(
             XERO_BILL_DELETE_PERMISSION,
-            runtime.policies[DELETE_XERO_DRAFT_BILL].permission_references,
+            runtime.policies[XERO].permission_references,
         )
 
     def test_a_fresh_create_response_is_not_treated_as_invalid(self) -> None:
@@ -318,14 +333,13 @@ class XeroPrimitiveTests(unittest.TestCase):
                 lambda *_: captured_invoice(),
             )
         gate = SafetyGate(runtime.policies)
-        for capability_id in (
-        ):
-            with self.subTest(capability_id=capability_id):
-                self.assertFalse(runtime.policies[capability_id].approval_required)
-                call = CapabilityCall("call-1", capability_id, {})
+        for action in (CAPTURE_INVOICE,):
+            with self.subTest(action=action):
+                self.assertFalse(needs_approval(runtime, action))
+                call = xero_call("call-1", action, {})
                 permitted = AuthorityContext(
                     "friedl",
-                    frozenset({XERO_READ_PERMISSION, XERO_BILL_WRITE_PERMISSION}),
+                    runtime.permissions,
                     datetime(2026, 8, 31, tzinfo=UTC),
                 )
                 self.assertEqual(
@@ -364,24 +378,24 @@ class XeroPrimitiveTests(unittest.TestCase):
                 }
             ),
         )
-        for capability_id in (
-            CAPTURE_SUPPLIER_INVOICE,
-            DELETE_XERO_DRAFT_BILL,
+        for action in (
+            CAPTURE_INVOICE,
+            DELETE_DRAFT_BILL,
         ):
-            self.assertTrue(runtime.policies[capability_id].approval_required)
+            self.assertTrue(needs_approval(runtime, action))
 
     def test_create_result_survives_restart_and_returns_to_core_for_readback(self) -> None:
         now = datetime(2026, 8, 31, tzinfo=UTC)
         retention = now + timedelta(days=30)
-        capture_call = CapabilityCall(
+        capture_call = xero_call(
             "capture-1",
-            CAPTURE_SUPPLIER_INVOICE,
+            CAPTURE_INVOICE,
             capture_arguments(),
             "approval-1",
         )
         approval = Approval(
             "approval-1",
-            ApprovalScope(CAPTURE_SUPPLIER_INVOICE, capture_arguments()),
+            ApprovalScope(XERO, xero_arguments(CAPTURE_INVOICE, capture_arguments())),
             ApprovalLifecycle.GRANTED,
             now + timedelta(minutes=10),
         )
@@ -483,8 +497,8 @@ class XeroPrimitiveTests(unittest.TestCase):
             store.close()
 
             restarted_store = SQLiteGoalStore(path)
-            read_call = CapabilityCall(
-                "read-1", READ_XERO_BILL, {"invoice_id": "bill-1"}
+            read_call = xero_call(
+                "read-1", READ_BILL, {"invoice_id": "bill-1"}
             )
             # After a restart the goal is one summary among the conversation's
             # unfinished goals. The Core asks for its full state, then acts on
@@ -512,12 +526,12 @@ class XeroPrimitiveTests(unittest.TestCase):
             )
             # Once selected, the capture result is there in full.
             self.assertEqual(
-                second_reasoner.contexts[1].active_goal.attempts[-1].call.capability_id,
-                CAPTURE_SUPPLIER_INVOICE,
+                second_reasoner.contexts[1].active_goal.attempts[-1].call.arguments["action"],
+                CAPTURE_INVOICE,
             )
             self.assertEqual(
-                second_reasoner.contexts[2].active_goal.attempts[-1].call.capability_id,
-                READ_XERO_BILL,
+                second_reasoner.contexts[2].active_goal.attempts[-1].call.arguments["action"],
+                READ_BILL,
             )
             restarted_store.close()
 

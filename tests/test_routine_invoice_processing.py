@@ -40,11 +40,24 @@ from alx.contracts import (  # noqa: E402
 from alx.bootstrap.xero import XERO_BILL_WRITE_PERMISSION, build_xero_runtime  # noqa: E402
 from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools import CAPTURE_SUPPLIER_INVOICE, build_xero_executors  # noqa: E402
+from alx.tools import (  # noqa: E402
+    build_xero_executors  # noqa: E402,
+)
 from alx.tools.xero import (  # noqa: E402
     CAPTURE_INVOICE_DEFINITION,
     FIND_BILL_DEFINITION,
 )
+from alx.tools import build_xero_executors  # noqa: E402
+from xero_actions import (  # noqa: E402
+    CAPTURE_INVOICE,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+    needs_approval,
+)
+from alx.tools import offered_xero_actions, xero_definition  # noqa: E402
 from support import xero_settings  # noqa: E402
 from test_execution_plan import (  # noqa: E402
     SCHEMA,
@@ -57,8 +70,9 @@ from test_execution_plan import (  # noqa: E402
 from test_invoice_capture import FakeMail, FakeXero, arguments, extracted  # noqa: E402
 
 FILE = "mail"
+CAPTURING = xero_definition(offered_xero_actions(capture=True, digikey=False, dhl=False))
 DEFINITIONS = (
-    CAPTURE_INVOICE_DEFINITION,
+    CAPTURING,
     CapabilityDefinition(FILE, FILE, SCHEMA, SCHEMA, SideEffect.EFFECTFUL),
 )
 FINISHED = (
@@ -79,7 +93,7 @@ class RecordingXero(FakeXero):
 
 def capture_step(uid: str, *, completion=FINISHED, authorise=True) -> ExecutionStep:
     return ExecutionStep(
-        CapabilityCall(f"capture-{uid}", CAPTURE_SUPPLIER_INVOICE,
+        xero_call(f"capture-{uid}", CAPTURE_INVOICE,
                        arguments(uid=uid, authorise=authorise)),
         tuple(completion),
     )
@@ -98,18 +112,18 @@ class PlannedCaptureTests(PlanHarness):
         self.invoices = {"60110": extracted(invoice_number="2W54YRN2-0020"),
                          "60171": extracted(invoice_number="2W54YRN2-0021")}
         self.mail = FakeMail()
-        self.executors = build_xero_executors(
+        self.executors = xero_executors(
             self.xero, self.mail, lambda: "executor-call",
             lambda *_: self.invoices[self.current_uid],
         )
         self.current_uid = ""
 
     def dispatch(self, call, state):
-        if call.capability_id != CAPTURE_SUPPLIER_INVOICE:
+        if call.capability_id != XERO:
             return super().dispatch(call, state)
         self.calls.append(call)
         self.current_uid = call.arguments["uid"]
-        result = self.executors[CAPTURE_SUPPLIER_INVOICE](call.arguments)
+        result = self.executors[CAPTURE_INVOICE](call.arguments)
         return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
                                  replace(result, call_id=call.call_id))
 
@@ -129,7 +143,7 @@ class PlannedCaptureTests(PlanHarness):
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
         # Select, install and say so: the person turn's three steps.
         self.assertEqual(reasoner.calls, 3, "a known step returned to the Core")
-        self.assertEqual(self.names(), [CAPTURE_SUPPLIER_INVOICE] * 2 + [FILE] * 2)
+        self.assertEqual(self.names(), [XERO] * 2 + [FILE] * 2)
         self.assertEqual({bill["Status"] for bill in self.xero.bills.values()},
                          {"AUTHORISED"})
         self.occasion(agent)
@@ -144,18 +158,18 @@ class PlannedCaptureTests(PlanHarness):
         attention = self.plan_of().attention
         self.assertEqual(attention.reason, "planned_evidence_requires_judgement")
         self.assertEqual(len(attention.evidence_call_ids), 1)
-        self.assertEqual(self.names(), [CAPTURE_SUPPLIER_INVOICE])
+        self.assertEqual(self.names(), [XERO])
         self.assertEqual(reasoner.calls, 3)
         self.assertEqual(self.xero.bills, {})
 
     def test_an_existing_authorised_bill_stops_the_plan_before_filing(self):
         self.current_uid = "60110"
-        self.executors[CAPTURE_SUPPLIER_INVOICE](arguments(uid="60110"))
+        self.executors[CAPTURE_INVOICE](arguments(uid="60110"))
         created = self.xero.created
         self.run_plan(capture_step("60110", completion=()), file_step("60110"))
         self.assertEqual(self.plan_of().attention.reason,
                          "planned_evidence_requires_judgement")
-        self.assertEqual(self.names(), [CAPTURE_SUPPLIER_INVOICE])
+        self.assertEqual(self.names(), [XERO])
         self.assertEqual(self.xero.created, created, "a duplicate reached Xero")
         returned = self.state().attempts[-1].result.values
         self.assertEqual(returned["returned_for"], "duplicate_bill")
@@ -164,12 +178,12 @@ class PlannedCaptureTests(PlanHarness):
         self.mail.digest = "0" * 64
         self.run_plan(capture_step("60110"), file_step("60110"))
         self.assertEqual(self.plan_of().attention.reason, "planned_result_failed")
-        self.assertEqual(self.names(), [CAPTURE_SUPPLIER_INVOICE])
+        self.assertEqual(self.names(), [XERO])
 
     def test_a_draft_does_not_satisfy_a_finished_bill(self):
         self.run_plan(capture_step("60110", authorise=False), file_step("60110"))
         self.assertEqual(self.plan_of().attention.reason, "planned_result_unexpected")
-        self.assertEqual(self.names(), [CAPTURE_SUPPLIER_INVOICE])
+        self.assertEqual(self.names(), [XERO])
         bill = self.state().attempts[-1].result.values["bill"]
         self.assertEqual(bill["status"], "DRAFT")
 
@@ -190,19 +204,18 @@ class CaptureContractTests(unittest.TestCase):
                 xero_settings(unattended_bill_writes=True), Path(directory),
                 FakeMail(), lambda: "call", lambda *_: extracted(),
             )
-        policy = runtime.policies[CAPTURE_SUPPLIER_INVOICE]
-        self.assertFalse(policy.approval_required)
+        policy = runtime.policies[XERO]
+        self.assertFalse(needs_approval(runtime, CAPTURE_INVOICE))
         xero = FakeXero()
         broker = CapabilityBroker(
-            CapabilityRegistry((CAPTURE_INVOICE_DEFINITION,)),
-            SafetyGate({CAPTURE_SUPPLIER_INVOICE: policy}),
+            CapabilityRegistry(runtime.definitions),
+            SafetyGate({XERO: policy}),
             build_xero_executors(xero, FakeMail(), lambda: "capture-1",
                                  lambda *_: extracted()),
         )
         attempt = broker.dispatch(
-            CapabilityCall("capture-1", CAPTURE_SUPPLIER_INVOICE, arguments(authorise=True)),
-            AuthorityContext("friedl", frozenset({XERO_BILL_WRITE_PERMISSION}),
-                             datetime.now(UTC)),
+            xero_call("capture-1", CAPTURE_INVOICE, arguments(authorise=True)),
+            AuthorityContext("friedl", runtime.permissions, datetime.now(UTC)),
         )
         self.assertEqual(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertEqual(attempt.result.values["bill"]["status"], "AUTHORISED")
@@ -211,8 +224,8 @@ class CaptureContractTests(unittest.TestCase):
         self.assertIn("No separate lookup is needed first", CAPTURE_INVOICE_DEFINITION.purpose)
         self.assertIn("not a step before capturing", FIND_BILL_DEFINITION.purpose)
         xero = RecordingXero()
-        capture = build_xero_executors(xero, FakeMail(), lambda: "c",
-                                       lambda *_: extracted())[CAPTURE_SUPPLIER_INVOICE]
+        capture = xero_executors(xero, FakeMail(), lambda: "c",
+                                       lambda *_: extracted())[CAPTURE_INVOICE]
         self.assertTrue(capture(arguments()).values["completed"])
         # Any contact first, then the resolved supplier: the D-018 pair.
         self.assertEqual(xero.lookups, [("18300777", ""), ("18300777", "c-1")])
@@ -221,8 +234,8 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(xero.created, 1)
 
     def test_a_routine_bill_is_success_and_a_return_needs_judgement(self):
-        capture = build_xero_executors(FakeXero(), FakeMail(), lambda: "c",
-                                       lambda *_: extracted())[CAPTURE_SUPPLIER_INVOICE]
+        capture = xero_executors(FakeXero(), FakeMail(), lambda: "c",
+                                       lambda *_: extracted())[CAPTURE_INVOICE]
         finished = capture(arguments())
         self.assertIsNone(finished.outcome)
         returned = capture(arguments())
@@ -230,8 +243,8 @@ class CaptureContractTests(unittest.TestCase):
         self.assertIs(returned.outcome, ExecutionOutcome.AMBIGUOUS)
         unresolved = FakeXero()
         unresolved.contacts = ()
-        early = build_xero_executors(unresolved, FakeMail(), lambda: "c",
-                                     lambda *_: extracted())[CAPTURE_SUPPLIER_INVOICE]
+        early = xero_executors(unresolved, FakeMail(), lambda: "c",
+                                     lambda *_: extracted())[CAPTURE_INVOICE]
         result = early(arguments())
         self.assertEqual(result.values["returned_for"], "supplier_unresolved")
         self.assertIs(result.outcome, ExecutionOutcome.AMBIGUOUS)
@@ -255,9 +268,9 @@ class DuplicateTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.xero = ContactScopedXero()
-        self.capture = build_xero_executors(
+        self.capture = xero_executors(
             self.xero, FakeMail(), lambda: "c", lambda *_: extracted()
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
 
     def existing(self, contact_id: str, status: str) -> None:
         self.xero.bills["bill-0"] = {
@@ -299,10 +312,10 @@ class ReferenceTests(unittest.TestCase):
 
     def reference(self, invoice, **inputs) -> str:
         xero = FakeXero()
-        capture = build_xero_executors(
+        capture = xero_executors(
             xero, FakeMail(filename="Invoice-2W54YRN2-0021.pdf"), lambda: "c",
             lambda *_: invoice,
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         result = capture(arguments(**inputs))
         self.assertTrue(result.values["completed"], result)
         return xero.bills["bill-1"]["Reference"]
@@ -317,10 +330,10 @@ class ReferenceTests(unittest.TestCase):
         values = arguments()
         del values["context_line"]
         xero = FakeXero()
-        capture = build_xero_executors(
+        capture = xero_executors(
             xero, FakeMail(filename="Invoice-2W54YRN2-0021.pdf"), lambda: "c",
             lambda *_: extracted(description="Team plan, 1 Oct to 1 Nov 2026"),
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         self.assertTrue(capture(values).values["completed"])
         self.assertEqual(xero.bills["bill-1"]["Reference"], "Team plan, 1 Oct to 1 Nov 2026")
 
@@ -345,9 +358,9 @@ class LegacyDraftReferenceTests(unittest.TestCase):
 
     def draft(self, reference: str, **changes):
         self.xero = FakeXero()
-        capture = build_xero_executors(
+        capture = xero_executors(
             self.xero, FakeMail(), lambda: "c", lambda *_: extracted(), "310", "INPUT3"
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         capture(arguments())
         bill = self.xero.bills["bill-1"]
         bill.update(Status="DRAFT", Reference=reference, **changes)

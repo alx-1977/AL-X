@@ -24,9 +24,8 @@ from alx.providers import (
 )
 from alx.safety import AuthorityPolicy
 from alx.contracts.mail import recorded_mail_action
+from alx.contracts.xero import XeroAction, recorded_xero_action
 from alx.tools import (
-    CAPTURE_SUPPLIER_INVOICE,
-    PROCESS_DHL_IMPORT,
     DEFINITIONS,
     MAIL,
     MailAction,
@@ -78,7 +77,8 @@ def captured_invoice_filing_scopes(
         result = attempt.result
         if (
             call is None
-            or call.capability_id != CAPTURE_SUPPLIER_INVOICE
+            or recorded_xero_action(call.capability_id, call.arguments)
+            is not XeroAction.CAPTURE_INVOICE
             or result is None
             or result.state is not CapabilityResultState.SUCCEEDED
             or result.recovery_values().get("completed") is not True
@@ -129,7 +129,8 @@ def dhl_mail_scopes(state: GoalState | None) -> tuple[ApprovalScope, ...]:
         result = attempt.result
         if (
             call is None
-            or call.capability_id != PROCESS_DHL_IMPORT
+            or recorded_xero_action(call.capability_id, call.arguments)
+            is not XeroAction.IMPORT_DHL
             or result is None
             or result.state is not CapabilityResultState.SUCCEEDED
             or result.recovery_values().get("completed") is not True

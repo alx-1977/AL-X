@@ -164,21 +164,30 @@ def test_migration_preserves_intact_facts_and_does_not_promote_summary_markers(t
             assert result.values['checkpoint']['original_length'] == len(raw)
 
 
-@pytest.mark.parametrize('capability,values,reader', [
-    ('capture_supplier_invoice', {'completed': True}, 'captured_invoice_filing_scopes'),
-    ('process_dhl_import', {'completed': True, 'stage': 'customs_documents',
-                          'source_mail': [{'mailbox_id': 'mail', 'uid_validity': 'v', 'uid': str(i)}
-                                          for i in range(100)]}, 'dhl_mail_scopes'),
-    ('send_mail_reply', {'accepted': True, 'source_has_attachments': False},
+_DHL_DONE = {'completed': True, 'stage': 'customs_documents',
+             'source_mail': [{'mailbox_id': 'mail', 'uid_validity': 'v', 'uid': str(i)}
+                             for i in range(100)]}
+
+
+@pytest.mark.parametrize('capability,action,values,reader', [
+    ('xero', 'capture_invoice', {'completed': True}, 'captured_invoice_filing_scopes'),
+    ('xero', 'import_dhl', _DHL_DONE, 'dhl_mail_scopes'),
+    # Saved before D-074 under the former ids, and still recognised.
+    ('capture_supplier_invoice', None, {'completed': True}, 'captured_invoice_filing_scopes'),
+    ('process_dhl_import', None, _DHL_DONE, 'dhl_mail_scopes'),
+    ('send_mail_reply', None, {'accepted': True, 'source_has_attachments': False},
      'mail_post_reply_standing_scopes'),
 ])
-def test_mail_authority_uses_exact_completion_and_references(tmp_path, capability, values, reader):
+def test_mail_authority_uses_exact_completion_and_references(tmp_path, capability, action, values, reader):
     from alx.bootstrap import mail
     values = {**{f'item_{i}': i for i in range(1000)}, **values}
     state = goal(values, capability_id=capability)
     attempt = state.attempts[0]
+    arguments = {'mailbox_id': 'mail', 'uid_validity': 'v', 'uid': '1'}
+    if action is not None:
+        arguments = {'action': action, **arguments}
     state = replace(state, attempts=(replace(attempt, call=replace(
-        attempt.call, arguments={'mailbox_id': 'mail', 'uid_validity': 'v', 'uid': '1'}, durable_arguments=None)),))
+        attempt.call, arguments=arguments, durable_arguments=None)),))
     read = getattr(mail, reader)
     expected = read(state)
     assert expected

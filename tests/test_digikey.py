@@ -14,14 +14,30 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from alx.bootstrap.digikey import build_digikey_runtime
-from alx.bootstrap.xero import build_xero_runtime, BILL_EXECUTION_CAPABILITIES
+from alx.bootstrap.digikey import DIGIKEY_ORDER_READ_PERMISSION, build_digikey_provider
+from alx.bootstrap.xero import build_xero_runtime, BILL_EXECUTION_ACTIONS
 from alx.config.digikey import DigiKeySettings
 from alx.contracts import CapabilityResultState, ExecutionOutcome, SideEffect
 from alx.providers.digikey import DigiKeyError, DigiKeyProvider, normalize_order
-from alx.tools.digikey import LOOKUP_DEFINITION, LOOKUP_DIGIKEY_ORDER, CAPTURE_DIGIKEY_ORDER_BILL, build_digikey_executors
-from alx.tools.xero import CAPTURE_DIGIKEY_DEFINITION, build_xero_executors
+from alx.tools.digikey import (  # noqa: E402
+    LOOKUP_DEFINITION,
+    build_digikey_executors,
+)
+from alx.tools.xero import (  # noqa: E402
+    CAPTURE_DIGIKEY_DEFINITION,
+)
 from test_invoice_capture import FakeXero, FakeMail, arguments, extracted
+from xero_actions import (  # noqa: E402
+    CAPTURE_DIGIKEY_BILL,
+    LOOKUP_DIGIKEY,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+    needs_approval,
+)
+from alx.contracts import XeroAction  # noqa: E402
 from support import xero_settings
 
 
@@ -63,7 +79,7 @@ def handler_with_order(order=None):
 
 def test_sales_order_lookup_and_contract(caplog):
     handler, calls = handler_with_order()
-    execute = build_digikey_executors(provider(handler), lambda: "call")[LOOKUP_DIGIKEY_ORDER]
+    execute = build_digikey_executors(provider(handler).lookup, lambda: "call")[LOOKUP_DIGIKEY]
     result = execute({"sales_order_number": "102748548"})
     assert result.state is CapabilityResultState.SUCCEEDED
     assert LOOKUP_DEFINITION.output_schema.accepts(result.values)
@@ -159,10 +175,10 @@ def test_invoice_search_rejects_distinct_matching_orders(capture_bill, paginated
     xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
     xero.authorise_bill = Mock(wraps=xero.authorise_bill)
     if capture_bill:
-        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
-                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
+        execute = xero_executors(xero, FakeMail(), lambda: "call",
+                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_BILL]
     else:
-        execute = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER]
+        execute = build_digikey_executors(p.lookup, lambda: "call")[LOOKUP_DIGIKEY]
     result = execute({"invoice_number": "135916797"})
     assert result.state is CapabilityResultState.FAILED
     assert result.failure == {"code": "order_ambiguous"}
@@ -220,10 +236,10 @@ def test_incomplete_invoice_search_never_writes(monkeypatch, exhaustion, capture
         xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
         xero.create_draft_bill = Mock(wraps=xero.create_draft_bill)
         xero.authorise_bill = Mock(wraps=xero.authorise_bill)
-        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
-                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
+        execute = xero_executors(xero, FakeMail(), lambda: "call",
+                                       digikey_lookup=p.lookup)[CAPTURE_DIGIKEY_BILL]
     else:
-        execute = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER]
+        execute = build_digikey_executors(p.lookup, lambda: "call")[LOOKUP_DIGIKEY]
     result = execute({"invoice_number": "135916797"})
     assert result.state is CapabilityResultState.FAILED
     assert result.failure == {"code": "search_incomplete"}
@@ -281,7 +297,7 @@ def test_invoice_search_rejects_results_received_after_deadline(monkeypatch, lat
                                           (429, "rate_limited"), (404, "order_not_found")])
 def test_failures_do_not_disclose_http_body_or_secrets(status, code, caplog):
     p = provider(lambda request: httpx.Response(status, text="secret-private token-private refresh-private"))
-    result = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER]({"sales_order_number": "1"})
+    result = build_digikey_executors(p.lookup, lambda: "call")[LOOKUP_DIGIKEY]({"sales_order_number": "1"})
     assert result.failure == {"code": code}
     assert "private" not in repr(result) + caplog.text
 
@@ -303,7 +319,7 @@ def test_connection_error_and_invalid_json_are_sanitized():
                                   {"sales_order_number": "../token"}, {"invoice_number": ""}])
 def test_bad_identifiers_do_not_make_http_requests(args):
     p = Mock()
-    result = build_digikey_executors(p, lambda: "call")[LOOKUP_DIGIKEY_ORDER](args)
+    result = build_digikey_executors(p.lookup, lambda: "call")[LOOKUP_DIGIKEY](args)
     assert result.failure["code"] == "arguments_unusable"
     p.lookup.assert_not_called()
 
@@ -312,17 +328,17 @@ def capture(order=None, xero=None, *, draft_cleanup_permitted=False):
     xero = xero or FakeXero()
     xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
     handler, _ = handler_with_order(order)
-    executors = build_xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
+    executors = xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
                                      digikey_lookup=provider(handler).lookup,
                                      draft_cleanup_permitted=draft_cleanup_permitted)
-    return xero, executors[CAPTURE_DIGIKEY_ORDER_BILL]
+    return xero, executors[CAPTURE_DIGIKEY_BILL]
 
 
 def test_capture_reuses_duplicate_commit_and_readback_without_pdf():
     xero, execute = capture()
     result = execute({"sales_order_number": "102748548"})
     assert result.values["completed"] is True
-    assert result.capability_id == CAPTURE_DIGIKEY_ORDER_BILL
+    assert result.capability_id == XERO
     assert CAPTURE_DIGIKEY_DEFINITION.output_schema.accepts(result.values)
     bill = xero.bills["bill-1"]
     assert bill["Status"] == "AUTHORISED"
@@ -469,8 +485,8 @@ def test_reported_shipped_order_rounding_and_invoice_capture(identifier, enabled
         return base(request)
     xero = FakeXero()
     xero.contacts = ({"Name": "DigiKey", "ContactID": "c-1", "ContactStatus": "ACTIVE"},)
-    execute = build_xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
-                                   digikey_lookup=provider(handle).lookup)[CAPTURE_DIGIKEY_ORDER_BILL]
+    execute = xero_executors(xero, FakeMail(), lambda: "call", lambda *_: extracted(),
+                                   digikey_lookup=provider(handle).lookup)[CAPTURE_DIGIKEY_BILL]
     args = {identifier: "135916797" if identifier == "invoice_number" else "102748548"}
     if enabled:
         args["rounding_adjustment"] = True
@@ -545,8 +561,8 @@ def test_non_rounding_difference_fails_before_any_write(change, authorise):
     if change == "extension":
         order = normalize_order(raw)
         order["line_items"][5]["extended_price"] = "744.54"
-        execute = build_xero_executors(xero, FakeMail(), lambda: "call",
-                                      digikey_lookup=lambda **_: order)[CAPTURE_DIGIKEY_ORDER_BILL]
+        execute = xero_executors(xero, FakeMail(), lambda: "call",
+                                      digikey_lookup=lambda **_: order)[CAPTURE_DIGIKEY_BILL]
     assert_source_mismatch_without_write(xero, execute, authorise=authorise)
 
 
@@ -769,17 +785,21 @@ def test_one_writer_and_shared_resolution_core_with_mutation():
 
 
 def test_runtime_independent_of_pdf_extractor_and_authority(tmp_path):
-    read_runtime = build_digikey_runtime(ENV, lambda: "call")
-    assert read_runtime is not None
-    assert build_digikey_runtime({}, lambda: "call") is None
+    read_provider = build_digikey_provider(ENV)
+    assert read_provider is not None
+    assert build_digikey_provider({}) is None
     assert "private" not in repr(DigiKeySettings.from_environment(ENV))
     for unattended in (False, True):
         runtime = build_xero_runtime(xero_settings(unattended_bill_writes=unattended), tmp_path,
-                                     FakeMail(), lambda: "call", digikey_lookup=read_runtime.provider.lookup)
-        assert CAPTURE_DIGIKEY_ORDER_BILL in runtime.executors
-        assert "capture_supplier_invoice" not in runtime.executors
-        assert runtime.policies[CAPTURE_DIGIKEY_ORDER_BILL].approval_required is not unattended
-    assert CAPTURE_DIGIKEY_ORDER_BILL in BILL_EXECUTION_CAPABILITIES
+                                     FakeMail(), lambda: "call", digikey_lookup=read_provider.lookup)
+        offered = {item.value for item in runtime.actions}
+        assert {CAPTURE_DIGIKEY_BILL, LOOKUP_DIGIKEY} <= offered
+        assert "capture_invoice" not in offered
+        assert needs_approval(runtime, CAPTURE_DIGIKEY_BILL) is not unattended
+        # The order read is a read: never approval, its own permission kept.
+        assert not needs_approval(runtime, LOOKUP_DIGIKEY)
+        assert DIGIKEY_ORDER_READ_PERMISSION in runtime.policies[XERO].permission_references
+    assert XeroAction.CAPTURE_DIGIKEY_BILL in BILL_EXECUTION_ACTIONS
     assert CAPTURE_DIGIKEY_DEFINITION.side_effect is SideEffect.EFFECTFUL
 
 
@@ -827,9 +847,9 @@ def test_shared_payload_calculates_xero_four_dp_line_rounding(line_amount_types,
 
 def test_shared_commit_rejects_source_mismatch_before_write():
     xero = FakeXero()
-    executors = build_xero_executors(xero, FakeMail(), lambda: "call",
+    executors = xero_executors(xero, FakeMail(), lambda: "call",
                                      lambda *_: extracted(subtotal="179.99"))
-    result = executors["capture_supplier_invoice"](arguments())
+    result = executors["capture_invoice"](arguments())
     assert result.failure["code"] == "source_mismatch"
     assert xero.created == 0
     assert not xero.bills
@@ -852,9 +872,9 @@ def test_created_total_cleanup_respects_separate_runtime_delete_authority(
         tmp_path, FakeMail(), lambda: "call", lambda *_: extracted(),
         digikey_lookup=provider(handler).lookup,
     )
-    capability = "capture_supplier_invoice" if source == "pdf" else CAPTURE_DIGIKEY_ORDER_BILL
-    assert not runtime.policies[capability].approval_required
-    assert runtime.policies["delete_xero_draft_bill"].approval_required is not delete_permitted
+    capability = "capture_invoice" if source == "pdf" else CAPTURE_DIGIKEY_BILL
+    assert not needs_approval(runtime, capability)
+    assert needs_approval(runtime, "delete_draft_bill") is not delete_permitted
     create, read = xero.create_draft_bill, xero.read_bill
     reads = 0
 
@@ -878,7 +898,7 @@ def test_created_total_cleanup_respects_separate_runtime_delete_authority(
     xero.authorise_bill = Mock(wraps=xero.authorise_bill)
     args = arguments(authorise=authorise) if source == "pdf" else {
         "sales_order_number": "102748548", "authorise": authorise}
-    result = runtime.executors[capability](args)
+    result = runtime.executors[XERO](xero_arguments(capability, args))
     if stage == "final" and authorise:
         assert result.values["completed"] is True
         xero.delete_draft_bill.assert_not_called()

@@ -35,10 +35,11 @@ from alx.contracts import (  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
 from alx.tools import (  # noqa: E402
     MAIL,
-    PROCESS_DHL_IMPORT,
+    XERO,
     build_mail_executors,
 )
 from mail_actions import FILE, FLAG, by_action, mail_arguments  # noqa: E402
+from xero_actions import IMPORT_DHL, xero_arguments  # noqa: E402
 
 DOCS = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "60692"}
 FILED_DOCS = {"mailbox_id": "FireFli/Processed", "uid_validity": "888", "uid": "41"}
@@ -46,17 +47,21 @@ INVOICE = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "60801"}
 OTHER = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "99"}
 
 
-def dhl(stage: str, *, completed: bool = True, source=(DOCS,), customs=()):
+def dhl(stage: str, *, completed: bool = True, source=(DOCS,), customs=(),
+        capability: str = XERO):
     values = {"completed": completed, "stage": stage, "source_mail": list(source)}
     if customs:
         values["customs_mail"] = list(customs)
-    call = CapabilityCall("call-1", PROCESS_DHL_IMPORT, {"documents": []})
+    arguments = {"documents": []}
+    if capability == XERO:
+        arguments = xero_arguments(IMPORT_DHL, arguments)
+    call = CapabilityCall("call-1", capability, arguments)
     return CapabilityAttempt(
         call=call,
         disposition=CapabilityAttemptDisposition.EXECUTED,
         implementation_invoked=True,
         result=CapabilityResult(
-            "call-1", PROCESS_DHL_IMPORT, CapabilityResultState.SUCCEEDED, values
+            "call-1", capability, CapabilityResultState.SUCCEEDED, values
         ),
     )
 
@@ -103,6 +108,13 @@ class ScopeDerivationTests(unittest.TestCase):
 
     def test_no_goal_authorises_nothing(self) -> None:
         self.assertEqual(dhl_mail_scopes(None), ())
+
+    def test_an_import_saved_before_d074_is_still_recognised(self) -> None:
+        scopes = scopes_of(goal(dhl("customs_documents", capability="process_dhl_import")))
+        self.assertEqual(scopes, {
+            scope(FILE, DOCS),
+            scope(FLAG, {**DOCS, "colour": "orange"}),
+        })
 
 
 class GateEnforcementTests(unittest.TestCase):

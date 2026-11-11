@@ -22,7 +22,9 @@ from alx.contracts import (  # noqa: E402
     ReasoningContext,
 )
 from alx.core.model_reasoner import CACHE_KEY, ModelReasoner  # noqa: E402
-from alx.tools import XERO_DEFINITIONS  # noqa: E402
+from alx.tools import XeroAction, xero_definition  # noqa: E402
+
+XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
 
 
 class FakeModel:
@@ -102,7 +104,7 @@ class PrefixStabilityTests(unittest.TestCase):
         self.reasoner.decide(context("conversation-1", "hello"))
         messages = self.model.requests[0].messages
         self.assertEqual(messages[2].role, ModelRole.SYSTEM)
-        self.assertIn("capture_supplier_invoice", messages[2].content)
+        self.assertIn('"id":"xero"', messages[2].content)
         # The volatile task material is last and holds no catalogue.
         self.assertEqual(messages[-1].role, ModelRole.USER)
         self.assertNotIn('"capabilities"', messages[-1].content)

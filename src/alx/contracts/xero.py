@@ -6,6 +6,7 @@ from alx.contracts.diagnostics import service_message
 
 import re
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any, Mapping, Protocol
 
 # Xero's serialised date form, an external protocol format.
@@ -120,3 +121,56 @@ class XeroAccountingAccount(Protocol):
     ) -> tuple[Mapping[str, Any], ...]: ...
 
     def read_sales_invoice(self, invoice_id: str) -> Mapping[str, Any] | None: ...
+
+
+XERO = "xero"
+
+
+class XeroAction(str, Enum):
+    """Every accounting job, a closed list like the mail and KiCad actions (D-074)."""
+
+    SEARCH_CONTACTS = "search_contacts"
+    CREATE_CONTACT = "create_contact"
+    UPDATE_CONTACT = "update_contact"
+    LIST_ACCOUNTS = "list_accounts"
+    LIST_TAX_RATES = "list_tax_rates"
+    FIND_BILL = "find_bill"
+    READ_BILL = "read_bill"
+    DELETE_DRAFT_BILL = "delete_draft_bill"
+    CAPTURE_INVOICE = "capture_invoice"
+    CAPTURE_DIGIKEY_BILL = "capture_digikey_bill"
+    IMPORT_DHL = "import_dhl"
+    FIND_QUOTES = "find_quotes"
+    INVOICE_QUOTE = "invoice_quote"
+    LOOKUP_DIGIKEY = "lookup_digikey"
+
+
+# Goals saved before D-074 hold calls under the fourteen former capability ids.
+# They are only recognised here, so a resumed goal still knows what it already
+# captured or imported; none of them can be called (Law 0).
+_RECORDED_BEFORE_D074 = {
+    "search_xero_contacts": XeroAction.SEARCH_CONTACTS,
+    "create_xero_contact": XeroAction.CREATE_CONTACT,
+    "update_xero_contact": XeroAction.UPDATE_CONTACT,
+    "list_xero_accounts": XeroAction.LIST_ACCOUNTS,
+    "list_xero_tax_rates": XeroAction.LIST_TAX_RATES,
+    "find_xero_bill": XeroAction.FIND_BILL,
+    "read_xero_bill": XeroAction.READ_BILL,
+    "delete_xero_draft_bill": XeroAction.DELETE_DRAFT_BILL,
+    "capture_supplier_invoice": XeroAction.CAPTURE_INVOICE,
+    "capture_digikey_order_bill": XeroAction.CAPTURE_DIGIKEY_BILL,
+    "process_dhl_import": XeroAction.IMPORT_DHL,
+    "find_xero_quotes": XeroAction.FIND_QUOTES,
+    "invoice_xero_quote": XeroAction.INVOICE_QUOTE,
+    "lookup_digikey_order": XeroAction.LOOKUP_DIGIKEY,
+}
+
+
+def recorded_xero_action(capability_id: str, arguments: Mapping[str, Any]) -> XeroAction | None:
+    """Which accounting job a recorded call was, in today's form or as saved before D-074."""
+    if capability_id == XERO:
+        try:
+            return XeroAction(arguments.get("action"))
+        except ValueError:
+            return None
+    return _RECORDED_BEFORE_D074.get(capability_id)

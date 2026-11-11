@@ -73,7 +73,7 @@ class ReadOwnSessionsTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         _record(self.root / "2026-11-08", "085910-aaaaaaaa.jsonl", "Put the Greptile bill in", [
             _event("tool_use", id="t1", name="mcp__alx__call_capability",
-                   input={"capability_id": "capture_supplier_invoice", "arguments_json": "{}"}),
+                   input={"capability_id": "xero", "arguments_json": "{}"}),
             _event("tool_result", tool_use_id="t1", content=[{"type": "text", "text": json.dumps({
                 "result_state": "failed", "failure": {"code": "source_mismatch"},
                 "result_values": {"steps": ["executed_bill"]}})}]),
@@ -102,7 +102,7 @@ class ReadOwnSessionsTests(unittest.TestCase):
         [session] = result.values["sessions"]
         self.assertEqual(session["trigger"]["said"], "Put the Greptile bill in")
         capture, update = session["steps"]
-        self.assertEqual(capture["capability"], "capture_supplier_invoice")
+        self.assertEqual(capture["capability"], "xero")
         self.assertEqual(capture["result"]["failure"]["code"], "source_mismatch")
         self.assertEqual(update["result"]["status"], "blocked")
         self.assertEqual(update["result"]["stop_reason"], "genuinely_blocked")
@@ -269,10 +269,10 @@ class SessionContextProvenanceTests(unittest.TestCase):
 
 
 def _goal(status: GoalStatus, result_state: CapabilityResultState) -> GoalState:
-    call = CapabilityCall("c-1", "capture_supplier_invoice", {}, None)
+    call = CapabilityCall("c-1", "xero", {}, None)
     attempt = CapabilityAttempt(
         call, CapabilityAttemptDisposition.EXECUTED, True,
-        CapabilityResult("c-1", "capture_supplier_invoice", result_state, {},
+        CapabilityResult("c-1", "xero", result_state, {},
                          None if result_state is CapabilityResultState.SUCCEEDED
                          else {"code": "source_mismatch"}))
     state = GoalState(GOAL, Objective("turn:t", "Put the Greptile bill in Xero"),
@@ -287,7 +287,7 @@ class OwnCapabilityFailureTests(unittest.TestCase):
     def test_blocking_after_her_own_capability_failed_puts_the_fact_in_view(self) -> None:
         outcome = _goal_outcome(_goal(GoalStatus.BLOCKED, CapabilityResultState.FAILED))
         failed = outcome["own_capability_failed"]
-        self.assertEqual(failed["capability_id"], "capture_supplier_invoice")
+        self.assertEqual(failed["capability_id"], "xero")
         self.assertEqual(failed["code"], "source_mismatch")
         self.assertIn("toolbox gap", failed["note"])
 

@@ -603,7 +603,8 @@ class EveryOutboundCapabilityDeclaresItselfTests(unittest.TestCase):
 
     def test_every_capability_carrying_authored_text_is_accounted_for(self) -> None:
         from alx.core.loop import CoreAgent as Agent
-        from alx.tools import DEFINITIONS as MAIL, XERO_DEFINITIONS
+        from alx.tools import DEFINITIONS as MAIL, XeroAction, xero_definition
+        XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
         from alx.tools.mail import SEND_DEFINITIONS
         from alx.tools.notebook import DEFINITIONS as NOTEBOOK
         from alx.tools.web import DEFINITION as PAGE, SEARCH_DEFINITION
@@ -620,7 +621,8 @@ class EveryOutboundCapabilityDeclaresItselfTests(unittest.TestCase):
     def test_a_capability_holding_authored_arguments_is_read_or_declared(self) -> None:
         """The collision itself: holding `subject` is not a declaration."""
         from alx.core.loop import CoreAgent as Agent
-        from alx.tools import DEFINITIONS as MAIL, XERO_DEFINITIONS
+        from alx.tools import DEFINITIONS as MAIL, XeroAction, xero_definition
+        XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
         from alx.tools.mail import SEND_DEFINITIONS
         from alx.tools.web import DEFINITION as PAGE, SEARCH_DEFINITION
 

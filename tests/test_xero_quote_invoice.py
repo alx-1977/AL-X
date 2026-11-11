@@ -30,11 +30,19 @@ from alx.providers.xero import (  # noqa: E402
     XeroAccountingAdapter,
     XeroConnection,
 )
-from alx.tools import (  # noqa: E402
-    FIND_XERO_QUOTES,
-    INVOICE_XERO_QUOTE,
-    build_xero_executors,
+from xero_actions import (  # noqa: E402
+    FIND_QUOTES,
+    INVOICE_QUOTE,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+    CAPTURE_INVOICE,
+    gate_state,
+    needs_approval,
 )
+from alx.safety import SafetyState  # noqa: E402
 from support import xero_settings  # noqa: E402
 
 PO_BYTES = b"bluenova-po"
@@ -132,13 +140,13 @@ def arguments(**changes) -> dict:
 
 class QuoteToInvoiceTests(unittest.TestCase):
     def executors(self, xero):
-        return build_xero_executors(
+        return xero_executors(
             xero, FakeMail(), lambda: "call-1", today=lambda: date(2026, 10, 6),
         )
 
     def test_a_sent_quote_becomes_a_verified_draft_invoice(self) -> None:
         xero = QuotingXero()
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(xero)[INVOICE_QUOTE](arguments())
         values = result.values
         self.assertTrue(values["completed"], values)
         self.assertEqual(xero.status_changes, ["ACCEPTED", "INVOICED"])
@@ -171,19 +179,19 @@ class QuoteToInvoiceTests(unittest.TestCase):
             with self.subTest(quoted=quoted):
                 xero = QuotingXero()
                 xero.quote["LineAmountTypes"] = quoted
-                self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+                self.executors(xero)[INVOICE_QUOTE](arguments())
                 self.assertEqual(xero.created[0]["LineAmountTypes"], invoiced)
 
     def test_it_never_approves_or_sends(self) -> None:
         xero = QuotingXero()
-        self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        self.executors(xero)[INVOICE_QUOTE](arguments())
         self.assertEqual({item["Status"] for item in xero.invoices.values()}, {"DRAFT"})
 
     def test_a_draft_or_declined_quote_returns_unposted(self) -> None:
         for status in ("DRAFT", "DECLINED"):
             with self.subTest(status=status):
                 xero = QuotingXero(status)
-                result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+                result = self.executors(xero)[INVOICE_QUOTE](arguments())
                 self.assertFalse(result.values["completed"])
                 self.assertEqual(result.values["returned_for"], f"quote_{status.lower()}")
                 self.assertEqual(xero.created, [])
@@ -193,14 +201,14 @@ class QuoteToInvoiceTests(unittest.TestCase):
         """A return awaits her judgement; a plan must not run on as if done."""
         from alx.contracts import ExecutionOutcome
 
-        result = self.executors(QuotingXero("DRAFT"))[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(QuotingXero("DRAFT"))[INVOICE_QUOTE](arguments())
         self.assertIs(result.outcome, ExecutionOutcome.AMBIGUOUS)
-        done = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](arguments())
+        done = self.executors(QuotingXero())[INVOICE_QUOTE](arguments())
         self.assertIsNone(done.outcome)
 
     def test_a_po_that_does_not_match_its_digest_writes_nothing(self) -> None:
         xero = QuotingXero()
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments(po_document={
+        result = self.executors(xero)[INVOICE_QUOTE](arguments(po_document={
             **arguments()["po_document"], "expected_sha256": "0" * 64,
         }))
         self.assertEqual(result.failure["code"], "source_mismatch")
@@ -208,7 +216,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
 
     def test_rerunning_resumes_and_never_invoices_twice(self) -> None:
         xero = QuotingXero()
-        execute = self.executors(xero)[INVOICE_XERO_QUOTE]
+        execute = self.executors(xero)[INVOICE_QUOTE]
         execute(arguments())
         again = execute(arguments())
         self.assertTrue(again.values["completed"], again.values)
@@ -223,14 +231,14 @@ class QuoteToInvoiceTests(unittest.TestCase):
             "Contact": {"ContactID": "bluenova"}, "Reference": "PO-7781",
             "Status": "AUTHORISED", "Type": "ACCREC",
         }
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(xero)[INVOICE_QUOTE](arguments())
         self.assertEqual(result.values["returned_for"], "invoice_already_exists")
         self.assertEqual(xero.created, [])
 
     def test_totals_that_disagree_leave_the_quote_uninvoiced(self) -> None:
         xero = QuotingXero()
         xero.totals_drift = True
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(xero)[INVOICE_QUOTE](arguments())
         self.assertFalse(result.values["completed"])
         self.assertEqual(result.values["returned_for"], "read_back_mismatch")
         self.assertNotIn("INVOICED", xero.status_changes)
@@ -251,7 +259,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
             return created
 
         xero.create_draft_sales_invoice = trimming
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(xero)[INVOICE_QUOTE](arguments())
         self.assertTrue(result.values["completed"], result.values)
         self.assertEqual(xero.status_changes, ["ACCEPTED", "INVOICED"])
 
@@ -267,7 +275,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
                            "UnitAmount": 1000.0, "AccountCode": "200",
                            "TaxType": "OUTPUT2"}],
         }
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(xero)[INVOICE_QUOTE](arguments())
         self.assertEqual(result.values["returned_for"], "read_back_mismatch")
         self.assertIn("Description", result.values["detail"])
         self.assertNotIn("INVOICED", xero.status_changes)
@@ -282,7 +290,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
             raise XeroAccessError("request_rejected")
 
         xero.create_draft_sales_invoice = refuse
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(xero)[INVOICE_QUOTE](arguments())
         self.assertEqual(result.failure["code"], "request_rejected")
         self.assertEqual(xero.status_changes, [])
         self.assertEqual(xero.quote["Status"], "SENT")
@@ -298,7 +306,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
             return dict(xero.quote)
 
         xero.set_quote_status = renumbering
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments())
+        result = self.executors(xero)[INVOICE_QUOTE](arguments())
         self.assertFalse(result.values["completed"])
         self.assertEqual(result.values["returned_for"], "quote_status_not_updated")
         self.assertIn("QU-0140", result.values["detail"])
@@ -307,7 +315,7 @@ class QuoteToInvoiceTests(unittest.TestCase):
     def test_a_po_whose_total_differs_from_the_quote_writes_nothing(self) -> None:
         """BlueNova's R16,707.20 PO was matched to a R8,964.25 quote."""
         xero = QuotingXero()
-        result = self.executors(xero)[INVOICE_XERO_QUOTE](arguments(po_total="16707.20"))
+        result = self.executors(xero)[INVOICE_QUOTE](arguments(po_total="16707.20"))
         self.assertFalse(result.values["completed"])
         self.assertEqual(result.values["returned_for"], "po_total_mismatch")
         self.assertIn("16707.20", result.values["detail"])
@@ -316,19 +324,19 @@ class QuoteToInvoiceTests(unittest.TestCase):
     def test_an_unreadable_po_total_is_refused(self) -> None:
         for value in ("", "about R1150", "1,150.00", "NaN", "Infinity", "sNaN"):
             with self.subTest(value=value):
-                result = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](
+                result = self.executors(QuotingXero())[INVOICE_QUOTE](
                     arguments(po_total=value)
                 )
                 self.assertEqual(result.failure["code"], "arguments_unusable")
 
     def test_an_unknown_quote_is_a_declared_failure(self) -> None:
-        result = self.executors(QuotingXero())[INVOICE_XERO_QUOTE](
+        result = self.executors(QuotingXero())[INVOICE_QUOTE](
             arguments(quote_id="quote-404")
         )
         self.assertEqual(result.failure["code"], "quote_not_found")
 
     def test_quotes_are_listed_for_one_customer(self) -> None:
-        result = self.executors(QuotingXero())[FIND_XERO_QUOTES]({"contact_id": "bluenova"})
+        result = self.executors(QuotingXero())[FIND_QUOTES]({"contact_id": "bluenova"})
         (quote,) = result.values["quotes"]
         self.assertEqual(quote["quote_number"], "QU-0042")
         self.assertEqual(quote["total"], "1150.0")
@@ -342,12 +350,17 @@ class QuoteRuntimeTests(unittest.TestCase):
             runtime = build_xero_runtime(
                 xero_settings(), Path(directory), FakeMail(), lambda: "call-1",
             )
-        policy = runtime.policies[INVOICE_XERO_QUOTE]
-        self.assertEqual(policy.permission_references, frozenset({XERO_QUOTE_INVOICE_PERMISSION}))
-        self.assertFalse(policy.approval_required)
+        # D-074: one policy holds every offered action's permission; invoicing
+        # a quote needs no approval even when bill writes do.
+        policy = runtime.policies[XERO]
+        self.assertIn(XERO_QUOTE_INVOICE_PERMISSION, policy.permission_references)
+        self.assertIn(XERO_READ_PERMISSION, policy.permission_references)
+        self.assertFalse(needs_approval(runtime, INVOICE_QUOTE))
+        self.assertFalse(needs_approval(runtime, FIND_QUOTES))
+        self.assertTrue(needs_approval(runtime, CAPTURE_INVOICE))
         self.assertEqual(
-            runtime.policies[FIND_XERO_QUOTES].permission_references,
-            frozenset({XERO_READ_PERMISSION}),
+            gate_state(runtime, INVOICE_QUOTE, runtime.permissions - {XERO_QUOTE_INVOICE_PERMISSION}),
+            SafetyState.DENIED,
         )
         self.assertIn(XERO_QUOTE_INVOICE_PERMISSION, runtime.permissions)
 

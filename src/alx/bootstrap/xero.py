@@ -1,4 +1,4 @@
-"""Compose the approved Xero supplier-bill primitives into AL/X boundaries."""
+"""Compose the one `xero` accounting capability into AL/X boundaries (D-074)."""
 
 from __future__ import annotations
 
@@ -8,28 +8,20 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alx.config import LlamaParseSettings, XeroSettings
-from alx.contracts import CapabilityDefinition, CapabilityResult, MailAccount, StructuredData
+from alx.contracts import (
+    CapabilityDefinition,
+    CapabilityResult,
+    MailAccount,
+    StructuredData,
+    XeroAction,
+)
 from alx.providers import LlamaParseExtractor, SQLiteXeroOAuth, XeroAccountingAdapter
 from alx.providers.dhl import classify_dhl_document
 from alx.safety import AuthorityPolicy
 from alx.specialists import ANSWER_SCHEMA, INSTRUCTION, checked_invoice
-from alx.tools import (
-    PROCESS_DHL_IMPORT,
-    CAPTURE_SUPPLIER_INVOICE,
-    DELETE_XERO_DRAFT_BILL,
-    FIND_XERO_BILL,
-    LIST_XERO_ACCOUNTS,
-    LIST_XERO_TAX_RATES,
-    READ_XERO_BILL,
-    SEARCH_XERO_CONTACTS,
-    UPDATE_XERO_CONTACT,
-    CREATE_XERO_CONTACT,
-    FIND_XERO_QUOTES,
-    INVOICE_XERO_QUOTE,
-    XERO_DEFINITIONS,
-    build_xero_executors,
-)
-from alx.tools.digikey import CAPTURE_DIGIKEY_ORDER_BILL
+from alx.tools import XERO, build_xero_executors, offered_xero_actions, xero_definition
+from alx.bootstrap.dhl import DhlImport
+from alx.bootstrap.digikey import DIGIKEY_ORDER_READ_PERMISSION
 
 
 XERO_READ_PERMISSION = "xero.read"
@@ -41,27 +33,26 @@ XERO_QUOTE_INVOICE_PERMISSION = "xero.quote.invoice"
 
 # Law 0: one production path per outcome. An ordinary supplier bill is posted
 # through the shared structured-invoice core (mail/PDF or DigiKey source), and
-# a DHL import by process_dhl_import. The steps inside each are private
+# a DHL import by import_dhl. The steps inside each are private
 # implementation, not competing writers. Superseded capabilities are deleted.
 # Both commit a bill, so both close their own ceiling window when they
 # actually finish. A DHL import armed the ceiling but could never settle it,
 # so a completed import left the conversation inside a spent window.
-BILL_EXECUTION_CAPABILITIES = frozenset(
-    {CAPTURE_SUPPLIER_INVOICE, CAPTURE_DIGIKEY_ORDER_BILL, PROCESS_DHL_IMPORT}
+BILL_EXECUTION_ACTIONS = frozenset(
+    {XeroAction.CAPTURE_INVOICE, XeroAction.CAPTURE_DIGIKEY_BILL, XeroAction.IMPORT_DHL}
 )
 
 # Arming the ceiling on the commit was too late: a task spent seven reasoning
 # calls reaching Xero and stayed unbudgeted because it never got that far. Any
 # of these says bill processing has begun, so the ceiling applies from the
 # first one AL/X reaches for.
-BILL_TASK_CAPABILITIES = BILL_EXECUTION_CAPABILITIES | {
-    PROCESS_DHL_IMPORT,
-    SEARCH_XERO_CONTACTS,
-    LIST_XERO_ACCOUNTS,
-    LIST_XERO_TAX_RATES,
-    FIND_XERO_BILL,
-    READ_XERO_BILL,
-    DELETE_XERO_DRAFT_BILL,
+BILL_TASK_ACTIONS = BILL_EXECUTION_ACTIONS | {
+    XeroAction.SEARCH_CONTACTS,
+    XeroAction.LIST_ACCOUNTS,
+    XeroAction.LIST_TAX_RATES,
+    XeroAction.FIND_BILL,
+    XeroAction.READ_BILL,
+    XeroAction.DELETE_DRAFT_BILL,
 }
 
 
@@ -105,6 +96,8 @@ class XeroRuntime:
     policies: Mapping[str, AuthorityPolicy]
     executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
     permissions: frozenset[str]
+    # The actions of `xero` this configuration offers (D-074).
+    actions: tuple[XeroAction, ...] = ()
 
 
 def build_xero_runtime(
@@ -114,7 +107,9 @@ def build_xero_runtime(
     call_id_source: Callable[[], str],
     extractor: Callable[[bytes, str, str, str], Mapping[str, Any]] | None = None,
     digikey_lookup: Callable[..., Mapping[str, Any]] | None = None,
+    dhl: DhlImport | None = None,
 ) -> XeroRuntime:
+    """Build the one `xero` capability (D-074) with the actions configured here."""
     oauth = SQLiteXeroOAuth(
         storage_root / "xero.sqlite3",
         settings.client_id,
@@ -124,98 +119,92 @@ def build_xero_runtime(
         settings.timeout_seconds,
     )
     adapter = XeroAccountingAdapter(oauth, settings.timeout_seconds)
-    read_policy = AuthorityPolicy(frozenset({XERO_READ_PERMISSION}))
-    # D-018. Friedl weighed the risk of an incorrect bill against re-proving
-    # carried-over V1 behaviour and authorised unattended supplier-bill writes
-    # of any amount. A bill is not a payment and is reversible in Xero. The
-    # structural safeguards are unchanged: balanced lines, account and tax
-    # identifiers validated against the live organisation, duplicate refusal,
-    # hash-bound attachments verified byte-for-byte, and read-back after every
-    # write. Payment and bank scopes remain unrequested.
-    write_policy = AuthorityPolicy(
-        frozenset({XERO_BILL_WRITE_PERMISSION}),
-        approval_required=not settings.unattended_bill_writes,
-    )
-    # D-019. Discarding a bill is a different act from preparing one, so it
-    # carries its own permission and its own approval setting. Friedl scoped
-    # this to drafts; voiding an authorised bill is not authorised here.
-    delete_policy = AuthorityPolicy(
-        frozenset({XERO_BILL_DELETE_PERMISSION}),
-        approval_required=not settings.unattended_bill_deletes,
-    )
-    # D-034. Friedl granted standing authority to rename one existing contact
-    # by exact ContactID. It is its own permission because it writes a
-    # different record from a bill, and no setting makes it attended.
-    rename_policy = AuthorityPolicy(frozenset({XERO_CONTACT_RENAME_PERMISSION}))
-    # D-035. Standing authority to create one supplier contact. Creating is a
-    # different act from renaming, so neither permission carries the other.
-    create_policy = AuthorityPolicy(frozenset({XERO_CONTACT_CREATE_PERMISSION}))
-    # D-037. Standing authority to turn one sent or accepted quote into a
-    # DRAFT sales invoice for the PO that accepts it. A draft is not sent,
-    # approved or paid, so no setting makes it attended. Its own permission:
-    # a sales document is a different record from a supplier bill.
-    quote_invoice_policy = AuthorityPolicy(
-        frozenset({XERO_QUOTE_INVOICE_PERMISSION})
-    )
-    policies = {
-        SEARCH_XERO_CONTACTS: read_policy,
-        LIST_XERO_ACCOUNTS: read_policy,
-        LIST_XERO_TAX_RATES: read_policy,
-        FIND_XERO_BILL: read_policy,
-        READ_XERO_BILL: read_policy,
-        DELETE_XERO_DRAFT_BILL: delete_policy,
-        UPDATE_XERO_CONTACT: rename_policy,
-        CREATE_XERO_CONTACT: create_policy,
-        FIND_XERO_QUOTES: read_policy,
-        INVOICE_XERO_QUOTE: quote_invoice_policy,
+    # Each action keeps the permission it had as its own capability; the one
+    # `xero` policy holds the union of those of the offered actions.
+    permission_of = {
+        XeroAction.SEARCH_CONTACTS: XERO_READ_PERMISSION,
+        XeroAction.LIST_ACCOUNTS: XERO_READ_PERMISSION,
+        XeroAction.LIST_TAX_RATES: XERO_READ_PERMISSION,
+        XeroAction.FIND_BILL: XERO_READ_PERMISSION,
+        XeroAction.READ_BILL: XERO_READ_PERMISSION,
+        XeroAction.FIND_QUOTES: XERO_READ_PERMISSION,
+        XeroAction.LOOKUP_DIGIKEY: DIGIKEY_ORDER_READ_PERMISSION,
+        # D-018. Friedl weighed the risk of an incorrect bill against
+        # re-proving carried-over V1 behaviour and authorised unattended
+        # supplier-bill writes of any amount. A bill is not a payment and is
+        # reversible in Xero. The structural safeguards are unchanged:
+        # balanced lines, account and tax identifiers validated against the
+        # live organisation, duplicate refusal, hash-bound attachments
+        # verified byte-for-byte, and read-back after every write. Payment and
+        # bank scopes remain unrequested.
+        XeroAction.CAPTURE_INVOICE: XERO_BILL_WRITE_PERMISSION,
+        XeroAction.CAPTURE_DIGIKEY_BILL: XERO_BILL_WRITE_PERMISSION,
+        # D-019. Discarding a bill is a different act from preparing one, so
+        # it carries its own permission and its own approval setting. Friedl
+        # scoped this to drafts; voiding an authorised bill is not authorised.
+        XeroAction.DELETE_DRAFT_BILL: XERO_BILL_DELETE_PERMISSION,
+        # D-034. Standing authority to rename one existing contact by exact
+        # ContactID; it writes a different record from a bill, and no setting
+        # makes it attended.
+        XeroAction.UPDATE_CONTACT: XERO_CONTACT_RENAME_PERMISSION,
+        # D-035. Standing authority to create one supplier contact. Creating
+        # is a different act from renaming, so neither permission carries the
+        # other.
+        XeroAction.CREATE_CONTACT: XERO_CONTACT_CREATE_PERMISSION,
+        # D-037. Standing authority to turn one sent or accepted quote into a
+        # DRAFT sales invoice for the PO that accepts it. A draft is not sent,
+        # approved or paid, so no setting makes it attended.
+        XeroAction.INVOICE_QUOTE: XERO_QUOTE_INVOICE_PERMISSION,
     }
-    definitions = tuple(
-        definition
-        for definition in XERO_DEFINITIONS
-        if (extractor is not None or definition.capability_id != CAPTURE_SUPPLIER_INVOICE)
-        and (digikey_lookup is not None or definition.capability_id != CAPTURE_DIGIKEY_ORDER_BILL)
+    # Which actions need Friedl's approval of the exact call follows his
+    # settings for that kind of write, action by action, as it did when each
+    # was its own capability.
+    needs_approval = set()
+    if not settings.unattended_bill_writes:
+        needs_approval.update((XeroAction.CAPTURE_INVOICE, XeroAction.CAPTURE_DIGIKEY_BILL))
+    if not settings.unattended_bill_deletes:
+        needs_approval.add(XeroAction.DELETE_DRAFT_BILL)
+    if dhl is not None:
+        # D-021: the DHL import keeps its own permission and approval setting.
+        permission_of[XeroAction.IMPORT_DHL] = dhl.permission
+        if dhl.approval_required:
+            needs_approval.add(XeroAction.IMPORT_DHL)
+    executors = build_xero_executors(
+        adapter,
+        mail_account,
+        call_id_source,
+        extractor,
+        settings.default_account_code,
+        settings.default_tax_type,
+        classify_dhl_document,
+        digikey_lookup=digikey_lookup,
+        # An approval of capture covers writes only. Cleanup may use
+        # deletion's standing authority, never capture's approval.
+        draft_cleanup_permitted=XeroAction.DELETE_DRAFT_BILL not in needs_approval,
+        dhl_import=None if dhl is None else dhl.executor_for(adapter),
     )
-    executors = dict(
-        build_xero_executors(
-            adapter,
-            mail_account,
-            call_id_source,
-            extractor,
-            settings.default_account_code,
-            settings.default_tax_type,
-            classify_dhl_document,
-            digikey_lookup=digikey_lookup,
-            # An approval of capture covers writes only. Cleanup may use
-            # deletion's standing authority, never capture's approval.
-            draft_cleanup_permitted=delete_policy.enabled and not delete_policy.approval_required,
-        )
+    # The catalogue promises that each offered action is callable in this
+    # runtime. Capture cannot read a document without its LlamaParse
+    # extractor, the DigiKey actions need the DigiKey order read, and the DHL
+    # import its own composition, so each is absent rather than advertised as
+    # a call that will fail before doing any work.
+    offered = offered_xero_actions(
+        capture=extractor is not None, digikey=digikey_lookup is not None, dhl=dhl is not None,
     )
-    if extractor is not None:
-        policies[CAPTURE_SUPPLIER_INVOICE] = write_policy
-    else:
-        # The catalogue promises that each offered capability is callable in
-        # this runtime. Supplier capture cannot read a document without its
-        # LlamaParse extractor, so it is absent rather than advertised as a
-        # callable that will fail before doing any work.
-        executors.pop(CAPTURE_SUPPLIER_INVOICE)
-    if digikey_lookup is not None:
-        policies[CAPTURE_DIGIKEY_ORDER_BILL] = write_policy
-    else:
-        executors.pop(CAPTURE_DIGIKEY_ORDER_BILL)
+    permissions = frozenset(permission_of[item] for item in offered)
+    policy = AuthorityPolicy(
+        permissions,
+        approval_required=True,
+        approval_exempt_when=tuple(
+            (("action", item.value),) for item in offered if item not in needs_approval
+        ),
+    )
     return XeroRuntime(
         oauth,
         adapter,
-        definitions,
-        policies,
+        (xero_definition(offered),),
+        {XERO: policy},
         executors,
-        frozenset(
-            {
-                XERO_READ_PERMISSION,
-                XERO_BILL_WRITE_PERMISSION,
-                XERO_BILL_DELETE_PERMISSION,
-                XERO_CONTACT_RENAME_PERMISSION,
-                XERO_CONTACT_CREATE_PERMISSION,
-                XERO_QUOTE_INVOICE_PERMISSION,
-            }
-        ),
+        permissions,
+        offered,
     )

@@ -34,7 +34,7 @@ payroll.
 - Nested ZIP members are exposed as bounded virtual attachments. The archive is never
   extracted to disk, path components are discarded, and member count and byte
   limits prevent an unbounded archive expansion.
-- A DHL import is one capability, `process_dhl_import`, authorised as a
+- A DHL import is one action, `xero` `import_dhl` (D-074), authorised as a
   deterministic sequence by D-021/D-022 and holding every DHL bill branch.
   Its branch is chosen from document evidence, never from wording. The
   DHL supplier is configuration (`ALX_XERO_DHL_SUPPLIER_NAME`, resolved to a
@@ -42,7 +42,7 @@ payroll.
   takes no contact argument and a wrong supplier cannot be handed to it. That
   contact and the three account codes are all verified against the live
   organisation before any write: a contact absent from this organisation, or
-  archived, refuses with `contact_not_found`. An ordinary supplier bill is posted by `capture_supplier_invoice`,
+  archived, refuses with `contact_not_found`. An ordinary supplier bill is posted by `xero` `capture_invoice`,
   which refuses a DHL document rather than flattening duty, import VAT and
   clearance onto one default account.
 - Law 0: each production outcome has exactly one path. The five granular write
@@ -126,7 +126,7 @@ filed. DHL writes remain fixture/fake-Xero proven only.
 ## Goal state and restart behaviour
 
 The existing Core checkpoints every effectful call before dispatch. A
-Xero-specific restart test drives an approved `capture_supplier_invoice`
+Xero-specific restart test drives an approved `xero` `capture_invoice`
 through the Core, closes and reopens the goal store, proves the capture result
 remains in the active goal, and drives a separate read-back result through the
 Core before AL/X responds. A DHL import is covered by `RestartContinuityTests`,
@@ -231,7 +231,7 @@ number rather than by the first 10-digit value in the document.
   suite fails when one is restored.
 - **New primitive justification:** mail attachments and Xero accounting effects
   are external capabilities AL/X did not possess.
-- **DHL production outcome:** `process_dhl_import` is the sole effectful path.
+- **DHL production outcome:** `xero` `import_dhl` is the sole effectful path.
   Its provider analyzer only classifies and extracts structured evidence and
   has no Xero dependency or write surface. No new capability was added for
   duty-tax-paid invoices.

@@ -4,7 +4,7 @@ On 2026-09-11 the Core asked Friedl whether it could discard an orphaned Xero
 draft bill left by a failed import. He answered "yes please". The turn ended
 with state=error, reason=repeated_rejected_call, and said nothing back to him.
 
-The sequence was correct at every step. delete_xero_draft_bill carried no
+The sequence was correct at every step. A draft-bill delete carried no
 approval, so the gate refused it approval_required; the Core asked; Friedl
 answered; the Core proposed a fresh approval grounded in that turn and retried
 the same capability with the same arguments. _repeats_rejected_call then saw a
@@ -44,11 +44,11 @@ from alx.core.loop import CoreAgent  # noqa: E402
 NOW = datetime(2026, 9, 11, 18, 46, tzinfo=UTC)
 
 # The live call: one draft bill, named exactly.
-ARGUMENTS = {"invoice_id": "5181fdd0-2b1c-4f6a-9e3d-7c8a1b2d4e5f"}
+ARGUMENTS = {"action": "delete_draft_bill", "invoice_id": "5181fdd0-2b1c-4f6a-9e3d-7c8a1b2d4e5f"}
 
 
 def call(call_id: str, approval_id: str | None = None) -> CapabilityCall:
-    return CapabilityCall(call_id, "delete_xero_draft_bill", ARGUMENTS, approval_id)
+    return CapabilityCall(call_id, "xero", ARGUMENTS, approval_id)
 
 
 def refused(reason: str, approval_id: str | None = None) -> CapabilityAttempt:
@@ -69,7 +69,7 @@ def approval(
 ) -> Approval:
     return Approval(
         approval_id,
-        ApprovalScope("delete_xero_draft_bill",
+        ApprovalScope("xero",
                       ARGUMENTS if arguments is None else arguments),
         lifecycle,
         expires_at,
@@ -210,7 +210,7 @@ class ExistingBehaviourIsUnchanged(unittest.TestCase):
         """Identity is the capability and its arguments."""
         state = goal(attempts=(refused("approval_required"),))
         other = CapabilityCall(
-            "call-2", "delete_xero_draft_bill", {"invoice_id": "another"}, None,
+            "call-2", "xero", {"action": "delete_draft_bill", "invoice_id": "another"}, None,
         )
         self.assertFalse(repeats(state, other))
 

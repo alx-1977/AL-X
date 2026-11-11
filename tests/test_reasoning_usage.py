@@ -421,14 +421,15 @@ class BillSettlementWiringTests(unittest.TestCase):
     def test_every_committing_capability_can_settle_its_window(self) -> None:
         """Requirement 1: a DHL import armed a ceiling it could never settle."""
         from alx.bootstrap.xero import (
-            BILL_EXECUTION_CAPABILITIES,
-            BILL_TASK_CAPABILITIES,
+            BILL_EXECUTION_ACTIONS,
+            BILL_TASK_ACTIONS,
         )
-        from alx.tools import CAPTURE_SUPPLIER_INVOICE, PROCESS_DHL_IMPORT
+        from alx.tools import XeroAction
 
-        self.assertIn(CAPTURE_SUPPLIER_INVOICE, BILL_EXECUTION_CAPABILITIES)
-        self.assertIn(PROCESS_DHL_IMPORT, BILL_EXECUTION_CAPABILITIES)
-        self.assertTrue(BILL_EXECUTION_CAPABILITIES <= BILL_TASK_CAPABILITIES)
+        self.assertIn(XeroAction.CAPTURE_INVOICE, BILL_EXECUTION_ACTIONS)
+        self.assertIn(XeroAction.CAPTURE_DIGIKEY_BILL, BILL_EXECUTION_ACTIONS)
+        self.assertIn(XeroAction.IMPORT_DHL, BILL_EXECUTION_ACTIONS)
+        self.assertTrue(BILL_EXECUTION_ACTIONS <= BILL_TASK_ACTIONS)
 
     def test_only_a_completed_result_settles(self) -> None:
         """Requirement 2: a refusal must not falsely close the window."""

@@ -18,8 +18,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.bootstrap.xero import (  # noqa: E402
-    BILL_EXECUTION_CAPABILITIES,
-    BILL_TASK_CAPABILITIES,
+    BILL_EXECUTION_ACTIONS,
+    BILL_TASK_ACTIONS,
     build_xero_runtime,
 )
 from alx.bootstrap.live_voice import _bill_budget_for_turn  # noqa: E402
@@ -27,15 +27,7 @@ from alx.observability import XERO_BILL_BUDGET  # noqa: E402
 from alx.observability.usage import (  # noqa: E402
     CLAUDE_SUBSCRIPTION_BILL_BUDGET,
 )
-from alx.tools import (  # noqa: E402
-    CAPTURE_SUPPLIER_INVOICE,
-    LIST_XERO_ACCOUNTS,
-    LIST_XERO_TAX_RATES,
-    PROCESS_DHL_IMPORT,
-    SEARCH_XERO_CONTACTS,
-    FIND_XERO_BILL,
-    READ_XERO_BILL,
-)
+from alx.tools import XERO, XeroAction  # noqa: E402
 from support import xero_settings  # noqa: E402
 
 # The step-by-step write path Law 0 required to be deleted, named as plain
@@ -70,11 +62,13 @@ class RoutineCatalogueTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.runtime = runtime()
-        self.offered = {item.capability_id for item in self.runtime.definitions}
+        self.offered = ({item.capability_id for item in self.runtime.definitions}
+                        | {item.value for item in self.runtime.actions})
 
     def test_committing_a_bill_offers_exactly_one_capability(self) -> None:
-        writes = self.offered & BILL_EXECUTION_CAPABILITIES
-        self.assertEqual(writes, {CAPTURE_SUPPLIER_INVOICE})
+        self.assertEqual({item.capability_id for item in self.runtime.definitions}, {XERO})
+        writes = set(self.runtime.actions) & BILL_EXECUTION_ACTIONS
+        self.assertEqual(writes, {XeroAction.CAPTURE_INVOICE})
 
     def test_the_old_step_by_step_write_path_no_longer_exists(self) -> None:
         """Law 0: deleted, not merely withheld from the catalogue."""
@@ -85,9 +79,9 @@ class RoutineCatalogueTests(unittest.TestCase):
                 self.assertNotIn(capability_id, self.runtime.policies)
 
     def test_reads_remain_available_for_ordinary_questions(self) -> None:
-        for capability_id in (FIND_XERO_BILL, READ_XERO_BILL):
-            with self.subTest(capability_id=capability_id):
-                self.assertIn(capability_id, self.offered)
+        for action in (XeroAction.FIND_BILL, XeroAction.READ_BILL):
+            with self.subTest(action=action):
+                self.assertIn(action, self.runtime.actions)
 
     def test_no_recovery_surface_survives_on_the_runtime(self) -> None:
         """A recovery-only route is exactly what Law 0 forbids."""
@@ -139,7 +133,7 @@ class ArmedBudgetTests(unittest.TestCase):
 
     def test_dispatching_a_bill_execution_arms_the_ceiling(self) -> None:
         """Without this the ceiling never applies to a real bill task."""
-        self.assertIn("BILL_TASK_CAPABILITIES", self.source)
+        self.assertIn("BILL_TASK_ACTIONS", self.source)
         self.assertIn("usage.set_budget(", self.source)
         # The budget is chosen by provider now, so the literal name no longer
         # appears at the arming site. What must remain true is that arming a
@@ -219,17 +213,17 @@ class ArmedBudgetTests(unittest.TestCase):
 
     def test_any_bill_capability_arms_the_ceiling_not_only_the_commit(self) -> None:
         """Arming on the commit was too late; a task reached seven calls first."""
-        self.assertIn(CAPTURE_SUPPLIER_INVOICE, BILL_TASK_CAPABILITIES)
-        self.assertIn(PROCESS_DHL_IMPORT, BILL_TASK_CAPABILITIES)
-        for capability_id in (
-            SEARCH_XERO_CONTACTS,
-            LIST_XERO_ACCOUNTS,
-            LIST_XERO_TAX_RATES,
-            FIND_XERO_BILL,
-            READ_XERO_BILL,
+        self.assertIn(XeroAction.CAPTURE_INVOICE, BILL_TASK_ACTIONS)
+        self.assertIn(XeroAction.IMPORT_DHL, BILL_TASK_ACTIONS)
+        for action in (
+            XeroAction.SEARCH_CONTACTS,
+            XeroAction.LIST_ACCOUNTS,
+            XeroAction.LIST_TAX_RATES,
+            XeroAction.FIND_BILL,
+            XeroAction.READ_BILL,
         ):
-            with self.subTest(capability_id=capability_id):
-                self.assertIn(capability_id, BILL_TASK_CAPABILITIES)
+            with self.subTest(action=action):
+                self.assertIn(action, BILL_TASK_ACTIONS)
 
 
 class ArmedBudgetBehaviourTests(unittest.TestCase):
@@ -246,8 +240,8 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
                 current_conversation_id[0] = conversation_id
                 usage.check(conversation_id)
 
-            def dispatch(capability_id: str) -> None:
-                if capability_id in BILL_TASK_CAPABILITIES:
+            def dispatch(action: XeroAction) -> None:
+                if action in BILL_TASK_ACTIONS:
                     usage.set_budget(current_conversation_id[0], XERO_BILL_BUDGET)
 
             call = {
@@ -267,7 +261,7 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
             )
 
             # Committing a bill declares the task routine.
-            dispatch(CAPTURE_SUPPLIER_INVOICE)
+            dispatch(XeroAction.CAPTURE_INVOICE)
             self.assertEqual(
                 usage.task("conversation-1")["budget_state"], "expected"
             )
@@ -289,7 +283,7 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
         """
         from alx.observability import BudgetExceeded, SQLiteUsageRecorder
 
-        for first_capability in sorted(BILL_TASK_CAPABILITIES):
+        for first_capability in sorted(BILL_TASK_ACTIONS):
             with self.subTest(first_capability=first_capability):
                 with tempfile.TemporaryDirectory() as directory:
                     usage = SQLiteUsageRecorder(Path(directory) / "usage.sqlite3")
@@ -300,7 +294,7 @@ class ArmedBudgetBehaviourTests(unittest.TestCase):
                         usage.check(conversation_id)
 
                     def dispatch(capability_id: str) -> None:
-                        if capability_id in BILL_TASK_CAPABILITIES:
+                        if capability_id in BILL_TASK_ACTIONS:
                             usage.set_budget(current[0], XERO_BILL_BUDGET)
 
                     call = {"code": "reasoning.completed", "model": "grok-4.5"}

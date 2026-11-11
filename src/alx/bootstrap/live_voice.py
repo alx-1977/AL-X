@@ -36,6 +36,7 @@ from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
 from alx.contracts.task import ExternalTask, TaskState
 from alx.contracts.trace import TraceSubsystem
+from alx.contracts.xero import recorded_xero_action
 from alx.providers.review_status import subject_reference
 from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
@@ -54,14 +55,14 @@ from alx.bootstrap.reasoning import (
     build_model_reasoner,
 )
 from alx.bootstrap.xero import (
-    BILL_EXECUTION_CAPABILITIES,
-    BILL_TASK_CAPABILITIES,
+    BILL_EXECUTION_ACTIONS,
+    BILL_TASK_ACTIONS,
     build_supplier_invoice_extractor,
     build_xero_runtime,
 )
-from alx.bootstrap.dhl import build_dhl_runtime
+from alx.bootstrap.dhl import build_dhl_import
 from alx.bootstrap.ship24 import build_ship24_runtime
-from alx.bootstrap.digikey import build_digikey_runtime
+from alx.bootstrap.digikey import build_digikey_provider
 from alx.bootstrap.kicad import build_kicad_runtime
 from alx.bootstrap.particle_local import build_particle_local_runtime
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
@@ -1040,12 +1041,9 @@ async def run(repository_root: Path) -> None:
         permissions.update(reader_runtime.permissions)
 
     xero_approval_ttl_seconds: int | None = None
-    digikey_runtime = build_digikey_runtime(environment, current_call_id.get)
-    if digikey_runtime is not None:
-        register(digikey_runtime.definitions, TraceSubsystem.DIGIKEY)
-        policies.update(digikey_runtime.policies)
-        executors.update(digikey_runtime.executors)
-        permissions.update(digikey_runtime.permissions)
+    # D-074: the DigiKey order read is an action of `xero`, offered when both
+    # DigiKey and Xero are configured.
+    digikey_provider = build_digikey_provider(environment)
     # For her own setup facts: whether D-018's standing bill authority is on,
     # and which of these integrations were composed.
     unattended_bills = False
@@ -1076,31 +1074,26 @@ async def run(repository_root: Path) -> None:
             mail_runtime.source,
             current_call_id.get,
             extractor,
-            digikey_lookup=digikey_runtime.provider.lookup if digikey_runtime is not None else None,
+            digikey_lookup=digikey_provider.lookup if digikey_provider is not None else None,
+            # A DHL import posts to Xero, so it is an action of `xero`, bound
+            # to the same adapter, with the same authority as any other bill
+            # write.
+            dhl=build_dhl_import(
+                mail_runtime.source,
+                current_call_id.get,
+                xero_settings.import_vat_account,
+                xero_settings.customs_duty_account,
+                xero_settings.clearance_account,
+                xero_settings.dhl_supplier_name,
+                xero_settings.unattended_bill_writes,
+                processed_mailbox=mail_settings.processed_mailbox,
+            ),
         )
         register(xero_runtime.definitions, TraceSubsystem.XERO)
         policies.update(xero_runtime.policies)
         executors.update(xero_runtime.executors)
         permissions.update(xero_runtime.permissions)
         xero_approval_ttl_seconds = xero_settings.approval_ttl_seconds
-
-        # A DHL import posts to Xero, so its one capability is built with the
-        # same adapter and the same authority as any other bill write.
-        dhl_runtime = build_dhl_runtime(
-            mail_runtime.source,
-            xero_runtime.adapter,
-            current_call_id.get,
-            xero_settings.import_vat_account,
-            xero_settings.customs_duty_account,
-            xero_settings.clearance_account,
-            xero_settings.dhl_supplier_name,
-            xero_settings.unattended_bill_writes,
-            processed_mailbox=mail_settings.processed_mailbox,
-        )
-        register(dhl_runtime.definitions, TraceSubsystem.DHL)
-        policies.update(dhl_runtime.policies)
-        executors.update(dhl_runtime.executors)
-        permissions.update(dhl_runtime.permissions)
 
     # Replying is authorised by DECISIONS.md D-011 and configured separately, so
     # a runtime without send settings reads mail without being able to send it.
@@ -1161,7 +1154,7 @@ async def run(repository_root: Path) -> None:
         goal_state_token = current_goal_state.set(state)
         # Reaching for any bill capability declares the task routine, so the
         # ceiling applies from the first one rather than from the commit.
-        if call.capability_id in BILL_TASK_CAPABILITIES:
+        if recorded_xero_action(call.capability_id, call.arguments) in BILL_TASK_ACTIONS:
             # The ceiling counts reasoning calls, so it follows the provider
             # executing this turn. The occasion relay is already the durable
             # boundary between autonomous and conversational turns; no model
@@ -1195,7 +1188,8 @@ async def run(repository_root: Path) -> None:
         # its own. Only a completed capture counts: settling after a refusal
         # or a returned ambiguity would hand the same bill a fresh ceiling and
         # let it keep reasoning.
-        if call.capability_id in BILL_EXECUTION_CAPABILITIES and _completed(attempt):
+        if (recorded_xero_action(call.capability_id, call.arguments) in BILL_EXECUTION_ACTIONS
+                and _completed(attempt)):
             usage.settle(current_conversation_id.get())
         return attempt
 
@@ -1328,7 +1322,7 @@ async def run(repository_root: Path) -> None:
                 ("Ship24", "tracking shipments across supported couriers",
                  "src/alx/providers/ship24.py", True),
                 ("DigiKey", "order status, invoices, shipping and structured supplier bill values",
-                 "src/alx/providers/digikey.py", digikey_runtime is not None),
+                 "src/alx/providers/digikey.py", digikey_provider is not None and xero_composed),
                 ("KiCad", "board DRC, confined pcbnew editing on copies, add-only manufacturing "
                  "exports, home/iCloud reference reading and "
                  "approved write-back", "src/alx/providers/kicad.py", True),

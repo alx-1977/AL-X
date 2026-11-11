@@ -1,8 +1,8 @@
 """Law 0: one outcome, one production path — proved by absence, not intent.
 
 Two production outcomes were consolidated here. Committing an ordinary
-supplier bill became `capture_supplier_invoice`, and a DHL import became
-`process_dhl_import`. Five capabilities that could each independently reach a
+supplier bill became the capture action, and a DHL import its own import
+action, both of the one `xero` capability since D-074. Five capabilities that could each independently reach a
 posted bill were deleted rather than hidden, deprecated or kept for recovery.
 
 "Not currently used" is not deleted, and "not exposed" is not deleted, so
@@ -22,19 +22,22 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
-from alx.bootstrap.dhl import build_dhl_runtime  # noqa: E402
 from alx.bootstrap.xero import build_xero_runtime  # noqa: E402
 from alx.contracts import SideEffect  # noqa: E402
-from alx.tools import (  # noqa: E402
-    CAPTURE_SUPPLIER_INVOICE,
-    DELETE_XERO_DRAFT_BILL,
-    DHL_DEFINITIONS,
-    PROCESS_DHL_IMPORT,
-    UPDATE_XERO_CONTACT,
-    CREATE_XERO_CONTACT,
-    XERO_DEFINITIONS,
-)
+from alx.tools import XERO, XeroAction, xero_definition  # noqa: E402
+from alx.tools.xero import CONTRACTS  # noqa: E402
 from support import xero_settings  # noqa: E402
+from xero_actions import dhl_import  # noqa: E402
+
+# The one capability and every action it can offer, by the names a call uses.
+XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
+ACTION_NAMES = {item.value for item in XeroAction} | {item.capability_id for item in CONTRACTS.values()}
+
+
+def effectful_actions() -> set[str]:
+    (definition,) = XERO_DEFINITIONS
+    return {item.value for item in XeroAction
+            if definition.effect_for({"action": item.value}) is SideEffect.EFFECTFUL}
 
 # Every production entry point that could once reach a posted supplier bill.
 SUPERSEDED = (
@@ -65,48 +68,36 @@ class FakeMail:
         raise AssertionError("not used")
 
 
-class FakeXero:
-    pass
-
-
-def runtimes():
+def runtime():
     settings = xero_settings(unattended_bill_writes=True)
     with tempfile.TemporaryDirectory() as directory:
-        xero = build_xero_runtime(
-            settings, Path(directory), FakeMail(), lambda: "call", lambda *_: {}
+        return build_xero_runtime(
+            settings, Path(directory), FakeMail(), lambda: "call", lambda *_: {},
+            dhl=dhl_import(settings, FakeMail()),
         )
-    dhl = build_dhl_runtime(
-        FakeMail(),
-        FakeXero(),
-        lambda: "call",
-        settings.import_vat_account,
-        settings.customs_duty_account,
-        settings.clearance_account,
-        settings.unattended_bill_writes,
-    )
-    return xero, dhl
 
 
 class SupersededPathsAreDeletedTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.xero, self.dhl = runtimes()
+        self.xero = runtime()
 
     def test_no_superseded_capability_is_registered_anywhere(self) -> None:
-        registered = {
-            item.capability_id for item in (*XERO_DEFINITIONS, *DHL_DEFINITIONS)
-        }
+        registered = {item.capability_id for item in self.xero.definitions} | ACTION_NAMES
+        self.assertEqual({item.capability_id for item in self.xero.definitions}, {XERO})
         for capability_id in SUPERSEDED:
             with self.subTest(capability_id=capability_id):
                 self.assertNotIn(capability_id, registered)
 
     def test_no_superseded_capability_is_dispatchable(self) -> None:
         """A registration is not the only way to reach an executor."""
-        executors = {**self.xero.executors, **self.dhl.executors}
-        policies = {**self.xero.policies, **self.dhl.policies}
+        executors = dict(self.xero.executors)
+        policies = dict(self.xero.policies)
         for capability_id in SUPERSEDED:
             with self.subTest(capability_id=capability_id):
                 self.assertNotIn(capability_id, executors)
                 self.assertNotIn(capability_id, policies)
+                result = executors[XERO]({"action": capability_id})
+                self.assertEqual(result.failure["code"], "arguments_unusable")
 
     def test_the_superseded_identifiers_are_gone_from_the_source(self) -> None:
         """Renamed and left behind is not deleted either."""
@@ -136,32 +127,33 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
         self.assertFalse(hasattr(DhlImportAnalyzerAdapter, "analyze_customs"))
 
     def test_only_supported_bill_sources_are_registered(self) -> None:
-        effectful = {
-            item.capability_id
-            for item in (*XERO_DEFINITIONS, *DHL_DEFINITIONS)
-            if item.side_effect is SideEffect.EFFECTFUL
-        }
+        effectful = effectful_actions()
         # PDF and DigiKey captures feed the one structured-invoice core
-        # (call ownership is enforced in test_digikey); process_dhl_import posts a DHL
+        # (call ownership is enforced in test_digikey); import_dhl posts a DHL
         # import, and delete discards a draft. The D-034 contact rename and
         # D-035 contact creation write a contact, and the D-037 quote invoice
         # writes a DRAFT sales invoice, never a bill. Nothing else writes.
         self.assertEqual(
             effectful,
             {
-                CAPTURE_SUPPLIER_INVOICE,
-                "capture_digikey_order_bill",
-                PROCESS_DHL_IMPORT,
-                DELETE_XERO_DRAFT_BILL,
-                UPDATE_XERO_CONTACT,
-                CREATE_XERO_CONTACT,
-                "invoice_xero_quote",
+                "capture_invoice",
+                "capture_digikey_bill",
+                "import_dhl",
+                "delete_draft_bill",
+                "update_contact",
+                "create_contact",
+                "invoice_quote",
             },
         )
 
     def test_the_two_bill_paths_do_not_overlap(self) -> None:
         """An ordinary bill and a DHL import are separate outcomes."""
-        self.assertEqual(set(self.xero.executors) & set(self.dhl.executors), set())
+        capture = CONTRACTS[XeroAction.CAPTURE_INVOICE]
+        dhl = CONTRACTS[XeroAction.IMPORT_DHL]
+        self.assertIsNot(capture, dhl)
+        self.assertNotEqual(capture.input_schema, dhl.input_schema)
+        source = (REPOSITORY_ROOT / "src/alx/tools/xero.py").read_text()
+        self.assertIn("methods[XeroAction.IMPORT_DHL] = dhl_import", source)
 
     def test_a_dhl_document_cannot_reach_the_ordinary_bill_path(self) -> None:
         """Two routes to a posted DHL bill would be the Law 0 violation."""
@@ -169,10 +161,8 @@ class SupersededPathsAreDeletedTests(unittest.TestCase):
         self.assertIn("dhl_import_requires_dedicated_processing", source)
         self.assertIn("dhl_classifier", source)
 
-    def test_no_recovery_surface_is_exposed_by_either_runtime(self) -> None:
-        for runtime in (self.xero, self.dhl):
-            with self.subTest(runtime=type(runtime).__name__):
-                self.assertFalse(hasattr(runtime, "recovery_definitions"))
+    def test_no_recovery_surface_is_exposed_by_the_runtime(self) -> None:
+        self.assertFalse(hasattr(self.xero, "recovery_definitions"))
 
 
 class MutationTests(unittest.TestCase):
@@ -194,17 +184,15 @@ class MutationTests(unittest.TestCase):
             SideEffect.EFFECTFUL,
             (),
         )
-        mutated = {
-            item.capability_id for item in (*XERO_DEFINITIONS, *DHL_DEFINITIONS)
-        } | {restored.capability_id}
+        mutated = {item.capability_id for item in XERO_DEFINITIONS} | ACTION_NAMES | {
+            restored.capability_id}
         offending = [item for item in SUPERSEDED if item in mutated]
         self.assertEqual(offending, ["create_xero_draft_bill"])
 
     def test_restoring_an_executor_is_caught(self) -> None:
-        xero, dhl = runtimes()
+        xero = runtime()
         mutated = {
             **xero.executors,
-            **dhl.executors,
             "authorise_xero_bill": lambda _arguments: None,
         }
         offending = [item for item in SUPERSEDED if item in mutated]
@@ -219,19 +207,17 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(offending, ["execute_xero_bill"])
 
     def test_a_second_effectful_bill_capability_is_caught(self) -> None:
-        effectful = {
-            item.capability_id
-            for item in (*XERO_DEFINITIONS, *DHL_DEFINITIONS)
-            if item.side_effect is SideEffect.EFFECTFUL
-        } | {"execute_xero_bill"}
+        effectful = effectful_actions() | {"execute_xero_bill"}
         self.assertNotEqual(
             effectful,
             {
-                CAPTURE_SUPPLIER_INVOICE,
-                PROCESS_DHL_IMPORT,
-                DELETE_XERO_DRAFT_BILL,
-                UPDATE_XERO_CONTACT,
-                CREATE_XERO_CONTACT,
+                "capture_invoice",
+                "capture_digikey_bill",
+                "import_dhl",
+                "delete_draft_bill",
+                "update_contact",
+                "create_contact",
+                "invoice_quote",
             },
         )
 
