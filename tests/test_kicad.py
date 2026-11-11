@@ -164,7 +164,14 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(set(self.runtime.executors), {'kicad'})
         payload = json.loads(_catalogue_payload(self.runtime.definitions))
         [line] = payload['capabilities']
-        self.assertTrue(line['purpose'].startswith('Anything KiCad - PCB or schematic: inspect a board first'))
+        # Her always-present line: the board, the project's own datasheet
+        # before judging or the web, and findings on screen (2026-11-09).
+        self.assertEqual(
+            line['purpose'],
+            "KiCad PCB or schematic: inspect the board, read the part's datasheet in the "
+            "project's datasheets folder (read_reference) before judging or searching the "
+            "web, show layout findings with show_on_screen.")
+        self.assertLessEqual(len(line['purpose']), 200)
         definition = DEFINITIONS[0]
         policy = self.runtime.policies['kicad']
         for action in ('inspect', 'check', 'edit', 'read_reference', 'analyse_copper', 'simulate'):

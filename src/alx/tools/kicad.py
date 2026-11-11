@@ -224,9 +224,11 @@ for _definition in CONTRACTS.values():
     _FIELDS.update(_definition.input_schema.properties)
 
 DEFINITION = CapabilityDefinition(KICAD,
-    'Anything KiCad - PCB or schematic: inspect a board first (every part with its value '
-    'and part number, nets, keep-outs), then edit a work copy, check it (DRC), analyse '
-    'copper, simulate a circuit, read reference files, export manufacturing files or apply '
+    "KiCad PCB or schematic: inspect the board, read the part's datasheet in the project's "
+    'datasheets folder (read_reference) before judging or searching the web, show layout '
+    'findings with show_on_screen. inspect gives every part with its value and part number, '
+    'nets and keep-outs; read_reference reads PDFs page by page. Then edit a work copy, '
+    'check it (DRC), analyse copper, simulate a circuit, export manufacturing files or apply '
     'an approved copy to his project. action names which; its fields are listed per action '
     'below. export and write_back change his project and need his approval of the exact '
     'call; every other action is free. Each action below lists its fields and the ones it requires. ' + ' '.join(
