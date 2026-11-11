@@ -126,6 +126,17 @@ inadequate.
 
 Not yet usable.
 
+- [ ] **Finish merging capabilities by subject (D-074).** Done: KiCad (#221),
+  mail (#222), Xero (#226), web and research (#228), code (#229). Left, one
+  per PR, each removing what it replaces (Law 0):
+  1. **Records** (her history): conversation_history, goal_history,
+     self_diagnosis (log, sessions, trace), claude_usage, read_mail_document.
+  2. **State**: continuity (carried thoughts, future cognition, own time,
+     presence, undelivered).
+  3. **Plans**: goal and plan decisions in the Core.
+  4. **Particle and readers**: particle, particle_local, readers.
+  5. **Other** (discuss with Friedl first): show_on_screen, track_shipment,
+     run_program, the worker.
 - [ ] Calendar / scheduling.
 - [ ] Altium / Nexar ECAD integration.
 - [ ] JLC/BOM matching and sourcing assistance.
