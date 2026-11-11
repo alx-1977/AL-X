@@ -184,6 +184,22 @@ class PerActionDeclarationTests(unittest.TestCase):
             replace(definition(), transmits_authored_text_when=(alternative,),
                     plan_observation_when=(alternative,))
 
+    def test_differently_written_declarations_matching_one_call_are_refused(self) -> None:
+        """PR #229 review: a git push matches both, though the tuples differ."""
+        with self.assertRaises(ValueError):
+            replace(definition(),
+                    transmits_authored_text_when=((("action", GIT),),),
+                    plan_observation_when=((("action", GIT), ("operation", "push")),))
+        with self.assertRaises(ValueError):
+            replace(definition(),
+                    transmits_authored_text_when=((("operation", "push"),),),
+                    plan_observation_when=((("action", GIT),),))
+
+    def test_declarations_that_cannot_match_one_call_are_allowed(self) -> None:
+        replace(definition(),
+                transmits_authored_text_when=((("action", GIT), ("operation", "push")),),
+                plan_observation_when=((("action", GIT), ("operation", "status")),))
+
     def test_a_sandbox_program_stays_out_of_the_goal_audit(self) -> None:
         durable = set(definition().durable_input_fields)
         for field in ("source", "entry_filename", "wall_seconds"):

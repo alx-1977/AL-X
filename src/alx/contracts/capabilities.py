@@ -109,6 +109,20 @@ def arguments_match(alternatives: ArgumentAlternatives, arguments: Mapping[str, 
                for alternative in alternatives)
 
 
+def _alternatives_overlap(first: tuple[tuple[str, str], ...],
+                          second: tuple[tuple[str, str], ...]) -> bool:
+    """Whether one call could match both alternatives: they agree on every key they share.
+
+    Two different alternatives can still match the same call, as one naming
+    only the action and one naming the action and an operation (PR #229
+    review), so whole alternatives are not compared.
+    """
+    if not first or not second:
+        return False
+    left, right = dict(first), dict(second)
+    return all(left[key] == right[key] for key in left.keys() & right.keys())
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityDefinition:
     capability_id: str
@@ -195,8 +209,9 @@ class CapabilityDefinition:
             raise ValueError("a capability that sends cannot be a plan observation")
         if (self.plan_observation and self.transmits_authored_text_when) or (
                 self.transmits_authored_text and self.plan_observation_when) or any(
-                alternative in self.transmits_authored_text_when
-                for alternative in self.plan_observation_when):
+                _alternatives_overlap(sending, observing)
+                for sending in self.transmits_authored_text_when
+                for observing in self.plan_observation_when):
             raise ValueError("an action that sends cannot be a plan observation")
         codes = tuple(self.possible_failure_codes)
         object.__setattr__(self, "possible_failure_codes", codes)
