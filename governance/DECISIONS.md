@@ -280,6 +280,10 @@ This file records approved product and architecture decisions that guide impleme
   3. A taxed invoice with deductions is returned to AL/X: splitting VAT across a discount is a judgment.
   4. A line-total refusal now carries both figures ("bill lines come to …, the invoice total is …"), so AL/X can see why instead of guessing.
   Real case before merging (D-072): the new reading of the real Greptile PDF gave both deductions as printed and a verified 94.50 bill total, with no Xero write.
+- **Amendment (2026-11-11): the ceiling belongs to the bill, not the conversation.** At 08:04 a bill lookup armed the ceiling; only a completed capture settles it, so five hours of unrelated work in the same conversation filled it, and from 13:12 three of Friedl's turns were stopped without a word until a restart. Friedl asked for this to be fixed with the other 10–11 November incidents in one change.
+  1. A bill task that has reached for no bill capability for thirty minutes is over: its window lapses, and the next bill capability opens a fresh one. A bill still being worked keeps its window and its ceiling.
+  2. A person's turn stopped by the ceiling gets one step that can only speak, exempt from the ceiling: it calls no capability and a turn reaches it at most once, so it cannot run away. Background turns stay stopped without that step.
+  No authority changes: the same capabilities, scopes, evidence rules and read-back apply. No Law exception is created.
 - **Review condition.** Revisit if an incorrect bill is created, a duplicate reaches Xero, an attachment is attached to the wrong bill, a read-back mismatch occurs, or Friedl decides an amount threshold or a return to attended writes is warranted.
 
 ## D-019 — Discarding a draft supplier bill on request

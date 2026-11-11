@@ -112,6 +112,11 @@ class InspectTests(unittest.TestCase):
         self.assertIn("GetIsRuleArea()", INSPECT_SCRIPT)
         self.assertIn("pcbnew.F_Cu", INSPECT_SCRIPT)
 
+    def test_teardrops_are_counted_not_listed(self) -> None:
+        # 2026-11-10: 908 teardrop zones on P0009 buried its 47 real zones.
+        self.assertIn("if zone.IsTeardropArea():", INSPECT_SCRIPT)
+        self.assertIn('"teardrops": teardrops', INSPECT_SCRIPT)
+
 
 class TurnBoundByActionTests(unittest.TestCase):
     """Review of c19c8c4: one free kicad call spent the turn's instruction."""

@@ -62,7 +62,9 @@ DEFINITION = CapabilityDefinition(
     "silkscreen), nets the tracks and vias, planes the zone nets to show faintly. marks "
     "colours a part, 'net:<name>' or 'keepout' by tone; unmarked copper is blue. rotate turns "
     "the view 90 degrees. dims draws dimension lines between two points in mm. Showing "
-    "replaces what is on screen; he closes it.",
+    "replaces what is on screen; he closes it. shown is true only when the screen reported "
+    "drawing it; when false it is not on screen (closed, not open or broken), so say that, "
+    "never that it is showing.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"title": _STRING, "subtitle": _STRING, "context": _STRING, "verdict": _TONED,
@@ -100,12 +102,29 @@ class DisplayBoard:
         self._id = uuid.uuid4().hex
         self._version = 0
         self._display: dict[str, Any] | None = None
+        # The newest version the screen reported drawing. Publishing is not
+        # showing: on 2026-11-10 the screen had crashed and she still told
+        # Friedl it was on screen, because publishing alone said "shown".
+        self._drawn = 0
+        self._drawn_changed = threading.Condition(self._lock)
 
     def publish(self, display: Mapping[str, Any]) -> int:
         with self._lock:
             self._version += 1
             self._display = dict(display)
             return self._version
+
+    def mark_drawn(self, board_id: str, version: int) -> None:
+        """The screen drew this version (it reports after drawing it)."""
+        with self._lock:
+            if board_id == self._id and 0 < version <= self._version:
+                self._drawn = max(self._drawn, version)
+                self._drawn_changed.notify_all()
+
+    def wait_drawn(self, version: int, timeout: float) -> bool:
+        """Whether the screen draws this version (or a newer one) in time."""
+        with self._lock:
+            return self._drawn_changed.wait_for(lambda: self._drawn >= version, timeout)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -133,6 +152,7 @@ def build_display_executors(
     board: DisplayBoard,
     read_section: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
     call_id_source: Callable[[], str],
+    draw_wait_seconds: float = 12.0,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     def failed(code: str, reason: str = "") -> CapabilityResult:
         failure = {"code": code, **({"reason": reason[:300]} if reason else {})}
@@ -197,9 +217,11 @@ def build_display_executors(
             })
         display["views"] = drawn
         version = board.publish(display)
+        # The screen polls every two seconds, then loads and draws the page.
+        shown = board.wait_drawn(version, draw_wait_seconds)
         return CapabilityResult(
             call_id_source(), SHOW_ON_SCREEN, CapabilityResultState.SUCCEEDED,
-            {"shown": True, "version": version,
+            {"shown": shown, "version": version,
              "views": [{"label": item["label"],
                         "parts": sorted(part["ref"] for part in item["geometry"].get("parts", ())),
                         "tracks": len(item["geometry"].get("tracks", ()))} for item in drawn]})

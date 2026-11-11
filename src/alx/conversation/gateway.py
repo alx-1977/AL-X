@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import monotonic
 from uuid import uuid4
 
@@ -33,6 +33,11 @@ LOGGER = logging.getLogger(__name__)
 _SLOW_CONTEXT_ASSEMBLY_SECONDS = 0.25
 
 
+# Enough of his conversation to know what she just told him and what is open.
+RECENT_WITH_FRIEDL_TURNS = 8
+RECENT_WITH_FRIEDL_WINDOW = timedelta(hours=3)
+
+
 class ConversationGateway:
     """Transport-neutral ingress. It attaches no goal: the Core is shown every
     unfinished goal of the conversation and decides which, if any, applies."""
@@ -41,13 +46,16 @@ class ConversationGateway:
                  identifier_factory: Callable[[], str] | None = None,
                  clock: Callable[[], datetime] | None = None,
                  contextual_events: Callable[[], tuple[BackgroundEvent, ...]] | None = None,
-                 conversation_events: Callable[[str], tuple[BackgroundEvent, ...]] | None = None) -> None:
+                 conversation_events: Callable[[str], tuple[BackgroundEvent, ...]] | None = None,
+                 live_thread: Callable[[], str | None] | None = None) -> None:
         self._core = core
         self._conversation_store = conversation_store
         self._identifier_factory = identifier_factory or (lambda: str(uuid4()))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._contextual_events = contextual_events or (lambda: ())
         self._conversation_events = conversation_events or (lambda _identity: ())
+        # Friedl's conversation on the screen now, if any.
+        self._live_thread = live_thread or (lambda: None)
 
     def _store_response(self, conversation_id: str, outcome: CoreOutcome,
                         retention_until: datetime) -> str:
@@ -207,6 +215,43 @@ class ConversationGateway:
                 stored += 1
         return stored
 
+    def _recent_with_friedl(self, conversation_id: str) -> tuple[BackgroundEvent, ...]:
+        """What was just said in Friedl's own conversation, read only.
+
+        A background occasion reasons over its own thread, but everything she
+        tells him lands in his. On 2026-11-10 and 11 she repeated parcel news
+        she had already given him, and a mail question was put to him while
+        her own question was still open there, so his "yes please" answered
+        the wrong one. Content past its D-013 deadline is left out.
+        """
+        live = self._live_thread()
+        if not live or live == conversation_id:
+            return ()
+        try:
+            thread = self._conversation_store.load(live)
+        except ConversationNotFound:
+            return ()
+        now = self._clock()
+        recent = [turn for turn in thread.turns
+                  if turn.occurred_at >= now - RECENT_WITH_FRIEDL_WINDOW
+                  and (turn.provenance is None or turn.provenance.content_expires_at is None
+                       or turn.provenance.content_expires_at > now)][-RECENT_WITH_FRIEDL_TURNS:]
+        if not recent:
+            return ()
+        inputs = [turn.provenance for turn in recent if turn.provenance is not None]
+        return (BackgroundEvent(
+            f"recent-with-friedl:{live}:{recent[-1].turn_id}",
+            "conversation.recent_with_friedl",
+            recent[-1].occurred_at,
+            {"conversation_id": live, "turns": len(recent)},
+            transient_data={"turns": [
+                {"from": "alx" if turn.origin is ConversationOrigin.ALX_RESPONSE else "friedl",
+                 "at": turn.occurred_at.isoformat(), "text": turn.content}
+                for turn in recent]},
+            provenance=(RetentionPolicy().derive(ContentOrigin.ALX, now, inputs)
+                        if inputs else None),
+        ),)
+
     def _with_contextual_events(
         self, conversation: ConversationSnapshot, *additional: BackgroundEvent
     ) -> ConversationSnapshot:
@@ -323,7 +368,8 @@ class ConversationGateway:
             conversation = self._conversation_store.create(
                 conversation_id, retention_until
             )
-        transient_conversation = self._with_contextual_events(conversation, event)
+        transient_conversation = self._with_contextual_events(
+            conversation, event, *self._recent_with_friedl(conversation_id))
         outcome = self._core.process(
             transient_conversation,
             retention_until,

@@ -711,13 +711,19 @@ class CoreAgent:
                 (*retrieved_memories, *relationship_memories),
                 transient_attempts, prior_goal_provenance,
             )
+            budget_stopped = False
             try:
                 self._budget_check(conversation_id)
             except Exception as error:
                 LOGGER.warning("Reasoning stopped by execution budget: %s", error)
-                return CoreOutcome(
-                    CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
-                )
+                if origin is not CognitionOrigin.PERSON_TURN:
+                    return CoreOutcome(
+                        CoreState.CHECKPOINTED, snapshot, reason="budget_exceeded"
+                    )
+                # A person is never left in silence: on 2026-11-11 three of
+                # Friedl's turns were stopped here without a word. The stop
+                # holds; one step that can only speak tells him so.
+                budget_stopped = True
             marks = self._step_marks(
                 snapshot, dispatched, refused_calls, refused_goal_selections,
                 retrieved_memories, continuation_notices, answering_plan,
@@ -758,6 +764,12 @@ class CoreAgent:
                     turn_key=turn_key,
                     step_index=step_index,
                 )
+                if budget_stopped:
+                    return self._respond_to_terminal_blocker(
+                        conversation_id, conversation, snapshot, reasoning_context,
+                        transient_attempts, "budget_exceeded", decision_provenance,
+                        refused_calls, budget_exempt=True,
+                    )
                 rendered_plan = self._rendered_plan(reasoning_context.active_goal)
                 self._emit_reasoning(purpose, purpose_reference, conversation_id)
                 decision = self._reasoner.decide(reasoning_context)
@@ -1529,17 +1541,16 @@ class CoreAgent:
                 transient_attempts, "approval_covers_unheard_text",
                 decision_provenance, refused_calls, park=False,
             )
-        if origin is CognitionOrigin.PERSON_TURN:
-            # A person's turn never ends in silence: on 2026-11-06 the Dual
-            # Coil request used its steps and stopped without a word. Her
-            # work is parked above; one step that can only speak tells him
-            # where it stands.
-            return self._respond_to_terminal_blocker(
-                conversation_id, conversation, snapshot, reasoning_context,
-                transient_attempts, "budget_exhausted", decision_provenance,
-                refused_calls, park=False,
-            )
-        return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason="budget_exhausted")
+        # A turn never ends in silence when it runs out of steps: on
+        # 2026-11-06 the Dual Coil request stopped without a word, and on
+        # 2026-11-10 a background coil job did the same at 14:14 and nobody
+        # knew until Friedl asked at 14:25. Her work is parked above; one
+        # step that can only speak says where it stands.
+        return self._respond_to_terminal_blocker(
+            conversation_id, conversation, snapshot, reasoning_context,
+            transient_attempts, "budget_exhausted", decision_provenance,
+            refused_calls, park=False,
+        )
 
     def _respond_to_terminal_blocker(
         self,
@@ -1552,8 +1563,13 @@ class CoreAgent:
         provenance: ContentProvenance,
         refused_calls: tuple[Mapping[str, Any], ...] = (),
         park: bool = True,
+        budget_exempt: bool = False,
     ) -> CoreOutcome:
         """Allow one response-only decision for a person, parking stopped work.
+
+        After the execution budget itself stopped the turn, that one step is
+        exempt from it: it uses no capability, and a person's turn reaches it
+        at most once, so it cannot run away.
 
         A refused plan change stops nothing that was running, so it parks
         nothing: she only says what happened. There may be no goal at all,
@@ -1574,7 +1590,8 @@ class CoreAgent:
             purpose=ReasoningPurpose.PREPARING_RESPONSE,
         )
         try:
-            self._budget_check(conversation_id)
+            if not budget_exempt:
+                self._budget_check(conversation_id)
         except Exception as error:
             LOGGER.warning("Terminal checkpoint response stopped by execution budget: %s", error)
             return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)

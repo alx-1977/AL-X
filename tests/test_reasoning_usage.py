@@ -13,7 +13,8 @@ from alx.observability import (  # noqa: E402
     ExecutionBudget,
     SQLiteUsageRecorder,
 )
-from alx.observability.usage import USD_PER_MILLION  # noqa: E402
+from alx.contracts import AgentDecision  # noqa: E402
+from alx.observability.usage import BILL_TASK_IDLE_SECONDS, USD_PER_MILLION  # noqa: E402
 
 
 def call(**overrides) -> dict:
@@ -289,6 +290,49 @@ class ExecutionBudgetTests(unittest.TestCase):
                     ExecutionBudget(expected, warn, stop)
 
 
+class IdleBillTaskTests(unittest.TestCase):
+    """2026-11-11: a find_bill at 08:04 armed the ceiling and nothing settled it.
+
+    Five hours of unrelated work in the same conversation then filled it, and
+    from 13:12 every turn, Friedl's included, was stopped before it was heard.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.now = [1000.0]
+        self.recorder = SQLiteUsageRecorder(
+            Path(directory.name) / "reasoning-usage.sqlite3", clock=lambda: self.now[0])
+
+    def test_a_bill_task_left_idle_no_longer_holds_the_conversation(self) -> None:
+        self.recorder.set_budget("c", XERO_BILL_BUDGET)
+        for _ in range(4):
+            self.recorder.record("c", call())
+        with self.assertRaises(BudgetExceeded):
+            self.recorder.check("c")
+        self.now[0] += BILL_TASK_IDLE_SECONDS
+        self.recorder.check("c")  # unrelated work goes on
+
+    def test_a_bill_task_still_reaching_for_bills_keeps_its_ceiling(self) -> None:
+        self.recorder.set_budget("c", XERO_BILL_BUDGET)
+        for _ in range(4):
+            self.now[0] += BILL_TASK_IDLE_SECONDS / 2
+            self.recorder.set_budget("c", XERO_BILL_BUDGET)
+            self.recorder.record("c", call())
+        with self.assertRaises(BudgetExceeded):
+            self.recorder.check("c")
+
+    def test_the_next_bill_after_an_idle_one_gets_its_own_window(self) -> None:
+        self.recorder.set_budget("c", XERO_BILL_BUDGET)
+        for _ in range(4):
+            self.recorder.record("c", call())
+        self.now[0] += BILL_TASK_IDLE_SECONDS
+        self.recorder.set_budget("c", XERO_BILL_BUDGET)
+        self.recorder.record("c", call())
+        self.recorder.check("c")
+        self.assertEqual(self.recorder.task("c")["budget_state"], "expected")
+
+
 class BudgetDeadlockTests(unittest.TestCase):
     """A ceiling that stops a task must not strand the conversation.
 
@@ -474,16 +518,13 @@ class BillSettlementWiringTests(unittest.TestCase):
 
 
 class CoreBudgetIntegrationTests(unittest.TestCase):
-    def test_the_core_stops_reasoning_when_the_budget_check_raises(self) -> None:
-        """The Core must checkpoint, not keep calling the model."""
-        from alx.core import CoreAgent, CoreState
+    def _run(self, origin, decide):
+        """One turn against a ceiling that is already spent."""
+        from alx.core import CoreAgent
 
-        calls = []
-
-        class RefusingReasoner:
-            def decide(self, _context):
-                calls.append(1)
-                raise AssertionError("the model must not be called past the ceiling")
+        class Reasoner:
+            def decide(self, context):
+                return decide(context)
 
         class Store:
             def load(self, _goal_id):
@@ -499,10 +540,10 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
                 return ()
 
         def check(_task_id):
-            raise BudgetExceeded("task-1", 5, 4)
+            raise BudgetExceeded("task-1", 26, 26)
 
         agent = CoreAgent(
-            Store(), RefusingReasoner(), lambda _c, _s: None, (),
+            Store(), Reasoner(), lambda _c, _s: None, (),
             budget_check=check,
         )
 
@@ -511,10 +552,40 @@ class CoreBudgetIntegrationTests(unittest.TestCase):
             turns = ()
             events = ()
 
-        outcome = agent.process(Conversation(), _future(), step_budget=25)
+        return agent.process(Conversation(), _future(), step_budget=25, origin=origin)
+
+    def test_a_background_turn_stops_without_calling_the_model(self) -> None:
+        """The Core must checkpoint, not keep calling the model."""
+        from alx.contracts import CognitionOrigin
+        from alx.core import CoreState
+
+        calls = []
+
+        def refuse(_context):
+            calls.append(1)
+            raise AssertionError("the model must not be called past the ceiling")
+
+        outcome = self._run(CognitionOrigin.EXTERNAL_EVENT, refuse)
         self.assertIs(outcome.state, CoreState.CHECKPOINTED)
         self.assertEqual(outcome.reason, "budget_exceeded")
         self.assertEqual(calls, [])
+
+    def test_a_person_turn_is_told_in_one_step_that_can_only_speak(self) -> None:
+        """2026-11-11: three of Friedl's turns were stopped without a word."""
+        from alx.contracts import CognitionOrigin
+        from alx.core import CoreState
+
+        seen = []
+
+        def speak(context):
+            seen.append((context.response_only_reason, context.purpose))
+            return AgentDecision(response="I stopped that task; it ran too long.")
+
+        outcome = self._run(CognitionOrigin.PERSON_TURN, speak)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], "budget_exceeded")
+        self.assertIs(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(outcome.response, "I stopped that task; it ran too long.")
 
     def test_a_budget_checkpoint_does_not_need_reason_recovery(self) -> None:
         from alx.interfaces.server import RECOVERABLE_TRANSPORT_REASONS

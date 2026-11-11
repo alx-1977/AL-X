@@ -94,6 +94,7 @@ class LiveVoiceServer:
         reader_tile: Callable[[], dict[str, Any] | None] | None = None,
         # D-073: what AL/X is showing on the viewer, and its version.
         display: Callable[[], dict[str, Any]] | None = None,
+        display_drawn: Callable[[str, int], None] | None = None,
         # Copies a delivered reply into the conversation Friedl is in.
         relay: Callable[[str, str, str], bool] | None = None,
         locate: Callable[[str, str], tuple[str, Any] | None] | None = None,
@@ -120,6 +121,7 @@ class LiveVoiceServer:
         # D-041: the BHL tile's current data, or None on a day without events.
         self._reader_tile = reader_tile
         self._display = display
+        self._display_drawn = display_drawn
         self._host = host
         self._port = port
         self._sample_rate_hz = sample_rate_hz
@@ -195,11 +197,10 @@ class LiveVoiceServer:
         if not registered:
             # A mail thread has no listener of its own. An absent session
             # makes this occasion undelivered evidence for a later Core turn.
-            live = [item for item in getattr(self, "_live_conversations", [])
-                    if self._delivery_queues.get(item)]
-            if not live:
+            live = self.live_conversation()
+            if live is None:
                 return not_queued("no_screen_connected")
-            conversation_id = live[-1]
+            conversation_id = live
             registered = self._delivery_queues.get(conversation_id) or []
         # Snapshot: the listener may go away while this runs, which the loop
         # side re-checks rather than assuming.
@@ -692,6 +693,16 @@ class LiveVoiceServer:
                         else self._display())
             return self._response(200, json.dumps(snapshot).encode(),
                                   "application/json; charset=utf-8")
+        if parsed.path == "/display-drawn.json":
+            # The viewer reports a version it has drawn; nothing else changes.
+            query = parse_qs(parsed.query)
+            try:
+                version = int(query.get("version", ["0"])[0])
+            except ValueError:
+                version = 0
+            if self._display_drawn is not None and version > 0:
+                self._display_drawn(query.get("id", [""])[0], version)
+            return self._response(200, b"{}", "application/json; charset=utf-8")
         relative = {
             "/": "index.html",
             "/app.css": "app.css",
@@ -760,6 +771,12 @@ class LiveVoiceServer:
             return str(UUID(proposed))
         except (ValueError, AttributeError):
             return str(uuid4())
+
+    def live_conversation(self) -> str | None:
+        """Friedl's conversation on a connected screen, the newest if several."""
+        live = [item for item in getattr(self, "_live_conversations", [])
+                if self._delivery_queues.get(item)]
+        return live[-1] if live else None
 
     @staticmethod
     def _response(status: int, body: bytes, media_type: str) -> Response:
