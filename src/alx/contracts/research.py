@@ -10,6 +10,7 @@ than on storage, which is what the module boundaries require.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from alx.contracts.cognition import Cognition
@@ -122,3 +123,22 @@ class ResearchPricing(Protocol):
         max_input_tokens: int,
         max_output_tokens: int,
     ) -> float | None: ...
+
+
+RESEARCH = "research"
+
+
+class ResearchAction(str, Enum):
+    """Every web and research job, a closed list like the mail and Xero actions (D-074)."""
+
+    READ_PAGE = "read_page"
+    SEARCH_WEB = "search_web"
+    ASK_MODEL = "ask_model"
+    OPEN_THREAD = "open_thread"
+    RECORD_ENTRY = "record_entry"
+    REVISE_ENTRY = "revise_entry"
+    CORRECT_ENTRY = "correct_entry"
+    SEARCH_NOTEBOOK = "search_notebook"
+    READ_THREAD = "read_thread"
+    SET_STATUS = "set_status"
+    DELETE = "delete"

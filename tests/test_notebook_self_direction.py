@@ -54,8 +54,11 @@ from alx.core import CoreAgent, CoreState
 from alx.core.model_reasoner import _context_payload
 from alx.goals import SQLiteGoalStore
 from alx.research.store import SQLiteResearchStore
-from alx.tools import ASK_WEB_PAGE, ASK_WEB_SEARCH, WEB_DEFINITION, WEB_SEARCH_DEFINITION
-from alx.tools.notebook import DEFINITIONS as NOTEBOOK_DEFINITIONS
+from alx.contracts import RESEARCH
+from research_actions import (
+    NOTEBOOK, OPEN_THREAD, READ_PAGE, RECORD_ENTRY, SEARCH_WEB, definition, research_call,
+)
+
 
 
 NOW = datetime(2026, 9, 5, 9, 0, tzinfo=UTC)
@@ -124,7 +127,9 @@ class NotebookTestCase(unittest.TestCase):
 
         def dispatch(call, state):
             current[0] = call.call_id
-            self.recorded.append(call.capability_id)
+            # The research job a call was, by action (D-074).
+            self.recorded.append(call.arguments.get("action") if call.capability_id == RESEARCH
+                                 else call.capability_id)
             return CapabilityAttempt(
                 call, CapabilityAttemptDisposition.EXECUTED, True,
                 CapabilityResult(call.call_id, call.capability_id,
@@ -133,8 +138,7 @@ class NotebookTestCase(unittest.TestCase):
 
         return CoreAgent(
             self.goals, reasoner, dispatch,
-            capabilities or (WEB_DEFINITION, WEB_SEARCH_DEFINITION,
-                             *NOTEBOOK_DEFINITIONS),
+            capabilities or (definition(),),
             clock=lambda: NOW,
             identifier_factory=lambda: next(values),
             open_notebook_threads=lambda: self.notebook.open_threads(
@@ -147,11 +151,11 @@ class UserDirectedResearchTests(NotebookTestCase):
     """Friedl asks; she researches and answers. The notebook stays hers."""
 
     def search_call(self, call_id="call-s1"):
-        return CapabilityCall(call_id, ASK_WEB_SEARCH,
+        return research_call(call_id, SEARCH_WEB,
                               {"search_id": "s1", "subject": "device os release"})
 
     def page_call(self, call_id="call-p1"):
-        return CapabilityCall(call_id, ASK_WEB_PAGE,
+        return research_call(call_id, READ_PAGE,
                               {"page_id": "p1", "url": "https://example.com/a"})
 
     def test_she_can_search_and_read_to_answer_him(self) -> None:
@@ -167,7 +171,7 @@ class UserDirectedResearchTests(NotebookTestCase):
             conversation("what is the latest Device OS release?"), RETENTION, 5
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(self.recorded, [ASK_WEB_SEARCH, ASK_WEB_PAGE])
+        self.assertEqual(self.recorded, [SEARCH_WEB, READ_PAGE])
 
     def test_answering_writes_nothing_to_the_notebook(self) -> None:
         """The acceptance criterion: research is not notebook material."""
@@ -237,8 +241,8 @@ class SelfDirectedInterestTests(NotebookTestCase):
             AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.CREATE, "Understand X for myself",
                 (SuccessCriterion("criterion-1", "I understand it"),))),
-            AgentDecision(call=CapabilityCall(
-                "call-n1", "open_research_thread",
+            AgentDecision(call=research_call(
+                "call-n1", OPEN_THREAD,
                 {"thread_id": "t-mine", "question": "How does X work?",
                  "interest": "I want to understand it."})),
             AgentDecision(finish_silently=True),
@@ -246,7 +250,7 @@ class SelfDirectedInterestTests(NotebookTestCase):
         self.agent(reasoner).process(
             conversation("(an occasion nobody asked for)"), RETENTION, 4
         )
-        self.assertEqual(self.recorded, ["open_research_thread"])
+        self.assertEqual(self.recorded, [OPEN_THREAD])
 
     def test_a_goalless_turn_cannot_write_and_says_so(self) -> None:
         """The refusal is mechanical and reported, never silent.
@@ -256,8 +260,8 @@ class SelfDirectedInterestTests(NotebookTestCase):
         and proceed rather than being left guessing.
         """
         reasoner = Queued(
-            AgentDecision(call=CapabilityCall(
-                "call-n1", "open_research_thread",
+            AgentDecision(call=research_call(
+                "call-n1", OPEN_THREAD,
                 {"thread_id": "t-mine", "question": "How does X work?",
                  "interest": "I want to understand it."})),
             AgentDecision(finish_silently=True),
@@ -275,13 +279,13 @@ class SelfDirectedInterestTests(NotebookTestCase):
             AgentDecision(goal_proposal=GoalProposal(
                 GoalMutationKind.CREATE, "Understand X for myself",
                 (SuccessCriterion("criterion-1", "I understand it"),))),
-            AgentDecision(call=CapabilityCall(
-                "call-s1", ASK_WEB_SEARCH, {"search_id": "s", "subject": "x"})),
-            AgentDecision(call=CapabilityCall(
-                "call-p1", ASK_WEB_PAGE,
+            AgentDecision(call=research_call(
+                "call-s1", SEARCH_WEB, {"search_id": "s", "subject": "x"})),
+            AgentDecision(call=research_call(
+                "call-p1", READ_PAGE,
                 {"page_id": "p", "url": "https://example.com/x"})),
-            AgentDecision(call=CapabilityCall(
-                "call-e1", "record_research_entry",
+            AgentDecision(call=research_call(
+                "call-e1", RECORD_ENTRY,
                 {"entry_id": "e1", "thread_id": "t-mine", "kind": "claim",
                  "content": "What I now think.",
                  "source_references": ["attempt:call-p1"]})),
@@ -292,7 +296,7 @@ class SelfDirectedInterestTests(NotebookTestCase):
         )
         self.assertEqual(
             self.recorded,
-            [ASK_WEB_SEARCH, ASK_WEB_PAGE, "record_research_entry"],
+            [SEARCH_WEB, READ_PAGE, RECORD_ENTRY],
         )
 
     def test_she_may_ask_for_a_later_occasion_herself(self) -> None:
@@ -308,7 +312,7 @@ class SelfDirectedInterestTests(NotebookTestCase):
         # side-effect free, so it needs none.
         from alx.tools.continuity import DEFINITIONS as CONTINUITY
 
-        self.agent(reasoner, capabilities=(*NOTEBOOK_DEFINITIONS, *CONTINUITY)
+        self.agent(reasoner, capabilities=(definition(*NOTEBOOK), *CONTINUITY)
                    ).process(conversation("(her own occasion)"), RETENTION, 3)
         self.assertEqual(self.recorded, ["request_future_cognition"])
 

@@ -16,7 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.bootstrap.web import build_web_runtime
+import tempfile
+
 from alx.capabilities import CapabilityRegistry
 from alx.contracts import (
     CapabilityAttempt,
@@ -25,8 +26,8 @@ from alx.contracts import (
     CapabilityResultState,
     WebPage,
 )
-from alx.tools import ASK_WEB_PAGE
-from alx.tools.web import build_web_executors
+from alx.contracts import RESEARCH, ResearchAction
+from research_actions import READ_PAGE, page_reader, research_call, research_runtime
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "alx"
@@ -46,13 +47,24 @@ class StubFetcher:
         )
 
 
+def web_runtime(test: unittest.TestCase, **options):
+    directory = tempfile.TemporaryDirectory()
+    test.addCleanup(directory.cleanup)
+    runtime = research_runtime(directory.name, lambda: "call-1", web_read_enabled=True, **options)
+    test.addCleanup(runtime.close)
+    return runtime
+
+
 class OneProductionPathTests(unittest.TestCase):
     def test_exactly_one_capability_retrieves_a_web_page(self) -> None:
-        runtime = build_web_runtime(True, lambda: "call-1")
+        runtime = web_runtime(self)
         self.assertEqual(len(runtime.definitions), 1)
-        self.assertEqual(runtime.definitions[0].capability_id, ASK_WEB_PAGE)
+        self.assertEqual(runtime.definitions[0].capability_id, RESEARCH)
         self.assertEqual(len(runtime.executors), 1)
-        runtime.provider.close()
+        self.assertEqual(
+            [item for item in runtime.offered if item is ResearchAction.READ_PAGE],
+            [ResearchAction.READ_PAGE],
+        )
 
     def test_only_one_module_performs_http_retrieval(self) -> None:
         """A second fetcher would be a second way onto the network."""
@@ -106,13 +118,26 @@ class OneProductionPathTests(unittest.TestCase):
         self.assertNotIn("follow_redirects=True", text)
 
     def test_no_second_web_capability_is_registered(self) -> None:
-        runtime = build_web_runtime(True, lambda: "call-1")
+        runtime = web_runtime(self)
         registry = CapabilityRegistry(runtime.definitions)
         identifiers = [
             item.capability_id for item in registry.list_definitions()
         ]
-        self.assertEqual(identifiers, [ASK_WEB_PAGE])
-        runtime.provider.close()
+        self.assertEqual(identifiers, [RESEARCH])
+
+    def test_the_former_web_and_research_capabilities_are_gone(self) -> None:
+        """D-074: eleven capabilities became one; none of the old ids remains."""
+        former = ("ask_web_page", "ask_web_search", "ask_research_question",
+                  "open_research_thread", "record_research_entry",
+                  "revise_research_entry", "correct_research_entry",
+                  "search_research", "read_research_thread",
+                  "set_research_status", "delete_research")
+        for path in sorted(SOURCE_ROOT.rglob("*.py")):
+            text = path.read_text()
+            for name in former:
+                self.assertNotIn(f'"{name}"', text, f"{name} in {path}")
+        self.assertFalse((SOURCE_ROOT / "bootstrap" / "web.py").exists())
+        self.assertFalse((SOURCE_ROOT / "bootstrap" / "notebook.py").exists())
 
     def test_search_is_absent_until_it_is_configured(self) -> None:
         """Reading is authorised on its own; searching costs money.
@@ -122,12 +147,9 @@ class OneProductionPathTests(unittest.TestCase):
         configuration still has no search capability registered — absent
         rather than merely failing.
         """
-        runtime = build_web_runtime(True, lambda: "call-1")
-        self.assertNotIn(
-            "ask_web_search", [item.capability_id for item in runtime.definitions]
-        )
+        runtime = web_runtime(self)
+        self.assertNotIn(ResearchAction.SEARCH_WEB, runtime.offered)
         self.assertIsNone(runtime.searcher)
-        runtime.provider.close()
 
     def test_brave_stays_inside_the_provider_boundary(self) -> None:
         """No Brave-specific knowledge in Core, contracts or generic tools."""
@@ -139,7 +161,7 @@ class OneProductionPathTests(unittest.TestCase):
         allowed = {
             "providers/web_search.py",
             "providers/__init__.py",
-            "bootstrap/web.py",
+            "bootstrap/research.py",
             "config/settings.py",
         }
         found = {
@@ -177,7 +199,7 @@ class MutationTests(unittest.TestCase):
     """Restoring a competing path must be caught, not merely unused."""
 
     def test_a_second_registered_fetch_capability_is_caught(self) -> None:
-        runtime = build_web_runtime(True, lambda: "call-1")
+        runtime = web_runtime(self)
         registry = CapabilityRegistry(runtime.definitions)
         from dataclasses import replace
 
@@ -190,24 +212,20 @@ class MutationTests(unittest.TestCase):
         ]
         # The assertion the production test relies on must fail here.
         with self.assertRaises(AssertionError):
-            self.assertEqual(identifiers, [ASK_WEB_PAGE])
-        runtime.provider.close()
+            self.assertEqual(identifiers, [RESEARCH])
 
 
 class EvidenceAnchorTests(unittest.TestCase):
     """A retrieval is citable through the anchor that already existed."""
 
     def attempt(self) -> CapabilityAttempt:
-        executors = build_web_executors(StubFetcher(), lambda: "call-web-1")
-        call = CapabilityCall(
-            "call-web-1", ASK_WEB_PAGE,
-            {"page_id": "p1", "url": "https://example.com/report"},
-        )
+        arguments = {"page_id": "p1", "url": "https://example.com/report"}
+        call = research_call("call-web-1", READ_PAGE, arguments)
         return CapabilityAttempt(
             call,
             CapabilityAttemptDisposition.EXECUTED,
             True,
-            executors[ASK_WEB_PAGE](call.arguments),
+            page_reader(StubFetcher(), lambda: "call-web-1")(arguments),
         )
 
     def test_a_successful_retrieval_is_a_known_evidence_source(self) -> None:
@@ -234,9 +252,8 @@ class EvidenceAnchorTests(unittest.TestCase):
         attempt = self.attempt()
         self.assertEqual(attempt.result.evidence_refs, ())
         text = (SOURCE_ROOT / "tools" / "web.py").read_text()
-        for capability in ("record_research_entry", "open_research_thread",
-                           "revise_research_entry"):
-            self.assertNotIn(capability, text)
+        for name in ("RECORD_ENTRY", "OPEN_THREAD", "REVISE_ENTRY", "notebook"):
+            self.assertNotIn(name, text)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -18,7 +18,11 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.contracts import CapabilityResultState, SideEffect, ValueKind  # noqa: E402
 from alx.research import SQLiteResearchStore  # noqa: E402
-from alx.tools.notebook import DEFINITIONS, NotebookCapabilities  # noqa: E402
+from alx.contracts import RESEARCH  # noqa: E402
+from alx.tools.notebook import CONTRACTS, NotebookCapabilities  # noqa: E402
+from alx.tools.research import READ_ACTIONS, research_definition  # noqa: E402
+
+DEFINITIONS = tuple(CONTRACTS.values())
 
 
 NOW = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
@@ -151,7 +155,7 @@ class NotebookCapabilityTest(NotebookFixture):
              "reason": "Factually wrong.", "expected_revision": 1}
         )
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
-        self.assertEqual(result.capability_id, "correct_research_entry")
+        self.assertEqual(result.capability_id, "correct_entry")
         self.assertEqual(len(self.store.read_entry("e-1").revisions), 2)
 
     def test_unscoped_search_is_refused_as_unusable_arguments(self) -> None:
@@ -218,8 +222,14 @@ class NotebookCapabilityTest(NotebookFixture):
 
     def test_reads_are_marked_as_having_no_side_effect(self) -> None:
         by_id = {d.capability_id: d for d in DEFINITIONS}
-        self.assertIs(by_id["search_research"].side_effect, SideEffect.NONE)
-        self.assertIs(by_id["read_research_thread"].side_effect, SideEffect.NONE)
+        self.assertIs(by_id["search_notebook"].side_effect, SideEffect.NONE)
+        self.assertIs(by_id["read_thread"].side_effect, SideEffect.NONE)
+        # The one capability treats exactly those as reads (D-074).
+        one = research_definition(tuple(CONTRACTS))
+        self.assertEqual(one.capability_id, RESEARCH)
+        for action, contract in CONTRACTS.items():
+            self.assertIs(one.effect_for({"action": action.value}), contract.side_effect)
+        self.assertEqual(set(READ_ACTIONS), {a for a, d in CONTRACTS.items() if d.side_effect is SideEffect.NONE})
 
     def test_schemas_are_structured_objects_with_no_raw_language_field(self) -> None:
         """No capability takes an utterance, phrase, command or intent."""

@@ -251,6 +251,10 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
     "src/alx/tools/sandbox.py": (
         "tests/test_sandbox_capability.py",
     ),
+    "src/alx/tools/research.py": (
+        "tests/test_research_one_tool.py",
+        "tests/test_research_result_persistence.py",
+    ),
     "src/alx/tools/web.py": (
         "tests/test_web_capabilities.py",
         "tests/test_web_search_capability.py",
@@ -288,9 +292,6 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
         "tests/test_mail_vertical_slice.py",
         "tests/test_mail_reply.py",
     ),
-    "src/alx/bootstrap/notebook.py": (
-        "tests/test_notebook_runtime.py",
-    ),
     "src/alx/bootstrap/providers.py": (
         "tests/test_runtime_config.py",
         "tests/test_provider_adapters.py",
@@ -309,7 +310,10 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
         "tests/test_repository_authority.py",
     ),
     "src/alx/bootstrap/research.py": (
+        "tests/test_research_one_tool.py",
         "tests/test_first_research_activation.py",
+        "tests/test_notebook_runtime.py",
+        "tests/test_web_single_path.py",
     ),
     "src/alx/bootstrap/review.py": (
         "tests/test_review_request.py",
@@ -319,10 +323,6 @@ _EXPLICIT_TESTS: dict[str, tuple[str, ...]] = {
     ),
     "src/alx/bootstrap/tasks.py": (
         "tests/test_task_status.py",
-    ),
-    "src/alx/bootstrap/web.py": (
-        "tests/test_web_single_path.py",
-        "tests/test_web_capabilities.py",
     ),
     "src/alx/bootstrap/xero.py": (
         "tests/test_xero_bill_primitives.py",

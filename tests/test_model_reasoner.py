@@ -20,7 +20,10 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.core import ModelReasoner  # noqa: E402
 from alx.core.model_reasoner import decision_schema  # noqa: E402
-from alx.tools.notebook import RECORD_ENTRY_DEFINITION  # noqa: E402
+from alx.contracts import ResearchAction  # noqa: E402
+from alx.tools.research import research_definition  # noqa: E402
+
+RECORD_ENTRY_DEFINITION = research_definition(tuple(ResearchAction))
 
 NOW = datetime(2026, 8, 28, tzinfo=UTC)
 SCHEMA = StructuredSchema(ValueKind.OBJECT)
@@ -245,21 +248,28 @@ class ModelReasonerTests(unittest.TestCase):
         """2026-10-17: a planned web read with max_characters was refused as
         "not durable", unnamed, and she sent the same plan back twice."""
         from dataclasses import replace as replace_context
-        from alx.tools.web import DEFINITION as PAGE, SEARCH_DEFINITION as SEARCH
-        context = replace_context(self.context(), capabilities=(CAPABILITY, PAGE, SEARCH))
-        read = dict(self.plan_step(), capability_id="ask_web_page", arguments_json=json.dumps(
-            {"page_id": "p1", "url": "https://example.com", "max_characters": 4000}))
-        search = dict(self.plan_step(), call_id="call-2", capability_id="ask_web_search",
+        from alx.contracts import ResearchAction
+        from alx.tools.research import research_definition
+        research = research_definition(tuple(ResearchAction))
+        context = replace_context(self.context(), capabilities=(CAPABILITY, research))
+        read = dict(self.plan_step(), capability_id="research", arguments_json=json.dumps(
+            {"action": "read_page", "page_id": "p1", "url": "https://example.com",
+             "max_characters": 4000}))
+        search = dict(self.plan_step(), call_id="call-2", capability_id="research",
                       arguments_json=json.dumps(
-                          {"search_id": "s1", "subject": "parcel", "max_results": 5}))
+                          {"action": "search_web", "search_id": "s1", "subject": "parcel",
+                           "max_results": 5}))
         decision = ModelReasoner(FakeModel(self.plan_output(read, search)),
                                  "laws", "identity").decide(context)
         self.assertEqual(decision.plan_update.plan.steps[0].call.arguments["max_characters"], 4000)
+        # question is a notebook field whose text belongs to the notebook, so
+        # a plan may not carry it (D-074 keeps each field's durability).
         extra = dict(read, arguments_json=json.dumps(
-            {"page_id": "p1", "url": "https://example.com", "question": "where is it"}))
+            {"action": "read_page", "page_id": "p1", "url": "https://example.com",
+             "question": "where is it"}))
         with self.assertRaisesRegex(
                 DecisionValidationError,
-                "ask_web_page may be planned only with page_id, url, max_characters; remove question"):
+                r"research may be planned only with action, page_id, url, max_characters, .*; remove question"):
             ModelReasoner(FakeModel(self.plan_output(extra)), "laws", "identity").decide(context)
 
     def test_plan_schema_leaves_objective_and_source_turn_to_the_runtime(self) -> None:
@@ -603,8 +613,9 @@ class ModelReasonerTests(unittest.TestCase):
     def test_notebook_content_is_transient_but_identity_is_durable(self) -> None:
         finding = "The complete finding must live only in the notebook."
         output = call_tool(
-            capability_id="record_research_entry",
+            capability_id="research",
             arguments_json=json.dumps({
+                "action": "record_entry",
                 "entry_id": "entry-1",
                 "thread_id": "thread-1",
                 "kind": "conclusion",

@@ -49,13 +49,12 @@ EFFORT = "max"
 
 def _capabilities():
     """The real registered catalogue, exactly as the runtime composes it."""
-    from alx.tools import (
-        CONTINUITY_DEFINITIONS, NOTEBOOK_DEFINITIONS, RESEARCH_DEFINITION,
-    )
+    from alx.contracts import ResearchAction
+    from alx.tools import CONTINUITY_DEFINITIONS, research_definition
     from alx.tools.mail import DEFINITIONS as MAIL
 
     definitions = (
-        tuple(NOTEBOOK_DEFINITIONS) + (RESEARCH_DEFINITION,)
+        (research_definition(tuple(ResearchAction)),)
         + tuple(CONTINUITY_DEFINITIONS) + tuple(MAIL)
     )
     for module, name in (("alx.tools.xero", "DEFINITIONS"), ("alx.tools.dhl", "DEFINITIONS")):

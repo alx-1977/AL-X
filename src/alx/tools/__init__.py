@@ -27,30 +27,10 @@ from alx.tools.continuity import (
     WITHDRAW_FUTURE_COGNITION,
     build_continuity_executors,
 )
-from alx.tools.web import (
-    ASK_WEB_PAGE,
-    ASK_WEB_SEARCH,
-    DEFINITION as WEB_DEFINITION,
-    SEARCH_DEFINITION as WEB_SEARCH_DEFINITION,
-    build_web_executors,
-    build_web_search_executors,
-)
-from alx.tools.notebook import (
-    CORRECT_RESEARCH_ENTRY,
-    DEFINITIONS as NOTEBOOK_DEFINITIONS,
-    DELETE_RESEARCH,
-    OPEN_RESEARCH_THREAD,
-    READ_RESEARCH_THREAD,
-    RECORD_RESEARCH_ENTRY,
-    REVISE_RESEARCH_ENTRY,
-    SEARCH_RESEARCH,
-    SET_RESEARCH_STATUS,
-    build_notebook_executors,
-)
 from alx.tools.research import (
-    ASK_RESEARCH_QUESTION,
-    DEFINITION as RESEARCH_DEFINITION,
     build_research_executors,
+    offered_research_actions,
+    research_definition,
 )
 from alx.tools.dhl import build_dhl_executors
 
@@ -109,12 +89,6 @@ __all__ = [
     "STOP_CODING_JOB",
     "STOP_CODING_DEFINITION",
     "build_coding_executors",
-    "ASK_WEB_PAGE",
-    "ASK_WEB_SEARCH",
-    "WEB_SEARCH_DEFINITION",
-    "build_web_search_executors",
-    "WEB_DEFINITION",
-    "build_web_executors",
     "CONTINUITY_DEFINITIONS",
     "MINIMUM_HORIZON_SECONDS",
     "OPEN_THOUGHT_LIMIT",
@@ -124,19 +98,6 @@ __all__ = [
     "SET_PRESENCE",
     "WITHDRAW_FUTURE_COGNITION",
     "build_continuity_executors",
-    "ASK_RESEARCH_QUESTION",
-    "RESEARCH_DEFINITION",
-    "build_research_executors",
-    "CORRECT_RESEARCH_ENTRY",
-    "DELETE_RESEARCH",
-    "NOTEBOOK_DEFINITIONS",
-    "OPEN_RESEARCH_THREAD",
-    "READ_RESEARCH_THREAD",
-    "RECORD_RESEARCH_ENTRY",
-    "REVISE_RESEARCH_ENTRY",
-    "SEARCH_RESEARCH",
-    "SET_RESEARCH_STATUS",
-    "build_notebook_executors",
     "DEFINITIONS",
     "MAIL",
     "MailAction",
@@ -150,4 +111,7 @@ __all__ = [
     "offered_xero_actions",
     "xero_definition",
     "build_dhl_executors",
+    "build_research_executors",
+    "offered_research_actions",
+    "research_definition",
 ]

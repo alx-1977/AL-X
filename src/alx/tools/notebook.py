@@ -25,6 +25,7 @@ from alx.contracts import (
     EntryKind,
     EntryProposal,
     EntryRevisionProposal,
+    ResearchAction,
     ResearchQuery,
     RevisionAuthor,
     SideEffect,
@@ -35,14 +36,16 @@ from alx.contracts import (
 )
 
 
-OPEN_RESEARCH_THREAD = "open_research_thread"
-RECORD_RESEARCH_ENTRY = "record_research_entry"
-REVISE_RESEARCH_ENTRY = "revise_research_entry"
-SEARCH_RESEARCH = "search_research"
-READ_RESEARCH_THREAD = "read_research_thread"
-SET_RESEARCH_STATUS = "set_research_status"
-CORRECT_RESEARCH_ENTRY = "correct_research_entry"
-DELETE_RESEARCH = "delete_research"
+# The notebook's jobs are actions of the one `research` capability (D-074).
+# Each keeps its own contract below; nothing registers them separately.
+_OPEN = ResearchAction.OPEN_THREAD.value
+_RECORD = ResearchAction.RECORD_ENTRY.value
+_REVISE = ResearchAction.REVISE_ENTRY.value
+_SEARCH = ResearchAction.SEARCH_NOTEBOOK.value
+_READ = ResearchAction.READ_THREAD.value
+_STATUS = ResearchAction.SET_STATUS.value
+_CORRECT = ResearchAction.CORRECT_ENTRY.value
+_DELETE = ResearchAction.DELETE.value
 
 class _EvidenceUnresolved(Exception):
     """A cited evidence identifier could not be resolved to its provenance."""
@@ -109,7 +112,7 @@ _THREAD = StructuredSchema(
 
 
 OPEN_THREAD_DEFINITION = CapabilityDefinition(
-    OPEN_RESEARCH_THREAD,
+    _OPEN,
     "Open a durable thread in your notebook recording a question you want to "
     "understand and why it interests you. Storage only: it starts no work and "
     "schedules nothing.",
@@ -126,7 +129,7 @@ OPEN_THREAD_DEFINITION = CapabilityDefinition(
 )
 
 RECORD_ENTRY_DEFINITION = CapabilityDefinition(
-    RECORD_RESEARCH_ENTRY,
+    _RECORD,
     "Record one claim, hypothesis, doubt, question or conclusion against a "
     "thread, referencing evidence by identifier rather than copying it.",
     StructuredSchema(
@@ -148,7 +151,7 @@ RECORD_ENTRY_DEFINITION = CapabilityDefinition(
 )
 
 REVISE_ENTRY_DEFINITION = CapabilityDefinition(
-    REVISE_RESEARCH_ENTRY,
+    _REVISE,
     "Record AL/X's own changed view as a new revision attributed to her, "
     "preserving every earlier version and the stated reason.",
     StructuredSchema(
@@ -170,9 +173,9 @@ REVISE_ENTRY_DEFINITION = CapabilityDefinition(
 )
 
 SEARCH_DEFINITION = CapabilityDefinition(
-    SEARCH_RESEARCH,
+    _SEARCH,
     "Retrieve entries from your notebook (your diary and research notes; not "
-    "ask_research_question) matching a scope. A scope is required: thread, "
+    "ask_model) matching a scope. A scope is required: thread, "
     "cited source, or a time window with both ends. Kind alone is not a scope.",
     StructuredSchema(
         ValueKind.OBJECT,
@@ -204,7 +207,7 @@ SEARCH_DEFINITION = CapabilityDefinition(
 )
 
 READ_THREAD_DEFINITION = CapabilityDefinition(
-    READ_RESEARCH_THREAD,
+    _READ,
     "Read one page of a research thread. Entries and revisions are bounded; "
     "next_offset continues a larger thread.",
     StructuredSchema(
@@ -220,7 +223,7 @@ READ_THREAD_DEFINITION = CapabilityDefinition(
 )
 
 SET_STATUS_DEFINITION = CapabilityDefinition(
-    SET_RESEARCH_STATUS,
+    _STATUS,
     "Pause, resume or archive a research thread. Archived research takes no "
     "new entries and stays out of ordinary retrieval.",
     StructuredSchema(
@@ -236,7 +239,7 @@ SET_STATUS_DEFINITION = CapabilityDefinition(
 )
 
 CORRECT_ENTRY_DEFINITION = CapabilityDefinition(
-    CORRECT_RESEARCH_ENTRY,
+    _CORRECT,
     "Record Friedl's correction to an entry as a new revision attributed to "
     "him, preserving what was written before and why it was corrected.",
     StructuredSchema(
@@ -258,7 +261,7 @@ CORRECT_ENTRY_DEFINITION = CapabilityDefinition(
 )
 
 DELETE_DEFINITION = CapabilityDefinition(
-    DELETE_RESEARCH,
+    _DELETE,
     "Permanently delete a research thread or entry and every version of it. "
     "The content is removed, not hidden; only an identifier and a time remain.",
     StructuredSchema(
@@ -279,16 +282,18 @@ DELETE_DEFINITION = CapabilityDefinition(
 )
 
 
-DEFINITIONS = (
-    OPEN_THREAD_DEFINITION,
-    RECORD_ENTRY_DEFINITION,
-    REVISE_ENTRY_DEFINITION,
-    SEARCH_DEFINITION,
-    READ_THREAD_DEFINITION,
-    SET_STATUS_DEFINITION,
-    CORRECT_ENTRY_DEFINITION,
-    DELETE_DEFINITION,
-)
+# Contracts, not capabilities: the one `research` capability offers each as
+# an action (D-074).
+CONTRACTS = {
+    ResearchAction.OPEN_THREAD: OPEN_THREAD_DEFINITION,
+    ResearchAction.RECORD_ENTRY: RECORD_ENTRY_DEFINITION,
+    ResearchAction.REVISE_ENTRY: REVISE_ENTRY_DEFINITION,
+    ResearchAction.SEARCH_NOTEBOOK: SEARCH_DEFINITION,
+    ResearchAction.READ_THREAD: READ_THREAD_DEFINITION,
+    ResearchAction.SET_STATUS: SET_STATUS_DEFINITION,
+    ResearchAction.CORRECT_ENTRY: CORRECT_ENTRY_DEFINITION,
+    ResearchAction.DELETE: DELETE_DEFINITION,
+}
 
 
 def _entry_values(snapshot: Any) -> dict[str, Any]:
@@ -415,14 +420,14 @@ class NotebookCapabilities:
                 proposal, now + _timedelta(days=self._retention_days)
             )
         except KeyError:
-            return _failed(call_id, OPEN_RESEARCH_THREAD, "arguments_unusable")
+            return _failed(call_id, _OPEN, "arguments_unusable")
         except (TypeError, ValueError):
-            return _failed(call_id, OPEN_RESEARCH_THREAD, "arguments_unusable")
+            return _failed(call_id, _OPEN, "arguments_unusable")
         except Exception as error:
-            return _failed(call_id, OPEN_RESEARCH_THREAD, _code(error))
+            return _failed(call_id, _OPEN, _code(error))
         return _ok(
             call_id,
-            OPEN_RESEARCH_THREAD,
+            _OPEN,
             _thread_values(snapshot),
             _thread_receipt(snapshot),
         )
@@ -445,14 +450,14 @@ class NotebookCapabilities:
             )
             snapshot = self._store.record_entry(proposal)
         except _EvidenceUnresolved:
-            return _failed(call_id, RECORD_RESEARCH_ENTRY, "evidence_unresolved")
+            return _failed(call_id, _RECORD, "evidence_unresolved")
         except (KeyError, TypeError, ValueError):
-            return _failed(call_id, RECORD_RESEARCH_ENTRY, "arguments_unusable")
+            return _failed(call_id, _RECORD, "arguments_unusable")
         except Exception as error:
-            return _failed(call_id, RECORD_RESEARCH_ENTRY, _code(error))
+            return _failed(call_id, _RECORD, _code(error))
         return _ok(
             call_id,
-            RECORD_RESEARCH_ENTRY,
+            _RECORD,
             _entry_values(snapshot),
             _entry_receipt(snapshot),
         )
@@ -462,7 +467,7 @@ class NotebookCapabilities:
     ) -> CapabilityResult:
         """AL/X changes her own thinking. No approval; history is preserved."""
         return self._append_revision(
-            call_id, values, REVISE_RESEARCH_ENTRY, RevisionAuthor.ALX
+            call_id, values, _REVISE, RevisionAuthor.ALX
         )
 
     def correct_entry(
@@ -476,7 +481,7 @@ class NotebookCapabilities:
         ungated revise route or present her own revision as Friedl's.
         """
         return self._append_revision(
-            call_id, values, CORRECT_RESEARCH_ENTRY, RevisionAuthor.FRIEDL
+            call_id, values, _CORRECT, RevisionAuthor.FRIEDL
         )
 
     def _append_revision(
@@ -556,13 +561,13 @@ class NotebookCapabilities:
             )
             found = self._store.retrieve(query)
         except KeyError as error:
-            return _failed(call_id, SEARCH_RESEARCH, "arguments_unusable",
+            return _failed(call_id, _SEARCH, "arguments_unusable",
                            f"{error.args[0]} is required")
         except (TypeError, ValueError) as error:
-            return _failed(call_id, SEARCH_RESEARCH, "arguments_unusable", str(error))
+            return _failed(call_id, _SEARCH, "arguments_unusable", str(error))
         except Exception as error:
-            return _failed(call_id, SEARCH_RESEARCH, _code(error))
-        return _ok(call_id, SEARCH_RESEARCH, {"entries": [_entry_values(i) for i in found]})
+            return _failed(call_id, _SEARCH, _code(error))
+        return _ok(call_id, _SEARCH, {"entries": [_entry_values(i) for i in found]})
 
     def read_thread(
         self, call_id: str, values: Mapping[str, Any]
@@ -572,12 +577,12 @@ class NotebookCapabilities:
                 str(values["thread_id"]), int(values.get("offset", 0))
             )
         except (KeyError, TypeError, ValueError):
-            return _failed(call_id, READ_RESEARCH_THREAD, "arguments_unusable")
+            return _failed(call_id, _READ, "arguments_unusable")
         except Exception as error:
-            return _failed(call_id, READ_RESEARCH_THREAD, _code(error))
+            return _failed(call_id, _READ, _code(error))
         return _ok(
             call_id,
-            READ_RESEARCH_THREAD,
+            _READ,
             _thread_values(snapshot),
             _thread_receipt(snapshot),
         )
@@ -590,12 +595,12 @@ class NotebookCapabilities:
                 str(values["thread_id"]), ThreadStatus(str(values["status"]))
             )
         except (KeyError, TypeError, ValueError):
-            return _failed(call_id, SET_RESEARCH_STATUS, "arguments_unusable")
+            return _failed(call_id, _STATUS, "arguments_unusable")
         except Exception as error:
-            return _failed(call_id, SET_RESEARCH_STATUS, _code(error))
+            return _failed(call_id, _STATUS, _code(error))
         return _ok(
             call_id,
-            SET_RESEARCH_STATUS,
+            _STATUS,
             _thread_values(snapshot),
             _thread_receipt(snapshot),
         )
@@ -612,11 +617,11 @@ class NotebookCapabilities:
             elif kind == "entry":
                 record = self._store.delete_entry(record_id, now)
             else:
-                return _failed(call_id, DELETE_RESEARCH, "arguments_unusable")
+                return _failed(call_id, _DELETE, "arguments_unusable")
         except (KeyError, TypeError, ValueError):
-            return _failed(call_id, DELETE_RESEARCH, "arguments_unusable")
+            return _failed(call_id, _DELETE, "arguments_unusable")
         except Exception as error:
-            return _failed(call_id, DELETE_RESEARCH, _code(error))
+            return _failed(call_id, _DELETE, _code(error))
         values = {
             "record_id": record.record_id,
             "kind": record.kind,
@@ -624,7 +629,7 @@ class NotebookCapabilities:
         }
         return _ok(
             call_id,
-            DELETE_RESEARCH,
+            _DELETE,
             values,
             values,
         )
@@ -655,38 +660,26 @@ def build_notebook_executors(
     call_id_source: Callable[[], str],
     clock: Callable[[], datetime] | None = None,
     provenance_of: Callable[[tuple[str, ...], datetime], Any] | None = None,
-) -> Mapping[str, Callable[[Any], CapabilityResult]]:
-    """Bind the eight notebook primitives to the one durable store.
+) -> Mapping[ResearchAction, Callable[[Any], CapabilityResult]]:
+    """Bind the eight notebook actions to the one durable store.
 
-    Every capability reaches the notebook through this map and no other way, so
-    there is exactly one production path to research storage.
+    Only the one `research` capability calls these, so there is exactly one
+    production path to research storage.
     """
     capabilities = NotebookCapabilities(
         store, retention_days, clock, provenance_of
     )
+    methods = {
+        ResearchAction.OPEN_THREAD: capabilities.open_thread,
+        ResearchAction.RECORD_ENTRY: capabilities.record_entry,
+        ResearchAction.REVISE_ENTRY: capabilities.revise_entry,
+        ResearchAction.SEARCH_NOTEBOOK: capabilities.search,
+        ResearchAction.READ_THREAD: capabilities.read_thread,
+        ResearchAction.SET_STATUS: capabilities.set_status,
+        ResearchAction.CORRECT_ENTRY: capabilities.correct_entry,
+        ResearchAction.DELETE: capabilities.delete,
+    }
     return {
-        OPEN_RESEARCH_THREAD: lambda values: capabilities.open_thread(
-            call_id_source(), values
-        ),
-        RECORD_RESEARCH_ENTRY: lambda values: capabilities.record_entry(
-            call_id_source(), values
-        ),
-        REVISE_RESEARCH_ENTRY: lambda values: capabilities.revise_entry(
-            call_id_source(), values
-        ),
-        SEARCH_RESEARCH: lambda values: capabilities.search(
-            call_id_source(), values
-        ),
-        READ_RESEARCH_THREAD: lambda values: capabilities.read_thread(
-            call_id_source(), values
-        ),
-        SET_RESEARCH_STATUS: lambda values: capabilities.set_status(
-            call_id_source(), values
-        ),
-        CORRECT_RESEARCH_ENTRY: lambda values: capabilities.correct_entry(
-            call_id_source(), values
-        ),
-        DELETE_RESEARCH: lambda values: capabilities.delete(
-            call_id_source(), values
-        ),
+        action: (lambda values, method=method: method(call_id_source(), values))
+        for action, method in methods.items()
     }

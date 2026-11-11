@@ -31,10 +31,10 @@ from alx.contracts import XeroAction
 from alx.tools.particle import build_particle_executors
 from alx.tools.pull_request_checks import build_pull_request_checks_executors
 from alx.tools.readers import build_reader_executors
-from alx.tools.research import build_research_executors
 from alx.tools.review_content import build_review_content_executors
 from alx.tools.sandbox import build_sandbox_executors
-from alx.tools.web import build_web_search_executors
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from research_actions import model_question, web_searcher  # noqa: E402
 from alx.tools.ship24 import build_ship24_executors
 
 NOW = datetime.now(UTC)
@@ -160,7 +160,7 @@ def test_other_code_only_provider_handlers_keep_explicit_diagnostics(kind):
         error = SpecialistError("provider_failed", MESSAGE)
         provider = Mock()
         provider.answer.side_effect = error
-        executors = build_research_executors(provider, lambda: "call")
+        executors = {"research": model_question(provider, lambda: "call")}
         arguments = dict(question_id="q", instruction="Inspect", material="Evidence")
     elif kind == "sandbox":
         error = diagnostic(SandboxError("sandbox_unavailable"))
@@ -184,7 +184,7 @@ def test_other_code_only_provider_handlers_keep_explicit_diagnostics(kind):
         error = diagnostic(WebSearchError("search_provider_failed", "status 500"))
         provider = Mock()
         provider.search.side_effect = error
-        executors = build_web_search_executors(provider, Mock(), lambda: "call", "search")
+        executors = {"research": web_searcher(provider, Mock(), lambda: "call", "search")}
         arguments = dict(search_id="s", subject="subject")
     result = next(iter(executors.values()))(arguments)
     assert result.failure["service_message"] == failure_details(error)["service_message"]
@@ -217,7 +217,7 @@ def test_specialist_wrappers_preserve_explicit_provider_diagnostics(kind):
         specialist = ResearchSpecialist(
             {Cognition.SURVEY: ResearchTierModel("provider", "model", transport)},
             ledger, pricing, 8000, 1000, 0.1)
-        result = build_research_executors(specialist, lambda: "call")["ask_research_question"](
+        result = model_question(specialist, lambda: "call")(
             dict(question_id="q", instruction="Inspect", material="Evidence"))
         transport.complete.assert_called_once()
         assert result.failure == {"code": "provider_failed", **failure_details(error)}

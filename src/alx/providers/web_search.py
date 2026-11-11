@@ -174,7 +174,7 @@ class BraveWebSearchProvider:
             return None
         parts = urlsplit(url)
         if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
-            # A candidate AL/X could not hand to ask_web_page is not a
+            # A candidate AL/X could not hand to the read_page action is not a
             # candidate. Dropping it is mechanical, not a judgement.
             return None
         snippet = _strip_markup(_text(item.get("description"), MAX_SNIPPET_CHARACTERS * 4))

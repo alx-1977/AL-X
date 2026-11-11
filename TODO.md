@@ -23,7 +23,7 @@ Implemented and proven in real use.
   reconciled duty-tax-paid invoice posts; freight returns unposted.
   Fixture-backed tests in `tests/test_dhl_reconciliation.py`.
 - [x] **Web search** — Brave-backed search wired into a capability
-  (`ASK_WEB_SEARCH`, `providers/web_search.py`, `BraveWebSearchProvider`),
+  (`research` action `search_web`, `providers/web_search.py`, `BraveWebSearchProvider`),
   fails closed if unusable. Live-tested per Friedl.
 
 ## Partial / MVP

@@ -25,7 +25,8 @@ from alx.providers.web_fetch import HttpWebFetchProvider
 from alx.providers.llamaparse import _json_object
 from alx.contracts import SpecialistError
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
-from alx.tools.web import build_web_executors
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from research_actions import page_reader  # noqa: E402
 from alx.tools.goal_history import READ_OWN_GOALS, build_goal_history_executors
 from alx.tools.self_diagnosis import LOG_DEFINITION, READ_OWN_LOG, build_self_diagnosis_executors
 
@@ -158,7 +159,7 @@ class ServiceFailureTests(unittest.TestCase):
                     self.assertEqual(error.detail, f"status {status}")
                     self.assertEqual(error.service_message, f"status {status}")
                     self.assertNotIn(distinctive.decode(), str(vars(error)))
-                    result = build_web_executors(provider, lambda: "call")["ask_web_page"](
+                    result = page_reader(provider, lambda: "call")(
                         {"page_id": "p", "url": "https://example.com"})
                     self.assertEqual(result.failure, {"code": code, "service_message": f"status {status}"})
                     self.assertNotIn(distinctive.decode(), str(result.failure))

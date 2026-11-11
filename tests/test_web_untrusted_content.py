@@ -29,8 +29,8 @@ from alx.contracts import (
     WebPage,
 )
 from alx.core.model_reasoner import _attempt_payload
-from alx.tools import ASK_WEB_PAGE
-from alx.tools.web import build_web_executors
+from alx.contracts import RESEARCH
+from research_actions import READ_PAGE, page_reader, research_call
 
 
 NOW = datetime(2026, 9, 4, 10, 30, tzinfo=UTC)
@@ -86,8 +86,7 @@ class StubFetcher:
 
 
 def retrieve(content: str):
-    executors = build_web_executors(StubFetcher(content), lambda: "call-1")
-    return executors[ASK_WEB_PAGE](
+    return page_reader(StubFetcher(content), lambda: "call-1")(
         {"page_id": "p1", "url": "https://hostile.example/page"}
     )
 
@@ -99,7 +98,7 @@ class ContentStaysDataTests(unittest.TestCase):
             with self.subTest(page=name):
                 result = retrieve(content)
                 self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
-                self.assertEqual(result.capability_id, ASK_WEB_PAGE)
+                self.assertEqual(result.capability_id, RESEARCH)
 
     def test_page_text_only_ever_lands_in_the_content_field(self) -> None:
         """There is no field a page could use to say anything else."""
@@ -113,7 +112,7 @@ class ContentStaysDataTests(unittest.TestCase):
 
     def test_a_page_cannot_add_a_field_to_the_result(self) -> None:
         """The output schema is closed, so a page cannot invent a channel."""
-        from alx.tools.web import DEFINITION
+        from alx.tools.web import PAGE_CONTRACT as DEFINITION
 
         self.assertFalse(DEFINITION.output_schema.extra_properties)
         result = retrieve(HOSTILE_PAGES["fake_result"])
@@ -155,8 +154,8 @@ class TrustLabellingTests(unittest.TestCase):
         result = retrieve(content)
         return _attempt_payload(
             CapabilityAttempt(
-                CapabilityCall("call-1", ASK_WEB_PAGE,
-                               {"page_id": "p1", "url": "https://hostile.example/page"}),
+                research_call("call-1", READ_PAGE,
+                              {"page_id": "p1", "url": "https://hostile.example/page"}),
                 CapabilityAttemptDisposition.EXECUTED,
                 True,
                 result,
@@ -185,7 +184,7 @@ class TrustLabellingTests(unittest.TestCase):
 
     def test_the_capability_identity_is_the_runtimes_not_the_pages(self) -> None:
         payload = self.payload(HOSTILE_PAGES["fake_result"])
-        self.assertEqual(payload["capability_id"], ASK_WEB_PAGE)
+        self.assertEqual(payload["capability_id"], RESEARCH)
         self.assertEqual(payload["call_id"], "call-1")
 
 

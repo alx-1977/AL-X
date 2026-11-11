@@ -45,8 +45,7 @@ from alx.contracts.web import (
 )
 from alx.providers.web_fetch import HttpWebFetchProvider
 from alx.providers.web_url import parse_public_url
-from alx.tools import ASK_WEB_PAGE
-from alx.tools.web import build_web_executors
+from research_actions import page_reader
 
 
 PUBLIC_IP = "93.184.216.34"
@@ -476,8 +475,7 @@ class MetadataBoundTests(ComposedTestCase):
             f"<link rel='canonical' href='http://example.com/{'c' * 400_000}'>"
             f"</head><body><p>{'body ' * 100_000}</p></body></html>"
         )
-        executors = build_web_executors(self.provider(), lambda: "call-1")
-        result = executors[ASK_WEB_PAGE](
+        result = page_reader(self.provider(), lambda: "call-1")(
             {"page_id": "p1", "url": "http://example.com/all"}
         )
         durable = "".join(f"{k}{v}" for k, v in result.durable_values.items())
@@ -490,8 +488,7 @@ class MetadataBoundTests(ComposedTestCase):
             f"<meta property='og:site_name' content='{'P' * 400_000}'></head>"
             f"<body><p>{'body ' * 100_000}</p></body></html>"
         )
-        executors = build_web_executors(self.provider(), lambda: "call-1")
-        result = executors[ASK_WEB_PAGE](
+        result = page_reader(self.provider(), lambda: "call-1")(
             {"page_id": "p1", "url": "http://example.com/all"}
         )
         payload = "".join(f"{k}{v}" for k, v in result.values.items())
@@ -784,8 +781,7 @@ class CanonicalMatrixTests(ComposedTestCase):
             "<html><head><link rel='canonical' href='http://example.com/pref'>"
             "</head><body><p>ordinary article text</p></body></html>"
         )
-        executors = build_web_executors(self.provider(), lambda: "call-1")
-        result = executors[ASK_WEB_PAGE](
+        result = page_reader(self.provider(), lambda: "call-1")(
             {"page_id": "p1", "url": "http://example.com/c"}
         )
         self.assertEqual(result.values["canonical_url"], "http://example.com/pref")

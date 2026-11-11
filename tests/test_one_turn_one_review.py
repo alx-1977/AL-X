@@ -49,7 +49,10 @@ from alx.contracts import (
 )
 from alx.core import CoreAgent
 from alx.goals import SQLiteGoalStore
-from alx.tools import ASK_WEB_SEARCH, WEB_SEARCH_DEFINITION
+from alx.contracts import RESEARCH
+from research_actions import SEARCH_WEB, definition, research_call
+
+WEB_SEARCH_DEFINITION = definition(SEARCH_WEB)
 from alx.tools.review import DEFINITION as REVIEW_DEFINITION, REQUEST_EXTERNAL_REVIEW
 from alx.tools.review_content import (
     DEFINITION as REVIEW_CONTENT_DEFINITION,
@@ -506,9 +509,9 @@ class OneTurnOneReviewTests(unittest.TestCase):
         that incident under a new name.
         """
         calls = [
-            CapabilityCall(
+            research_call(
                 f"call-s{index}",
-                ASK_WEB_SEARCH,
+                SEARCH_WEB,
                 {"search_id": f"s{index}", "subject": f"phrasing {index}"},
                 approval_id=f"approve-s{index}",
             )
@@ -532,7 +535,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
             one_instruction(), RETENTION, 8
         )
 
-        self.assertEqual(self.dispatched, [ASK_WEB_SEARCH] * 3)
+        self.assertEqual(self.dispatched, [RESEARCH] * 3)
 
 
 class StandingScopeTests(unittest.TestCase):
