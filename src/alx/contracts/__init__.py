@@ -117,6 +117,8 @@ from alx.contracts.notebook import (
     ThreadStatus,
 )
 from alx.contracts.research import (
+    RESEARCH,
+    ResearchAction,
     ResearchLedger,
     ResearchModelUnpriced,
     ResearchPricing,
@@ -360,6 +362,7 @@ __all__ = [
     "MailSendError", "MailThreading", "OutboundReply", "ReplyOutcome",
     "xero_date",
     "XERO", "XeroAction", "recorded_xero_action",
+    "RESEARCH", "ResearchAction",
     "XeroAccessError", "XeroAccountingAccount", "CONTACT_CREATION_UNCONFIRMED",
     "DHL_DOCUMENT_FAILURES", "DhlDocumentError", "DhlImportAnalyzer",
 ]

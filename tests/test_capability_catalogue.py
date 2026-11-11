@@ -149,13 +149,12 @@ class FailureCodeSetTests(unittest.TestCase):
     """A provider's repeated codes are stated once, and none is lost."""
 
     def setUp(self) -> None:
-        from alx.tools import (
-            CONTINUITY_DEFINITIONS, NOTEBOOK_DEFINITIONS, RESEARCH_DEFINITION,
-        )
+        from alx.contracts import ResearchAction
+        from alx.tools import CONTINUITY_DEFINITIONS, research_definition
         from alx.tools.mail import DEFINITIONS as MAIL
 
         self.definitions = (
-            tuple(NOTEBOOK_DEFINITIONS) + (RESEARCH_DEFINITION,)
+            (research_definition(tuple(ResearchAction)),)
             + tuple(CONTINUITY_DEFINITIONS) + tuple(MAIL)
             + tuple(XERO_DEFINITIONS) + tuple(DHL_DEFINITIONS)
         )

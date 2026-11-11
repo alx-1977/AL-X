@@ -1,4 +1,4 @@
-"""`ask_web_page` through the broker, and the trust boundary around what it returns.
+"""The `research` read_page action through the broker, and the trust boundary around what it returns.
 
 Nothing here reaches a network: the fetch provider is a stub returning fixed
 pages, because what is under test is the capability contract, the provenance
@@ -24,10 +24,13 @@ from alx.contracts import (
     WebPage,
     WebRetrievalError,
 )
-from alx.bootstrap.web import WEB_READ_PERMISSION, build_web_runtime
+from alx.bootstrap.research import NOTEBOOK_PERMISSION, WEB_READ_PERMISSION
+from alx.contracts import RESEARCH, ResearchAction
 from alx.safety import AuthorityContext, SafetyGate
-from alx.tools import ASK_WEB_PAGE
-from alx.tools.web import build_web_executors
+from alx.tools.research import build_research_executors
+from alx.tools.web import build_page_reader
+from research_actions import READ_PAGE, page_reader, research_call, research_runtime
+import tempfile
 
 
 NOW = datetime(2026, 9, 4, 10, 30, tzinfo=UTC)
@@ -62,8 +65,14 @@ class StubFetcher:
 
 
 def execute(fetcher, arguments, call_id="call-1"):
-    executors = build_web_executors(fetcher, lambda: call_id)
-    return executors[ASK_WEB_PAGE](arguments)
+    return page_reader(fetcher, lambda: call_id)(arguments)
+
+
+def page_executors(fetcher, call_id="call-1"):
+    """The one research executor offering only the page read."""
+    return build_research_executors(
+        {ResearchAction.READ_PAGE: build_page_reader(fetcher, lambda: call_id)}, lambda: call_id
+    )
 
 
 class ResultShapeTests(unittest.TestCase):
@@ -148,9 +157,10 @@ class DurableStateTests(unittest.TestCase):
         self.assertEqual(result.values["content"], "the readable part")
 
     def test_the_url_is_durable_input_so_a_restart_knows_what_was_asked(self) -> None:
-        from alx.tools.web import DEFINITION
+        from alx.tools.research import research_definition
 
-        self.assertEqual(DEFINITION.durable_input_fields, ("page_id", "url", "max_characters"))
+        durable = research_definition((ResearchAction.READ_PAGE,)).durable_input_fields
+        self.assertEqual(durable, ("action", "page_id", "url", "max_characters"))
 
 
 class FailureTests(unittest.TestCase):
@@ -200,30 +210,35 @@ class BrokerTests(unittest.TestCase):
     """The capability is reachable only the way every other one is."""
 
     def setUp(self) -> None:
-        self.runtime = build_web_runtime(True, lambda: "call-1")
+        self.directory = tempfile.TemporaryDirectory()
+        self.runtime = research_runtime(self.directory.name, lambda: "call-1", web_read_enabled=True)
         self.registry = CapabilityRegistry(self.runtime.definitions)
         self.fetcher = StubFetcher()
         self.broker = CapabilityBroker(
             self.registry,
             SafetyGate(self.runtime.policies),
-            build_web_executors(self.fetcher, lambda: "call-1"),
+            page_executors(self.fetcher),
         )
+
+    def tearDown(self) -> None:
+        self.runtime.close()
+        self.directory.cleanup()
 
     def authority(self, permissions):
         return AuthorityContext("friedl", frozenset(permissions), NOW)
 
     def test_the_capability_runs_with_web_read(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_PAGE,
+            research_call("call-1", READ_PAGE,
                            {"page_id": "p1", "url": "https://example.com/"}),
-            self.authority({WEB_READ_PERMISSION}),
+            self.authority(self.runtime.permissions),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
 
     def test_without_web_read_nothing_is_fetched(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_PAGE,
+            research_call("call-1", READ_PAGE,
                            {"page_id": "p1", "url": "https://example.com/"}),
             self.authority(set()),
         )
@@ -233,27 +248,30 @@ class BrokerTests(unittest.TestCase):
     def test_research_spend_does_not_grant_web_access(self) -> None:
         """Buying model tokens is not permission to reach the network."""
         attempt = self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_PAGE,
+            research_call("call-1", READ_PAGE,
                            {"page_id": "p1", "url": "https://example.com/"}),
-            self.authority({"research.spend"}),
+            self.authority({"research.spend", NOTEBOOK_PERMISSION}),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
         self.assertEqual(self.fetcher.calls, [])
 
-    def test_a_malformed_call_is_rejected_by_schema(self) -> None:
+    def test_a_call_missing_a_required_field_fetches_nothing(self) -> None:
+        # One schema serves every action, so the action's own required fields
+        # are checked by the capability, before anything is fetched (D-074).
         attempt = self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_PAGE, {"page_id": "p1"}),
-            self.authority({WEB_READ_PERMISSION}),
+            research_call("call-1", READ_PAGE, {"page_id": "p1"}),
+            self.authority(self.runtime.permissions),
         )
-        self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
-        self.assertEqual(attempt.reason_code, "input_invalid")
+        self.assertEqual(attempt.result.failure["code"], "arguments_unusable")
+        self.assertIn("read_page requires url", attempt.result.failure["reason"])
+        self.assertEqual(self.fetcher.calls, [])
 
     def test_an_undeclared_argument_is_rejected(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_PAGE, {
+            research_call("call-1", READ_PAGE, {
                 "page_id": "p1", "url": "https://example.com/", "method": "POST",
             }),
-            self.authority({WEB_READ_PERMISSION}),
+            self.authority(self.runtime.permissions),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
 
@@ -264,14 +282,12 @@ class BrokerTests(unittest.TestCase):
                 broker = CapabilityBroker(
                     self.registry,
                     SafetyGate(self.runtime.policies),
-                    build_web_executors(
-                        StubFetcher(error=WebRetrievalError(code)), lambda: "call-1"
-                    ),
+                    page_executors(StubFetcher(error=WebRetrievalError(code))),
                 )
                 attempt = broker.dispatch(
-                    CapabilityCall("call-1", ASK_WEB_PAGE,
+                    research_call("call-1", READ_PAGE,
                                    {"page_id": "p1", "url": "https://example.com/"}),
-                    self.authority({WEB_READ_PERMISSION}),
+                    self.authority(self.runtime.permissions),
                 )
                 self.assertIs(
                     attempt.disposition, CapabilityAttemptDisposition.EXECUTED
@@ -280,28 +296,39 @@ class BrokerTests(unittest.TestCase):
 
 
 class RuntimeAvailabilityTests(unittest.TestCase):
-    def test_a_runtime_never_told_it_may_read_has_no_capability(self) -> None:
-        """Absent, not merely failing."""
-        self.assertIsNone(build_web_runtime(False, lambda: "call-1"))
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
 
-    def test_the_enabled_runtime_registers_exactly_one_capability(self) -> None:
-        runtime = build_web_runtime(True, lambda: "call-1")
-        self.assertEqual(
-            [item.capability_id for item in runtime.definitions], [ASK_WEB_PAGE]
-        )
-        self.assertEqual(set(runtime.executors), {ASK_WEB_PAGE})
-        runtime.provider.close()
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def runtime(self, enabled):
+        runtime = research_runtime(self.directory.name, lambda: "call-1", web_read_enabled=enabled)
+        self.addCleanup(runtime.close)
+        return runtime
+
+    def test_a_runtime_never_told_it_may_read_offers_no_page_read(self) -> None:
+        """Absent, not merely failing."""
+        runtime = self.runtime(False)
+        self.assertNotIn(ResearchAction.READ_PAGE, runtime.offered)
+        self.assertNotIn(WEB_READ_PERMISSION, runtime.permissions)
+        self.assertNotIn("[read_page]", runtime.definitions[0].purpose)
+
+    def test_the_enabled_runtime_registers_one_capability_with_the_page_read(self) -> None:
+        runtime = self.runtime(True)
+        self.assertEqual([item.capability_id for item in runtime.definitions], [RESEARCH])
+        self.assertEqual(set(runtime.executors), {RESEARCH})
+        self.assertIn(ResearchAction.READ_PAGE, runtime.offered)
 
     def test_web_read_is_its_own_permission(self) -> None:
-        runtime = build_web_runtime(True, lambda: "call-1")
-        self.assertEqual(runtime.permissions, frozenset({WEB_READ_PERMISSION}))
+        runtime = self.runtime(True)
+        self.assertIn(WEB_READ_PERMISSION, runtime.permissions)
         self.assertNotIn("research.spend", runtime.permissions)
-        runtime.provider.close()
 
     def test_reading_needs_no_approval_ceremony(self) -> None:
-        runtime = build_web_runtime(True, lambda: "call-1")
-        self.assertFalse(runtime.policies[ASK_WEB_PAGE].approval_required)
-        runtime.provider.close()
+        from alx.contracts.capabilities import arguments_match
+        policy = self.runtime(True).policies[RESEARCH]
+        self.assertTrue(arguments_match(policy.approval_exempt_when, {"action": READ_PAGE}))
 
 
 if __name__ == "__main__":  # pragma: no cover

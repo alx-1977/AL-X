@@ -21,7 +21,12 @@ from alx.core import CoreAgent, CoreState
 from alx.goals import SQLiteGoalStore
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.tools.ship24 import TRACK_SHIPMENT
-from alx.tools.web import ASK_WEB_PAGE, DEFINITION as WEB_DEFINITION, build_web_executors
+from alx.contracts import RESEARCH, ResearchAction
+from alx.tools.research import build_research_executors
+from alx.tools.web import build_page_reader
+from research_actions import READ_PAGE, definition, research_call
+
+WEB_DEFINITION = definition(READ_PAGE)
 from tests.test_ship24_tracking import TRACKED, response
 from tests.test_web_conversation import StubFetcher
 
@@ -68,8 +73,10 @@ class Ship24ConversationTests(unittest.TestCase):
         executors = dict(self.runtime.executors)
         permissions = self.runtime.permissions
         if fetcher:
-            policies[ASK_WEB_PAGE] = AuthorityPolicy(frozenset({"web.read"}))
-            executors.update(build_web_executors(fetcher, lambda: self.call_id))
+            policies[RESEARCH] = AuthorityPolicy(frozenset({"web.read"}))
+            executors.update(build_research_executors(
+                {ResearchAction.READ_PAGE: build_page_reader(fetcher, lambda: self.call_id)},
+                lambda: self.call_id))
             permissions |= frozenset({"web.read"})
         broker = CapabilityBroker(CapabilityRegistry(definitions), SafetyGate(policies), executors)
 
@@ -146,7 +153,7 @@ class Ship24ConversationTests(unittest.TestCase):
         fetcher = StubFetcher()
         reasoner = Queued(
             AgentDecision(goal_proposal=goal()), AgentDecision(call=self.call()),
-            AgentDecision(call=CapabilityCall("call-web-1", ASK_WEB_PAGE,
+            AgentDecision(call=research_call("call-web-1", READ_PAGE,
                                               {"page_id": "courier", "url": fetcher.page().requested_url})),
             AgentDecision(response="The parcel was delivered; I checked the courier page too."),
         )
@@ -155,7 +162,7 @@ class Ship24ConversationTests(unittest.TestCase):
                 conversation("Track my parcel and check the courier's service bulletin"), RETENTION, 5)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
         self.assertEqual([attempt.call.capability_id for attempt in self.store.load("goal-1").state.attempts],
-                         [TRACK_SHIPMENT, ASK_WEB_PAGE])
+                         [TRACK_SHIPMENT, RESEARCH])
         post.assert_called_once()
         self.assertEqual(len(fetcher.calls), 1)
 

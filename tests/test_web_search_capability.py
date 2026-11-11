@@ -1,4 +1,4 @@
-"""`ask_web_search` end to end: discovery only, and never a second opinion.
+"""The `research` search_web action end to end: discovery only, and never a second opinion.
 
 Search finds candidates. It does not read them, rank them, prefer them, or
 decide which matters — those are AL/X's judgements, and every test here that
@@ -41,7 +41,9 @@ from alx.contracts import (
     WebSearchResult,
     WebSearchResults,
 )
-from alx.bootstrap.web import WEB_READ_PERMISSION, build_web_runtime
+from alx.bootstrap.research import NOTEBOOK_PERMISSION, WEB_READ_PERMISSION
+from alx.contracts import RESEARCH, ResearchAction
+from alx.contracts.capabilities import arguments_match
 from alx.config.settings import (
     APPROVED_SEARCH_USD_PER_REQUEST,
     WebSearchSettings,
@@ -54,8 +56,17 @@ from alx.observability.search_budget import (
 )
 from alx.providers.web_search import BRAVE_USD_PER_REQUEST, BraveWebSearchProvider
 from alx.safety import AuthorityContext, SafetyGate
-from alx.tools import ASK_WEB_PAGE, ASK_WEB_SEARCH
-from alx.tools.web import build_web_search_executors
+from alx.tools.research import build_research_executors, research_definition
+from alx.tools.web import SEARCH_CONTRACT, build_web_searcher
+from research_actions import SEARCH_WEB, research_call, research_runtime, web_searcher
+
+
+def search_executor(searcher, ledger, call_id_source, provider):
+    """The one research executor offering only the search."""
+    return build_research_executors(
+        {ResearchAction.SEARCH_WEB: build_web_searcher(searcher, ledger, call_id_source, provider)},
+        call_id_source,
+    )[RESEARCH]
 
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -119,10 +130,7 @@ class SearchReservationStub:
 
 def execute(searcher, ledger=None, arguments=None, call_id="call-1"):
     ledger = ledger or RecordingLedger()
-    executors = build_web_search_executors(
-        searcher, ledger, lambda: call_id, "brave"
-    )
-    return executors[ASK_WEB_SEARCH](
+    return web_searcher(searcher, ledger, lambda: call_id, "brave")(
         arguments or {"search_id": "s1", "subject": "reservoir levels"}
     )
 
@@ -358,18 +366,17 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn("retrieved_at", result.durable_values)
 
     def test_the_disclosed_subject_is_recorded_as_durable_input(self) -> None:
-        from alx.tools.web import SEARCH_DEFINITION
-
         self.assertEqual(
-            SEARCH_DEFINITION.durable_input_fields, ("search_id", "subject", "max_results")
+            research_definition((ResearchAction.SEARCH_WEB,)).durable_input_fields,
+            ("action", "search_id", "subject", "max_results"),
         )
 
     def test_nothing_is_recorded_automatically(self) -> None:
         result = execute(StubSearcher())
         self.assertEqual(result.evidence_refs, ())
         source = (Path(__file__).resolve().parents[1] / "src/alx/tools/web.py").read_text()
-        for capability in ("record_research_entry", "open_research_thread"):
-            self.assertNotIn(capability, source)
+        for name in ("RECORD_ENTRY", "OPEN_THREAD", "notebook"):
+            self.assertNotIn(name, source)
 
 
 class UntrustedCandidateTests(unittest.TestCase):
@@ -408,18 +415,16 @@ class UntrustedCandidateTests(unittest.TestCase):
                     self.assertNotIn(text, str(value))
 
     def test_a_candidate_cannot_invent_a_field(self) -> None:
-        from alx.tools.web import SEARCH_DEFINITION
-
-        item = SEARCH_DEFINITION.output_schema.properties["results"].items
+        item = SEARCH_CONTRACT.output_schema.properties["results"].items
         self.assertFalse(item.extra_properties)
-        self.assertFalse(SEARCH_DEFINITION.output_schema.extra_properties)
+        self.assertFalse(SEARCH_CONTRACT.output_schema.extra_properties)
+        self.assertFalse(research_definition(tuple(ResearchAction)).output_schema.extra_properties)
 
     def test_candidates_reach_the_core_labelled_untrusted(self) -> None:
         result = execute(StubSearcher(self.hostile_results()))
         payload = _attempt_payload(
             CapabilityAttempt(
-                CapabilityCall("call-1", ASK_WEB_SEARCH,
-                               {"search_id": "s1", "subject": "x"}),
+                research_call("call-1", SEARCH_WEB, {"search_id": "s1", "subject": "x"}),
                 CapabilityAttemptDisposition.EXECUTED, True, result,
             )
         )
@@ -447,20 +452,18 @@ class NoAutomaticFetchTests(unittest.TestCase):
             def fetch(self, url, max_characters):  # pragma: no cover
                 raise AssertionError("search must not fetch anything")
 
-        runtime = build_web_runtime(True, lambda: "call-1")
-        self.addCleanup(runtime.provider.close)
         execute(StubSearcher(results(5)))
 
     def test_the_search_executor_cannot_reach_the_fetch_capability(self) -> None:
         source = (
             Path(__file__).resolve().parents[1] / "src/alx/tools/web.py"
         ).read_text()
-        body = source[source.index("def build_web_search_executors"):]
+        body = source[source.index("def build_web_searcher"):]
         body = body[: body.index("def _charge")]
         self.assertNotIn("fetch", body)
-        self.assertNotIn("ASK_WEB_PAGE", body)
+        self.assertNotIn("_PAGE", body)
 
-    def test_a_result_url_can_be_handed_to_ask_web_page_unchanged(self) -> None:
+    def test_a_result_url_can_be_handed_to_read_page_unchanged(self) -> None:
         """The two capabilities compose through AL/X, not through code."""
         from alx.providers.web_url import parse_public_url
         import socket
@@ -478,19 +481,14 @@ class BrokerTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         settings = WebSearchSettings(True, "key", PRICE, 30, 0.15)
-        self.runtime = build_web_runtime(
-            True, lambda: "call-1", settings, Path(self.directory.name)
+        self.runtime = research_runtime(
+            self.directory.name, lambda: "call-1", web_read_enabled=True,
+            search_settings=settings,
         )
-        self.addCleanup(self.runtime.provider.close)
-        self.addCleanup(self.runtime.searcher.close)
+        self.addCleanup(self.runtime.close)
         self.searcher = StubSearcher()
         self.ledger = RecordingLedger()
-        executors = dict(self.runtime.executors)
-        executors.update(
-            build_web_search_executors(
-                self.searcher, self.ledger, lambda: "call-1", "brave"
-            )
-        )
+        executors = {RESEARCH: search_executor(self.searcher, self.ledger, lambda: "call-1", "brave")}
         self.broker = CapabilityBroker(
             CapabilityRegistry(self.runtime.definitions),
             SafetyGate(self.runtime.policies),
@@ -502,9 +500,9 @@ class BrokerTests(unittest.TestCase):
 
     def call(self, arguments=None):
         return self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_SEARCH,
+            research_call("call-1", SEARCH_WEB,
                            arguments or {"search_id": "s1", "subject": "x"}),
-            self.authority({WEB_READ_PERMISSION}),
+            self.authority(self.runtime.permissions),
         )
 
     def test_search_runs_under_web_read(self) -> None:
@@ -514,7 +512,7 @@ class BrokerTests(unittest.TestCase):
 
     def test_without_web_read_nothing_is_searched(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_SEARCH,
+            research_call("call-1", SEARCH_WEB,
                            {"search_id": "s1", "subject": "x"}),
             self.authority(set()),
         )
@@ -524,9 +522,9 @@ class BrokerTests(unittest.TestCase):
 
     def test_research_spend_does_not_grant_search(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall("call-1", ASK_WEB_SEARCH,
+            research_call("call-1", SEARCH_WEB,
                            {"search_id": "s1", "subject": "x"}),
-            self.authority({"research.spend"}),
+            self.authority({"research.spend", NOTEBOOK_PERMISSION}),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.REJECTED)
 
@@ -538,21 +536,18 @@ class BrokerTests(unittest.TestCase):
         for code in ("search_budget_exhausted", "search_timeout",
                      "search_auth_failed", "search_no_results"):
             with self.subTest(code=code):
-                executors = dict(self.runtime.executors)
-                executors.update(
-                    build_web_search_executors(
-                        StubSearcher(WebSearchError(code, "status 500")),
-                        RecordingLedger(), lambda: "call-1", "brave",
-                    )
-                )
+                executors = {RESEARCH: search_executor(
+                    StubSearcher(WebSearchError(code, "status 500")),
+                    RecordingLedger(), lambda: "call-1", "brave",
+                )}
                 broker = CapabilityBroker(
                     CapabilityRegistry(self.runtime.definitions),
                     SafetyGate(self.runtime.policies), executors,
                 )
                 attempt = broker.dispatch(
-                    CapabilityCall("call-1", ASK_WEB_SEARCH,
+                    research_call("call-1", SEARCH_WEB,
                                    {"search_id": "s1", "subject": "x"}),
-                    self.authority({WEB_READ_PERMISSION}),
+                    self.authority(self.runtime.permissions),
                 )
                 self.assertIs(
                     attempt.disposition, CapabilityAttemptDisposition.EXECUTED
@@ -569,17 +564,15 @@ class RegistrationTests(unittest.TestCase):
         self.root = Path(self.directory.name)
 
     def runtime(self, settings):
-        runtime = build_web_runtime(True, lambda: "c1", settings, self.root)
-        self.addCleanup(runtime.provider.close)
-        if runtime.searcher is not None:
-            self.addCleanup(runtime.searcher.close)
+        runtime = research_runtime(self.root, lambda: "c1", web_read_enabled=True,
+                                   search_settings=settings)
+        self.addCleanup(runtime.close)
         return runtime
 
     def test_a_valid_configuration_registers_search(self) -> None:
         runtime = self.runtime(WebSearchSettings(True, "key", PRICE, 30, 0.15))
-        self.assertIn(
-            ASK_WEB_SEARCH, [d.capability_id for d in runtime.definitions]
-        )
+        self.assertIn(ResearchAction.SEARCH_WEB, runtime.offered)
+        self.assertIn("[search_web]", runtime.definitions[0].purpose)
 
     def test_incomplete_configuration_leaves_search_unregistered(self) -> None:
         for settings in (
@@ -595,27 +588,24 @@ class RegistrationTests(unittest.TestCase):
         ):
             with self.subTest(settings=settings):
                 runtime = self.runtime(settings)
-                self.assertNotIn(
-                    ASK_WEB_SEARCH,
-                    [d.capability_id for d in runtime.definitions],
-                )
+                self.assertNotIn(ResearchAction.SEARCH_WEB, runtime.offered)
+                self.assertNotIn("[search_web]", runtime.definitions[0].purpose)
                 self.assertIsNone(runtime.searcher)
 
     def test_reading_still_works_when_search_is_unavailable(self) -> None:
         runtime = self.runtime(WebSearchSettings(True, "", PRICE, 30, 0.15))
-        self.assertIn(ASK_WEB_PAGE, [d.capability_id for d in runtime.definitions])
+        self.assertIn(ResearchAction.READ_PAGE, runtime.offered)
 
     def test_search_and_fetch_share_one_authority(self) -> None:
         runtime = self.runtime(WebSearchSettings(True, "key", PRICE, 30, 0.15))
-        self.assertEqual(runtime.permissions, frozenset({WEB_READ_PERMISSION}))
-        self.assertEqual(
-            runtime.policies[ASK_WEB_SEARCH].permission_references,
-            runtime.policies[ASK_WEB_PAGE].permission_references,
-        )
+        # Both carry web.read and nothing else of their own; the notebook is
+        # always offered beside them (D-074).
+        self.assertEqual(runtime.permissions, frozenset({WEB_READ_PERMISSION, NOTEBOOK_PERMISSION}))
 
     def test_search_needs_no_approval_ceremony(self) -> None:
         runtime = self.runtime(WebSearchSettings(True, "key", PRICE, 30, 0.15))
-        self.assertFalse(runtime.policies[ASK_WEB_SEARCH].approval_required)
+        self.assertTrue(arguments_match(runtime.policies[RESEARCH].approval_exempt_when,
+                                        {"action": SEARCH_WEB}))
 
     def test_an_unusable_ledger_leaves_search_unregistered(self) -> None:
         (self.root / "search-spend.sqlite3").write_bytes(b"not a database")
@@ -658,22 +648,18 @@ class LiveLedgerTests(unittest.TestCase):
     def test_the_daily_request_ceiling_stops_the_capability(self) -> None:
         ledger = self.ledger(daily_requests=3)
         searcher = StubSearcher()
-        executors = build_web_search_executors(
-            searcher, ledger, lambda: "call-1", "brave"
-        )
+        search = web_searcher(searcher, ledger, lambda: "call-1", "brave")
         for _ in range(3):
-            executors[ASK_WEB_SEARCH]({"search_id": "s", "subject": "x"})
-        result = executors[ASK_WEB_SEARCH]({"search_id": "s", "subject": "x"})
+            search({"search_id": "s", "subject": "x"})
+        result = search({"search_id": "s", "subject": "x"})
         self.assertEqual(result.failure["code"], "search_budget_exhausted")
         self.assertEqual(len(searcher.calls), 3)
 
     def test_spend_accumulates_across_a_restart(self) -> None:
         searcher = StubSearcher()
-        first = build_web_search_executors(
-            searcher, self.ledger(), lambda: "c", "brave"
-        )
+        first = web_searcher(searcher, self.ledger(), lambda: "c", "brave")
         for _ in range(4):
-            first[ASK_WEB_SEARCH]({"search_id": "s", "subject": "x"})
+            first({"search_id": "s", "subject": "x"})
         self.assertEqual(self.ledger().committed_requests(), 4)
 
 

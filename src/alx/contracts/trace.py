@@ -37,8 +37,6 @@ class TraceSubsystem(str, Enum):
     CODING = "coding"
     REVIEW = "review"
     RESEARCH = "research"
-    WEB = "web"
-    NOTEBOOK = "notebook"
     THOUGHTS = "thoughts"
     XERO = "xero"
     DHL = "dhl"

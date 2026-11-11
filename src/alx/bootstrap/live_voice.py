@@ -38,7 +38,6 @@ from alx.contracts.task import ExternalTask, TaskState
 from alx.contracts.trace import TraceSubsystem
 from alx.contracts.xero import recorded_xero_action
 from alx.providers.review_status import subject_reference
-from alx.bootstrap.web import build_web_runtime
 from alx.bootstrap.autonomous import (
     AutonomousCognitionRunner,
     InputBoundHolds,
@@ -48,7 +47,6 @@ from alx.bootstrap.autonomous import (
 from alx.bootstrap.continuity import build_continuity_runtime
 from alx.contracts.notebook import OPEN_NOTEBOOK_THREAD_LIMIT
 from alx.tools import OPEN_THOUGHT_LIMIT, PENDING_REVISIT_LIMIT
-from alx.bootstrap.notebook import build_notebook_runtime
 from alx.bootstrap.reasoning import (
     OriginSelectedReasoner,
     autonomous_input_ceiling,
@@ -590,16 +588,24 @@ async def run(repository_root: Path) -> None:
             return None
         return tuple(provenance for _reference in source_references)
 
-    notebook_runtime = build_notebook_runtime(
+    # D-074: the web, paid questions and her notebook are one capability. Each
+    # action is offered only with its own authority: web.read (D-025) for
+    # reading and searching, research.spend for a paid question (absent unless
+    # a tier and a budget are configured), research.notebook for the notebook.
+    research_runtime = build_research_runtime(
+        provider_settings.research,
         storage_root,
-        voice_settings.goal_retention_days,
         current_call_id.get,
+        retention_days=voice_settings.goal_retention_days,
+        web_read_enabled=voice_settings.web_read_enabled,
+        search_settings=voice_settings.web_search,
         provenance_of=notebook_provenance,
+        telemetry_sink=telemetry,
     )
-    register(notebook_runtime.definitions, TraceSubsystem.NOTEBOOK)
-    policies.update(notebook_runtime.policies)
-    executors.update(notebook_runtime.executors)
-    permissions.update(notebook_runtime.permissions)
+    register(research_runtime.definitions, TraceSubsystem.RESEARCH)
+    policies.update(research_runtime.policies)
+    executors.update(research_runtime.executors)
+    permissions.update(research_runtime.permissions)
 
     opportunity_ledger = SQLiteOpportunityLedger(
         storage_root / "cognition-opportunities.sqlite3"
@@ -709,39 +715,6 @@ async def run(repository_root: Path) -> None:
         cognition_source.enabled,
         autonomous_cognition_daily_budget_usd(environment),
     )
-
-    # Paid research reaches AL/X as one capability through the same broker and
-    # safety gate as everything else. It is absent unless a cognition tier is
-    # enabled and a budget configured, so a runtime that has not been told it
-    # may spend cannot propose a research call at all.
-    research_runtime = build_research_runtime(
-        provider_settings.research,
-        storage_root,
-        current_call_id.get,
-        telemetry,
-    )
-    if research_runtime is None:
-        LOGGER.info("Research is not enabled: no paid research capability")
-    else:
-        register(research_runtime.definitions, TraceSubsystem.RESEARCH)
-        policies.update(research_runtime.policies)
-        executors.update(research_runtime.executors)
-        permissions.update(research_runtime.permissions)
-
-    # D-025 authorises reading the public web. It is a separate authority from
-    # research spending: this buys no model tokens, and research.spend reaches
-    # no network. Absent unless this runtime was told it may read.
-    web_runtime = build_web_runtime(
-        voice_settings.web_read_enabled,
-        current_call_id.get,
-        voice_settings.web_search,
-        storage_root,
-    )
-    if web_runtime is not None:
-        register(web_runtime.definitions, TraceSubsystem.WEB)
-        policies.update(web_runtime.policies)
-        executors.update(web_runtime.executors)
-        permissions.update(web_runtime.permissions)
 
     # D-027 authorises isolated experimentation. The sandbox root is kept
     # apart from the runtime storage root, which holds goals, memories and a
@@ -1297,7 +1270,7 @@ async def run(repository_root: Path) -> None:
                 )
                 if name in research_settings.enabled_tiers
             }
-            if research_runtime is not None else "unavailable"
+            if research_runtime.specialist is not None else "unavailable"
         ),
         "research_calls_per_day": research_settings.limits.daily_calls,
         "supplier_bills": (
@@ -1310,7 +1283,7 @@ async def run(repository_root: Path) -> None:
         # the latest and best way any of her current integrations are built on".
         "integrations": _integrations(
             provider_settings,
-            research_settings if research_runtime is not None else None,
+            research_settings if research_runtime.specialist is not None else None,
             (
                 ("iCloud Mail", "reading, flagging, filing and sending mail over "
                  "IMAP and SMTP", "src/alx/providers/icloud_mail.py, "
@@ -1335,7 +1308,8 @@ async def run(repository_root: Path) -> None:
                  "src/alx/providers/behaviorlive.py", reader_runtime is not None),
                 ("Web search", "searching the public web; pages are read "
                  "directly", "src/alx/providers/web_search.py, "
-                 "src/alx/providers/web_fetch.py", web_runtime is not None),
+                 "src/alx/providers/web_fetch.py",
+                 research_runtime.fetcher is not None),
                 ("GitHub", "your repository: pull requests, checks and merges",
                  "src/alx/providers/github_merge.py, "
                  "src/alx/providers/github_pull_request.py",
@@ -1447,7 +1421,7 @@ async def run(repository_root: Path) -> None:
         # thread never creates an occasion, and nothing here schedules a
         # return to one. Continuity of interest; opportunity stays hers to
         # ask for through request_future_cognition.
-        open_notebook_threads=lambda: notebook_runtime.store.open_threads(
+        open_notebook_threads=lambda: research_runtime.store.open_threads(
             OPEN_NOTEBOOK_THREAD_LIMIT
         ),
         undelivered_responses=lambda: opportunity_ledger.undelivered(),
@@ -1720,11 +1694,7 @@ async def run(repository_root: Path) -> None:
         mail_runtime.observations.close()
         conversation_store.close()
         memory_store.close()
-        notebook_runtime.store.close()
-        if web_runtime is not None:
-            web_runtime.provider.close()
-            if web_runtime.searcher is not None:
-                web_runtime.searcher.close()
+        research_runtime.close()
         goal_store.close()
 
 

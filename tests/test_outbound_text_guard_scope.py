@@ -57,7 +57,10 @@ from alx.contracts import (
 from alx.core import CoreAgent, CoreState
 from alx.core.model_reasoner import _attempt_payload
 from alx.goals import SQLiteGoalStore
-from alx.tools import ASK_WEB_SEARCH, WEB_SEARCH_DEFINITION
+from alx.contracts import RESEARCH
+from research_actions import SEARCH_WEB, definition, research_call
+
+WEB_SEARCH_DEFINITION = definition(SEARCH_WEB)
 from alx.tools.mail import (DEFINITION as MAIL_DEFINITION, MAIL,
                             SEND_MAIL_REPLY, SEND_REPLY_DEFINITION)
 from mail_actions import READ, is_mail, mail_call
@@ -122,7 +125,9 @@ class GuardScopeTestCase(unittest.TestCase):
         def dispatch(call, state):
             # A controlled stand-in: nothing reaches Brave, a mail server or
             # any other outside system from these tests.
-            self.dispatched.append(call.capability_id)
+            # The research job a call was, by action (D-074).
+            self.dispatched.append(call.arguments.get("action") if call.capability_id == RESEARCH
+                                   else call.capability_id)
             values = ({"subject": read_subject}
                       if is_mail(call, READ)
                       and read_subject is not None else {"ok": True})
@@ -156,8 +161,8 @@ class WebSearchIsNotOutboundTests(GuardScopeTestCase):
     """The incident: a search subject she has never spoken must still run."""
 
     def search_call(self) -> CapabilityCall:
-        return CapabilityCall(
-            "call-s1", ASK_WEB_SEARCH,
+        return research_call(
+            "call-s1", SEARCH_WEB,
             {"search_id": "s1",
              "subject": "MP2723A STAT pin blinking fault condition datasheet"},
             approval_id="approve-s1",
@@ -176,7 +181,7 @@ class WebSearchIsNotOutboundTests(GuardScopeTestCase):
             RETENTION, 4,
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(self.dispatched, [ASK_WEB_SEARCH],
+        self.assertEqual(self.dispatched, [SEARCH_WEB],
                          "the search never reached dispatch")
 
     def test_no_attempt_is_refused_for_unheard_text(self) -> None:
@@ -200,7 +205,7 @@ class WebSearchIsNotOutboundTests(GuardScopeTestCase):
     def test_reformulating_a_search_is_not_refused_either(self) -> None:
         """Eight reformulations were refused during the incident."""
         calls = [
-            CapabilityCall(f"call-s{index}", ASK_WEB_SEARCH,
+            research_call(f"call-s{index}", SEARCH_WEB,
                            {"search_id": f"s{index}",
                             "subject": f"MP2723A STAT blink phrasing {index}"},
                            approval_id=f"approve-s{index}")
@@ -218,7 +223,7 @@ class WebSearchIsNotOutboundTests(GuardScopeTestCase):
                          asked="what makes the STAT light blink?"),
             RETENTION, 6,
         )
-        self.assertEqual(self.dispatched, [ASK_WEB_SEARCH] * 3)
+        self.assertEqual(self.dispatched, [SEARCH_WEB] * 3)
 
     def test_the_declaration_is_what_scopes_it(self) -> None:
         self.assertFalse(WEB_SEARCH_DEFINITION.transmits_authored_text)
@@ -534,9 +539,9 @@ class RejectionReasonReachesCoreTests(GuardScopeTestCase):
 
     def test_an_ordinary_attempt_carries_no_reason(self) -> None:
         attempt = CapabilityAttempt(
-            CapabilityCall("call-1", ASK_WEB_SEARCH, {"search_id": "s"}),
+            research_call("call-1", SEARCH_WEB, {"search_id": "s"}),
             CapabilityAttemptDisposition.EXECUTED, True,
-            CapabilityResult("call-1", ASK_WEB_SEARCH,
+            CapabilityResult("call-1", RESEARCH,
                              CapabilityResultState.SUCCEEDED, {"ok": True}),
         )
         self.assertIsNone(_attempt_payload(attempt)["reason_code"])
@@ -606,11 +611,7 @@ class EveryOutboundCapabilityDeclaresItselfTests(unittest.TestCase):
         from alx.tools import DEFINITIONS as MAIL, XeroAction, xero_definition
         XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
         from alx.tools.mail import SEND_DEFINITIONS
-        from alx.tools.notebook import DEFINITIONS as NOTEBOOK
-        from alx.tools.web import DEFINITION as PAGE, SEARCH_DEFINITION
-
-        every = (*MAIL, *SEND_DEFINITIONS, *XERO_DEFINITIONS, *NOTEBOOK,
-                 PAGE, SEARCH_DEFINITION)
+        every = (*MAIL, *SEND_DEFINITIONS, *XERO_DEFINITIONS, definition())
         declared = {
             item.capability_id for item in every if item.transmits_authored_text
         }
@@ -624,10 +625,7 @@ class EveryOutboundCapabilityDeclaresItselfTests(unittest.TestCase):
         from alx.tools import DEFINITIONS as MAIL, XeroAction, xero_definition
         XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
         from alx.tools.mail import SEND_DEFINITIONS
-        from alx.tools.web import DEFINITION as PAGE, SEARCH_DEFINITION
-
-        every = (*MAIL, *SEND_DEFINITIONS, *XERO_DEFINITIONS, PAGE,
-                 SEARCH_DEFINITION)
+        every = (*MAIL, *SEND_DEFINITIONS, *XERO_DEFINITIONS, definition())
         holding = {
             item.capability_id: item.transmits_authored_text
             for item in every
@@ -796,8 +794,8 @@ class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
     def test_she_may_still_do_something_different_after_a_refusal(self) -> None:
         """The stop prevents pointless repetition, never recovery."""
         refused = self.refused_send()
-        alternative = CapabilityCall(
-            "call-s1", ASK_WEB_SEARCH,
+        alternative = research_call(
+            "call-s1", SEARCH_WEB,
             {"search_id": "s1", "subject": "something else entirely"},
         )
         reasoner, outcome = self.run_once(
@@ -809,7 +807,7 @@ class PreGoalRefusalIsVisibleTests(GuardScopeTestCase):
             budget=5, identifiers=("goal-1", "goal-2", "goal-3"),
         )
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(self.dispatched, [ASK_WEB_SEARCH],
+        self.assertEqual(self.dispatched, [SEARCH_WEB],
                          "a viable alternative was blocked")
 
 

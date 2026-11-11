@@ -1,9 +1,9 @@
-"""One language-blind primitive for reading a public web page, under D-025.
+"""Reading a public web page and searching the web, under D-025.
 
-Retrieval is reached the way every other capability is: AL/X proposes a
+Both are actions of the one `research` capability (D-074): AL/X proposes a
 structured call, the broker validates it, the safety gate authorises it under
-`web.read`, and the executor runs it. The capability retrieves one page and
-reports what it found. It does not decide whether the page is any good,
+`web.read`, and the action runs. A page read retrieves one page and reports
+what it found. It does not decide whether the page is any good,
 whether its claims are true, whether it answers the question, or whether
 anything should be recorded. Those judgements are hers.
 
@@ -37,11 +37,12 @@ from alx.contracts import (
     ValueKind,
     WEB_FETCH_FAILURES,
     MAX_EXTRACTED_CHARACTERS,
+    ResearchAction,
 )
 
 
-ASK_WEB_PAGE = "ask_web_page"
-ASK_WEB_SEARCH = "ask_web_search"
+_PAGE = ResearchAction.READ_PAGE.value
+_SEARCH = ResearchAction.SEARCH_WEB.value
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
@@ -50,8 +51,8 @@ _INTEGER = StructuredSchema(ValueKind.INTEGER)
 # is a different fact from a page that would not load.
 _FAILURES = ("arguments_unusable", *WEB_FETCH_FAILURES)
 
-DEFINITION = CapabilityDefinition(
-    ASK_WEB_PAGE,
+PAGE_CONTRACT = CapabilityDefinition(
+    _PAGE,
     "Retrieve one public web page by exact URL and return its readable text "
     "with the source URL, title and retrieval time. Reads only; follows no "
     "search, logs in to nothing, and judges nothing about what it finds.",
@@ -105,11 +106,11 @@ DEFINITION = CapabilityDefinition(
 )
 
 
-def build_web_executors(
+def build_page_reader(
     fetcher: Any,
     call_id_source: Callable[[], str],
-) -> Mapping[str, Callable[[Any], CapabilityResult]]:
-    """Bind the one page-read primitive to the one fetch provider."""
+) -> Callable[[Any], CapabilityResult]:
+    """Bind the page-read action to the one fetch provider."""
 
     def read_page(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
@@ -126,7 +127,7 @@ def build_web_executors(
         except (KeyError, TypeError, ValueError):
             return CapabilityResult(
                 call_id,
-                ASK_WEB_PAGE,
+                _PAGE,
                 CapabilityResultState.FAILED,
                 failure={"code": "arguments_unusable"},
             )
@@ -140,7 +141,7 @@ def build_web_executors(
             code = getattr(error, "code", None)
             return CapabilityResult(
                 call_id,
-                ASK_WEB_PAGE,
+                _PAGE,
                 CapabilityResultState.FAILED,
                 failure={
                     "code": code if code in WEB_FETCH_FAILURES else "provider_failed",
@@ -167,7 +168,7 @@ def build_web_executors(
 
         return CapabilityResult(
             call_id,
-            ASK_WEB_PAGE,
+            _PAGE,
             CapabilityResultState.SUCCEEDED,
             values,
             # Metadata only. The retrieval stays citable across a restart
@@ -195,13 +196,13 @@ def build_web_executors(
             ),
         )
 
-    return {ASK_WEB_PAGE: read_page}
+    return read_page
 
 
 _SEARCH_FAILURES = ("arguments_unusable", *WEB_SEARCH_FAILURES)
 
-SEARCH_DEFINITION = CapabilityDefinition(
-    ASK_WEB_SEARCH,
+SEARCH_CONTRACT = CapabilityDefinition(
+    _SEARCH,
     "Search the public web for candidate pages matching a subject and return "
     "them in the provider's own order with their URLs, titles and snippets. "
     "Discovery only: it reads no page, follows nothing, and judges nothing "
@@ -253,20 +254,20 @@ SEARCH_DEFINITION = CapabilityDefinition(
 )
 
 
-def build_web_search_executors(
+def build_web_searcher(
     searcher: Any,
     ledger: Any,
     call_id_source: Callable[[], str],
     provider_name: str,
-) -> Mapping[str, Callable[[Any], CapabilityResult]]:
-    """Bind the one search primitive to one provider and one spend ledger."""
+) -> Callable[[Any], CapabilityResult]:
+    """Bind the search action to one provider and one spend ledger."""
 
     def run_search(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
 
         def failed(code: str, error: BaseException | None = None) -> CapabilityResult:
             return CapabilityResult(
-                call_id, ASK_WEB_SEARCH, CapabilityResultState.FAILED,
+                call_id, _SEARCH, CapabilityResultState.FAILED,
                 failure={"code": code, **(failure_details(error) if error else {})},
             )
 
@@ -341,7 +342,7 @@ def build_web_search_executors(
         }
         return CapabilityResult(
             call_id,
-            ASK_WEB_SEARCH,
+            _SEARCH,
             CapabilityResultState.SUCCEEDED,
             values,
             # Candidates are a working set for the turn that chooses among
@@ -358,7 +359,7 @@ def build_web_search_executors(
             ),
         )
 
-    return {ASK_WEB_SEARCH: run_search}
+    return run_search
 
 
 def _charge(ledger: Any, reservation: Any) -> None:
@@ -382,10 +383,8 @@ def _release(ledger: Any, reservation: Any, failure_code: str) -> None:
 
 
 __all__ = [
-    "ASK_WEB_PAGE",
-    "ASK_WEB_SEARCH",
-    "DEFINITION",
-    "SEARCH_DEFINITION",
-    "build_web_executors",
-    "build_web_search_executors",
+    "PAGE_CONTRACT",
+    "SEARCH_CONTRACT",
+    "build_page_reader",
+    "build_web_searcher",
 ]

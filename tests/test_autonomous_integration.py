@@ -333,9 +333,8 @@ class ViableInputCeilingTests(unittest.TestCase):
 
     def _production_bound(self) -> int:
         from alx.contracts.models import input_token_upper_bound
-        from alx.tools import (
-            CONTINUITY_DEFINITIONS, NOTEBOOK_DEFINITIONS, RESEARCH_DEFINITION,
-        )
+        from alx.contracts import ResearchAction
+        from alx.tools import CONTINUITY_DEFINITIONS, research_definition
         from alx.tools.mail import DEFINITIONS as MAIL
 
         try:
@@ -349,7 +348,7 @@ class ViableInputCeilingTests(unittest.TestCase):
         laws = (ROOT / "LAWS_OF_ALX.md").read_text(encoding="utf-8")
         identity = (ROOT / "IDENTITY_AND_MEMORY.md").read_text(encoding="utf-8")
         capabilities = (
-            tuple(NOTEBOOK_DEFINITIONS) + (RESEARCH_DEFINITION,)
+            (research_definition(tuple(ResearchAction)),)
             + tuple(CONTINUITY_DEFINITIONS) + tuple(MAIL)
             + tuple(XERO) + tuple(DHL)
         )

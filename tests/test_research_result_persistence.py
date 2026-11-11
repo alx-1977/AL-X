@@ -26,9 +26,14 @@ from alx.observability.research_budget import (  # noqa: E402
 from alx.specialists.research import (  # noqa: E402
     ResearchCeilingFailed, ResearchInputUnbounded, ResearchModelUnbounded,
 )
-from alx.tools.research import (  # noqa: E402
-    ASK_RESEARCH_QUESTION, DEFINITION, build_research_executors,
+from alx.contracts import RESEARCH, ResearchAction  # noqa: E402
+from alx.tools.research import CONTRACTS  # noqa: E402
+from research_actions import (  # noqa: E402
+    ASK_MODEL, RECORD_ENTRY, model_question, research_arguments,
 )
+
+# The paid question's own contract, as the one capability offers it (D-074).
+DEFINITION = CONTRACTS[ResearchAction.ASK_MODEL]
 
 
 class FakeResearcher:
@@ -38,9 +43,9 @@ class FakeResearcher:
 
 class ResearchResultPersistenceTests(unittest.TestCase):
     def test_finding_reaches_core_but_goal_receipt_contains_no_prose(self) -> None:
-        execute = build_research_executors(
+        execute = model_question(
             FakeResearcher(), lambda: "research-call"
-        )[ASK_RESEARCH_QUESTION]
+        )
         result = execute({
             "question_id": "question-1",
             "instruction": "Investigate.",
@@ -54,20 +59,21 @@ class ResearchResultPersistenceTests(unittest.TestCase):
     def test_goal_restart_retains_only_notebook_references(self) -> None:
         finding = "A full paid research finding."
         research_call = CapabilityCall(
-            "research-call", ASK_RESEARCH_QUESTION, {"question_id": "q-1"}
+            "research-call", RESEARCH, research_arguments(ASK_MODEL, {"question_id": "q-1"})
         )
         research_result = CapabilityResult(
-            "research-call", ASK_RESEARCH_QUESTION,
+            "research-call", RESEARCH,
             CapabilityResultState.SUCCEEDED, {"finding": finding},
             durable_values={},
         )
         notebook_call = CapabilityCall(
-            "notebook-call", "record_research_entry",
-            {"entry_id": "entry-1", "thread_id": "thread-1", "content": finding},
-            durable_arguments={"entry_id": "entry-1", "thread_id": "thread-1"},
+            "notebook-call", RESEARCH,
+            research_arguments(RECORD_ENTRY, {"entry_id": "entry-1", "thread_id": "thread-1",
+                                              "content": finding}),
+            durable_arguments={"action": RECORD_ENTRY, "entry_id": "entry-1", "thread_id": "thread-1"},
         )
         notebook_result = CapabilityResult(
-            "notebook-call", "record_research_entry",
+            "notebook-call", RESEARCH,
             CapabilityResultState.SUCCEEDED,
             {"entry_id": "entry-1", "thread_id": "thread-1", "content": finding},
             durable_values={
@@ -109,7 +115,7 @@ class ResearchResultPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(
             dict(recovered.attempts[-1].call.arguments),
-            {"entry_id": "entry-1", "thread_id": "thread-1"},
+            {"action": RECORD_ENTRY, "entry_id": "entry-1", "thread_id": "thread-1"},
         )
 
 
@@ -144,9 +150,9 @@ class ResearchFailureTranslationTests(unittest.TestCase):
     """
 
     def _failure_for(self, error: Exception) -> str:
-        execute = build_research_executors(
+        execute = model_question(
             FailingResearcher(error), lambda: "research-call"
-        )[ASK_RESEARCH_QUESTION]
+        )
         result = execute(dict(ARGUMENTS))
         self.assertIs(result.state, CapabilityResultState.FAILED)
         self.assertIsNotNone(result.failure)
@@ -204,9 +210,9 @@ class ResearchFailureTranslationTests(unittest.TestCase):
             def answer(self, question, task_id=""):
                 raise AssertionError("a malformed call must not reach the specialist")
 
-        execute = build_research_executors(
+        execute = model_question(
             Unreachable(), lambda: "research-call"
-        )[ASK_RESEARCH_QUESTION]
+        )
         for arguments in (
             {"instruction": "Investigate.", "material": "Material."},
             dict(ARGUMENTS, cognition="omniscient"),
@@ -226,18 +232,18 @@ class ResearchFailureTranslationTests(unittest.TestCase):
                     "material_omitted_characters": 4_200,
                 }
 
-        execute = build_research_executors(
+        execute = model_question(
             Partial(), lambda: "research-call"
-        )[ASK_RESEARCH_QUESTION]
+        )
         result = execute(dict(ARGUMENTS))
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(result.values["material_omitted_characters"], 4_200)
 
     def test_a_complete_read_carries_no_omission_field(self) -> None:
         """The field's presence is the signal, so a full read must not set it."""
-        execute = build_research_executors(
+        execute = model_question(
             FakeResearcher(), lambda: "research-call"
-        )[ASK_RESEARCH_QUESTION]
+        )
         result = execute(dict(ARGUMENTS))
         self.assertNotIn("material_omitted_characters", result.values)
 
@@ -255,9 +261,9 @@ class ResearchFailureTranslationTests(unittest.TestCase):
             def answer(self, question, task_id=""):
                 return {"finding": "   "}
 
-        execute = build_research_executors(
+        execute = model_question(
             Blank(), lambda: "research-call"
-        )[ASK_RESEARCH_QUESTION]
+        )
         result = execute(dict(ARGUMENTS))
         self.assertIs(result.state, CapabilityResultState.FAILED)
         self.assertEqual(result.failure["code"], "provider_failed")

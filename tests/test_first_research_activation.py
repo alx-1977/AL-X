@@ -568,9 +568,12 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         from alx.bootstrap.research import build_research_runtime
 
         settings = RuntimeSettings.from_environment(environment(**overrides))
-        return build_research_runtime(
-            settings.research, self.root, lambda: self._call_id[0]
+        runtime = build_research_runtime(
+            settings.research, self.root, lambda: self._call_id[0],
+            retention_days=3650, web_read_enabled=False,
         )
+        self.addCleanup(runtime.close)
+        return runtime
 
     def broker(self, runtime):
         from alx.capabilities import CapabilityBroker, CapabilityRegistry
@@ -597,8 +600,9 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         registry, _broker = self.broker(runtime)
         self.assertEqual(
             [d.capability_id for d in registry.list_definitions()],
-            ["ask_research_question"],
+            ["research"],
         )
+        self.assertIn("[ask_model]", registry.list_definitions()[0].purpose)
 
     def test_spending_requires_its_own_permission(self) -> None:
         from alx.contracts import CapabilityAttemptDisposition, CapabilityCall
@@ -609,8 +613,8 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         attempt = broker.dispatch(
             CapabilityCall(
                 "call-1",
-                "ask_research_question",
-                {"question_id": "q", "instruction": "i", "material": "m"},
+                "research",
+                {"action": "ask_model", "question_id": "q", "instruction": "i", "material": "m"},
             ),
             self.authority(set()),
         )
@@ -628,8 +632,9 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
             attempt = broker.dispatch(
                 CapabilityCall(
                     f"call-{tier}",
-                    "ask_research_question",
+                    "research",
                     {
+                        "action": "ask_model",
                         "question_id": "q",
                         "instruction": "i",
                         "material": "m",
@@ -644,8 +649,14 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
             )
 
     def test_research_is_absent_when_no_tier_is_enabled(self) -> None:
-        """Unregistered, so AL/X cannot even propose the call."""
-        self.assertIsNone(self.runtime(ALX_RESEARCH_ENABLED_TIERS=""))
+        """Not offered, so AL/X cannot even propose the call."""
+        from alx.contracts import ResearchAction
+
+        runtime = self.runtime(ALX_RESEARCH_ENABLED_TIERS="")
+        self.assertIsNone(runtime.specialist)
+        self.assertNotIn(ResearchAction.ASK_MODEL, runtime.offered)
+        self.assertNotIn("research.spend", runtime.permissions)
+        self.assertNotIn("[ask_model]", runtime.definitions[0].purpose)
 
     def test_there_is_one_research_execution_path(self) -> None:
         """No second entry point, and no improvised direct invocation."""
@@ -672,7 +683,10 @@ class AuthoritativeRuntimePathTest(unittest.TestCase):
         # cognition requests, so the blanket ban would fail on a task Friedl
         # approved. The property that still holds, and the one D-023 actually
         # protects, is that nothing schedules *research*.
-        self.assertNotIn("research", source[source.index("TaskGroup"):].lower())
+        # Closing its stores at shutdown schedules nothing.
+        after = "\n".join(line for line in source[source.index("TaskGroup"):].splitlines()
+                          if not line.strip().endswith(".close()"))
+        self.assertNotIn("research", after.lower())
         for forbidden in ("research_timer", "recurring_research", "research_loop"):
             self.assertNotIn(forbidden, source)
 

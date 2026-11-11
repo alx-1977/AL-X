@@ -35,8 +35,18 @@ from alx.contracts import (
 )
 from alx.core import CoreAgent, CoreState
 from alx.goals import SQLiteGoalStore
-from alx.tools import ASK_WEB_PAGE, WEB_DEFINITION
-from alx.tools.web import build_web_executors
+from alx.contracts import RESEARCH, ResearchAction
+from alx.tools.research import build_research_executors
+from alx.tools.web import build_page_reader, build_web_searcher
+from research_actions import READ_PAGE, SEARCH_WEB, definition, research_call, research_runtime
+
+WEB_DEFINITION = definition(READ_PAGE)
+
+
+def page_executors(fetcher, call_id_source):
+    return build_research_executors(
+        {ResearchAction.READ_PAGE: build_page_reader(fetcher, call_id_source)}, call_id_source
+    )
 
 
 NOW = datetime(2026, 9, 4, 10, 30, tzinfo=UTC)
@@ -121,7 +131,7 @@ class WebConversationTests(unittest.TestCase):
 
     def agent(self, reasoner, fetcher, identifiers=("goal-1",)):
         values = iter(identifiers)
-        executors = build_web_executors(fetcher, lambda: current_call[0])
+        executors = page_executors(fetcher, lambda: current_call[0])
         current_call = ["call-web-1"]
 
         def dispatch(call, state):
@@ -139,8 +149,8 @@ class WebConversationTests(unittest.TestCase):
         )
 
     def read_call(self, call_id: str = "call-web-1") -> CapabilityCall:
-        return CapabilityCall(
-            call_id, ASK_WEB_PAGE, {"page_id": "p1", "url": URL}
+        return research_call(
+            call_id, READ_PAGE, {"page_id": "p1", "url": URL}
         )
 
     def test_differently_worded_goals_reach_the_same_capability(self) -> None:
@@ -225,8 +235,8 @@ class WebConversationTests(unittest.TestCase):
             AgentDecision(goal_proposal=a_goal()),
             AgentDecision(call=self.read_call()),
             AgentDecision(
-                call=CapabilityCall(
-                    "call-web-2", ASK_WEB_PAGE, {"page_id": "p2", "url": other}
+                call=research_call(
+                    "call-web-2", READ_PAGE, {"page_id": "p2", "url": other}
                 )
             ),
             AgentDecision(response="The mirror had it: sixty percent."),
@@ -268,7 +278,7 @@ class WebConversationTests(unittest.TestCase):
         reopened = SQLiteGoalStore(self.path)
         self.addCleanup(reopened.close)
         attempt = reopened.load("goal-1").state.attempts[-1]
-        self.assertEqual(attempt.call.capability_id, ASK_WEB_PAGE)
+        self.assertEqual(attempt.call.arguments["action"], READ_PAGE)
         self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
         # The anchor a later notebook entry or evidence record would cite.
         self.assertEqual(attempt.call.call_id, "call-web-1")
@@ -373,8 +383,8 @@ class WebConversationTests(unittest.TestCase):
         # she is now told is the right one and revises what she reports.
         after = Queued(
             AgentDecision(
-                call=CapabilityCall(
-                    "call-web-2", ASK_WEB_PAGE,
+                call=research_call(
+                    "call-web-2", READ_PAGE,
                     {"page_id": "p2", "url": corrected},
                 )
             ),
@@ -390,10 +400,10 @@ class WebConversationTests(unittest.TestCase):
         # start a second piece of it.
         self.assertEqual(len(self.store.list_goals()), 1)
         capabilities = [
-            item.call.capability_id
+            item.call.arguments["action"]
             for item in self.store.load("goal-1").state.attempts
         ]
-        self.assertEqual(capabilities, [ASK_WEB_PAGE, ASK_WEB_PAGE])
+        self.assertEqual(capabilities, [READ_PAGE, READ_PAGE])
 
     def test_an_interruption_is_followed_by_resumption(self) -> None:
         """Unrelated conversation between two turns loses none of the work."""
@@ -441,8 +451,8 @@ class WebConversationTests(unittest.TestCase):
             AgentDecision(call=self.read_call()),
             # She does not declare completion on the failure. She looks again.
             AgentDecision(
-                call=CapabilityCall(
-                    "call-web-2", ASK_WEB_PAGE,
+                call=research_call(
+                    "call-web-2", READ_PAGE,
                     {"page_id": "p2", "url": "https://example.org/mirror"},
                 )
             ),
@@ -486,6 +496,10 @@ class ScenariosNotApplicableTests(unittest.TestCase):
     identical from a test list.
     """
 
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
     def test_no_approval_pause_exists_to_exercise(self) -> None:
         """Reading a public page is not a consequential action.
 
@@ -496,25 +510,19 @@ class ScenariosNotApplicableTests(unittest.TestCase):
         pause in this capability to test. Any future capability that writes,
         posts or spends would need its own decision and its own gate.
         """
-        from alx.bootstrap.web import build_web_runtime
+        from alx.contracts.capabilities import arguments_match
 
-        runtime = build_web_runtime(True, lambda: "call-1")
-        self.addCleanup(runtime.provider.close)
-        self.assertFalse(runtime.policies[ASK_WEB_PAGE].approval_required)
+        runtime = research_runtime(self.directory.name, lambda: "call-1", web_read_enabled=True)
+        self.addCleanup(runtime.close)
+        self.assertTrue(arguments_match(runtime.policies[RESEARCH].approval_exempt_when,
+                                        {"action": READ_PAGE}))
 
-    def test_this_slice_registers_only_one_capability(self) -> None:
-        """A multi-capability goal needs a second capability to combine with.
-
-        Steps 1-3 deliver `ask_web_page` alone; `ask_web_search` waits for the
-        step-3 review. The multi-capability scenario becomes testable, and must
-        be tested, when search lands.
-        """
-        from alx.bootstrap.web import build_web_runtime
-
-        runtime = build_web_runtime(True, lambda: "call-1")
-        self.addCleanup(runtime.provider.close)
+    def test_web_reading_registers_one_capability(self) -> None:
+        """Reading is an action of the one `research` capability (D-074)."""
+        runtime = research_runtime(self.directory.name, lambda: "call-1", web_read_enabled=True)
+        self.addCleanup(runtime.close)
         self.assertEqual(
-            [item.capability_id for item in runtime.definitions], [ASK_WEB_PAGE]
+            [item.capability_id for item in runtime.definitions], [RESEARCH]
         )
 
 
@@ -538,8 +546,6 @@ class SearchThenReadTests(unittest.TestCase):
 
     def agent(self, reasoner, identifiers=("goal-1",)):
         from alx.contracts import WebSearchResult, WebSearchResults
-        from alx.tools import ASK_WEB_SEARCH, WEB_SEARCH_DEFINITION
-        from alx.tools.web import build_web_search_executors
 
         values = iter(identifiers)
         current = ["call-1"]
@@ -578,12 +584,11 @@ class SearchThenReadTests(unittest.TestCase):
                     title="A Page",
                 )
 
-        executors = dict(build_web_executors(Fetcher(), lambda: current[0]))
-        executors.update(
-            build_web_search_executors(
-                Searcher(), Ledger(), lambda: current[0], "brave"
-            )
-        )
+        executors = build_research_executors({
+            ResearchAction.READ_PAGE: build_page_reader(Fetcher(), lambda: current[0]),
+            ResearchAction.SEARCH_WEB: build_web_searcher(
+                Searcher(), Ledger(), lambda: current[0], "brave"),
+        }, lambda: current[0])
 
         def dispatch(call, state):
             current[0] = call.call_id
@@ -594,20 +599,16 @@ class SearchThenReadTests(unittest.TestCase):
 
         return CoreAgent(
             self.store, reasoner, dispatch,
-            (WEB_DEFINITION, WEB_SEARCH_DEFINITION),
+            (definition(READ_PAGE, SEARCH_WEB),),
             clock=lambda: NOW, identifier_factory=lambda: next(values),
         )
 
     def search_call(self, call_id="call-s1", subject="reservoir levels"):
-        from alx.tools import ASK_WEB_SEARCH
-
-        return CapabilityCall(
-            call_id, ASK_WEB_SEARCH, {"search_id": "s1", "subject": subject}
-        )
+        return research_call(call_id, SEARCH_WEB, {"search_id": "s1", "subject": subject})
 
     def page_call(self, url, call_id="call-p1"):
-        return CapabilityCall(
-            call_id, ASK_WEB_PAGE, {"page_id": "p1", "url": url}
+        return research_call(
+            call_id, READ_PAGE, {"page_id": "p1", "url": url}
         )
 
     def test_she_searches_then_chooses_what_to_read(self) -> None:
@@ -708,11 +709,9 @@ class SearchThenReadTests(unittest.TestCase):
             conversation("reservoir levels"), RETENTION, 5
         )
         capabilities = [
-            item.call.capability_id for item in outcome.snapshot.state.attempts
+            item.call.arguments["action"] for item in outcome.snapshot.state.attempts
         ]
-        from alx.tools import ASK_WEB_SEARCH
-
-        self.assertEqual(capabilities, [ASK_WEB_SEARCH, ASK_WEB_PAGE])
+        self.assertEqual(capabilities, [SEARCH_WEB, READ_PAGE])
         ids = [item.call.call_id for item in outcome.snapshot.state.attempts]
         self.assertEqual(ids, ["call-s1", "call-p1"])
 
