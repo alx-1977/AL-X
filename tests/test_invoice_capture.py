@@ -26,14 +26,18 @@ from alx.contracts import (  # noqa: E402
 )
 from alx.contracts import SideEffect  # noqa: E402
 from alx.bootstrap.xero import build_xero_runtime  # noqa: E402
-from support import xero_settings  # noqa: E402
-from alx.tools import (  # noqa: E402
-    CAPTURE_SUPPLIER_INVOICE,
-    DELETE_XERO_DRAFT_BILL,
-    FIND_XERO_BILL,
-    READ_XERO_BILL,
-    build_xero_executors,
+from xero_actions import (  # noqa: E402
+    CAPTURE_INVOICE,
+    DELETE_DRAFT_BILL,
+    FIND_BILL,
+    READ_BILL,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
 )
+from support import xero_settings  # noqa: E402
 
 PDF = b"samtec-invoice-bytes"
 DIGEST = hashlib.sha256(PDF).hexdigest()
@@ -201,10 +205,10 @@ class RoutineCaptureTests(unittest.TestCase):
             self.calls.append((payload, media_type, filename, context_line))
             return extracted()
 
-        self.executors = build_xero_executors(
+        self.executors = xero_executors(
             self.xero, FakeMail(), lambda: "call-1", extractor
         )
-        self.capture = self.executors[CAPTURE_SUPPLIER_INVOICE]
+        self.capture = self.executors[CAPTURE_INVOICE]
 
     def test_the_extractor_receives_original_bytes_on_the_live_path(self) -> None:
         """Proof the wiring reaches the document extractor, not a Core call."""
@@ -224,9 +228,9 @@ class RoutineCaptureTests(unittest.TestCase):
             calls.append((payload, media_type, filename, context_line))
             return extracted()
 
-        capture = build_xero_executors(
+        capture = xero_executors(
             FakeXero(), mail, lambda: "call-1", extractor
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         result = capture(arguments())
         self.assertTrue(result.values["completed"])
         self.assertEqual(calls[0][0], PDF)
@@ -281,9 +285,9 @@ class AttachmentToctouTests(unittest.TestCase):
             return original(invoice_id)
 
         self.xero.authorise_bill = authorise
-        return build_xero_executors(
+        return xero_executors(
             self.xero, FakeMail(), lambda: "call-1", lambda *_: extracted()
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
 
     def test_unchanged_attachment_is_authorised(self) -> None:
         result = self.capture_with()(arguments())
@@ -385,12 +389,12 @@ class RealDocumentTypeTests(unittest.TestCase):
 
     def build(self, document_type: str):
         self.xero = FakeXero()
-        return build_xero_executors(
+        return xero_executors(
             self.xero,
             FakeMail(),
             lambda: "call-1",
             lambda *_: extracted(document_type=document_type),
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
 
     def test_a_document_calling_itself_an_invoice_is_captured(self) -> None:
         for document_type in ("invoice", "Invoice", "tax invoice", "supplier bill"):
@@ -433,14 +437,14 @@ class DefaultAccountTests(unittest.TestCase):
         )
         xero.tax_rates = ({"TaxType": "INPUT3", "Status": "ACTIVE"},)
         self.xero = xero
-        return build_xero_executors(
+        return xero_executors(
             xero,
             FakeMail(),
             lambda: "call-1",
             lambda *_: extracted(tax_amount=tax_amount),
             default,
             "INPUT3",
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
 
     def test_a_mixed_history_supplier_posts_without_asking(self) -> None:
         """Previously this returned coding_unresolved on every invoice."""
@@ -517,14 +521,14 @@ class InvoiceTaxTreatmentTests(unittest.TestCase):
             total="6.90",
         )
         fields.update(invoice)
-        return build_xero_executors(
+        return xero_executors(
             self.xero,
             FakeMail(),
             lambda: "call-1",
             lambda *_: fields,
             "999",
             "INPUT3",
-        )[CAPTURE_SUPPLIER_INVOICE](arguments())
+        )[CAPTURE_INVOICE](arguments())
 
     def assert_bill(self, result, *, tax_type, line_amount_types, unit_amount, tax_amount):
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED)
@@ -583,9 +587,9 @@ class StaleDraftTests(unittest.TestCase):
     def build(self):
         self.xero = FakeXero()
         self.xero.accounts = ({"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},)
-        return build_xero_executors(
+        return xero_executors(
             self.xero, FakeMail(), lambda: "call-1", lambda *_: extracted(), "310", "INPUT3"
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
 
     def existing_draft(self, **changes):
         capture = self.build()
@@ -1003,9 +1007,9 @@ class CurrencyResolutionTests(unittest.TestCase):
         self.xero = FakeXero()
 
     def capture(self, invoice, **inputs):
-        executor = build_xero_executors(
+        executor = xero_executors(
             self.xero, FakeMail(), lambda: "currency-call", lambda *_: invoice
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         return executor(arguments(**inputs))
 
     def assert_unresolved(self, result, reason):
@@ -1127,21 +1131,21 @@ class CurrencyResolutionTests(unittest.TestCase):
         from alx.capabilities import CapabilityBroker, CapabilityRegistry
         from alx.contracts import CapabilityCall
         from alx.safety import SafetyGate, AuthorityPolicy, AuthorityContext
-        from alx.tools.xero import CAPTURE_INVOICE_DEFINITION
+        from alx.tools import XeroAction, build_xero_executors, xero_definition
         calls = []
         executors = build_xero_executors(
             self.xero, FakeMail(), lambda: "currency-call",
             lambda *args: calls.append(args) or extracted(),
         )
         broker = CapabilityBroker(
-            CapabilityRegistry((CAPTURE_INVOICE_DEFINITION,)),
-            SafetyGate({CAPTURE_SUPPLIER_INVOICE: AuthorityPolicy()}), executors,
+            CapabilityRegistry((xero_definition(tuple(XeroAction)),)),
+            SafetyGate({XERO: AuthorityPolicy()}), executors,
         )
         authority = AuthorityContext("friedl", frozenset(), datetime.now(UTC))
         for currency in ("", "ZAR body", None, 123):
             with self.subTest(currency=currency):
                 attempt = broker.dispatch(
-                    CapabilityCall("currency-call", CAPTURE_SUPPLIER_INVOICE,
+                    xero_call("currency-call", CAPTURE_INVOICE,
                                    arguments(currency=currency)), authority,
                 )
                 if isinstance(currency, str):
@@ -1162,17 +1166,17 @@ class CurrencyResolutionTests(unittest.TestCase):
         from alx.core.model_reasoner import _attempt_is_citable, _attempt_payload
         from alx.goals import SQLiteGoalStore
         from alx.safety import SafetyGate, AuthorityPolicy, AuthorityContext
-        from alx.tools.xero import CAPTURE_INVOICE_DEFINITION
+        from alx.tools import XeroAction, build_xero_executors, xero_definition
         now = datetime.now(UTC)
         executors = build_xero_executors(
             self.xero, FakeMail(), lambda: "currency-call", lambda *_: extracted(currency="")
         )
         broker = CapabilityBroker(
-            CapabilityRegistry((CAPTURE_INVOICE_DEFINITION,)),
-            SafetyGate({CAPTURE_SUPPLIER_INVOICE: AuthorityPolicy()}), executors,
+            CapabilityRegistry((xero_definition(tuple(XeroAction)),)),
+            SafetyGate({XERO: AuthorityPolicy()}), executors,
         )
         attempt = broker.dispatch(
-            CapabilityCall("currency-call", CAPTURE_SUPPLIER_INVOICE, arguments()),
+            xero_call("currency-call", CAPTURE_INVOICE, arguments()),
             AuthorityContext("friedl", frozenset(), now),
         )
         self.assertEqual(attempt.result.state, CapabilityResultState.PARTIAL)
@@ -1202,9 +1206,9 @@ class CurrencyResolutionTests(unittest.TestCase):
     def test_unknown_exception_text_does_not_escape(self):
         def broken(*_):
             raise ValueError("secret invoice body and provider payload")
-        executor = build_xero_executors(
+        executor = xero_executors(
             self.xero, FakeMail(), lambda: "currency-call", broken
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         result = executor(arguments())
         self.assertEqual(result.failure["field"], "unknown")
         self.assertNotIn("secret", str(result))
@@ -1218,9 +1222,9 @@ class ReturnsToCoreTests(unittest.TestCase):
         for name, value in xero_changes.items():
             setattr(xero, name, value)
         self.xero = xero
-        return build_xero_executors(
+        return xero_executors(
             xero, FakeMail(), lambda: "call-1", extractor
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
 
     def test_a_document_that_is_not_an_invoice_stops_the_bill_path(self) -> None:
         capture = self.build(lambda *_: extracted(document_type="delivery_note"))
@@ -1307,7 +1311,7 @@ class ReturnsToCoreTests(unittest.TestCase):
 
     def test_a_dhl_document_never_reaches_the_extractor(self) -> None:
         calls = []
-        capture = build_xero_executors(
+        capture = xero_executors(
             FakeXero(),
             FakeMail(),
             lambda: "call-1",
@@ -1315,7 +1319,7 @@ class ReturnsToCoreTests(unittest.TestCase):
             "",
             "",
             lambda _payload: "dhl_invoice",
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         result = capture(arguments())
         self.assertEqual(
             result.failure["code"], "dhl_import_requires_dedicated_processing"
@@ -1353,8 +1357,9 @@ class NoFallbackTests(unittest.TestCase):
                 lambda: "call",
                 lambda *_: extracted(),
             )
-        offered = {item.capability_id for item in runtime.definitions}
-        self.assertIn(CAPTURE_SUPPLIER_INVOICE, offered)
+        offered = ({item.capability_id for item in runtime.definitions}
+                   | {item.value for item in runtime.actions})
+        self.assertIn(CAPTURE_INVOICE, offered)
         for capability_id in superseded:
             with self.subTest(capability_id=capability_id):
                 self.assertNotIn(capability_id, offered)
@@ -1363,12 +1368,14 @@ class NoFallbackTests(unittest.TestCase):
 
     def test_only_supported_bill_sources_are_registered(self) -> None:
         """Both source adapters use the shared core enforced by test_digikey."""
-        from alx.tools import XERO_DEFINITIONS
+        from alx.tools import XeroAction, xero_definition
 
+        definition = xero_definition(tuple(XeroAction))
         effectful = {
-            item.capability_id
-            for item in XERO_DEFINITIONS
-            if item.side_effect is SideEffect.EFFECTFUL
+            item.value
+            for item in XeroAction
+            if definition.effect_for(xero_arguments(item.value)) is SideEffect.EFFECTFUL
+            and item is not XeroAction.IMPORT_DHL
         }
         # PDF and DigiKey capture feed the same core; delete discards a bill. The D-034 contact
         # rename and D-035 contact creation write a contact, and the D-037
@@ -1377,19 +1384,20 @@ class NoFallbackTests(unittest.TestCase):
         self.assertEqual(
             effectful,
             {
-                CAPTURE_SUPPLIER_INVOICE,
-                "capture_digikey_order_bill",
-                "delete_xero_draft_bill",
-                "update_xero_contact",
-                "create_xero_contact",
-                "invoice_xero_quote",
+                CAPTURE_INVOICE,
+                "capture_digikey_bill",
+                "delete_draft_bill",
+                "update_contact",
+                "create_contact",
+                "invoice_quote",
             },
         )
 
     def test_capture_arms_the_reasoning_ceiling_immediately(self) -> None:
-        from alx.bootstrap.xero import BILL_TASK_CAPABILITIES
+        from alx.bootstrap.xero import BILL_TASK_ACTIONS
+        from alx.tools import XeroAction
 
-        self.assertIn(CAPTURE_SUPPLIER_INVOICE, BILL_TASK_CAPABILITIES)
+        self.assertIn(XeroAction(CAPTURE_INVOICE), BILL_TASK_ACTIONS)
 
     def test_the_live_runtime_supplies_the_llamaparse_extractor(self) -> None:
         source = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
@@ -1426,12 +1434,14 @@ class NoFallbackTests(unittest.TestCase):
 
     def test_capture_without_an_extractor_refuses_rather_than_planning(self) -> None:
         """A misconfigured runtime must not silently fall back to Core steps."""
-        capture = build_xero_executors(
+        capture = xero_executors(
             FakeXero(), FakeMail(), lambda: "call-1"
-        )[CAPTURE_SUPPLIER_INVOICE]
+        )[CAPTURE_INVOICE]
         result = capture(arguments())
         self.assertEqual(result.state, CapabilityResultState.FAILED)
-        self.assertEqual(result.failure["code"], "specialist_unconfigured")
+        # D-074: without the extractor the action is not offered at all.
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertNotIn(CAPTURE_INVOICE, result.failure["reason"])
 
 
 class SupplierCaptureAvailabilityTests(unittest.TestCase):
@@ -1449,12 +1459,11 @@ class SupplierCaptureAvailabilityTests(unittest.TestCase):
 
     def test_a_configured_llamaparse_extractor_exposes_supplier_capture(self) -> None:
         runtime = self._runtime(lambda *_: extracted())
-        self.assertIn(
-            CAPTURE_SUPPLIER_INVOICE,
-            {item.capability_id for item in runtime.definitions},
-        )
-        self.assertIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
-        self.assertIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
+        self.assertIn(CAPTURE_INVOICE, offered_by(runtime))
+        self.assertIn(f"[{CAPTURE_INVOICE}]", runtime.definitions[0].purpose)
+        # Unattended bill writes: the offered capture is exempt from approval.
+        self.assertIn(xero_arguments(CAPTURE_INVOICE),
+                      [dict(item) for item in runtime.policies[XERO].approval_exempt_when])
 
     def test_missing_llamaparse_configuration_does_not_advertise_capture(self) -> None:
         from alx.bootstrap.xero import build_supplier_invoice_extractor
@@ -1465,25 +1474,30 @@ class SupplierCaptureAvailabilityTests(unittest.TestCase):
         )
         self.assertIsNone(extractor)
         runtime = self._runtime(extractor)
-        offered = {item.capability_id for item in runtime.definitions}
-        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, offered)
-        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
-        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
+        self.assert_capture_absent(runtime)
 
     def test_an_absent_extractor_does_not_advertise_supplier_capture(self) -> None:
         runtime = self._runtime()
-        offered = {item.capability_id for item in runtime.definitions}
-        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, offered)
-        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.policies)
-        self.assertNotIn(CAPTURE_SUPPLIER_INVOICE, runtime.executors)
+        self.assert_capture_absent(runtime)
         # LlamaParse gates only ordinary supplier capture. Xero reads and
-        # draft deletion remain independently callable, and DHL has its own
-        # deterministic runtime.
-        for capability_id in (FIND_XERO_BILL, READ_XERO_BILL, DELETE_XERO_DRAFT_BILL):
-            with self.subTest(capability_id=capability_id):
-                self.assertIn(capability_id, offered)
-                self.assertIn(capability_id, runtime.policies)
-                self.assertIn(capability_id, runtime.executors)
+        # draft deletion remain callable, and DHL has its own deterministic
+        # composition.
+        for action in (FIND_BILL, READ_BILL, DELETE_DRAFT_BILL):
+            with self.subTest(action=action):
+                self.assertIn(action, offered_by(runtime))
+                self.assertIn(f"[{action}]", runtime.definitions[0].purpose)
+
+    def assert_capture_absent(self, runtime) -> None:
+        self.assertNotIn(CAPTURE_INVOICE, offered_by(runtime))
+        self.assertNotIn(f"[{CAPTURE_INVOICE}]", runtime.definitions[0].purpose)
+        self.assertNotIn("supplier invoices", runtime.definitions[0].purpose.split(".")[0])
+        result = runtime.executors[XERO](xero_arguments(CAPTURE_INVOICE, arguments()))
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertNotIn(CAPTURE_INVOICE, result.failure["reason"])
+
+
+def offered_by(runtime) -> set[str]:
+    return {item.value for item in runtime.actions}
 
 
 if __name__ == "__main__":

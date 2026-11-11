@@ -48,13 +48,21 @@ from alx.providers.xero import (  # noqa: E402
     XeroConnection,
 )
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
-from alx.tools import (  # noqa: E402
-    CAPTURE_SUPPLIER_INVOICE,
-    SEARCH_XERO_CONTACTS,
-    UPDATE_XERO_CONTACT,
-    XERO_DEFINITIONS,
-    build_xero_executors,
+from alx.tools import XeroAction, build_xero_executors, xero_definition  # noqa: E402
+from xero_actions import (  # noqa: E402
+    CAPTURE_INVOICE,
+    SEARCH_CONTACTS,
+    UPDATE_CONTACT,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+    contract,
+    needs_approval,
 )
+
+XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
 from support import xero_settings  # noqa: E402
 from test_invoice_capture import FakeMail, FakeXero, arguments, extracted  # noqa: E402
 
@@ -120,8 +128,8 @@ class ContactXero(FakeXero):
 class UpdateContactTests(unittest.TestCase):
     def setUp(self) -> None:
         self.xero = ContactXero(izwi())
-        self.update = build_xero_executors(self.xero, FakeMail(), lambda: "call-1")[
-            UPDATE_XERO_CONTACT
+        self.update = xero_executors(self.xero, FakeMail(), lambda: "call-1")[
+            UPDATE_CONTACT
         ]
 
     def test_a_contact_is_renamed_and_read_back(self) -> None:
@@ -166,8 +174,8 @@ class UpdateContactTests(unittest.TestCase):
 
     def test_no_contact_is_created_or_merged(self) -> None:
         self.xero = ContactXero(izwi(), {**izwi(), "ContactID": OTHER_ID, "Name": "Acme"})
-        update = build_xero_executors(self.xero, FakeMail(), lambda: "c")[
-            UPDATE_XERO_CONTACT
+        update = xero_executors(self.xero, FakeMail(), lambda: "c")[
+            UPDATE_CONTACT
         ]
         update({"contact_id": IZWI_ID, "name": LEGAL_NAME})
         self.assertEqual(set(self.xero.records), {IZWI_ID, OTHER_ID})
@@ -311,24 +319,28 @@ class CatalogueTests(unittest.TestCase):
             )
 
     def test_the_capability_is_in_the_authoritative_catalogue(self) -> None:
-        definition = next(
-            item for item in XERO_DEFINITIONS if item.capability_id == UPDATE_XERO_CONTACT
-        )
+        definition = contract(UPDATE_CONTACT)
         self.assertIs(definition.side_effect, SideEffect.EFFECTFUL)
         self.assertEqual(set(definition.input_schema.properties), {"contact_id", "name"})
         self.assertEqual(definition.input_schema.required, ("contact_id", "name"))
         self.assertFalse(definition.input_schema.extra_properties)
         runtime = self.runtime()
-        self.assertIn(definition, runtime.definitions)
-        self.assertIn(UPDATE_XERO_CONTACT, runtime.executors)
+        (offered,) = runtime.definitions
+        self.assertIs(offered.effect_for(xero_arguments(UPDATE_CONTACT)), SideEffect.EFFECTFUL)
+        self.assertIn(f"[{UPDATE_CONTACT}] fields: contact_id, name;", offered.purpose)
+        self.assertIn(XeroAction.UPDATE_CONTACT, runtime.actions)
+        self.assertIn(XERO, runtime.executors)
 
     def test_d034_standing_authority_needs_its_own_permission(self) -> None:
         runtime = self.runtime()
-        policy = runtime.policies[UPDATE_XERO_CONTACT]
-        self.assertFalse(policy.approval_required)
-        self.assertEqual(policy.permission_references, {XERO_CONTACT_RENAME_PERMISSION})
+        policy = runtime.policies[XERO]
+        # D-074: one policy; the rename needs no approval even when bill
+        # writes do, and its own permission stays part of it.
+        self.assertFalse(needs_approval(runtime, UPDATE_CONTACT))
+        self.assertTrue(needs_approval(runtime, CAPTURE_INVOICE))
+        self.assertIn(XERO_CONTACT_RENAME_PERMISSION, policy.permission_references)
         self.assertIn(XERO_CONTACT_RENAME_PERMISSION, runtime.permissions)
-        call = CapabilityCall("c", UPDATE_XERO_CONTACT, {})
+        call = xero_call("c", UPDATE_CONTACT, {})
         now = datetime(2026, 9, 27, tzinfo=UTC)
         gate = SafetyGate(runtime.policies)
         self.assertEqual(
@@ -374,12 +386,12 @@ class ContinuationTests(unittest.TestCase):
             1,
             retention,
         )
-        capture = CapabilityCall("capture-1", CAPTURE_SUPPLIER_INVOICE, arguments())
-        search = CapabilityCall("search-1", SEARCH_XERO_CONTACTS, {"search_term": "Izwi"})
-        rename = CapabilityCall(
-            "rename-1", UPDATE_XERO_CONTACT, {"contact_id": IZWI_ID, "name": LEGAL_NAME}
+        capture = xero_call("capture-1", CAPTURE_INVOICE, arguments())
+        search = xero_call("search-1", SEARCH_CONTACTS, {"search_term": "Izwi"})
+        rename = xero_call(
+            "rename-1", UPDATE_CONTACT, {"contact_id": IZWI_ID, "name": LEGAL_NAME}
         )
-        retry = CapabilityCall("capture-2", CAPTURE_SUPPLIER_INVOICE, arguments())
+        retry = xero_call("capture-2", CAPTURE_INVOICE, arguments())
 
         class Queued:
             def __init__(self, *decisions):

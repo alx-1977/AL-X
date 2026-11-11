@@ -37,7 +37,7 @@ class ServiceFailureTests(unittest.TestCase):
         message = "Service quota exhausted; api_key=sk-test-abcdefghijk " + "quota exceeded " * 200
         from alx.providers.xero import _raise_clean, _validation_messages
         from alx.contracts import XeroAccessError
-        from alx.tools.xero import build_xero_executors, SEARCH_CONTACTS_DEFINITION, SEARCH_XERO_CONTACTS
+        from alx.tools.xero import XERO, XeroAction, build_xero_executors, xero_definition
         response = httpx.Response(400, json={
             "Elements": [{"ValidationErrors": [{"Message": message}]}]})
         with self.assertRaises(XeroAccessError) as caught:
@@ -51,12 +51,12 @@ class ServiceFailureTests(unittest.TestCase):
         account = Mock()
         account.search_contacts.side_effect = error
         broker = CapabilityBroker(
-            CapabilityRegistry((SEARCH_CONTACTS_DEFINITION,)),
-            SafetyGate({SEARCH_XERO_CONTACTS: AuthorityPolicy(frozenset({"xero.read"}))}),
+            CapabilityRegistry((xero_definition((XeroAction.SEARCH_CONTACTS,)),)),
+            SafetyGate({XERO: AuthorityPolicy(frozenset({"xero.read"}))}),
             build_xero_executors(account, Mock(), lambda: "call"))
         now = datetime.now(UTC)
         attempt = broker.dispatch(
-            CapabilityCall("call", SEARCH_XERO_CONTACTS, {"search_term": "supplier"}),
+            CapabilityCall("call", XERO, {"action": "search_contacts", "search_term": "supplier"}),
             AuthorityContext("friedl", frozenset({"xero.read"}), now))
         self.assertEqual(attempt.result.failure["service_message"], error.service_message)
         with tempfile.TemporaryDirectory() as directory:
@@ -89,7 +89,7 @@ class ServiceFailureTests(unittest.TestCase):
     def test_xero_refusal_keeps_the_sanitized_service_message(self):
         from alx.providers.xero import _raise_clean, _validation_messages
         from alx.contracts import XeroAccessError
-        from alx.tools.xero import build_xero_executors, SEARCH_XERO_CONTACTS
+        from alx.tools.xero import XERO, build_xero_executors
         message = "Due Date is required; api_key=private-key"
         response = Mock()
         response.json.return_value = {"Elements": [{"ValidationErrors": [{"Message": message}]}]}
@@ -97,8 +97,8 @@ class ServiceFailureTests(unittest.TestCase):
             _raise_clean("request_rejected", "; ".join(_validation_messages(response)))
         account = Mock()
         account.search_contacts.side_effect = caught.exception
-        result = build_xero_executors(account, Mock(), lambda: "call")[SEARCH_XERO_CONTACTS](
-            {"search_term": "supplier"})
+        result = build_xero_executors(account, Mock(), lambda: "call")[XERO](
+            {"action": "search_contacts", "search_term": "supplier"})
         self.assertEqual(result.failure["service_message"],
                          "Due Date is required; api_key=[masked]")
 

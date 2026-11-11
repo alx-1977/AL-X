@@ -27,6 +27,7 @@ from alx.providers.llamaparse import LlamaParseExtractor
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.tools.documents import DEFINITION, build_document_executors
 from alx.tools.dhl import build_dhl_executors
+from alx.contracts import XeroAction
 from alx.tools.particle import build_particle_executors
 from alx.tools.pull_request_checks import build_pull_request_checks_executors
 from alx.tools.readers import build_reader_executors
@@ -108,7 +109,7 @@ def test_dhl_provider_failures_keep_details_and_classified_documents(error_type)
     else:
         analyzer.classify.side_effect = error
     result = build_dhl_executors(mail, analyzer, Mock(), lambda: "call", "1", "2", "3")[
-        "process_dhl_import"]({"documents": [SOURCE]})
+        XeroAction.IMPORT_DHL]({"documents": [SOURCE]})
     assert result.failure == {"code": error.code, **failure_details(error)}
     if error_type is DhlDocumentError:
         assert result.values["documents"] == ({"attachment_id": "3", "kind": "unreadable"},)

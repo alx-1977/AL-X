@@ -11,10 +11,9 @@ from alx.contracts import (
     CapabilityDefinition, CapabilityResult, CapabilityResultState, ContentOrigin,
     RetentionPolicy, SideEffect, StructuredSchema, ValueKind,
 )
+from alx.contracts.xero import XERO, XeroAction
 
 
-LOOKUP_DIGIKEY_ORDER = "lookup_digikey_order"
-CAPTURE_DIGIKEY_ORDER_BILL = "capture_digikey_order_bill"
 FAILURE_CODES = (
     "arguments_unusable", "not_configured", "authentication_failed", "rate_limited",
     "provider_failed", "connection_failed", "response_invalid", "order_not_found",
@@ -49,8 +48,9 @@ ORDER_INPUT = StructuredSchema(
     ValueKind.OBJECT, {"sales_order_number": _STRING, "invoice_number": _STRING},
     extra_properties=False,
 )
+# The `xero` lookup_digikey action's own contract (D-074); nothing registers it.
 LOOKUP_DEFINITION = CapabilityDefinition(
-    LOOKUP_DIGIKEY_ORDER,
+    XeroAction.LOOKUP_DIGIKEY.value,
     "Read a DigiKey order by exactly one sales_order_number or invoice_number. Returns all lines, invoices and shipping facts; absent shipping/tax charges are zero. Invoice search scans paginated account history and sales-order details and refuses ambiguous matches.",
     ORDER_INPUT, ORDER_SCHEMA, SideEffect.NONE, FAILURE_CODES,
 )
@@ -67,25 +67,27 @@ def order_arguments(arguments: Mapping[str, Any]) -> dict[str, str]:
     return supplied
 
 
-def build_digikey_executors(provider: Any, call_id_source: Callable[[], str]):
+def build_digikey_executors(order_lookup: Callable[..., Mapping[str, Any]],
+                            call_id_source: Callable[[], str]):
+    """The DigiKey order read, one action of the `xero` capability (D-074)."""
     def lookup(arguments: Mapping[str, Any]) -> CapabilityResult:
         try:
             selected = order_arguments(arguments)
         except ValueError:
-            return CapabilityResult(call_id_source(), LOOKUP_DIGIKEY_ORDER,
+            return CapabilityResult(call_id_source(), XERO,
                                     CapabilityResultState.FAILED, failure={"code": "arguments_unusable"})
         try:
-            values = provider.lookup(**selected)
+            values = order_lookup(**selected)
         except Exception as error:
             code = getattr(error, "code", "provider_failed")
-            return CapabilityResult(call_id_source(), LOOKUP_DIGIKEY_ORDER,
+            return CapabilityResult(call_id_source(), XERO,
                                     CapabilityResultState.FAILED,
                                     failure={"code": code if code in FAILURE_CODES else "provider_failed"})
         return CapabilityResult(
-            call_id_source(), LOOKUP_DIGIKEY_ORDER, CapabilityResultState.SUCCEEDED, values,
+            call_id_source(), XERO, CapabilityResultState.SUCCEEDED, values,
             provenance=RetentionPolicy().non_mail(ContentOrigin.EXTERNAL, datetime.now(UTC)),
         )
-    return {LOOKUP_DIGIKEY_ORDER: lookup}
+    return {XeroAction.LOOKUP_DIGIKEY: lookup}
 
 
 def bill_invoice(order: Mapping[str, Any], *, rounding_adjustment: bool = False) -> tuple[dict[str, Any], list[dict[str, str]], list[str]]:

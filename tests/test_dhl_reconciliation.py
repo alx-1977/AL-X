@@ -26,7 +26,7 @@ from alx.contracts import (  # noqa: E402
 from alx.providers import DhlImportAnalyzerAdapter  # noqa: E402
 from alx.providers.dhl import _classify_customs_document  # noqa: E402
 from alx.tools import (  # noqa: E402
-    PROCESS_DHL_IMPORT,
+    XeroAction,
     build_dhl_executors,
 )
 from alx.tools.dhl import DEFINITION as DHL_DEFINITION  # noqa: E402
@@ -1368,7 +1368,7 @@ def executor_for(mail, xero, supplier_name: str = "DHL EXPRESS", processed_mailb
         supplier_name,
         clock=lambda: datetime(2026, 8, 31, tzinfo=UTC),
         processed_mailbox=processed_mailbox,
-    )[PROCESS_DHL_IMPORT]
+    )[XeroAction.IMPORT_DHL]
 
 
 class DhlImportLifecycleTests(unittest.TestCase):
@@ -1687,7 +1687,7 @@ class DhlImportLifecycleTests(unittest.TestCase):
             "425",
             "DHL EXPRESS",
             clock=lambda: datetime(2026, 8, 31, tzinfo=UTC),
-        )[PROCESS_DHL_IMPORT]
+        )[XeroAction.IMPORT_DHL]
         result = executor(
             {
                 "documents": [
@@ -2173,7 +2173,7 @@ class DhlImportLifecycleTests(unittest.TestCase):
 
 
 class DeclaredFailureCodeTests(unittest.TestCase):
-    """Every DHL document failure is one process_dhl_import declares."""
+    """Every DHL document failure is one the xero import_dhl action declares."""
 
     def test_every_document_failure_is_a_declared_capability_failure(self) -> None:
         for code in DHL_DOCUMENT_FAILURES:
@@ -2276,7 +2276,7 @@ class ConfiguredSupplierAndAccountsTests(unittest.TestCase):
         self.assertEqual(writes, [])
 
     def test_an_account_absent_from_the_organisation_refuses(self) -> None:
-        """The same live validation capture_supplier_invoice applies."""
+        """The same live validation supplier invoice capture applies."""
         self.xero.list_accounts = lambda: (
             {"Code": "820", "Status": "ACTIVE"},
             {"Code": "426", "Status": "ACTIVE"},

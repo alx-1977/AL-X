@@ -37,7 +37,7 @@ from alx.contracts import (  # noqa: E402
 from alx.core.model_reasoner import _context_payload  # noqa: E402
 
 NOW = datetime(2026, 9, 11, 21, 30, tzinfo=UTC)
-ARGUMENTS = {"invoice_id": "5181fdd0-21d1-44a8-8db2-755630f5d883"}
+ARGUMENTS = {"action": "delete_draft_bill", "invoice_id": "5181fdd0-21d1-44a8-8db2-755630f5d883"}
 
 
 def approval(
@@ -45,7 +45,7 @@ def approval(
 ) -> Approval:
     return Approval(
         approval_id,
-        ApprovalScope("delete_xero_draft_bill", ARGUMENTS),
+        ApprovalScope("xero", ARGUMENTS),
         ApprovalLifecycle.GRANTED,
         expires_at,
     )
@@ -77,7 +77,7 @@ class TheExpiryIsProjected(unittest.TestCase):
     def test_the_existing_fields_are_unchanged(self) -> None:
         entry = projected(approval(expires_at=NOW))[0]
         self.assertEqual(entry["id"], "approval-1")
-        self.assertEqual(entry["capability_id"], "delete_xero_draft_bill")
+        self.assertEqual(entry["capability_id"], "xero")
         self.assertEqual(entry["arguments"], ARGUMENTS)
         self.assertEqual(entry["lifecycle"], "granted")
 
@@ -138,7 +138,7 @@ class EnforcementIsUnchanged(unittest.TestCase):
 
     def _call(self, approval_id: str = "approval-1") -> CapabilityCall:
         return CapabilityCall(
-            "call-1", "delete_xero_draft_bill", ARGUMENTS, approval_id,
+            "call-1", "xero", ARGUMENTS, approval_id,
         )
 
     def test_an_expired_approval_still_fails_closed(self) -> None:

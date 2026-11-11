@@ -10,19 +10,11 @@ from alx.tools.mail import (
     build_send_executors,
 )
 from alx.tools.xero import (
-    DELETE_XERO_DRAFT_BILL,
-    CAPTURE_SUPPLIER_INVOICE,
-    DEFINITIONS as XERO_DEFINITIONS,
-    FIND_XERO_BILL,
-    LIST_XERO_ACCOUNTS,
-    LIST_XERO_TAX_RATES,
-    READ_XERO_BILL,
-    SEARCH_XERO_CONTACTS,
-    UPDATE_XERO_CONTACT,
-    CREATE_XERO_CONTACT,
-    FIND_XERO_QUOTES,
-    INVOICE_XERO_QUOTE,
+    XERO,
+    XeroAction,
     build_xero_executors,
+    offered_xero_actions,
+    xero_definition,
 )
 from alx.tools.continuity import (
     DEFINITIONS as CONTINUITY_DEFINITIONS,
@@ -60,11 +52,7 @@ from alx.tools.research import (
     DEFINITION as RESEARCH_DEFINITION,
     build_research_executors,
 )
-from alx.tools.dhl import (
-    PROCESS_DHL_IMPORT,
-    DEFINITIONS as DHL_DEFINITIONS,
-    build_dhl_executors,
-)
+from alx.tools.dhl import build_dhl_executors
 
 from alx.tools.sandbox import (
     DEFINITION as SANDBOX_DEFINITION,
@@ -156,20 +144,10 @@ __all__ = [
     "SEND_MAIL_REPLY",
     "build_mail_executors",
     "build_send_executors",
-    "DELETE_XERO_DRAFT_BILL",
-    "CAPTURE_SUPPLIER_INVOICE",
-    "PROCESS_DHL_IMPORT",
-    "XERO_DEFINITIONS",
-    "FIND_XERO_BILL",
-    "LIST_XERO_ACCOUNTS",
-    "LIST_XERO_TAX_RATES",
-    "READ_XERO_BILL",
-    "SEARCH_XERO_CONTACTS",
-    "UPDATE_XERO_CONTACT",
-    "CREATE_XERO_CONTACT",
-    "FIND_XERO_QUOTES",
-    "INVOICE_XERO_QUOTE",
+    "XERO",
+    "XeroAction",
     "build_xero_executors",
-    "DHL_DEFINITIONS",
+    "offered_xero_actions",
+    "xero_definition",
     "build_dhl_executors",
 ]

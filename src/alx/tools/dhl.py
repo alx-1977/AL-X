@@ -47,10 +47,9 @@ from alx.contracts import (
     xero_date,
 )
 from alx.contracts.provenance import RetentionPolicy
+from alx.contracts.xero import XERO, XeroAction
 from alx.specialists import resolve_supplier
 
-
-PROCESS_DHL_IMPORT = "process_dhl_import"
 
 TOLERANCE = Decimal("0.01")
 
@@ -87,8 +86,9 @@ _CLASSIFIED = StructuredSchema(
     extra_properties=False,
 )
 
+# The `xero` import_dhl action's own contract (D-074); nothing registers it.
 DEFINITION = CapabilityDefinition(
-    PROCESS_DHL_IMPORT,
+    XeroAction.IMPORT_DHL.value,
     "Process the exact DHL documents supplied: customs evidence and its invoice form one two-stage import; a reconciled duty-tax-paid invoice posts directly; freight returns unposted. The branch follows from document evidence. A whole DHL notification may be supplied: documents that are not DHL evidence, such as the air waybill, the shipper's commercial invoice or a release notice, are left unused, and documents lists what each was read as. A completed stage names in source_mail the emails it processed, which may then be filed; after a provisional draft each is first flagged orange, and once the bill is authorised customs_mail names the documents emails whose orange flag may be cleared.",
     StructuredSchema(
         ValueKind.OBJECT,
@@ -146,7 +146,6 @@ DEFINITION = CapabilityDefinition(
     ),
 )
 
-DEFINITIONS = (DEFINITION,)
 
 
 def _required(values: Mapping[str, Any], name: str) -> str:
@@ -203,7 +202,7 @@ def build_dhl_executors(
     ) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
-            PROCESS_DHL_IMPORT,
+            XERO,
             CapabilityResultState.FAILED,
             {"documents": tuple(documents)} if documents else {},
             failure={"code": code, **(failure_details(error) if error else {})},
@@ -220,7 +219,7 @@ def build_dhl_executors(
     ) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
-            PROCESS_DHL_IMPORT,
+            XERO,
             CapabilityResultState.SUCCEEDED,
             {
                 "completed": False,
@@ -244,7 +243,7 @@ def build_dhl_executors(
 
         D-021 requires the configured supplier and the three account codes to
         be verified against the live organisation before any write, the same
-        validation `capture_supplier_invoice` applies to its own coding.
+        validation supplier invoice capture applies to its own coding.
         """
         accounts = {
             str(item.get("Code") or ""): item
@@ -683,7 +682,7 @@ def build_dhl_executors(
         steps.append("verified")
         return CapabilityResult(
             call_id_source(),
-            PROCESS_DHL_IMPORT,
+            XERO,
             CapabilityResultState.SUCCEEDED,
             {
                 # The stage succeeded, and the shipment is not finished: the
@@ -1003,7 +1002,7 @@ def build_dhl_executors(
         steps.append("verified")
         return CapabilityResult(
             call_id_source(),
-            PROCESS_DHL_IMPORT,
+            XERO,
             CapabilityResultState.SUCCEEDED,
             {
                 "completed": True,
@@ -1270,7 +1269,7 @@ def build_dhl_executors(
         steps.append("verified")
         return CapabilityResult(
             call_id_source(),
-            PROCESS_DHL_IMPORT,
+            XERO,
             CapabilityResultState.SUCCEEDED,
             {
                 "completed": True,
@@ -1444,4 +1443,4 @@ def build_dhl_executors(
             return invoice_stage(contact_id, invoices[0], references)
         return customs_stage(contact_id, customs, references)
 
-    return {PROCESS_DHL_IMPORT: process}
+    return {XeroAction.IMPORT_DHL: process}

@@ -3841,9 +3841,14 @@ class CoreAgent:
         # approval can it know that a particular one does not. Without that set
         # nothing is stripped from an effectful call, so a Core built without
         # it behaves exactly as before.
+        # D-074: an action its policy exempts needs no approval either, so
+        # a capability with only some actions under approval treats the
+        # others as approval-free.
         needs_approval = (
             not self._approval_free_capabilities
             or call.capability_id not in self._approval_free_capabilities
+        ) and not arguments_match(
+            self._approval_exempt_when.get(call.capability_id, ()), call.arguments
         )
         if definition.effect_for(call.arguments) is SideEffect.EFFECTFUL and needs_approval:
             return decision

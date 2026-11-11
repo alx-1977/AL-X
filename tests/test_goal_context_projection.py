@@ -39,10 +39,10 @@ from alx.contracts.result_summary import RESULT_LIMIT  # noqa: E402
 
 
 def attempt(index: int, *, failed: bool = False) -> CapabilityAttempt:
-    call = CapabilityCall(f"call-{index}", "list_xero_accounts", {})
+    call = CapabilityCall(f"call-{index}", "xero", {"action": "list_accounts"})
     result = CapabilityResult(
         f"call-{index}",
-        "list_xero_accounts",
+        "xero",
         CapabilityResultState.FAILED if failed else CapabilityResultState.SUCCEEDED,
         {} if failed else {"accounts": [{"code": str(n)} for n in range(40)]},
         failure={"code": "rate_limited"} if failed else None,
@@ -132,7 +132,7 @@ class ProjectionTests(unittest.TestCase):
     def test_older_attempts_become_a_compact_summary(self) -> None:
         summary = self.payload["older_attempts"]
         self.assertEqual(summary["count"], 65 - VERBATIM_ATTEMPTS)
-        self.assertIn("list_xero_accounts:succeeded", summary["outcomes"])
+        self.assertIn("xero:succeeded", summary["outcomes"])
         self.assertIn("rate_limited", summary["failure_codes"])
 
     def test_older_failures_are_never_silently_dropped(self) -> None:

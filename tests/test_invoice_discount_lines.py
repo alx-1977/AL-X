@@ -21,8 +21,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.providers.llamaparse import _invoice_fields  # noqa: E402
 from alx.specialists.invoice import ANSWER_SCHEMA, checked_invoice  # noqa: E402
-from alx.tools import CAPTURE_SUPPLIER_INVOICE, build_xero_executors  # noqa: E402
+from alx.tools import (  # noqa: E402
+    build_xero_executors  # noqa: E402,
+)
 from test_invoice_capture import FakeMail, FakeXero, arguments  # noqa: E402
+from xero_actions import (  # noqa: E402
+    CAPTURE_INVOICE,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+)
 
 
 def greptile(**overrides) -> dict:
@@ -144,9 +154,9 @@ class CaptureTests(unittest.TestCase):
         self.xero.history = ()
         self.xero.accounts = ({"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},)
         fields = checked_invoice(greptile(**overrides))
-        return build_xero_executors(
+        return xero_executors(
             self.xero, FakeMail(), lambda: "call-1", lambda *_: fields, "310", "INPUT3",
-        )[CAPTURE_SUPPLIER_INVOICE](arguments())
+        )[CAPTURE_INVOICE](arguments())
 
     def test_the_greptile_bill_carries_each_deduction_as_a_negative_line(self) -> None:
         result = self.capture()
@@ -168,9 +178,9 @@ class CaptureTests(unittest.TestCase):
         self.xero.history = ()
         self.xero.accounts = ({"Code": "310", "Status": "ACTIVE", "TaxType": "NONE"},)
         fields = {**checked_invoice(greptile()), "adjustments": (), "bill_total": ""}
-        result = build_xero_executors(
+        result = xero_executors(
             self.xero, FakeMail(), lambda: "call-1", lambda *_: fields, "310", "INPUT3",
-        )[CAPTURE_SUPPLIER_INVOICE](arguments())
+        )[CAPTURE_INVOICE](arguments())
         self.assertEqual(result.failure["code"], "source_mismatch")
         self.assertIn("193.00", result.failure["service_message"])
         self.assertIn("96.50", result.failure["service_message"])

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Protocol, Sequence
 
 
-# Every code a DHL document can fail with. process_dhl_import declares these
+# Every code a DHL document can fail with. The xero import_dhl action declares these
 # as its possible failures, so this is the one list both sides read. A code
 # missing from it reached the broker undeclared and was rewritten to
 # result_failure_invalid, which hid what the documents actually said.
@@ -45,7 +45,7 @@ class DhlDocumentError(Exception):
     def __init__(self, code: str) -> None:
         if not isinstance(code, str) or not code.strip():
             raise ValueError("code must not be blank")
-        # Not ValueError: process_dhl_import reads that as unusable
+        # Not ValueError: the xero import_dhl action reads that as unusable
         # arguments, which would hide an undeclared code as the caller's fault.
         if code not in DHL_DOCUMENT_FAILURES:
             raise LookupError(f"undeclared DHL document failure: {code}")

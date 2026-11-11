@@ -1,4 +1,4 @@
-"""Language-blind Xero primitives for supplier accounts-payable bills."""
+"""Language-blind accounting primitives: one `xero` capability with an action per job (D-074)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from alx.contracts.diagnostics import failure_details
 import hashlib
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
@@ -29,28 +30,22 @@ from alx.contracts import (
     XeroAccountingAccount,
     xero_date,
 )
+from alx.contracts.xero import XERO, XeroAction
 from alx.specialists import checked_invoice, is_supplier_bill, prior_coding, resolve_supplier
-from alx.tools.digikey import CAPTURE_DIGIKEY_ORDER_BILL, FAILURE_CODES, ORDER_INPUT
+from alx.tools.dhl import DEFINITION as DHL_IMPORT_DEFINITION
+from alx.tools.digikey import (
+    FAILURE_CODES, LOOKUP_DEFINITION as DIGIKEY_LOOKUP_DEFINITION, ORDER_INPUT,
+    build_digikey_executors,
+)
 
 
-SEARCH_XERO_CONTACTS = "search_xero_contacts"
-LIST_XERO_ACCOUNTS = "list_xero_accounts"
-LIST_XERO_TAX_RATES = "list_xero_tax_rates"
-FIND_XERO_BILL = "find_xero_bill"
-READ_XERO_BILL = "read_xero_bill"
-CAPTURE_SUPPLIER_INVOICE = "capture_supplier_invoice"
-DELETE_XERO_DRAFT_BILL = "delete_xero_draft_bill"
-UPDATE_XERO_CONTACT = "update_xero_contact"
-CREATE_XERO_CONTACT = "create_xero_contact"
-FIND_XERO_QUOTES = "find_xero_quotes"
-INVOICE_XERO_QUOTE = "invoice_xero_quote"
 
 # Xero's documented maximum length for a contact name.
 _CONTACT_NAME_LIMIT = 255
 
 _FAILURES = (
     "arguments_unusable",
-    "specialist_unconfigured",
+    "result_output_invalid",
     "connection_failed",
     "not_connected",
     "token_unreadable",
@@ -155,7 +150,7 @@ _REQUIRED_ATTACHMENT = _object(
 )
 
 SEARCH_CONTACTS_DEFINITION = CapabilityDefinition(
-    SEARCH_XERO_CONTACTS,
+    XeroAction.SEARCH_CONTACTS.value,
     "Search existing contacts in the configured Xero organisation without creating or changing one.",
     _object({"search_term": _STRING}, ("search_term",)),
     _object({"contacts": _ARRAY_OBJECT}, ("contacts",)),
@@ -164,7 +159,7 @@ SEARCH_CONTACTS_DEFINITION = CapabilityDefinition(
 )
 
 LIST_ACCOUNTS_DEFINITION = CapabilityDefinition(
-    LIST_XERO_ACCOUNTS,
+    XeroAction.LIST_ACCOUNTS.value,
     "List the configured Xero chart-of-accounts entries without changing them.",
     _object({}, ()),
     _object({"accounts": _ARRAY_OBJECT}, ("accounts",)),
@@ -173,7 +168,7 @@ LIST_ACCOUNTS_DEFINITION = CapabilityDefinition(
 )
 
 LIST_TAX_RATES_DEFINITION = CapabilityDefinition(
-    LIST_XERO_TAX_RATES,
+    XeroAction.LIST_TAX_RATES.value,
     "List the configured Xero tax rates without changing them.",
     _object({}, ()),
     _object({"tax_rates": _ARRAY_OBJECT}, ("tax_rates",)),
@@ -182,8 +177,8 @@ LIST_TAX_RATES_DEFINITION = CapabilityDefinition(
 )
 
 FIND_BILL_DEFINITION = CapabilityDefinition(
-    FIND_XERO_BILL,
-    "Find an accounts-payable bill by its exact supplier invoice number without changing it. capture_supplier_invoice runs its own duplicate check, so this is not a step before capturing.",
+    XeroAction.FIND_BILL.value,
+    "Find an accounts-payable bill by its exact supplier invoice number without changing it. capture_invoice runs its own duplicate check, so this is not a step before capturing.",
     _object(
         {"invoice_number": _STRING, "contact_id": _STRING},
         ("invoice_number",),
@@ -194,7 +189,7 @@ FIND_BILL_DEFINITION = CapabilityDefinition(
 )
 
 READ_BILL_DEFINITION = CapabilityDefinition(
-    READ_XERO_BILL,
+    XeroAction.READ_BILL.value,
     "Read one exact Xero accounts-payable bill by Xero identifier without changing it.",
     _object({"invoice_id": _STRING}, ("invoice_id",)),
     _BILL_RESULT,
@@ -214,7 +209,7 @@ _SOURCE_DOCUMENT = _object(
 )
 
 CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
-    CAPTURE_SUPPLIER_INVOICE,
+    XeroAction.CAPTURE_INVOICE.value,
     "Read one identified mail attachment as a supplier invoice, resolve its supplier and accounting treatment from this organisation's own records, and commit the bill when every one of those is unambiguous; otherwise return what is unresolved without acting. "
     "Before writing it checks the invoice number itself: under this supplier, a bill already beyond draft returns as duplicate_bill and a matching draft is resumed; under any other contact it returns as invoice_number_under_other_contact. No separate lookup is needed first. "
     "authorise true finishes the bill AUTHORISED, which is what processing a supplier invoice means; false leaves an unfinished DRAFT, for when you have a reason the bill must not be authorised yet. Both are covered by this capability's one authority. "
@@ -266,7 +261,7 @@ CAPTURE_INVOICE_DEFINITION = CapabilityDefinition(
 )
 
 CAPTURE_DIGIKEY_DEFINITION = CapabilityDefinition(
-    CAPTURE_DIGIKEY_ORDER_BILL,
+    XeroAction.CAPTURE_DIGIKEY_BILL.value,
     "Read a DigiKey order by exactly one sales_order_number or invoice_number and feed its structured invoice values into the supplier-bill core. Uses the same supplier/account/tax resolution, duplicate checks and commit as supplier invoice capture. Requires one fully shipped invoice and reconciled amounts; returns needs_judgment without writing when allocation or resolution is unclear. No PDF attachment. authorise defaults to true. rounding_adjustment defaults to false; true permits one signed line only for proven cent rounding of submitted prices, bounded by 0.005 per merchandise line and at most 0.05.",
     StructuredSchema(ValueKind.OBJECT,
                      {**ORDER_INPUT.properties, "authorise": _BOOLEAN, "rounding_adjustment": _BOOLEAN},
@@ -277,7 +272,7 @@ CAPTURE_DIGIKEY_DEFINITION = CapabilityDefinition(
 )
 
 DELETE_DRAFT_DEFINITION = CapabilityDefinition(
-    DELETE_XERO_DRAFT_BILL,
+    XeroAction.DELETE_DRAFT_BILL.value,
     "Discard one exact DRAFT accounts-payable bill after verifying its invoice number and total; refuse a bill that is not a draft.",
     _object(
         {
@@ -293,7 +288,7 @@ DELETE_DRAFT_DEFINITION = CapabilityDefinition(
 )
 
 UPDATE_CONTACT_DEFINITION = CapabilityDefinition(
-    UPDATE_XERO_CONTACT,
+    XeroAction.UPDATE_CONTACT.value,
     "Rename one existing Xero contact, by exact ContactID, to the exact name given, changing nothing else, and read it back. Refuses an unknown contact or a name another contact, archived included, holds.",
     _object({"contact_id": _STRING, "name": _STRING}, ("contact_id", "name")),
     _object(
@@ -311,7 +306,7 @@ UPDATE_CONTACT_DEFINITION = CapabilityDefinition(
 )
 
 CREATE_CONTACT_DEFINITION = CapabilityDefinition(
-    CREATE_XERO_CONTACT,
+    XeroAction.CREATE_CONTACT.value,
     "Create one Xero contact with only the exact name given, and read it back. Refuses a name any contact, archived included, holds. Returns partial with contact_creation_unconfirmed when the create was sent but could not be confirmed: search before acting again.",
     _object({"name": _STRING}, ("name",)),
     _object(
@@ -343,7 +338,7 @@ _QUOTE_SUMMARY = _object(
 )
 
 FIND_QUOTES_DEFINITION = CapabilityDefinition(
-    FIND_XERO_QUOTES,
+    XeroAction.FIND_QUOTES.value,
     "List one customer's live Xero sales quotes by exact ContactID, newest first, with number, status, date, currency, total, reference and title. Reads only.",
     _object({"contact_id": _STRING}, ("contact_id",)),
     _object(
@@ -358,7 +353,7 @@ FIND_QUOTES_DEFINITION = CapabilityDefinition(
 # to a sales invoice. Which quote the PO accepts, and what its PO number is,
 # are AL/X's judgement from the PO; this performs only the decided steps.
 INVOICE_QUOTE_DEFINITION = CapabilityDefinition(
-    INVOICE_XERO_QUOTE,
+    XeroAction.INVOICE_QUOTE.value,
     "Invoice one Xero sales quote as a DRAFT sales invoice for the purchase order that accepts it. po_total is the total the PO itself states, read from the PO document with read_mail_document, never taken from a filename or the quote; if you cannot read the PO, ask Friedl instead of calling this. A quote whose total differs from po_total returns unposted before anything is written. Otherwise it marks a SENT quote ACCEPTED, creates the draft invoice with the quote's customer, currency and lines and the PO number as its reference, attaches the PO document from mail verified byte for byte, checks the invoice reads back with the quote's totals, then marks the quote INVOICED. Never approves or sends the invoice. A quote in DRAFT or DECLINED, an existing invoice for that PO that differs, or totals that disagree return to you unposted. Rerunning resumes a matching draft rather than creating another.",
     _object(
         {
@@ -396,20 +391,124 @@ INVOICE_QUOTE_DEFINITION = CapabilityDefinition(
     _FAILURES + ("quote_not_found",),
 )
 
-DEFINITIONS = (
-    CAPTURE_DIGIKEY_DEFINITION,
-    SEARCH_CONTACTS_DEFINITION,
-    LIST_ACCOUNTS_DEFINITION,
-    LIST_TAX_RATES_DEFINITION,
-    FIND_BILL_DEFINITION,
-    READ_BILL_DEFINITION,
-    CAPTURE_INVOICE_DEFINITION,
-    DELETE_DRAFT_DEFINITION,
-    UPDATE_CONTACT_DEFINITION,
-    CREATE_CONTACT_DEFINITION,
-    FIND_QUOTES_DEFINITION,
-    INVOICE_QUOTE_DEFINITION,
+# Each action keeps its own input and result contract; the capability is one
+# (D-074). These are contracts, not capabilities: nothing registers them.
+CONTRACTS = {
+    XeroAction.SEARCH_CONTACTS: SEARCH_CONTACTS_DEFINITION,
+    XeroAction.CREATE_CONTACT: CREATE_CONTACT_DEFINITION,
+    XeroAction.UPDATE_CONTACT: UPDATE_CONTACT_DEFINITION,
+    XeroAction.LIST_ACCOUNTS: LIST_ACCOUNTS_DEFINITION,
+    XeroAction.LIST_TAX_RATES: LIST_TAX_RATES_DEFINITION,
+    XeroAction.FIND_BILL: FIND_BILL_DEFINITION,
+    XeroAction.READ_BILL: READ_BILL_DEFINITION,
+    XeroAction.DELETE_DRAFT_BILL: DELETE_DRAFT_DEFINITION,
+    XeroAction.CAPTURE_INVOICE: CAPTURE_INVOICE_DEFINITION,
+    XeroAction.CAPTURE_DIGIKEY_BILL: CAPTURE_DIGIKEY_DEFINITION,
+    XeroAction.IMPORT_DHL: DHL_IMPORT_DEFINITION,
+    XeroAction.FIND_QUOTES: FIND_QUOTES_DEFINITION,
+    XeroAction.INVOICE_QUOTE: INVOICE_QUOTE_DEFINITION,
+    XeroAction.LOOKUP_DIGIKEY: DIGIKEY_LOOKUP_DEFINITION,
+}
+# What changes nothing: the reads need no active goal and no approval.
+READ_ACTIONS = (
+    XeroAction.SEARCH_CONTACTS, XeroAction.LIST_ACCOUNTS, XeroAction.LIST_TAX_RATES,
+    XeroAction.FIND_BILL, XeroAction.READ_BILL, XeroAction.FIND_QUOTES,
+    XeroAction.LOOKUP_DIGIKEY,
 )
+
+
+def offered_xero_actions(*, capture: bool, digikey: bool, dhl: bool) -> tuple[XeroAction, ...]:
+    """The actions this runtime can actually perform, in the contracts' order.
+
+    Capture needs the LlamaParse extractor, the DigiKey actions the DigiKey
+    order read, and the DHL import its own composition. An action whose
+    dependency is absent is not offered, so the catalogue never promises a
+    call that would fail before doing any work.
+    """
+    absent = set()
+    if not capture:
+        absent.add(XeroAction.CAPTURE_INVOICE)
+    if not digikey:
+        absent.update((XeroAction.CAPTURE_DIGIKEY_BILL, XeroAction.LOOKUP_DIGIKEY))
+    if not dhl:
+        absent.add(XeroAction.IMPORT_DHL)
+    return tuple(item for item in CONTRACTS if item not in absent)
+
+
+def _union(schemas: Sequence[StructuredSchema]) -> dict[str, StructuredSchema]:
+    """Every field any offered action takes or returns.
+
+    Each action's own contract is checked by the executor; this union only has
+    to admit what those contracts admit. A field two actions shape differently
+    is admitted as any structured value.
+    """
+    fields: dict[str, StructuredSchema] = {}
+    for schema in schemas:
+        for name, field in schema.properties.items():
+            if name in fields and fields[name] != field:
+                fields[name] = StructuredSchema(ValueKind.ANY)
+            else:
+                fields.setdefault(name, field)
+    return fields
+
+
+def _listed(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def xero_definition(offered: Sequence[XeroAction]) -> CapabilityDefinition:
+    """The one `xero` capability, describing only the offered actions (D-074).
+
+    Its first sentence is her always-present catalogue line, so it names
+    every offered job and nothing that is absent.
+    """
+    offered = tuple(item for item in CONTRACTS if item in set(offered))
+    looked_up = ["contacts", "accounts", "tax rates", "bills", "quotes"]
+    if XeroAction.LOOKUP_DIGIKEY in offered:
+        looked_up.append("DigiKey orders")
+    billed = [label for action, label in (
+        (XeroAction.CAPTURE_INVOICE, "supplier invoices"),
+        (XeroAction.CAPTURE_DIGIKEY_BILL, "DigiKey orders"),
+        (XeroAction.IMPORT_DHL, "DHL imports"),
+    ) if action in offered]
+    line = (
+        f"Xero accounting: read {_listed(looked_up)}, "
+        + (f"bill {_listed(billed)}, " if billed else "")
+        + "delete draft bills, add/rename contacts, invoice quotes."
+    )
+    contracts = [CONTRACTS[item] for item in offered]
+    return CapabilityDefinition(
+        XERO,
+        line
+        + " action names which. "
+        + ", ".join(item.value for item in offered if item in READ_ACTIONS)
+        + " change nothing; every other action writes to Xero, and whether one needs "
+        "Friedl's approval follows his settings for that kind of write. The result "
+        "carries the action's own fields. Each action below lists its fields and the "
+        "ones it requires. "
+        + " ".join(
+            f"[{name.value}] fields: {', '.join(contract.input_schema.properties) or 'none'}; "
+            f"required: {', '.join(contract.input_schema.required) or 'none'}. {contract.purpose}"
+            for name, contract in zip(offered, contracts)
+        ),
+        StructuredSchema(
+            ValueKind.OBJECT,
+            {"action": _STRING, **_union([item.input_schema for item in contracts])},
+            ("action",),
+            extra_properties=False,
+        ),
+        StructuredSchema(
+            ValueKind.OBJECT,
+            _union([item.output_schema for item in contracts]),
+            extra_properties=False,
+        ),
+        SideEffect.EFFECTFUL,
+        tuple(dict.fromkeys(code for item in contracts for code in item.possible_failure_codes)),
+        trace_fields=("action",),
+        read_only_when=tuple(
+            (("action", item.value),) for item in offered if item in READ_ACTIONS
+        ),
+    )
 
 
 def _required(arguments: StructuredData, name: str) -> str:
@@ -1093,7 +1192,13 @@ def build_xero_executors(
     today: Callable[[], date] = date.today,
     digikey_lookup: Callable[..., Mapping[str, Any]] | None = None,
     draft_cleanup_permitted: bool = False,
+    dhl_import: Callable[[StructuredData], CapabilityResult] | None = None,
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
+    """Bind the one `xero` capability to this organisation (D-074).
+
+    Only the actions whose dependencies are present are offered; a call that
+    names another fails arguments_unusable and lists the offered ones.
+    """
     def failed(capability_id: str, code: str, error: BaseException | None = None) -> CapabilityResult:
         return CapabilityResult(
             call_id_source(),
@@ -1131,11 +1236,11 @@ def build_xero_executors(
                 )
             }
 
-        return invoke(SEARCH_XERO_CONTACTS, operation)
+        return invoke(XERO, operation)
 
     def list_accounts(_arguments: StructuredData) -> CapabilityResult:
         return invoke(
-            LIST_XERO_ACCOUNTS,
+            XERO,
             lambda: {
                 "accounts": tuple(
                     {
@@ -1153,7 +1258,7 @@ def build_xero_executors(
 
     def list_tax_rates(_arguments: StructuredData) -> CapabilityResult:
         return invoke(
-            LIST_XERO_TAX_RATES,
+            XERO,
             lambda: {
                 "tax_rates": tuple(
                     {
@@ -1170,9 +1275,9 @@ def build_xero_executors(
     def find_bill(arguments: StructuredData) -> CapabilityResult:
         contact_id = arguments.get("contact_id", "")
         if not isinstance(contact_id, str):
-            return failed(FIND_XERO_BILL, "arguments_unusable")
+            return failed(XERO, "arguments_unusable")
         return invoke(
-            FIND_XERO_BILL,
+            XERO,
             lambda: _bill_values(
                 account.find_bill(
                     _required(arguments, "invoice_number"), contact_id.strip()
@@ -1182,7 +1287,7 @@ def build_xero_executors(
 
     def read_bill(arguments: StructuredData) -> CapabilityResult:
         return invoke(
-            READ_XERO_BILL,
+            XERO,
             lambda: _bill_values(account.read_bill(_required(arguments, "invoice_id"))),
         )
 
@@ -1208,7 +1313,7 @@ def build_xero_executors(
         def returned(reason: str, detail: str, bill: Mapping[str, Any] | None = None):
             return CapabilityResult(
                 call_id_source(),
-                CAPTURE_SUPPLIER_INVOICE,
+                XERO,
                 CapabilityResultState.SUCCEEDED,
                 {
                     "completed": False,
@@ -1232,7 +1337,7 @@ def build_xero_executors(
             # and return its actual identity and total for AL/X to decide.
             if not draft_cleanup_permitted:
                 return CapabilityResult(
-                    call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                    call_id_source(), XERO,
                     CapabilityResultState.FAILED,
                     failure={
                         "code": "source_mismatch",
@@ -1249,7 +1354,7 @@ def build_xero_executors(
             except XeroAccessError as error:
                 return returned("draft_cleanup_failed", error.code, bill)
             steps.append("deleted_mismatched_draft")
-            return failed(CAPTURE_SUPPLIER_INVOICE, "source_mismatch")
+            return failed(XERO, "source_mismatch")
 
         try:
             documents = arguments.get("source_documents")
@@ -1436,7 +1541,7 @@ def build_xero_executors(
             steps.append("verified")
             return CapabilityResult(
                 call_id_source(),
-                CAPTURE_SUPPLIER_INVOICE,
+                XERO,
                 CapabilityResultState.SUCCEEDED,
                 {
                     "completed": True,
@@ -1449,13 +1554,13 @@ def build_xero_executors(
             )
         except ValueError as error:
             return CapabilityResult(
-                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                call_id_source(), XERO,
                 CapabilityResultState.FAILED,
                 {"steps": tuple(steps)},
                 failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "bill_payload")},
             )
         except MailAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+            return failed(XERO, error.code, error)
         except XeroAccessError as error:
             # account_mapping_invalid means AL/X supplied an account or tax type
             # this organisation does not have. Choosing a replacement would be
@@ -1465,7 +1570,7 @@ def build_xero_executors(
                     "account_or_tax_unresolved",
                     "a supplied account code or tax type is not active in this organisation",
                 )
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+            return failed(XERO, error.code, error)
 
     def capture_invoice(arguments: StructuredData) -> CapabilityResult:
         """Read a document, resolve it against records, and commit if certain.
@@ -1481,7 +1586,7 @@ def build_xero_executors(
         def returned(reason: str, detail: str, invoice: Mapping[str, Any] | None = None):
             return CapabilityResult(
                 call_id_source(),
-                CAPTURE_SUPPLIER_INVOICE,
+                XERO,
                 CapabilityResultState.SUCCEEDED,
                 {
                     "completed": False,
@@ -1497,7 +1602,7 @@ def build_xero_executors(
 
         def currency_unresolved(reason: str, *, extracted: str = "", supplied: str = "") -> CapabilityResult:
             return CapabilityResult(
-                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                call_id_source(), XERO,
                 CapabilityResultState.PARTIAL,
                 {
                     "completed": False,
@@ -1519,8 +1624,6 @@ def build_xero_executors(
                 },
             )
 
-        if extractor is None:
-            return failed(CAPTURE_SUPPLIER_INVOICE, "specialist_unconfigured")
         try:
             explicit_currency = (
                 _invoice_currency(arguments["currency"]) if "currency" in arguments else None
@@ -1541,7 +1644,7 @@ def build_xero_executors(
                 reference, _required(arguments, "attachment_id")
             )
             if attachment.sha256 != digest:
-                return failed(CAPTURE_SUPPLIER_INVOICE, "source_mismatch")
+                return failed(XERO, "source_mismatch")
             steps.append("read_source_document")
 
             # Law 0: a DHL import has its own single path, because its duty,
@@ -1555,7 +1658,7 @@ def build_xero_executors(
                     "dhl_invoice",
                 ):
                     return failed(
-                        CAPTURE_SUPPLIER_INVOICE,
+                        XERO,
                         "dhl_import_requires_dedicated_processing",
                     )
                 # Only claimed when the check actually ran: an unwired
@@ -1570,7 +1673,7 @@ def build_xero_executors(
             )
             steps.append("extracted_invoice")
             if not is_supplier_bill(invoice["document_type"]):
-                return failed(CAPTURE_SUPPLIER_INVOICE, "not_an_invoice")
+                return failed(XERO, "not_an_invoice")
             invoice = dict(invoice)
             extracted_currency = invoice.get("currency", "")
             if not isinstance(extracted_currency, str):
@@ -1598,21 +1701,21 @@ def build_xero_executors(
 
         except ValueError as error:
             return CapabilityResult(
-                call_id_source(), CAPTURE_SUPPLIER_INVOICE,
+                call_id_source(), XERO,
                 CapabilityResultState.FAILED,
                 {"steps": tuple(steps)},
                 failure={"code": "invoice_validation_failed", **_invoice_validation_detail(error, "capture_input")},
             )
         except MailAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+            return failed(XERO, error.code, error)
         except SpecialistError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+            return failed(XERO, error.code, error)
         except XeroAccessError as error:
-            return failed(CAPTURE_SUPPLIER_INVOICE, error.code, error)
+            return failed(XERO, error.code, error)
 
 
         return _capture_structured_invoice(
-            invoice, capability_id=CAPTURE_SUPPLIER_INVOICE,
+            invoice, capability_id=XERO,
             authorise_requested=authorise_requested, context_line=context_line,
             filename=attachment.filename, source_documents=[dict(arguments)], steps=steps,
         )
@@ -1765,9 +1868,7 @@ def build_xero_executors(
     def capture_digikey(arguments: StructuredData) -> CapabilityResult:
         from alx.tools.digikey import order_arguments, bill_invoice
 
-        capability_id = CAPTURE_DIGIKEY_ORDER_BILL
-        if digikey_lookup is None:
-            return failed(capability_id, "not_configured")
+        capability_id = XERO
         try:
             lookup_arguments = order_arguments(arguments)
             authorise = arguments.get("authorise", True)
@@ -1831,7 +1932,7 @@ def build_xero_executors(
                 raise XeroAccessError("source_mismatch")
             return deleted
 
-        return invoke(DELETE_XERO_DRAFT_BILL, operation)
+        return invoke(XERO, operation)
 
     def update_contact(arguments: StructuredData) -> CapabilityResult:
         """D-034: rename one existing contact, exactly as AL/X decided.
@@ -1869,7 +1970,7 @@ def build_xero_executors(
                 "changed": previous != name,
             }
 
-        return invoke(UPDATE_XERO_CONTACT, operation)
+        return invoke(XERO, operation)
 
     def create_contact(arguments: StructuredData) -> CapabilityResult:
         """D-035: create one supplier contact, exactly as AL/X decided.
@@ -1894,11 +1995,11 @@ def build_xero_executors(
                 raise XeroAccessError("contact_name_conflict")
             written = account.create_contact(name)
         except ValueError:
-            return failed(CREATE_XERO_CONTACT, "arguments_unusable")
+            return failed(XERO, "arguments_unusable")
         except XeroAccessError as error:
             if error.code == CONTACT_CREATION_UNCONFIRMED:
                 return unconfirmed(name, "")
-            return failed(CREATE_XERO_CONTACT, error.code, error)
+            return failed(XERO, error.code, error)
         contact_id = str(written.get("ContactID") or "")
         if not contact_id:
             return unconfirmed(name, "")
@@ -1910,7 +2011,7 @@ def build_xero_executors(
             return unconfirmed(name, contact_id)
         return CapabilityResult(
             call_id_source(),
-            CREATE_XERO_CONTACT,
+            XERO,
             CapabilityResultState.SUCCEEDED,
             {
                 "contact_id": contact_id,
@@ -1924,7 +2025,7 @@ def build_xero_executors(
         """A create that may have happened. `created` is false: unconfirmed."""
         return CapabilityResult(
             call_id_source(),
-            CREATE_XERO_CONTACT,
+            XERO,
             CapabilityResultState.PARTIAL,
             {"contact_id": contact_id, "name": name, "status": "", "created": False},
             failure={"code": CONTACT_CREATION_UNCONFIRMED},
@@ -1944,7 +2045,7 @@ def build_xero_executors(
 
     def find_quotes(arguments: StructuredData) -> CapabilityResult:
         return invoke(
-            FIND_XERO_QUOTES,
+            XERO,
             lambda: {
                 "quotes": tuple(
                     quote_summary(item)
@@ -1970,7 +2071,7 @@ def build_xero_executors(
         def result(completed: bool, reason: str = "", detail: str = "") -> CapabilityResult:
             return CapabilityResult(
                 call_id_source(),
-                INVOICE_XERO_QUOTE,
+                XERO,
                 CapabilityResultState.SUCCEEDED,
                 {
                     "completed": completed,
@@ -2135,23 +2236,69 @@ def build_xero_executors(
                 f"{quote_total} {final.get('CurrencyCode')} references {po_number}",
             )
         except ValueError:
-            return failed(INVOICE_XERO_QUOTE, "arguments_unusable")
+            return failed(XERO, "arguments_unusable")
         except MailAccessError as error:
-            return failed(INVOICE_XERO_QUOTE, error.code, error)
+            return failed(XERO, error.code, error)
         except XeroAccessError as error:
-            return failed(INVOICE_XERO_QUOTE, error.code, error)
+            return failed(XERO, error.code, error)
 
-    return {
-        SEARCH_XERO_CONTACTS: search_contacts,
-        LIST_XERO_ACCOUNTS: list_accounts,
-        LIST_XERO_TAX_RATES: list_tax_rates,
-        FIND_XERO_BILL: find_bill,
-        READ_XERO_BILL: read_bill,
-        CAPTURE_SUPPLIER_INVOICE: capture_invoice,
-        CAPTURE_DIGIKEY_ORDER_BILL: capture_digikey,
-        DELETE_XERO_DRAFT_BILL: delete_draft,
-        UPDATE_XERO_CONTACT: update_contact,
-        CREATE_XERO_CONTACT: create_contact,
-        FIND_XERO_QUOTES: find_quotes,
-        INVOICE_XERO_QUOTE: invoice_quote,
+    methods = {
+        XeroAction.SEARCH_CONTACTS: search_contacts,
+        XeroAction.CREATE_CONTACT: create_contact,
+        XeroAction.UPDATE_CONTACT: update_contact,
+        XeroAction.LIST_ACCOUNTS: list_accounts,
+        XeroAction.LIST_TAX_RATES: list_tax_rates,
+        XeroAction.FIND_BILL: find_bill,
+        XeroAction.READ_BILL: read_bill,
+        XeroAction.DELETE_DRAFT_BILL: delete_draft,
+        XeroAction.FIND_QUOTES: find_quotes,
+        XeroAction.INVOICE_QUOTE: invoice_quote,
     }
+    if extractor is not None:
+        methods[XeroAction.CAPTURE_INVOICE] = capture_invoice
+    if digikey_lookup is not None:
+        methods[XeroAction.CAPTURE_DIGIKEY_BILL] = capture_digikey
+        methods.update(build_digikey_executors(digikey_lookup, call_id_source))
+    if dhl_import is not None:
+        methods[XeroAction.IMPORT_DHL] = dhl_import
+    offered = offered_xero_actions(
+        capture=extractor is not None, digikey=digikey_lookup is not None,
+        dhl=dhl_import is not None,
+    )
+
+    def run(arguments: StructuredData) -> CapabilityResult:
+        """Run one offered action under its own contract (D-074).
+
+        The action's result passes through unwrapped, with its provenance,
+        durable values and outcome, so what later code reads from it (a
+        capture's completion, a bill's values, a DHL stage's mail) stays
+        where it was.
+        """
+        try:
+            action = XeroAction(arguments.get("action"))
+        except ValueError:
+            action = None
+        if action not in offered:
+            return CapabilityResult(
+                call_id_source(), XERO, CapabilityResultState.FAILED,
+                failure={"code": "arguments_unusable",
+                         "reason": "action must be one of " + ", ".join(item.value for item in offered)},
+            )
+        contract = CONTRACTS[action]
+        values = {key: value for key, value in arguments.items() if key != "action"}
+        # The broker has already held every field to its type in the one
+        # schema, where each field has its action's own type. What remains is
+        # which fields this action takes and needs; each action still checks
+        # its own values, with the diagnostics it always gave.
+        fields = contract.input_schema
+        if set(values) - set(fields.properties) or not set(fields.required) <= set(values):
+            return failed(XERO, "arguments_unusable")
+        result = methods[action](values)
+        if result.capability_id != XERO:
+            result = replace(result, capability_id=XERO)
+        if (result.state is not CapabilityResultState.FAILED
+                and not contract.output_schema.accepts(result.values)):
+            return failed(XERO, "result_output_invalid")
+        return result
+
+    return {XERO: run}

@@ -31,11 +31,6 @@ from alx.contracts import (  # noqa: E402
     SpecialistError,
 )
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate  # noqa: E402
-from alx.tools.xero import (  # noqa: E402
-    CAPTURE_INVOICE_DEFINITION,
-    CAPTURE_SUPPLIER_INVOICE,
-    build_xero_executors,
-)
 from alx.providers.llamaparse import (  # noqa: E402
     EXTRACT_PATH,
     EXTRACT_TARGET,
@@ -46,6 +41,15 @@ from alx.providers.llamaparse import (  # noqa: E402
     MAX_DOCUMENT_BYTES,
 )
 from alx.specialists import ANSWER_SCHEMA, INSTRUCTION, checked_invoice  # noqa: E402
+from alx.tools import build_xero_executors, offered_xero_actions, xero_definition  # noqa: E402
+from xero_actions import (  # noqa: E402
+    CAPTURE_INVOICE,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+)
 
 
 API_KEY = "llamacloud-secret"
@@ -617,18 +621,16 @@ class CaptureBrokerContractTests(unittest.TestCase):
         class UnusedXero:
             pass
 
-        capture = build_xero_executors(
-            UnusedXero(), Mail(), lambda: "call-1", wired
-        )[CAPTURE_SUPPLIER_INVOICE]
         broker = CapabilityBroker(
-            CapabilityRegistry((CAPTURE_INVOICE_DEFINITION,)),
-            SafetyGate({CAPTURE_SUPPLIER_INVOICE: AuthorityPolicy()}),
-            {CAPTURE_SUPPLIER_INVOICE: capture},
+            CapabilityRegistry((xero_definition(offered_xero_actions(
+                capture=True, digikey=False, dhl=False)),)),
+            SafetyGate({XERO: AuthorityPolicy()}),
+            build_xero_executors(UnusedXero(), Mail(), lambda: "call-1", wired),
         )
         attempt = broker.dispatch(
-            CapabilityCall(
+            xero_call(
                 "call-1",
-                CAPTURE_SUPPLIER_INVOICE,
+                CAPTURE_INVOICE,
                 {
                     "mailbox_id": "INBOX",
                     "uid_validity": "1",

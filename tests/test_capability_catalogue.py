@@ -27,22 +27,26 @@ from alx.core.model_reasoner import (  # noqa: E402
     _result_fields,
     _shared_failure_codes,
 )
-from alx.tools import DHL_DEFINITIONS, XERO_DEFINITIONS  # noqa: E402
+from alx.tools import XeroAction, xero_definition  # noqa: E402
+from alx.tools.xero import CONTRACTS  # noqa: E402
+
+# D-074: each accounting job is an action of `xero` that keeps its own
+# contract; these are rendered the same way the one capability's are.
+XERO_DEFINITIONS = tuple(item for action, item in CONTRACTS.items()
+                         if action not in (XeroAction.IMPORT_DHL, XeroAction.LOOKUP_DIGIKEY))
+DHL_DEFINITIONS = (CONTRACTS[XeroAction.IMPORT_DHL],)
+XERO = xero_definition(tuple(XeroAction))
 
 
-def find(capability_id: str) -> CapabilityDefinition:
-    return next(
-        item
-        for item in (*XERO_DEFINITIONS, *DHL_DEFINITIONS)
-        if item.capability_id == capability_id
-    )
+def find(action: XeroAction) -> CapabilityDefinition:
+    return CONTRACTS[action]
 
 
 class InputCompletenessTests(unittest.TestCase):
     """Nothing needed to compose a valid call may be dropped."""
 
     def test_every_input_property_and_requirement_survives(self) -> None:
-        for definition in XERO_DEFINITIONS:
+        for definition in (*XERO_DEFINITIONS, *DHL_DEFINITIONS, XERO):
             with self.subTest(capability_id=definition.capability_id):
                 payload = _capability_schema_payload(definition.input_schema)
                 self.assertEqual(
@@ -56,7 +60,7 @@ class InputCompletenessTests(unittest.TestCase):
 
     def test_nested_input_structure_is_preserved(self) -> None:
         """A composite call takes arrays of objects; that shape must survive."""
-        payload = _capability_schema_payload(find("process_dhl_import").input_schema)
+        payload = _capability_schema_payload(find(XeroAction.IMPORT_DHL).input_schema)
         documents = payload["properties"]["documents"]
         self.assertEqual(documents["kind"], "array")
         self.assertEqual(
@@ -67,13 +71,13 @@ class InputCompletenessTests(unittest.TestCase):
 
     def test_a_nested_object_keeps_its_closed_schema(self) -> None:
         """Two levels down, extra_properties must still be carried."""
-        payload = _capability_schema_payload(find("process_dhl_import").input_schema)
+        payload = _capability_schema_payload(find(XeroAction.IMPORT_DHL).input_schema)
         item = payload["properties"]["documents"]["items"]
         self.assertIs(item["extra_properties"], False)
 
     def test_a_closed_schema_still_says_so(self) -> None:
         """extra_properties False is a real constraint, not a default."""
-        payload = _capability_schema_payload(find("find_xero_bill").input_schema)
+        payload = _capability_schema_payload(find(XeroAction.FIND_BILL).input_schema)
         self.assertIs(payload["extra_properties"], False)
 
     def test_empty_defaults_are_omitted_rather_than_spelled_out(self) -> None:
@@ -82,18 +86,18 @@ class InputCompletenessTests(unittest.TestCase):
 
     def test_omission_is_lossless(self) -> None:
         """An absent key means the default the schema always carried."""
-        payload = _capability_schema_payload(find("find_xero_bill").input_schema)
+        payload = _capability_schema_payload(find(XeroAction.FIND_BILL).input_schema)
         contact = payload["properties"]["contact_id"]
         self.assertNotIn("properties", contact)
         self.assertEqual(
-            find("find_xero_bill").input_schema.properties["contact_id"].properties,
+            find(XeroAction.FIND_BILL).input_schema.properties["contact_id"].properties,
             {},
         )
 
 
 class ResultCompressionTests(unittest.TestCase):
     def test_result_fields_name_what_comes_back(self) -> None:
-        fields = _result_fields(find("find_xero_bill").output_schema)
+        fields = _result_fields(find(XeroAction.FIND_BILL).output_schema)
         self.assertIn("invoice_id", fields)
         self.assertIn("status", fields)
         self.assertIn("total", fields)
@@ -107,7 +111,7 @@ class ResultCompressionTests(unittest.TestCase):
         self.assertEqual(fields, ["array of object"])
 
     def test_result_fields_are_materially_smaller_than_the_schema(self) -> None:
-        definition = find("process_dhl_import")
+        definition = find(XeroAction.IMPORT_DHL)
         full = json.dumps(
             _capability_schema_payload(definition.output_schema), separators=(",", ":")
         )

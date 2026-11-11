@@ -48,14 +48,22 @@ from alx.providers.xero import (  # noqa: E402
     XeroConnection,
 )
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
-from alx.tools import (  # noqa: E402
-    CAPTURE_SUPPLIER_INVOICE,
-    CREATE_XERO_CONTACT,
-    SEARCH_XERO_CONTACTS,
-    UPDATE_XERO_CONTACT,
-    XERO_DEFINITIONS,
-    build_xero_executors,
+from alx.tools import XeroAction, build_xero_executors, xero_definition  # noqa: E402
+from xero_actions import (  # noqa: E402
+    CAPTURE_INVOICE,
+    CREATE_CONTACT,
+    SEARCH_CONTACTS,
+    UPDATE_CONTACT,
+    XERO,
+    by_action,
+    xero_arguments,
+    xero_call,
+    xero_executors,
+    contract,
+    needs_approval,
 )
+
+XERO_DEFINITIONS = (xero_definition(tuple(XeroAction)),)
 from support import xero_settings  # noqa: E402
 from test_invoice_capture import FakeMail, arguments, extracted  # noqa: E402
 from test_xero_contact_rename import ContactXero, izwi  # noqa: E402
@@ -84,8 +92,8 @@ class CreatingXero(ContactXero):
 class CreateContactTests(unittest.TestCase):
     def setUp(self) -> None:
         self.xero = CreatingXero(izwi())
-        self.create = build_xero_executors(self.xero, FakeMail(), lambda: "call-1")[
-            CREATE_XERO_CONTACT
+        self.create = xero_executors(self.xero, FakeMail(), lambda: "call-1")[
+            CREATE_CONTACT
         ]
 
     def test_a_contact_is_created_and_read_back(self) -> None:
@@ -207,8 +215,8 @@ class CreateContactTests(unittest.TestCase):
                     raise XeroAccessError(code)
 
                 self.xero.read_contact = unreadable
-                create = build_xero_executors(self.xero, FakeMail(), lambda: "c")[
-                    CREATE_XERO_CONTACT
+                create = xero_executors(self.xero, FakeMail(), lambda: "c")[
+                    CREATE_CONTACT
                 ]
                 self.assert_unconfirmed(create({"name": SUPPLIER}), NEW_ID)
 
@@ -250,7 +258,7 @@ class CreateContactTests(unittest.TestCase):
             build_xero_executors(self.xero, FakeMail(), lambda: "call-1"),
         )
         attempt = broker.dispatch(
-            CapabilityCall("call-1", CREATE_XERO_CONTACT, {"name": SUPPLIER}),
+            xero_call("call-1", CREATE_CONTACT, {"name": SUPPLIER}),
             AuthorityContext(
                 "friedl", runtime.permissions, datetime(2026, 9, 27, tzinfo=UTC)
             ),
@@ -334,31 +342,35 @@ class AuthorityTests(unittest.TestCase):
                 xero_settings(), Path(directory), FakeMail(), lambda: "call"
             )
 
-    def state(self, gate, capability_id, permissions):
-        call = CapabilityCall("c", capability_id, {})
+    def state(self, gate, action, permissions):
+        call = xero_call("c", action, {})
         return gate.evaluate(call, AuthorityContext("friedl", permissions, self.now)).state
 
     def test_the_capability_is_in_the_authoritative_catalogue(self) -> None:
-        definition = next(
-            item for item in XERO_DEFINITIONS if item.capability_id == CREATE_XERO_CONTACT
-        )
+        definition = contract(CREATE_CONTACT)
         self.assertIs(definition.side_effect, SideEffect.EFFECTFUL)
         self.assertEqual(set(definition.input_schema.properties), {"name"})
         self.assertEqual(definition.input_schema.required, ("name",))
         self.assertFalse(definition.input_schema.extra_properties)
         runtime = self.runtime()
-        self.assertIn(definition, runtime.definitions)
-        self.assertIn(CREATE_XERO_CONTACT, runtime.executors)
+        (offered,) = runtime.definitions
+        self.assertIs(offered.effect_for(xero_arguments(CREATE_CONTACT)), SideEffect.EFFECTFUL)
+        self.assertIn(f"[{CREATE_CONTACT}] fields: name;", offered.purpose)
+        self.assertIn(XeroAction.CREATE_CONTACT, runtime.actions)
+        self.assertIn(XERO, runtime.executors)
 
     def test_d035_is_standing_authority_under_its_own_permission(self) -> None:
         runtime = self.runtime()
-        policy = runtime.policies[CREATE_XERO_CONTACT]
-        self.assertFalse(policy.approval_required)
-        self.assertEqual(policy.permission_references, {XERO_CONTACT_CREATE_PERMISSION})
+        policy = runtime.policies[XERO]
+        # D-074: one policy; creating needs no approval even when bill
+        # writes do, and its own permission stays part of it.
+        self.assertFalse(needs_approval(runtime, CREATE_CONTACT))
+        self.assertTrue(needs_approval(runtime, CAPTURE_INVOICE))
+        self.assertIn(XERO_CONTACT_CREATE_PERMISSION, policy.permission_references)
         self.assertIn(XERO_CONTACT_CREATE_PERMISSION, runtime.permissions)
         gate = SafetyGate(runtime.policies)
         self.assertEqual(
-            self.state(gate, CREATE_XERO_CONTACT, runtime.permissions),
+            self.state(gate, CREATE_CONTACT, runtime.permissions),
             SafetyState.ALLOWED,
         )
 
@@ -366,22 +378,27 @@ class AuthorityTests(unittest.TestCase):
         gate = SafetyGate(self.runtime().policies)
         rename_only = frozenset({XERO_READ_PERMISSION, XERO_CONTACT_RENAME_PERMISSION})
         self.assertEqual(
-            self.state(gate, CREATE_XERO_CONTACT, rename_only), SafetyState.DENIED
+            self.state(gate, CREATE_CONTACT, rename_only), SafetyState.DENIED
         )
         bill_only = frozenset({XERO_READ_PERMISSION, XERO_BILL_WRITE_PERMISSION})
         self.assertEqual(
-            self.state(gate, CREATE_XERO_CONTACT, bill_only), SafetyState.DENIED
+            self.state(gate, CREATE_CONTACT, bill_only), SafetyState.DENIED
         )
 
-    def test_d035_creation_authority_permits_only_creation(self) -> None:
-        gate = SafetyGate(self.runtime().policies)
+    def test_d035_creation_permission_remains_required(self) -> None:
+        """D-074: the one `xero` policy holds every action's permission, so
+        creation authority alone permits nothing, and nothing runs without it."""
+        runtime = self.runtime()
+        gate = SafetyGate(runtime.policies)
         create_only = frozenset({XERO_CONTACT_CREATE_PERMISSION})
+        without_create = runtime.permissions - {XERO_CONTACT_CREATE_PERMISSION}
+        for action in (CREATE_CONTACT, UPDATE_CONTACT, CAPTURE_INVOICE, SEARCH_CONTACTS):
+            with self.subTest(action=action):
+                self.assertEqual(self.state(gate, action, create_only), SafetyState.DENIED)
+                self.assertEqual(self.state(gate, action, without_create), SafetyState.DENIED)
         self.assertEqual(
-            self.state(gate, CREATE_XERO_CONTACT, create_only), SafetyState.ALLOWED
+            self.state(gate, CREATE_CONTACT, runtime.permissions), SafetyState.ALLOWED
         )
-        for other in (UPDATE_XERO_CONTACT, CAPTURE_SUPPLIER_INVOICE, SEARCH_XERO_CONTACTS):
-            with self.subTest(capability_id=other):
-                self.assertEqual(self.state(gate, other, create_only), SafetyState.DENIED)
 
 
 class ContinuationTests(unittest.TestCase):
@@ -414,12 +431,12 @@ class ContinuationTests(unittest.TestCase):
             1,
             retention,
         )
-        capture = CapabilityCall("capture-1", CAPTURE_SUPPLIER_INVOICE, arguments())
-        search = CapabilityCall(
-            "search-1", SEARCH_XERO_CONTACTS, {"search_term": "CodeRabbit"}
+        capture = xero_call("capture-1", CAPTURE_INVOICE, arguments())
+        search = xero_call(
+            "search-1", SEARCH_CONTACTS, {"search_term": "CodeRabbit"}
         )
-        create = CapabilityCall("create-1", CREATE_XERO_CONTACT, {"name": SUPPLIER})
-        retry = CapabilityCall("capture-2", CAPTURE_SUPPLIER_INVOICE, arguments())
+        create = xero_call("create-1", CREATE_CONTACT, {"name": SUPPLIER})
+        retry = xero_call("capture-2", CAPTURE_INVOICE, arguments())
 
         class Queued:
             def __init__(self, *decisions):

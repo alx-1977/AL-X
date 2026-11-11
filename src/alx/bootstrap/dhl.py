@@ -1,41 +1,35 @@
-"""Compose the one DHL import path into AL/X's boundaries."""
+"""Compose the one DHL import path; it is offered as an action of `xero` (D-074)."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Mapping
 
 from alx.contracts import (
-    CapabilityDefinition,
     CapabilityResult,
     MailAccount,
     StructuredData,
     XeroAccountingAccount,
+    XeroAction,
 )
 from alx.providers import DhlImportAnalyzerAdapter
-from alx.safety import AuthorityPolicy
-from alx.tools import (
-    DHL_DEFINITIONS,
-    PROCESS_DHL_IMPORT,
-    build_dhl_executors,
-)
+from alx.tools import build_dhl_executors
 
 
 DHL_IMPORT_PERMISSION = "dhl.import.process"
 
 
 @dataclass(frozen=True, slots=True)
-class DhlRuntime:
-    definitions: tuple[CapabilityDefinition, ...]
-    policies: Mapping[str, AuthorityPolicy]
-    executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
-    permissions: frozenset[str]
+class DhlImport:
+    """The DHL import's executor, bound to an account later, and its own authority."""
+
+    executor_for: Callable[[XeroAccountingAccount], Callable[[StructuredData], CapabilityResult]]
+    permission: str
+    approval_required: bool
 
 
-def build_dhl_runtime(
+def build_dhl_import(
     mail: MailAccount,
-    account: XeroAccountingAccount,
     call_id_source: Callable[[], str],
     import_vat_account: str,
     customs_duty_account: str,
@@ -43,22 +37,16 @@ def build_dhl_runtime(
     supplier_name: str = "",
     unattended: bool = False,
     processed_mailbox: str = "",
-) -> DhlRuntime:
-    """Build the single DHL import capability.
+) -> DhlImport:
+    """Build the single DHL import action.
 
     Processing a DHL import writes to Xero, so it carries the same authority as
     any other bill write: unattended where Friedl configured that under D-018,
-    and asking otherwise.
+    and asking otherwise. The `xero` runtime binds it to its own adapter.
     """
-    return DhlRuntime(
-        DHL_DEFINITIONS,
-        {
-            PROCESS_DHL_IMPORT: AuthorityPolicy(
-                frozenset({DHL_IMPORT_PERMISSION}),
-                approval_required=not unattended,
-            )
-        },
-        build_dhl_executors(
+
+    def executor_for(account: XeroAccountingAccount):
+        return build_dhl_executors(
             mail,
             DhlImportAnalyzerAdapter(),
             account,
@@ -68,6 +56,6 @@ def build_dhl_runtime(
             clearance_account,
             supplier_name,
             processed_mailbox=processed_mailbox,
-        ),
-        frozenset({DHL_IMPORT_PERMISSION}),
-    )
+        )[XeroAction.IMPORT_DHL]
+
+    return DhlImport(executor_for, DHL_IMPORT_PERMISSION, not unattended)

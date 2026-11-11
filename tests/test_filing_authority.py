@@ -33,16 +33,18 @@ from alx.contracts import (  # noqa: E402
     SuccessCriterion,
 )
 from alx.safety import AuthorityContext, SafetyGate, SafetyState  # noqa: E402
-from alx.tools import CAPTURE_SUPPLIER_INVOICE, MAIL  # noqa: E402
+from alx.tools import MAIL, XERO  # noqa: E402
 from mail_actions import FILE, READ, mail_arguments  # noqa: E402
+from xero_actions import CAPTURE_INVOICE, FIND_BILL, xero_arguments  # noqa: E402
 
 
 REFERENCE = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "12"}
 OTHER = {"mailbox_id": "INBOX", "uid_validity": "777", "uid": "99"}
 
 
-def attempt(*, completed: bool, arguments=None, capability=CAPTURE_SUPPLIER_INVOICE):
-    call = CapabilityCall("call-1", capability, {**(arguments or REFERENCE)})
+def attempt(*, completed: bool, arguments=None, capability=XERO):
+    call = CapabilityCall("call-1", capability,
+                          {**(arguments or xero_arguments(CAPTURE_INVOICE, REFERENCE))})
     return CapabilityAttempt(
         call=call,
         disposition=CapabilityAttemptDisposition.EXECUTED,
@@ -91,6 +93,20 @@ class ScopeDerivationTests(unittest.TestCase):
             ),
             (),
         )
+
+    def test_another_xero_action_authorises_nothing(self) -> None:
+        """Only a completed capture_invoice of `xero` names a message to file (D-074)."""
+        self.assertEqual(
+            captured_invoice_filing_scopes(
+                goal(attempt(completed=True, arguments=xero_arguments(FIND_BILL, REFERENCE)))
+            ),
+            (),
+        )
+
+    def test_a_capture_saved_before_d074_still_authorises_filing(self) -> None:
+        scopes = captured_invoice_filing_scopes(
+            goal(attempt(completed=True, capability="capture_supplier_invoice", arguments=REFERENCE)))
+        self.assertEqual([dict(item.arguments) for item in scopes], [mail_arguments(FILE, REFERENCE)])
 
     def test_no_goal_authorises_nothing(self) -> None:
         self.assertEqual(captured_invoice_filing_scopes(None), ())
