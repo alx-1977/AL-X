@@ -4,7 +4,8 @@ One capability, `show_on_screen`: a title, an information column and up to two
 board views, drawn over the moving wave the reader screen uses. She decides
 what to show and what each mark means; the viewer only draws it. Board views
 are read from KiCad files, his (read only, through a copy) or her own work
-copies, so what he sees is his actual copper.
+copies, so what he sees is his actual copper. A reference is a section of a
+datasheet page shown as printed, never redrawn, with her boxes on it.
 """
 
 from __future__ import annotations
@@ -27,8 +28,12 @@ SHOW_ON_SCREEN = "show_on_screen"
 TONES = ("ok", "bad", "info")
 MAX_ITEMS = 12
 MAX_VIEWS = 2
+MAX_PAGES = 2
+MAX_BOXES = 8
+SIDES = ("right", "left", "below")
 _FAILURES = ("arguments_unusable", "board_unavailable", "path_denied", "section_failed",
-             "section_too_large", "engine_unavailable", "unavailable")
+             "section_too_large", "engine_unavailable", "unavailable", "document_unavailable",
+             "page_failed")
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _NUMBER = StructuredSchema(ValueKind.NUMBER)
@@ -49,33 +54,53 @@ _VIEW = StructuredSchema(
      "marks": StructuredSchema(ValueKind.OBJECT), "rotate": StructuredSchema(ValueKind.BOOLEAN),
      "dims": StructuredSchema(ValueKind.ARRAY, items=_DIM)},
     ("label", "window"), extra_properties=False)
+_BOX = StructuredSchema(ValueKind.OBJECT, {"at": _POINT, "label": _STRING, "tone": _STRING,
+                                           "side": _STRING}, ("at", "label"), extra_properties=False)
+_PAGE = StructuredSchema(
+    ValueKind.OBJECT,
+    {"page": StructuredSchema(ValueKind.INTEGER), "section": _POINT, "caption": _STRING,
+     "boxes": StructuredSchema(ValueKind.ARRAY, items=_BOX)},
+    ("page", "section"), extra_properties=False)
+_REFERENCE = StructuredSchema(
+    ValueKind.OBJECT,
+    {"label": _STRING, "sublabel": _STRING, "document": _STRING,
+     "pages": StructuredSchema(ValueKind.ARRAY, items=_PAGE)},
+    ("label", "document", "pages"), extra_properties=False)
 
 DEFINITION = CapabilityDefinition(
     SHOW_ON_SCREEN,
     "Show Friedl something on your screen, over the moving wave: a title, a verdict, a short "
-    "column of items and up to two board views side by side (yours/suggested). Say one line "
-    "and let the screen carry the detail. Tones: ok (green, correct), bad (red, needs "
-    "attention), info (cyan). Lead the items with what is wrong; what is correct gets one "
-    "quiet item. A view reads a window [x0, y0, x1, y1] in mm of a KiCad board - board is a "
-    "path in his design folders (read through a copy, never changed), work_copy_id one of "
-    "your own copies (for a suggested layout). refs are the parts to draw (labelled like "
-    "silkscreen), nets the tracks and vias, planes the zone nets to show faintly. marks "
-    "colours a part, 'net:<name>' or 'keepout' by tone; unmarked copper is blue. rotate turns "
-    "the view 90 degrees. dims draws dimension lines between two points in mm. Showing "
-    "replaces what is on screen; he closes it. shown is true only when the screen reported "
-    "drawing it; when false it is not on screen (closed, not open or broken), so say that, "
-    "never that it is showing.",
+    "column of items and up to two board views side by side - his board on the left, your "
+    "fix on a work copy on the right - so he can accept the change or not. Say one line and "
+    "let the screen carry the detail. title is the part or subject only (e.g. AE1); context "
+    "names the project. Tones: ok (green, correct), bad (red, needs attention), info (cyan). "
+    "Lead the items with what is wrong; what is correct gets one quiet item. A view reads a "
+    "window [x0, y0, x1, y1] in mm of a KiCad board - board is a path in his design folders "
+    "(read through a copy, never changed), work_copy_id one of your own copies. Include every "
+    "part of the circuit, from its connector on. refs are the parts to draw, nets the tracks, "
+    "vias and copper shapes, planes the zone nets to show faintly. marks colours a part, "
+    "'net:<name>' or 'keepout' by tone; mark what differs red on his board and green on your "
+    "copy; unmarked copper is blue. rotate turns the view 90 degrees. dims draws dimension "
+    "lines between two points in mm. reference is the datasheet section the layout follows, "
+    "shown as printed behind a link, never redrawn: document is the PDF in his design "
+    "folders, each page a page number and a section [x0, y0, x1, y1] in points from the top "
+    "left of the page, boxes the places where his layout differs, in the same points, each "
+    "with a short label such as his value. Showing replaces what is on screen; he closes it. "
+    "shown is true only when the screen reported drawing it; when false it is not on screen "
+    "(closed, not open or broken), so say that, never that it is showing.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"title": _STRING, "subtitle": _STRING, "context": _STRING, "verdict": _TONED,
          "items": StructuredSchema(ValueKind.ARRAY, items=_ITEM), "note": _STRING,
-         "said": _STRING, "views": StructuredSchema(ValueKind.ARRAY, items=_VIEW)},
+         "said": _STRING, "views": StructuredSchema(ValueKind.ARRAY, items=_VIEW),
+         "reference": _REFERENCE},
         ("title",), extra_properties=False),
     StructuredSchema(
         ValueKind.OBJECT, {"shown": StructuredSchema(ValueKind.BOOLEAN),
                            "version": StructuredSchema(ValueKind.INTEGER),
                            "views": StructuredSchema(ValueKind.ARRAY,
-                                                     items=StructuredSchema(ValueKind.OBJECT))},
+                                                     items=StructuredSchema(ValueKind.OBJECT)),
+                           "reference_pages": StructuredSchema(ValueKind.INTEGER)},
         ("shown", "version"), extra_properties=False),
     SideEffect.NONE,
     _FAILURES,
@@ -102,17 +127,28 @@ class DisplayBoard:
         self._id = uuid.uuid4().hex
         self._version = 0
         self._display: dict[str, Any] | None = None
+        # Datasheet section images of the current version, served apart from
+        # the display itself, which her screen polls every two seconds.
+        self._assets: tuple[bytes, ...] = ()
         # The newest version the screen reported drawing. Publishing is not
         # showing: on 2026-11-10 the screen had crashed and she still told
         # Friedl it was on screen, because publishing alone said "shown".
         self._drawn = 0
         self._drawn_changed = threading.Condition(self._lock)
 
-    def publish(self, display: Mapping[str, Any]) -> int:
+    def publish(self, display: Mapping[str, Any], assets: tuple[bytes, ...] = ()) -> int:
         with self._lock:
             self._version += 1
             self._display = dict(display)
+            self._assets = tuple(assets)
             return self._version
+
+    def asset(self, board_id: str, version: int, index: int) -> bytes | None:
+        """An image of the version on screen now; anything else is gone."""
+        with self._lock:
+            if board_id != self._id or version != self._version or not 0 <= index < len(self._assets):
+                return None
+            return self._assets[index]
 
     def mark_drawn(self, board_id: str, version: int) -> None:
         """The screen drew this version (it reports after drawing it)."""
@@ -148,11 +184,59 @@ def _text(value: Any, limit: int, name: str) -> str:
     return value
 
 
+def _number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("a position is a number")
+    return float(value)
+
+
+def _reference(value: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Check a reference and work out, mechanically, where each box falls in its image."""
+    label = _text(value.get("label"), 40, "reference.label")
+    sublabel = _text(value.get("sublabel"), 60, "reference.sublabel")
+    document = value.get("document")
+    if not isinstance(document, str) or not document.strip():
+        raise ValueError("reference.document is the path of a PDF")
+    pages = list(value.get("pages") or [])
+    if not 1 <= len(pages) <= MAX_PAGES:
+        raise ValueError(f"reference has 1 to {MAX_PAGES} pages")
+    shown, requests = [], []
+    for page in pages:
+        section = [_number(v) for v in page.get("section") or ()]
+        if len(section) != 4 or section[0] >= section[2] or section[1] >= section[3]:
+            raise ValueError("a section is [x0, y0, x1, y1] in points, x0 < x1, y0 < y1")
+        x0, y0, x1, y1 = section
+        boxes = list(page.get("boxes") or [])
+        if len(boxes) > MAX_BOXES:
+            raise ValueError(f"at most {MAX_BOXES} boxes on a page")
+        placed = []
+        for box in boxes:
+            at = [_number(v) for v in box.get("at") or ()]
+            if len(at) != 4 or at[0] >= at[2] or at[1] >= at[3]:
+                raise ValueError("a box is [x0, y0, x1, y1] in points, x0 < x1, y0 < y1")
+            if at[2] <= x0 or at[0] >= x1 or at[3] <= y0 or at[1] >= y1:
+                raise ValueError("a box lies outside its section")
+            side = box.get("side") or "right"
+            if side not in SIDES:
+                raise ValueError(f"side is one of {', '.join(SIDES)}")
+            width, height = x1 - x0, y1 - y0
+            placed.append({"x": (max(at[0], x0) - x0) / width, "y": (max(at[1], y0) - y0) / height,
+                           "w": (min(at[2], x1) - max(at[0], x0)) / width,
+                           "h": (min(at[3], y1) - max(at[1], y0)) / height,
+                           "label": _text(box.get("label"), 40, "box.label"),
+                           "tone": _tone(box.get("tone")) or "bad", "side": side})
+        shown.append({"asset": len(requests), "w": x1 - x0, "h": y1 - y0,
+                      "caption": _text(page.get("caption"), 60, "caption"), "boxes": placed})
+        requests.append({"document": document, "page": page.get("page"), "section": section})
+    return {"label": label, "sublabel": sublabel, "pages": shown}, requests
+
+
 def build_display_executors(
     board: DisplayBoard,
     read_section: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
     call_id_source: Callable[[], str],
     draw_wait_seconds: float = 12.0,
+    read_page: Callable[[Mapping[str, Any]], bytes] | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     def failed(code: str, reason: str = "") -> CapabilityResult:
         failure = {"code": code, **({"reason": reason[:300]} if reason else {})}
@@ -162,8 +246,8 @@ def build_display_executors(
     def show(arguments: Mapping[str, Any]) -> CapabilityResult:
         try:
             display: dict[str, Any] = {
-                "title": _text(arguments.get("title"), 60, "title"),
-                "subtitle": _text(arguments.get("subtitle"), 40, "subtitle"),
+                "title": _text(arguments.get("title"), 24, "title"),
+                "subtitle": _text(arguments.get("subtitle"), 24, "subtitle"),
                 "context": _text(arguments.get("context"), 80, "context"),
                 "note": _text(arguments.get("note"), 400, "note"),
                 "said": _text(arguments.get("said"), 300, "said"),
@@ -194,10 +278,14 @@ def build_display_executors(
                     _tone(dim.get("tone"))
                     if len(dim["from"]) != 2 or len(dim["to"]) != 2:
                         raise ValueError("a dimension runs between two [x, y] points")
+            reference, page_requests = (None, []) if not arguments.get("reference") \
+                else _reference(arguments["reference"])
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             return failed("arguments_unusable", str(error))
         if views and read_section is None:
             return failed("unavailable", "KiCad is not available to read boards")
+        if page_requests and read_page is None:
+            return failed("unavailable", "datasheet pages cannot be shown here")
         drawn = []
         for view in views:
             try:
@@ -216,7 +304,17 @@ def build_display_executors(
                 "geometry": geometry,
             })
         display["views"] = drawn
-        version = board.publish(display)
+        assets = []
+        for request in page_requests:
+            try:
+                assets.append(bytes(read_page(request)))
+            except Exception as error:  # noqa: BLE001 - reported as her evidence
+                code = getattr(error, "code", None) or (error.args[0] if error.args else "")
+                code = code if code in _FAILURES else "page_failed"
+                detail = getattr(error, "recovery", None) or {}
+                return failed(code, str(detail.get("detail", "") if isinstance(detail, Mapping) else ""))
+        display["reference"] = reference
+        version = board.publish(display, tuple(assets))
         # The screen polls every two seconds, then loads and draws the page.
         shown = board.wait_drawn(version, draw_wait_seconds)
         return CapabilityResult(
@@ -224,7 +322,8 @@ def build_display_executors(
             {"shown": shown, "version": version,
              "views": [{"label": item["label"],
                         "parts": sorted(part["ref"] for part in item["geometry"].get("parts", ())),
-                        "tracks": len(item["geometry"].get("tracks", ()))} for item in drawn]})
+                        "tracks": len(item["geometry"].get("tracks", ()))} for item in drawn],
+             "reference_pages": len(assets)})
 
     return {SHOW_ON_SCREEN: show}
 

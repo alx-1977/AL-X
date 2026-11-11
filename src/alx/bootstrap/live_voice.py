@@ -553,7 +553,8 @@ async def run(repository_root: Path) -> None:
     executors.update(build_display_executors(
         display_board,
         None if kicad_runtime.provider is None else kicad_runtime.provider.section,
-        current_call_id.get))
+        current_call_id.get,
+        read_page=None if kicad_runtime.provider is None else kicad_runtime.provider.datasheet_section))
     permissions.add("screen.show")
     particle_local_runtime = build_particle_local_runtime(current_call_id.get, environment, storage_root)
     register(particle_local_runtime.definitions, TraceSubsystem.CORE)
@@ -1460,6 +1461,7 @@ async def run(repository_root: Path) -> None:
         CODE_ROOT / "src/alx/interfaces/assets",
         display=display_board.snapshot,
         display_drawn=display_board.mark_drawn,
+        display_asset=display_board.asset,
         reader_tile=None if reader_runtime is None else tile_source(
             reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch,
             display=ReaderSettings.from_environment(environment).display),

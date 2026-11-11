@@ -495,6 +495,52 @@ def kicad_containment_available():
     return platform.system() == 'Darwin' and Path('/usr/bin/sandbox-exec').is_file()
 
 
+def _confined_profile(project, *readable):
+    """The kernel sandbox for a contained run: one writable folder, no network.
+
+    dyld and CPython need system reads and IPC, so reading is allowed by
+    default, except anywhere in the home folder (keys, mail, documents)
+    outside the work folder and the named files. Writes are confined to the
+    folder. No forking: nothing can be left behind that keeps changing the
+    folder after the run is reported.
+    """
+    quote = lambda path: json.dumps(str(path))
+    # The user's own home, not $HOME, which callers may change.
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    return '\n'.join((
+        '(version 1)', '(allow default)',
+        '(deny file-read* (subpath ' + quote(home) + '))',
+        '(allow file-read-metadata)',
+        '(allow file-read* (subpath ' + quote(project) + ')'
+        + ''.join(' (literal ' + quote(path) + ')' for path in readable) + ')',
+        '(deny file-write*)',
+        '(allow file-write* (subpath ' + quote(project)
+        + ') (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))',
+        '(deny network*)',
+        '(deny process-fork)',
+    ))
+
+
+def run_page_render(executable, arguments, directory, *, runner=None, timeout_seconds=60):
+    """A datasheet page made into an image, confined like a KiCad script (D-073).
+
+    The document is a copy inside `directory`, the only place the renderer
+    may read in the home folder or write at all.
+    """
+    if not kicad_containment_available():
+        raise OSError('page render containment unavailable')
+    directory = Path(directory).resolve()
+    return run_coding_subprocess(
+        subprocess.run if runner is None else runner,
+        ['/usr/bin/sandbox-exec', '-p', _confined_profile(directory), str(executable),
+         *map(str, arguments)],
+        cwd=str(directory), env={'PATH': '/usr/bin:/bin', 'HOME': str(directory),
+                                 'TMPDIR': str(directory)},
+        shell=False, check=False, timeout=min(600, max(1, timeout_seconds)),
+        capture_output=True, text=True, stop_descendants=True,
+    )
+
+
 def run_kicad_python(executable, script, board, *, runner=None, timeout_seconds=120):
     """Kernel-confined KiCad script, through the managed process execution site.
 
@@ -507,25 +553,7 @@ def run_kicad_python(executable, script, board, *, runner=None, timeout_seconds=
     board = Path(board).resolve()
     project = board.parent
     script = Path(script).resolve()
-    quote = lambda path: json.dumps(str(path))
-    # The user's own home, not $HOME, which callers may change.
-    home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
-    # dyld and CPython need system reads and IPC, so reading is allowed by
-    # default, except anywhere in the home folder (keys, mail, documents)
-    # outside the work copy and the script. Writes are confined to the copy.
-    # No forking: a script cannot leave a process behind that keeps changing
-    # the copy after the edit is reported or restored.
-    profile = '\n'.join((
-        '(version 1)', '(allow default)',
-        '(deny file-read* (subpath ' + quote(home) + '))',
-        '(allow file-read-metadata)',
-        '(allow file-read* (subpath ' + quote(project) + ') (literal ' + quote(script) + '))',
-        '(deny file-write*)',
-        '(allow file-write* (subpath ' + quote(project)
-        + ') (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))',
-        '(deny network*)',
-        '(deny process-fork)',
-    ))
+    profile = _confined_profile(project, script)
     stdout, stderr = script.with_suffix('.stdout'), script.with_suffix('.stderr')
     result = run_coding_subprocess(
         subprocess.run if runner is None else runner,
