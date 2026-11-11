@@ -23,7 +23,7 @@ from alx.bootstrap.live_voice import _watch_review
 from alx.capabilities import CapabilityBroker, CapabilityRegistry
 from alx.contracts import (
     AgentDecision, ApprovalProposal, ApprovalScope, CapabilityAttempt,
-    CapabilityAttemptDisposition, CapabilityCall, CapabilityResult,
+    CapabilityAttemptDisposition, CapabilityResult,
     CapabilityResultState, ConversationOrigin, ConversationSnapshot,
     ConversationTurn, Evidence, GoalMutationKind, GoalProposal, GoalState,
     GoalStatus, Objective, SuccessCriterion, WorkItem,
@@ -38,6 +38,9 @@ from alx.providers.github_review import GitHubReviewProvider
 from alx.providers.repository_authority import RepositoryAuthority
 from alx.safety import AuthorityContext, SafetyGate
 from tests.review_transcript import install_grace_clock
+from tests.code_actions import (
+    MERGE, READ_REVIEW, REQUEST_REVIEW, RUN_JOB, code_call, code_runtime,
+)
 
 
 class Response:
@@ -134,16 +137,19 @@ class PostCodingTests(unittest.TestCase):
         )
         self.merge.provider._sleep = lambda seconds: None
         self.merge.provider._max_polls = 5
-        self.definitions = self.review.definitions + self.merge.definitions + self.repo.definitions
-        self.permissions = self.review.permissions | self.merge.permissions | self.repo.permissions
+        # The review, merge and git actions of the one `code` capability (D-074).
+        self.code = code_runtime(self.review, self.merge, self.repo,
+                                 call_id_source=lambda: self.call_id[0])
+        self.definitions = self.code.definitions
+        self.permissions = self.code.permissions
         self.broker = CapabilityBroker(
             CapabilityRegistry(self.definitions),
-            SafetyGate({**self.review.policies, **self.merge.policies, **self.repo.policies}),
-            {**self.review.executors, **self.merge.executors, **self.repo.executors},
+            SafetyGate(self.code.policies),
+            self.code.executors,
         )
         self.goals = SQLiteGoalStore(self.root / 'goals.sqlite3')
         self.addCleanup(self.goals.close)
-        finished = CapabilityCall('coding-finished', 'run_coding_task', {})
+        finished = code_call('coding-finished', RUN_JOB, {})
         self.finished = CapabilityAttempt(
             finished, CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(finished.call_id, finished.capability_id, CapabilityResultState.SUCCEEDED,
@@ -268,9 +274,17 @@ class PostCodingTests(unittest.TestCase):
         # Her first step selects the completed coding goal; every scripted
         # decision after it works under that goal.
         reasoner = Decisions([AgentDecision(goal_id='goal'), *decisions])
+        # Read from the policies exactly as the composition root reads them.
+        policies = self.code.policies
         core = CoreAgent(self.goals, reasoner, self.dispatch, self.definitions,
-                         approval_free_capabilities=frozenset({'merge_pull_request', 'read_external_review', 'repository_operation'}),
-                         turn_bound_capabilities=frozenset({'request_external_review'}))
+                         approval_free_capabilities=frozenset(
+                             name for name, policy in policies.items() if not policy.approval_required),
+                         turn_bound_capabilities=frozenset(
+                             name for name, policy in policies.items()
+                             if policy.approval_required and not policy.standing_scope_allowed),
+                         approval_exempt_when={
+                             name: policy.approval_exempt_when
+                             for name, policy in policies.items() if policy.approval_exempt_when})
         conversation = ConversationSnapshot('conversation', (
             ConversationTurn('conversation', 'turn', ConversationOrigin.TYPED,
                              'Request one external review and finish the completed coding job.',
@@ -279,16 +293,16 @@ class PostCodingTests(unittest.TestCase):
         return outcome, reasoner
 
     def merge_decision(self, identifier='merge'):
-        return AgentDecision(call=CapabilityCall(
-            identifier, 'merge_pull_request', {'pull_request_number': 72, 'head_sha': self.head}))
+        return AgentDecision(call=code_call(
+            identifier, MERGE, {'pull_request_number': 72, 'head_sha': self.head}))
 
     def test_real_post_coding_path_waits_merges_syncs_and_finishes(self):
         self.already_reviewed = False
-        request = CapabilityCall('request', 'request_external_review', {'pull_request_number': 72}, approval_id='approval')
+        request = code_call('request', REQUEST_REVIEW, {'pull_request_number': 72}, approval_id='approval')
         outcome, reasoner = self.run_core([
             AgentDecision(call=request,
                           approval_proposal=ApprovalProposal('approval', ApprovalScope(request.capability_id, request.arguments), 'turn:turn')),
-            AgentDecision(call=CapabilityCall('read', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head})),
+            AgentDecision(call=code_call('read', READ_REVIEW, {'pull_request_number': 72, 'head_sha': self.head})),
             self.merge_decision(),
             AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.REQUEST_COMPLETION, outstanding_work=(),
                                                      new_evidence=(Evidence('done-evidence', 'Merged exact reviewed head and synced main', supports=('done',), source_references=('attempt:merge',)),))),
@@ -297,8 +311,8 @@ class PostCodingTests(unittest.TestCase):
         self.assertEqual(outcome.response, 'Merged and main is synced.', (outcome, self.attempts))
         self.assertEqual(self.goals.load('goal').state.status, GoalStatus.COMPLETED)
         self.assertEqual(len(reasoner.contexts), 6)
-        self.assertEqual([a.call.capability_id for a in self.attempts],
-                         ['request_external_review', 'read_external_review', 'merge_pull_request'])
+        self.assertEqual([a.call.arguments['action'] for a in self.attempts],
+                         [REQUEST_REVIEW, READ_REVIEW, MERGE])
         self.assertTrue(all(a.result.state is CapabilityResultState.SUCCEEDED for a in self.attempts), self.attempts)
         self.assertEqual(self.request_count, 1)
         self.assertGreater(self.review_reads, self.review_pending)
@@ -397,7 +411,7 @@ class PostCodingTests(unittest.TestCase):
         self.already_reviewed = False
         self.review_pending = 10000
         self.tasks.poller._maximum_wait = 0.02
-        request = CapabilityCall('request', 'request_external_review', {'pull_request_number': 72}, approval_id='approval')
+        request = code_call('request', REQUEST_REVIEW, {'pull_request_number': 72}, approval_id='approval')
         outcome, reasoner = self.run_core([
             AgentDecision(call=request,
                           approval_proposal=ApprovalProposal('approval', ApprovalScope(request.capability_id, request.arguments), 'turn:turn')),
@@ -411,10 +425,10 @@ class PostCodingTests(unittest.TestCase):
 
     def test_unpublished_read_is_not_a_core_polling_capability(self):
         self.already_reviewed = False
-        read = AgentDecision(call=CapabilityCall(
-            'read', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head}))
-        retry = AgentDecision(call=CapabilityCall(
-            'retry', 'read_external_review', {'pull_request_number': 72, 'head_sha': self.head}))
+        read = AgentDecision(call=code_call(
+            'read', READ_REVIEW, {'pull_request_number': 72, 'head_sha': self.head}))
+        retry = AgentDecision(call=code_call(
+            'retry', READ_REVIEW, {'pull_request_number': 72, 'head_sha': self.head}))
         outcome, reasoner = self.run_core([read, retry])
         self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(len(self.attempts), 1)

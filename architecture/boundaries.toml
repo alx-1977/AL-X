@@ -257,7 +257,7 @@ forbidden = []
 [[outcomes]]
 id = "coding.running_job_is_stopped"
 description = "The running coding job is stopped, keeping its branch and diff."
-# AL/X stops a job through stop_coding_job when Friedl asks or she judges it
+# AL/X stops a job through the code action stop_job when Friedl asks or she judges it
 # right. It replaced the console's "Stop coding job" button and its socket
 # frame, which stopped jobs without her and was the only way to do so.
 entry = "tools/coding.py::build_coding_executors.<locals>.stop"

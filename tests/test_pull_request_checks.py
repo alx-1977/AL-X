@@ -28,9 +28,10 @@ from alx.bootstrap.pull_request_checks import (  # noqa: E402
 )
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.contracts import (  # noqa: E402
+    CODE,
     CapabilityAttemptDisposition,
-    CapabilityCall,
     CapabilityResultState,
+    CodeAction,
     ContentOrigin,
     SideEffect,
     ValueKind,
@@ -52,10 +53,11 @@ from alx.providers.github_checks import (  # noqa: E402
 )
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
 from alx.tools.pull_request_checks import (  # noqa: E402
-    DEFINITION,
-    READ_PULL_REQUEST_CHECKS,
+    CONTRACT as DEFINITION,
     build_pull_request_checks_executors,
 )
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
+from code_actions import READ_CHECKS, code_arguments, code_call, code_runtime, definition  # noqa: E402
 
 
 HEAD = "a" * 40
@@ -347,10 +349,16 @@ class CatalogueContractTests(unittest.TestCase):
     """The registered description is a read, and it does not judge the result."""
 
     def test_the_capability_is_a_read_of_one_revision(self) -> None:
-        self.assertEqual(DEFINITION.capability_id, READ_PULL_REQUEST_CHECKS)
-        self.assertEqual(DEFINITION.capability_id, "read_pull_request_checks")
+        # The read_checks action of the one `code` capability (D-074).
+        self.assertEqual(DEFINITION.capability_id, READ_CHECKS)
+        self.assertEqual(DEFINITION.capability_id, "read_checks")
         self.assertIs(DEFINITION.side_effect, SideEffect.NONE)
         self.assertFalse(DEFINITION.transmits_authored_text)
+        code = definition()
+        arguments = code_arguments(READ_CHECKS, {"pull_request_number": 87, "head_sha": HEAD})
+        self.assertIs(code.effect_for(arguments), SideEffect.NONE)
+        self.assertFalse(code.transmits_authored_text_for(arguments))
+        self.assertTrue(code.plan_observation_for(arguments))
         self.assertEqual(
             set(DEFINITION.input_schema.properties),
             {"pull_request_number", "head_sha"},
@@ -463,25 +471,28 @@ class RegistrationTests(unittest.TestCase):
         )
         self.assertIsNotNone(runtime)
         assert runtime is not None
+        self.assertEqual(set(runtime.actions), {CodeAction.READ_CHECKS})
         self.assertEqual(
-            {item.capability_id for item in runtime.definitions},
-            {READ_PULL_REQUEST_CHECKS},
+            runtime.action_permissions,
+            {CodeAction.READ_CHECKS: frozenset({CHECKS_READ_PERMISSION})},
         )
-        self.assertEqual(set(runtime.executors), {READ_PULL_REQUEST_CHECKS})
-        self.assertEqual(set(runtime.policies), {READ_PULL_REQUEST_CHECKS})
-        self.assertEqual(runtime.permissions, frozenset({CHECKS_READ_PERMISSION}))
+        code = code_runtime(runtime)
+        self.assertEqual(code.offered, (CodeAction.READ_CHECKS,))
+        self.assertEqual(set(code.executors), {CODE})
+        self.assertEqual(set(code.policies), {CODE})
+        self.assertEqual(code.permissions, frozenset({CHECKS_READ_PERMISSION}))
         self.assertEqual(CHECKS_READ_PERMISSION, "checks.read")
-        policy = runtime.policies[READ_PULL_REQUEST_CHECKS]
+        policy = code.policies[CODE]
         self.assertFalse(policy.approval_required)
         self.assertFalse(policy.standing_scope_allowed)
         self.assertEqual(
             policy.permission_references, frozenset({CHECKS_READ_PERMISSION})
         )
-        for permission in runtime.permissions:
+        for permission in code.permissions:
             self.assertNotIn("merge", permission)
             self.assertNotIn("review", permission)
-        self.assertNotIn("repository.merge", runtime.permissions)
-        self.assertNotIn("review.request", runtime.permissions)
+        self.assertNotIn("repository.merge", code.permissions)
+        self.assertNotIn("review.request", code.permissions)
 
     def test_permission_alone_authorises_the_read(self) -> None:
         runtime = build_pull_request_checks_runtime(
@@ -491,10 +502,10 @@ class RegistrationTests(unittest.TestCase):
             provider=types.SimpleNamespace(read=lambda *_args, **_kwargs: None),
         )
         assert runtime is not None
-        gate = SafetyGate(runtime.policies)
-        call = CapabilityCall(
+        gate = SafetyGate(code_runtime(runtime).policies)
+        call = code_call(
             "call-1",
-            READ_PULL_REQUEST_CHECKS,
+            READ_CHECKS,
             {"pull_request_number": 87, "head_sha": HEAD},
         )
         allowed = gate.evaluate(
@@ -548,20 +559,25 @@ class RegistrationTests(unittest.TestCase):
         while parent is not None:
             self.assertNotIsInstance(parent, ast.If)
             parent = parents.get(id(parent))
-        start = source.index("checks_runtime = build_pull_request_checks_runtime(")
-        window = source[start:start + 700]
-        self.assertIn("register(checks_runtime.definitions, TraceSubsystem.GITHUB)", window)
-        self.assertIn("policies.update(checks_runtime.policies)", window)
-        self.assertIn("executors.update(checks_runtime.executors)", window)
-        self.assertIn("permissions.update(checks_runtime.permissions)", window)
+        # Composed into the one `code` capability with the other code jobs
+        # (D-074), and registered with them.
+        start = source.index("code_runtime = build_code_runtime(")
+        window = source[start:start + 600]
+        self.assertIn("checks_runtime", window.split("current_call_id.get")[0])
+        self.assertIn("register(code_runtime.definitions, TraceSubsystem.CODING)", window)
+        self.assertIn("policies.update(code_runtime.policies)", window)
+        self.assertIn("executors.update(code_runtime.executors)", window)
+        self.assertIn("permissions.update(code_runtime.permissions)", window)
 
 
 class ExecutorTests(unittest.TestCase):
     """Invalid input and provider failures stay structured, and carry no prose."""
 
     def executor(self, reader):
+        # The action's own executor and its own argument checks, beneath the
+        # one `code` dispatcher (D-074).
         return build_pull_request_checks_executors(reader, lambda: "call-1")[
-            READ_PULL_REQUEST_CHECKS
+            CodeAction.READ_CHECKS
         ]
 
     def test_unusable_arguments_do_not_read(self) -> None:
@@ -639,16 +655,17 @@ class GitHubReadTests(ProviderCase):
             REPOSITORY, TOKEN, lambda: "call-1", provider=self.provider
         )
         assert runtime is not None
+        code = code_runtime(runtime)
         broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         )
         return broker
 
     def _dispatch(self, arguments: dict):
         return self._broker().dispatch(
-            CapabilityCall("call-1", READ_PULL_REQUEST_CHECKS, arguments),
+            code_call("call-1", READ_CHECKS, arguments),
             AuthorityContext(
                 "alx", frozenset({CHECKS_READ_PERMISSION}), datetime.now(UTC)
             ),

@@ -29,6 +29,8 @@ from collections.abc import Callable
 from typing import Any, Mapping
 
 from alx.contracts import (
+    CODE,
+    CodeAction,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -49,7 +51,6 @@ from alx.contracts.sandbox import (
 
 LOGGER = logging.getLogger(__name__)
 
-RUN_SANDBOX_EXPERIMENT = "run_sandbox_experiment"
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
@@ -68,8 +69,8 @@ _ARTIFACT = StructuredSchema(
 )
 
 
-DEFINITION = CapabilityDefinition(
-    RUN_SANDBOX_EXPERIMENT,
+CONTRACT = CapabilityDefinition(
+    CodeAction.EXPERIMENT.value,
     "Run one small Python program in an isolated workspace with no network, "
     "no production secrets, read access to the AL/X repository and git execution, and return "
     "its exit status, bounded output and a description of the files it "
@@ -135,7 +136,7 @@ def build_sandbox_executors(
     run_experiment: Callable[[SandboxRequest], Any],
     call_id_source: Callable[[], str],
     run_id_source: Callable[[], str],
-) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
+) -> Mapping[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Wire the one execution outcome to its structured capability result."""
 
     def run(arguments: Mapping[str, Any]) -> CapabilityResult:
@@ -178,7 +179,7 @@ def build_sandbox_executors(
         values["artifact_count"] = len(outcome.artifacts)
         return CapabilityResult(
             call_id,
-            RUN_SANDBOX_EXPERIMENT,
+            CODE,
             CapabilityResultState.SUCCEEDED,
             values,
             # Identifiers, integers, booleans, timestamps and hashes only.
@@ -194,13 +195,13 @@ def build_sandbox_executors(
             ),
         )
 
-    return {RUN_SANDBOX_EXPERIMENT: run}
+    return {CodeAction.EXPERIMENT: run}
 
 
 def _failed(call_id: str, code: str, **details: Any) -> CapabilityResult:
     return CapabilityResult(
         call_id,
-        RUN_SANDBOX_EXPERIMENT,
+        CODE,
         CapabilityResultState.FAILED,
         failure={"code": code, **details},
     )

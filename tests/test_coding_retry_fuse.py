@@ -19,10 +19,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.contracts import (  # noqa: E402
-    CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall,
+    CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityResult, CapabilityResultState, GoalState, Objective,
-    SuccessCriterion, AgentDecision, CapabilityDefinition, ConversationOrigin,
-    ConversationSnapshot, ConversationTurn, SideEffect, StructuredSchema, ValueKind,
+    SuccessCriterion, AgentDecision, ConversationOrigin,
+    ConversationSnapshot, ConversationTurn,
 )
 from alx.contracts.coding import CodingError, CodingRequest  # noqa: E402
 from alx.core import CoreAgent  # noqa: E402
@@ -31,13 +31,14 @@ from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.providers.coding_agent import CodingAgent  # noqa: E402
 from alx.providers.coding_git import coding_job_lock  # noqa: E402
 from alx.tools.coding import build_coding_executors  # noqa: E402
+from code_actions import RUN_JOB, addressed, code_call, definition, executors  # noqa: E402
 
 
 def attempt(call_id: str, *, failed=True, invoked=True, disposition=CapabilityAttemptDisposition.EXECUTED, failure_code="task_failed", arguments=None):
-    call = CapabilityCall(call_id, "run_coding_task", arguments or {"task": call_id, "worktree": "."})
+    call = code_call(call_id, RUN_JOB, arguments or {"task": call_id})
     if disposition is CapabilityAttemptDisposition.REJECTED:
         return CapabilityAttempt(call, disposition, False, reason_code="input_invalid")
-    result = CapabilityResult(call_id, "run_coding_task", CapabilityResultState.FAILED if failed else CapabilityResultState.SUCCEEDED, failure={"code": failure_code} if failed else None)
+    result = CapabilityResult(call_id, "code", CapabilityResultState.FAILED if failed else CapabilityResultState.SUCCEEDED, failure={"code": failure_code} if failed else None)
     return CapabilityAttempt(call, disposition, invoked, result, "executor_error" if disposition is CapabilityAttemptDisposition.BROKER_FAILURE else None)
 
 
@@ -45,10 +46,10 @@ FOUR_FAILURES = tuple(attempt(f"failure-{n}") for n in range(4))
 
 
 def planning_failure(call_id: str):
-    call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+    call = code_call(call_id, RUN_JOB, {"task": call_id})
     result = CapabilityResult(
         call_id,
-        "run_coding_task",
+        "code",
         CapabilityResultState.FAILED,
         failure={
             "code": "planning_failed",
@@ -70,10 +71,10 @@ def state(*attempts):
 class CodingRetryFuseTests(unittest.TestCase):
     def test_interruption_and_historical_timeout_do_not_spend_failure_allowance(self):
         old = CapabilityAttempt(
-            CapabilityCall("old", "run_coding_task", {"task": "work"}),
+            code_call("old", RUN_JOB, {"task": "work"}),
             CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(
-                "old", "run_coding_task", CapabilityResultState.FAILED,
+                "old", "code", CapabilityResultState.FAILED,
                 {"status": "failed", "checkpoint": json.dumps({
                     "stage": "execution", "state_digest": "a" * 64,
                 })},
@@ -81,10 +82,10 @@ class CodingRetryFuseTests(unittest.TestCase):
             ),
         )
         current = CapabilityAttempt(
-            CapabilityCall("current", "run_coding_task", {"resume_job_id": "old"}),
+            code_call("current", RUN_JOB, {"resume_job_id": "old"}),
             CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(
-                "current", "run_coding_task", CapabilityResultState.PARTIAL,
+                "current", "code", CapabilityResultState.PARTIAL,
                 {"status": "interrupted", "checkpoint": json.dumps({
                     "stage": "execution", "state_digest": "b" * 64,
                 })},
@@ -94,7 +95,7 @@ class CodingRetryFuseTests(unittest.TestCase):
         self.assertEqual(CoreAgent._consecutive_coding_failures(goal), 0)
         self.assertIsNone(CoreAgent._coding_exhaustion_reason(goal))
         self.assertIsNone(CoreAgent._coding_interruption_exhaustion_reason(
-            goal, CapabilityCall("next", "run_coding_task", {"resume_job_id": "current"})
+            goal, code_call("next", RUN_JOB, {"resume_job_id": "current"})
         ))
         self.assertEqual(CoreAgent._consecutive_coding_failures(state(
             old, current, attempt("implementation-error")
@@ -103,11 +104,11 @@ class CodingRetryFuseTests(unittest.TestCase):
     def test_interruption_chain_stops_on_no_progress_and_at_its_own_bound(self):
         def interrupted(number, parent, digest):
             return CapabilityAttempt(
-                CapabilityCall(str(number), "run_coding_task",
-                               {"resume_job_id": str(parent)} if parent else {"task": "work"}),
+                code_call(str(number), RUN_JOB,
+                          {"resume_job_id": str(parent)} if parent else {"task": "work"}),
                 CapabilityAttemptDisposition.EXECUTED, True,
                 CapabilityResult(
-                    str(number), "run_coding_task", CapabilityResultState.PARTIAL,
+                    str(number), "code", CapabilityResultState.PARTIAL,
                     {"status": "interrupted", "checkpoint": json.dumps({
                         "stage": "execution", "state_digest": digest,
                     })},
@@ -115,7 +116,7 @@ class CodingRetryFuseTests(unittest.TestCase):
             )
         first = interrupted(1, None, "a")
         unchanged = interrupted(2, 1, "a")
-        next_call = CapabilityCall("3", "run_coding_task", {"resume_job_id": "2"})
+        next_call = code_call("3", RUN_JOB, {"resume_job_id": "2"})
         self.assertEqual(
             CoreAgent._coding_interruption_exhaustion_reason(state(first, unchanged), next_call),
             "coding_interruption_no_progress",
@@ -124,7 +125,7 @@ class CodingRetryFuseTests(unittest.TestCase):
                       for index in range(1, 5))
         self.assertEqual(
             CoreAgent._coding_interruption_exhaustion_reason(
-                state(*chain), CapabilityCall("5", "run_coding_task", {"resume_job_id": "4"})
+                state(*chain), code_call("5", RUN_JOB, {"resume_job_id": "4"})
             ), "coding_interruption_exhausted",
         )
         self.assertEqual(CoreAgent._consecutive_coding_failures(state(*chain)), 0)
@@ -144,10 +145,10 @@ class CodingRetryFuseTests(unittest.TestCase):
             "all_required_verification_passed": True,
         }
         old_noop = CapabilityAttempt(
-            CapabilityCall("old-noop", "run_coding_task", {"task": "already done"}),
+            code_call("old-noop", RUN_JOB, {"task": "already done"}),
             CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(
-                "old-noop", "run_coding_task", CapabilityResultState.FAILED,
+                "old-noop", "code", CapabilityResultState.FAILED,
                 evidence, {"code": "task_failed", "phase": "test",
                            "session_completed": True},
             ),
@@ -166,13 +167,13 @@ class CodingRetryFuseTests(unittest.TestCase):
         ):
             with self.subTest(changed=changed):
                 result = CapabilityResult(
-                    "failed", "run_coding_task", CapabilityResultState.FAILED,
+                    "failed", "code", CapabilityResultState.FAILED,
                     {**evidence, **changed},
                     {"code": "task_failed", "phase": "test",
                      "session_completed": True},
                 )
                 failed = CapabilityAttempt(
-                    CapabilityCall("failed", "run_coding_task", {"task": "work"}),
+                    code_call("failed", RUN_JOB, {"task": "work"}),
                     CapabilityAttemptDisposition.EXECUTED, True, result,
                 )
                 self.assertEqual(CoreAgent._consecutive_coding_failures(state(failed)), 1)
@@ -189,9 +190,9 @@ class CodingRetryFuseTests(unittest.TestCase):
         ]
         attempts = tuple(
             CapabilityAttempt(
-                CapabilityCall(f"stage-{index}", "run_coding_task", {"task": "work"}),
+                code_call(f"stage-{index}", RUN_JOB, {"task": "work"}),
                 CapabilityAttemptDisposition.EXECUTED, True,
-                CapabilityResult(f"stage-{index}", "run_coding_task",
+                CapabilityResult(f"stage-{index}", "code",
                                  CapabilityResultState.FAILED, failure=failure),
             ) for index, failure in enumerate(failures)
         )
@@ -221,7 +222,7 @@ class CodingRetryFuseTests(unittest.TestCase):
                 self.contexts = []
                 self.decisions = [
                     AgentDecision(goal_id="goal-a"),
-                    AgentDecision(call=CapabilityCall("third", "run_coding_task", {"task": "changed", "worktree": "."})),
+                    AgentDecision(call=code_call("third", RUN_JOB, {"task": "changed"})),
                     AgentDecision(response="The prior jobs failed."),
                 ]
             def decide(self, context):
@@ -237,8 +238,7 @@ class CodingRetryFuseTests(unittest.TestCase):
             store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
             self.addCleanup(store.close)
             store.create(state(*FOUR_FAILURES), "conversation", retention)
-            schema = StructuredSchema(ValueKind.OBJECT)
-            capability = CapabilityDefinition("run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL)
+            capability = definition(RUN_JOB)
             reasoner = Reasoner()
             agent = CoreAgent(store, reasoner, dispatch, (capability,), clock=lambda: now)
             conversation = ConversationSnapshot("conversation", (
@@ -260,8 +260,8 @@ class CodingRetryFuseTests(unittest.TestCase):
             def __init__(self):
                 self.decisions = [
                     AgentDecision(goal_id="goal-a"),
-                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."})),
-                    AgentDecision(call=CapabilityCall("first-refusal", "run_coding_task", {"task": "first", "worktree": "."})),
+                    AgentDecision(call=code_call("first-refusal", RUN_JOB, {"task": "first"})),
+                    AgentDecision(call=code_call("first-refusal", RUN_JOB, {"task": "first"})),
                     AgentDecision(response="The coding path is exhausted."),
                 ]
             def decide(self, context):
@@ -271,8 +271,7 @@ class CodingRetryFuseTests(unittest.TestCase):
             store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
             self.addCleanup(store.close)
             store.create(state(*FOUR_FAILURES), "conversation", retention)
-            schema = StructuredSchema(ValueKind.OBJECT)
-            capability = CapabilityDefinition("run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL)
+            capability = definition(RUN_JOB)
             agent = CoreAgent(store, Reasoner(), lambda *_: self.fail("must not dispatch"), (capability,), clock=lambda: now)
             conversation = ConversationSnapshot("conversation", (ConversationTurn("conversation", "t", ConversationOrigin.TYPED, "continue", now, "friedl"),), 1, retention)
             outcome = agent.process(conversation, retention, 5)
@@ -280,7 +279,7 @@ class CodingRetryFuseTests(unittest.TestCase):
                 def decide(self, context):
                     if context.active_goal is None:
                         return AgentDecision(goal_id="goal-a")
-                    return AgentDecision(call=CapabilityCall("reworded", "run_coding_task", {"task": "different wording", "worktree": "."}))
+                    return AgentDecision(call=code_call("reworded", RUN_JOB, {"task": "different wording"}))
 
             reworded = CoreAgent(store, Reworded(), lambda *_: self.fail("must not dispatch"), (capability,), clock=lambda: now)
             reworded_outcome = reworded.process(conversation, retention, 2)
@@ -374,9 +373,9 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
                 call, CapabilityAttemptDisposition.EXECUTED, True, result
             )
 
-        executor = build_coding_executors(
+        executor = executors(build_coding_executors(
             self.agent.run, lambda: dispatched[-1]
-        )["run_coding_task"]
+        ))["code"]
         arguments = {
             "task": "change app",
             "repair_branch": "feat/change",
@@ -396,8 +395,8 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
                     git(root, "switch", "-q", "main")
                 if self.decisions <= 3:
                     return AgentDecision(
-                        call=CapabilityCall(
-                            f"job-{self.decisions}", "run_coding_task", arguments
+                        call=code_call(
+                            f"job-{self.decisions}", RUN_JOB, arguments
                         ),
                     )
                 return AgentDecision(response="done")
@@ -407,11 +406,7 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
             store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
             self.addCleanup(store.close)
             store.create(state(), "conversation", retention)
-            schema = StructuredSchema(ValueKind.OBJECT)
-            capability = CapabilityDefinition(
-                "run_coding_task", "bounded job", schema, schema,
-                SideEffect.EFFECTFUL,
-            )
+            capability = definition(RUN_JOB)
             agent = CoreAgent(
                 store, Reasoner(), dispatch, (capability,), clock=lambda: now
             )
@@ -441,10 +436,10 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
     def test_an_implementation_reaching_failure_still_counts(self) -> None:
         reached = attempt("reached", failure_code="task_failed")
         refused = CapabilityAttempt(
-            CapabilityCall("refused", "run_coding_task", {"task": "x"}),
+            code_call("refused", RUN_JOB, {"task": "x"}),
             CapabilityAttemptDisposition.EXECUTED, True,
             CapabilityResult(
-                "refused", "run_coding_task", CapabilityResultState.FAILED,
+                "refused", "code", CapabilityResultState.FAILED,
                 failure={
                     "code": "git_refused",
                     "reason_code": "canonical_checkout_dirty",
@@ -460,9 +455,9 @@ class CheckoutPreconditionsDoNotSpendTheAllowance(unittest.TestCase):
 
 def conflict(call_id: str):
     """A run that implemented but whose required check only the request blocked."""
-    call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+    call = code_call(call_id, RUN_JOB, {"task": call_id})
     result = CapabilityResult(
-        call_id, "run_coding_task", CapabilityResultState.FAILED,
+        call_id, "code", CapabilityResultState.FAILED,
         failure={
             "code": "required_verification_failed",
             "failure_class": "request_conflict",
@@ -472,9 +467,9 @@ def conflict(call_id: str):
 
 
 def before_implementation(call_id: str):
-    call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+    call = code_call(call_id, RUN_JOB, {"task": call_id})
     result = CapabilityResult(
-        call_id, "run_coding_task", CapabilityResultState.FAILED,
+        call_id, "code", CapabilityResultState.FAILED,
         failure={
             "code": "git_refused",
             "reason_code": "canonical_checkout_dirty",
@@ -500,7 +495,7 @@ class TaskFailuresShareOneBound(unittest.TestCase):
         def dispatch(call, authority):
             dispatched.append(call.call_id)
             result = CapabilityResult(
-                call.call_id, "run_coding_task", CapabilityResultState.SUCCEEDED,
+                call.call_id, "code", CapabilityResultState.SUCCEEDED,
                 {"status": "succeeded"},
             )
             return CapabilityAttempt(
@@ -511,8 +506,8 @@ class TaskFailuresShareOneBound(unittest.TestCase):
             def __init__(self):
                 self.decisions = [AgentDecision(goal_id="goal-a")] + [
                     AgentDecision(
-                        call=CapabilityCall(
-                            call_id, "run_coding_task", {"task": f"changed plan {call_id}"}
+                        call=code_call(
+                            call_id, RUN_JOB, {"task": f"changed plan {call_id}"}
                         ),
                     )
                     for call_id in calls
@@ -525,10 +520,7 @@ class TaskFailuresShareOneBound(unittest.TestCase):
             store = SQLiteGoalStore(Path(directory) / "goals.sqlite3")
             self.addCleanup(store.close)
             store.create(state(*attempts), "conversation", retention)
-            schema = StructuredSchema(ValueKind.OBJECT)
-            capability = CapabilityDefinition(
-                "run_coding_task", "bounded job", schema, schema, SideEffect.EFFECTFUL
-            )
+            capability = definition(RUN_JOB)
             agent = CoreAgent(store, Reasoner(), dispatch, (capability,), clock=lambda: now)
             conversation = ConversationSnapshot("conversation", (
                 ConversationTurn(
@@ -598,10 +590,10 @@ class TaskFailuresShareOneBound(unittest.TestCase):
             ("parsing", "plan_parse_failed"),
             ("persistence", "persistence_failed"),
         ):
-            call = CapabilityCall(call_id, "run_coding_task", {"task": call_id})
+            call = code_call(call_id, RUN_JOB, {"task": call_id})
             result = CapabilityResult(
                 call_id,
-                "run_coding_task",
+                "code",
                 CapabilityResultState.FAILED,
                 failure={
                     "code": code,
@@ -641,8 +633,8 @@ class TaskFailuresShareOneBound(unittest.TestCase):
                 self.decisions = [
                     AgentDecision(goal_id="goal-a"),
                     AgentDecision(
-                        call=CapabilityCall(
-                            "reworded", "run_coding_task", {"task": "try again"}
+                        call=code_call(
+                            "reworded", RUN_JOB, {"task": "try again"}
                         ),
                     ),
                     AgentDecision(
@@ -664,11 +656,7 @@ class TaskFailuresShareOneBound(unittest.TestCase):
                 "conversation",
                 retention,
             )
-            schema = StructuredSchema(ValueKind.OBJECT)
-            capability = CapabilityDefinition(
-                "run_coding_task", "bounded job", schema, schema,
-                SideEffect.EFFECTFUL,
-            )
+            capability = definition(RUN_JOB)
             core = CoreAgent(
                 goals, Reasoner(), lambda *_: self.fail("must not dispatch"),
                 (capability,), clock=lambda: now,
@@ -719,7 +707,7 @@ class TaskFailuresShareOneBound(unittest.TestCase):
                 "task_failed", reason_code="claimed", failure_class="request_conflict"
             )
 
-        executor = build_coding_executors(run_job, lambda: "job-1")["run_coding_task"]
+        executor = addressed(build_coding_executors(run_job, lambda: "job-1"), RUN_JOB)
         result = executor({
             "task": "change app", "repair_branch": "feat/change",
             "commit_message": "Change app",
@@ -728,7 +716,7 @@ class TaskFailuresShareOneBound(unittest.TestCase):
         self.assertEqual(result.failure["reason_code"], "claimed")
         self.assertNotIn("failure_class", result.failure)
 
-        call = CapabilityCall("job-1", "run_coding_task", {"task": "change app"})
+        call = code_call("job-1", RUN_JOB, {"task": "change app"})
         goal = state(
             CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
         )

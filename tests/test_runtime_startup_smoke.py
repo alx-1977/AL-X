@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from alx.bootstrap import live_voice  # noqa: E402
+from code_actions import GIT, RUN_JOB  # noqa: E402
 
 
 def _template_environment() -> dict[str, str]:
@@ -380,19 +381,24 @@ class CodingNeedsRepositoryAuthority(unittest.TestCase):
 
     A failed job leaves its feature branch in the canonical checkout, and only
     AL/X's repository authority can switch that checkout back to main. Without
-    that authority the process checkout is not a fallback: `run_coding_task`
-    is not registered at all.
+    that authority the process checkout is not a fallback: `code` does not
+    offer run_job at all.
     """
 
     _run_runtime = StartupSmokeTest._run_runtime
 
-    def _composed_coding(self, overrides: dict[str, str]) -> tuple[list, list]:
+    def _composed_coding(self, overrides: dict[str, str]) -> tuple[list, list, list]:
+        """The checkouts coding was given, the `code` actions offered, and
+        the order the coding and repository-authority jobs were composed in."""
         from alx.bootstrap.coding import build_coding_runtime
         from alx.capabilities import CapabilityRegistry
 
         checkouts: list = []
-        registered: list[str] = []
+        offered: list[str] = []
+        composed: list[str] = []
         register = CapabilityRegistry.register
+        authority = live_voice.build_repository_authority_runtime
+        code = live_voice.build_code_runtime
 
         class Agent:
             def run(self, request):
@@ -400,17 +406,33 @@ class CodingNeedsRepositoryAuthority(unittest.TestCase):
 
         def coding(enabled, model, call_id_source, **kwargs):
             checkouts.append(kwargs["repository"])
+            composed.append("coding")
             # The real composition, given an inert agent so no model is built.
             return build_coding_runtime(
                 enabled, model, call_id_source,
                 agent=Agent(), repository=kwargs["repository"],
             )
 
+        def repository_authority(*args, **kwargs):
+            composed.append("repository_authority")
+            return authority(*args, **kwargs)
+
+        def code_runtime(parts, call_id_source):
+            runtime = code(parts, call_id_source)
+            if runtime is not None:
+                offered.extend(item.value for item in runtime.offered)
+            return runtime
+
         def recording_register(registry, definition):
-            registered.append(definition.capability_id)
+            if definition.capability_id == "code":
+                registered_code.append(definition)
             return register(registry, definition)
 
+        registered_code: list = []
         with mock.patch.object(live_voice, "build_coding_runtime", coding), \
+                mock.patch.object(live_voice, "build_repository_authority_runtime",
+                                  repository_authority), \
+                mock.patch.object(live_voice, "build_code_runtime", code_runtime), \
                 mock.patch.object(CapabilityRegistry, "register", recording_register):
             observed = self._run_runtime({
                 "ALX_CODING_ENABLED": "true",
@@ -423,44 +445,45 @@ class CodingNeedsRepositoryAuthority(unittest.TestCase):
                 **overrides,
             })
         self.assertTrue(observed["served"])
-        return checkouts, registered
+        # Whatever is offered is offered through the one registered `code`.
+        self.assertEqual(len(registered_code), 1 if offered else 0)
+        return checkouts, offered, composed
 
     def test_missing_repository_authority_registers_no_coding(self) -> None:
-        checkouts, registered = self._composed_coding(
+        checkouts, offered, _ = self._composed_coding(
             {"ALX_REPOSITORY_RUNTIME_ENABLED": "false"}
         )
         self.assertEqual(checkouts, [None])
-        self.assertNotIn("run_coding_task", registered)
-        self.assertNotIn("repository_operation", registered)
+        self.assertNotIn(RUN_JOB, offered)
+        self.assertNotIn(GIT, offered)
 
     def test_partially_configured_repository_authority_registers_no_coding(self) -> None:
         # Enabled, but with no root: the settings are not usable, and the
         # checkout the process runs from must not stand in for one.
-        checkouts, registered = self._composed_coding({
+        checkouts, offered, _ = self._composed_coding({
             "ALX_REPOSITORY_RUNTIME_ENABLED": "true",
             "ALX_REPOSITORY_RUNTIME_ROOT": "",
             "ALX_REPOSITORY_RUNTIME_IDENTITY": "alx-1977/AL-X",
             "ALX_REPOSITORY_RUNTIME_ORIGIN": "https://github.com/alx-1977/AL-X.git",
         })
         self.assertEqual(checkouts, [None])
-        self.assertNotIn("run_coding_task", registered)
+        self.assertNotIn(RUN_JOB, offered)
 
     def test_usable_repository_authority_registers_coding_on_its_root(self) -> None:
-        checkouts, registered = self._composed_coding({
+        checkouts, offered, composed = self._composed_coding({
             "ALX_REPOSITORY_RUNTIME_ENABLED": "true",
             "ALX_REPOSITORY_RUNTIME_ROOT": str(ROOT),
             "ALX_REPOSITORY_RUNTIME_IDENTITY": "alx-1977/AL-X",
             "ALX_REPOSITORY_RUNTIME_ORIGIN": "https://github.com/alx-1977/AL-X.git",
         })
         self.assertEqual(checkouts, [ROOT.resolve()])
-        self.assertIn("repository_operation", registered)
-        self.assertIn("run_coding_task", registered)
+        self.assertIn(GIT, offered)
+        self.assertIn(RUN_JOB, offered)
         # Authority first: coding is composed only after it exists.
         self.assertLess(
-            registered.index("repository_operation"),
-            registered.index("run_coding_task"),
+            composed.index("repository_authority"),
+            composed.index("coding"),
         )
-
 
 if __name__ == "__main__":
     unittest.main()

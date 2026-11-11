@@ -381,7 +381,8 @@ class ModelReasonerTests(unittest.TestCase):
         from alx.contracts import CognitionOrigin, ConversationSnapshot, PlanStatus
         from alx.core import CoreAgent, CoreState
         from alx.goals import SQLiteGoalStore
-        from alx.tools.pull_request_checks import DEFINITION as CHECKS
+        from code_actions import READ_CHECKS, definition
+        CHECKS = definition(READ_CHECKS)
 
         head = "c" * 40
         raw = {
@@ -392,8 +393,9 @@ class ModelReasonerTests(unittest.TestCase):
                     "steps": [
                         {
                             "call_id": "read-checks",
-                            "capability_id": "read_pull_request_checks",
-                            "arguments_json": json.dumps({"pull_request_number": 95,
+                            "capability_id": "code",
+                            "arguments_json": json.dumps({"action": READ_CHECKS,
+                                                          "pull_request_number": 95,
                                                           "head_sha": head}),
                             "approval_id": None,
                             "completion_conditions": [],
@@ -429,7 +431,8 @@ class ModelReasonerTests(unittest.TestCase):
         self.assertEqual([item.call.call_id for item in proposed.steps],
                          ["read-checks", "search-after"])
         self.assertEqual(proposed.steps[0].call.arguments,
-                         {"pull_request_number": 95, "head_sha": head})
+                         {"action": READ_CHECKS, "pull_request_number": 95,
+                          "head_sha": head})
         # 3. It installs into a real active goal, bound to the runtime's
         # provenance, and nothing runs inside the turn: the executor does that.
         directory = tempfile.TemporaryDirectory()

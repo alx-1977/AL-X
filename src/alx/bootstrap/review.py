@@ -23,24 +23,13 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from alx.contracts import CapabilityDefinition, CapabilityResult, StructuredData
+from alx.contracts import CapabilityResult, CodeAction, StructuredData
 from alx.contracts.review import ReviewError, ReviewRequest
 from alx.contracts.review_provider import ReviewProvider, profile_for
 from alx.observability.review_allowance import ReviewAllowanceReached
 from alx.providers.github_review import GitHubReviewProvider
-from alx.safety import AuthorityPolicy
-from alx.tools.review import (
-    BEYOND_ALLOWANCE_DEFINITION,
-    DEFINITION as REVIEW_DEFINITION,
-    REQUEST_EXTERNAL_REVIEW,
-    REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE,
-    build_review_executors,
-)
-from alx.tools.review_content import (
-    DEFINITION as REVIEW_CONTENT_DEFINITION,
-    READ_EXTERNAL_REVIEW,
-    build_review_content_executors,
-)
+from alx.tools.review import build_review_executors
+from alx.tools.review_content import build_review_content_executors
 
 
 LOGGER = logging.getLogger(__name__)
@@ -90,13 +79,11 @@ class _AllowanceLedger:
 
 @dataclass(frozen=True, slots=True)
 class ReviewRuntime:
-    """The one review-request capability, or nothing at all."""
+    """The review actions of `code`, or nothing at all (D-074)."""
 
     provider: Any
-    definitions: tuple[CapabilityDefinition, ...]
-    policies: Mapping[str, AuthorityPolicy]
-    executors: Mapping[str, Callable[[StructuredData], CapabilityResult]]
-    permissions: frozenset[str]
+    actions: Mapping[CodeAction, Callable[[StructuredData], CapabilityResult]]
+    action_permissions: Mapping[CodeAction, frozenset[str]]
 
 
 def build_review_runtime(
@@ -209,33 +196,34 @@ def build_review_runtime(
 
     LOGGER.info(
         "External review requesting enabled: %s (%s)",
-        REQUEST_EXTERNAL_REVIEW,
+        CodeAction.REQUEST_REVIEW.value,
         getattr(selected, "reviewer", "external"),
     )
     beyond_allowance = allowance is not None
     return ReviewRuntime(
         provider=selected,
-        definitions=(
-            (REVIEW_DEFINITION, REVIEW_CONTENT_DEFINITION)
-            + ((BEYOND_ALLOWANCE_DEFINITION,) if beyond_allowance else ())
-        ),
-        policies={
+        actions={
+            **build_review_executors(request_review, call_id_source),
+            **(build_review_executors(
+                lambda review: request_review(review, beyond),
+                call_id_source,
+                CodeAction.REQUEST_REVIEW_BEYOND_ALLOWANCE,
+            ) if beyond_allowance else {}),
+            **build_review_content_executors(reader.read, call_id_source),
+        },
+        action_permissions={
             # Plain permission since 2026-10-06 (D-026, "Requesting the
             # review"): Friedl delegated when to ask for a review to AL/X, as
             # he had delegated merging, within his allowance since
             # 2026-10-14. A request on a head whose review is already running
             # or done attaches to that round rather than asking again, which
             # the provider enforces.
-            REQUEST_EXTERNAL_REVIEW: AuthorityPolicy(
-                frozenset({REVIEW_REQUEST_PERMISSION}),
-            ),
+            CodeAction.REQUEST_REVIEW: frozenset({REVIEW_REQUEST_PERMISSION}),
             # Past the allowance, a review is Friedl's to allow: "after that
-            # she needs to ask" (2026-10-14). His approval binds the exact call.
+            # she needs to ask" (2026-10-14). His approval binds the exact
+            # call; `code` asks it for this action alone.
             **({
-                REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE: AuthorityPolicy(
-                    frozenset({REVIEW_REQUEST_PERMISSION}),
-                    approval_required=True,
-                ),
+                CodeAction.REQUEST_REVIEW_BEYOND_ALLOWANCE: frozenset({REVIEW_REQUEST_PERMISSION}),
             } if beyond_allowance else {}),
             # Plain permission, deliberately. Reading spends nothing and
             # changes nothing outside, so requiring Friedl's word each time
@@ -243,20 +231,6 @@ def build_review_runtime(
             # unable to read a review she was woken to evaluate. It is a
             # separate permission from requesting, so holding one grants
             # nothing of the other.
-            READ_EXTERNAL_REVIEW: AuthorityPolicy(
-                frozenset({REVIEW_READ_PERMISSION}),
-            ),
+            CodeAction.READ_REVIEW: frozenset({REVIEW_READ_PERMISSION}),
         },
-        executors={
-            **build_review_executors(request_review, call_id_source),
-            **(build_review_executors(
-                lambda review: request_review(review, beyond),
-                call_id_source,
-                REQUEST_EXTERNAL_REVIEW_BEYOND_ALLOWANCE,
-            ) if beyond_allowance else {}),
-            **build_review_content_executors(reader.read, call_id_source),
-        },
-        permissions=frozenset(
-            {REVIEW_REQUEST_PERMISSION, REVIEW_READ_PERMISSION}
-        ),
     )

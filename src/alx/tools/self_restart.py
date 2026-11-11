@@ -13,6 +13,8 @@ from collections.abc import Callable
 from typing import Any, Mapping
 
 from alx.contracts import (
+    CODE,
+    CodeAction,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -21,14 +23,13 @@ from alx.contracts import (
     ValueKind,
 )
 
-RESTART_SELF = "restart_self"
 _FAILURES = ("nothing_new_to_run", "coding_job_running", "unavailable")
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
 
-DEFINITION = CapabilityDefinition(
-    RESTART_SELF,
+CONTRACT = CapabilityDefinition(
+    CodeAction.RESTART.value,
     "Restart yourself onto committed main, so code you have merged goes live. "
     "Refused with nothing_new_to_run when you already run main's commit, and "
     "with coding_job_running while a coding job is running. The restart starts "
@@ -54,12 +55,12 @@ def build_self_restart_executors(
     release: Callable[[], None],
     restart: Callable[[], None],
     call_id_source: Callable[[], str],
-) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
+) -> Mapping[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]]:
     def failed(code: str, **details: object) -> CapabilityResult:
-        return CapabilityResult(call_id_source(), RESTART_SELF, CapabilityResultState.FAILED,
+        return CapabilityResult(call_id_source(), CODE, CapabilityResultState.FAILED,
                                 failure={"code": code, **details})
 
-    def restart_self(_arguments: Mapping[str, Any]) -> CapabilityResult:
+    def restart_onto_main(_arguments: Mapping[str, Any]) -> CapabilityResult:
         try:
             running, main = running_commit(), main_commit()
         except Exception as error:  # noqa: BLE001 - reported, not raised
@@ -80,11 +81,11 @@ def build_self_restart_executors(
             release()
             return failed("unavailable", reason=type(error).__name__)
         return CapabilityResult(
-            call_id_source(), RESTART_SELF, CapabilityResultState.SUCCEEDED,
+            call_id_source(), CODE, CapabilityResultState.SUCCEEDED,
             {"restart_scheduled": True, "running_commit": running, "main_commit": main},
         )
 
-    return {RESTART_SELF: restart_self}
+    return {CodeAction.RESTART: restart_onto_main}
 
 
-__all__ = ["DEFINITION", "RESTART_SELF", "build_self_restart_executors"]
+__all__ = ["CONTRACT", "build_self_restart_executors"]

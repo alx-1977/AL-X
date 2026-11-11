@@ -53,11 +53,28 @@ from alx.contracts import RESEARCH
 from research_actions import SEARCH_WEB, definition, research_call
 
 WEB_SEARCH_DEFINITION = definition(SEARCH_WEB)
-from alx.tools.review import DEFINITION as REVIEW_DEFINITION, REQUEST_EXTERNAL_REVIEW
-from alx.tools.review_content import (
-    DEFINITION as REVIEW_CONTENT_DEFINITION,
-    READ_EXTERNAL_REVIEW,
+from alx.contracts import CODE, CodeAction
+from code_actions import (
+    READ_REVIEW,
+    REQUEST_REVIEW_BEYOND_ALLOWANCE,
+    code_call,
+    code_runtime,
 )
+
+# The review actions of the one `code` capability (D-074). Since 2026-10-06
+# only a review past Friedl's allowance needs his approval of the exact call,
+# so that is the review one instruction authorises once.
+_REVIEW_ACTIONS = (
+    CodeAction.REQUEST_REVIEW,
+    CodeAction.REQUEST_REVIEW_BEYOND_ALLOWANCE,
+    CodeAction.READ_REVIEW,
+)
+_REVIEW_CODE = code_runtime({action: None for action in _REVIEW_ACTIONS})
+REVIEW_DEFINITION = _REVIEW_CODE.definitions[0]
+REVIEW_CONTENT_DEFINITION = REVIEW_DEFINITION
+# The actions of `code` that need no approval, as the composition root
+# passes them on.
+EXEMPT = {CODE: _REVIEW_CODE.policies[CODE].approval_exempt_when}
 
 
 NOW = datetime(2026, 9, 6, 20, 8, tzinfo=UTC)
@@ -65,7 +82,16 @@ RETENTION = NOW + timedelta(days=30)
 
 # What the composition root derives from the policies: every capability whose
 # AuthorityPolicy sets approval_required. Built the same way here.
-TURN_BOUND = frozenset({REQUEST_EXTERNAL_REVIEW})
+TURN_BOUND = frozenset(
+    capability_id
+    for capability_id, policy in _REVIEW_CODE.policies.items()
+    if policy.approval_required and not policy.standing_scope_allowed
+)
+
+
+def _dispatched_as(call) -> str:
+    """The code action a dispatch ran, or the capability for any other."""
+    return call.arguments["action"] if call.capability_id == CODE else call.capability_id
 
 
 class Queued:
@@ -116,9 +142,9 @@ def a_second_instruction() -> ConversationSnapshot:
 
 
 def review_call(call_id: str, approval_id: str, number: int = 21):
-    return CapabilityCall(
+    return code_call(
         call_id,
-        REQUEST_EXTERNAL_REVIEW,
+        REQUEST_REVIEW_BEYOND_ALLOWANCE,
         {"pull_request_number": number},
         approval_id=approval_id,
     )
@@ -146,7 +172,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
         def dispatch(call, state):
             # Stands in for the provider. Nothing here contacts GitHub; the
             # point of the test is that this is never reached a second time.
-            self.dispatched.append(call.capability_id)
+            self.dispatched.append(_dispatched_as(call))
             return CapabilityAttempt(
                 call,
                 CapabilityAttemptDisposition.EXECUTED,
@@ -167,6 +193,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
             clock=lambda: NOW,
             identifier_factory=lambda: next(values),
             turn_bound_capabilities=TURN_BOUND,
+            approval_exempt_when=EXEMPT,
         )
 
     @staticmethod
@@ -200,7 +227,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
         outcome = self.agent(reasoner).process(one_instruction(), RETENTION, 6)
 
         # One GitHub contact, not two. This is the whole invariant.
-        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+        self.assertEqual(self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE])
         reasons = [
             item.reason_code
             for item in outcome.snapshot.state.attempts
@@ -251,6 +278,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
             clock=lambda: NOW,
             identifier_factory=lambda: "goal-1",
             turn_bound_capabilities=TURN_BOUND,
+            approval_exempt_when=EXEMPT,
         )
         agent.process(one_instruction(), RETENTION, 6)
 
@@ -304,6 +332,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
             clock=lambda: NOW,
             identifier_factory=lambda: "goal-1",
             turn_bound_capabilities=TURN_BOUND,
+            approval_exempt_when=EXEMPT,
         ).process(one_instruction(), RETENTION, 6)
 
         self.assertEqual(calls, 2)
@@ -350,6 +379,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
             clock=lambda: NOW,
             identifier_factory=lambda: "goal-1",
             turn_bound_capabilities=TURN_BOUND,
+            approval_exempt_when=EXEMPT,
         ).process(one_instruction(), RETENTION, 5)
 
         self.assertEqual(calls, 1)
@@ -370,7 +400,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
         )
         agent = self.agent(reasoner)
         agent.process(one_instruction(), RETENTION, 4)
-        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+        self.assertEqual(self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE])
 
         # Friedl asks again. The same goal, the same capability, a new turn.
         again = review_call("call-3", "approve-3")
@@ -392,12 +422,13 @@ class OneTurnOneReviewTests(unittest.TestCase):
             clock=lambda: NOW,
             identifier_factory=lambda: "goal-2",
             turn_bound_capabilities=TURN_BOUND,
+            approval_exempt_when=EXEMPT,
         )
         agent_two.process(a_second_instruction(), RETENTION, 4)
 
         # Two reviews in total: one per instruction, which is the point.
         self.assertEqual(
-            self.dispatched, [REQUEST_EXTERNAL_REVIEW, REQUEST_EXTERNAL_REVIEW]
+            self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE, REQUEST_REVIEW_BEYOND_ALLOWANCE]
         )
 
     def test_a_turn_refused_as_already_done_does_not_block_the_next_instruction(self) -> None:
@@ -412,7 +443,7 @@ class OneTurnOneReviewTests(unittest.TestCase):
             AgentDecision(response="Requested once."),
         ))
         agent.process(one_instruction(), RETENTION, 6)
-        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+        self.assertEqual(self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE])
 
         later = NOW + timedelta(minutes=2)
         conversation = ConversationSnapshot("conversation-1", (
@@ -432,9 +463,10 @@ class OneTurnOneReviewTests(unittest.TestCase):
             lambda call, state: self._executed(call), (REVIEW_DEFINITION,),
             clock=lambda: later, identifier_factory=lambda: "goal-2",
             turn_bound_capabilities=TURN_BOUND,
+            approval_exempt_when=EXEMPT,
         )
         outcome = agent_two.process(conversation, RETENTION, 4)
-        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW, REQUEST_EXTERNAL_REVIEW])
+        self.assertEqual(self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE, REQUEST_REVIEW_BEYOND_ALLOWANCE])
         self.assertNotIn("repeated_rejected_call",
                          [item.reason_code for item in outcome.snapshot.state.attempts])
 
@@ -456,9 +488,9 @@ class OneTurnOneReviewTests(unittest.TestCase):
                 AgentDecision(response="Requested."),
             ),
             lambda call, state: self._executed(call), (REVIEW_DEFINITION,),
-            clock=lambda: NOW, turn_bound_capabilities=TURN_BOUND,
+            clock=lambda: NOW, turn_bound_capabilities=TURN_BOUND, approval_exempt_when=EXEMPT,
         ).process(a_second_instruction(), RETENTION, 4)
-        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+        self.assertEqual(self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE])
 
     def test_without_a_fresh_approval_the_refusal_still_binds(self) -> None:
         first = review_call("call-1", "approve-1")
@@ -481,14 +513,14 @@ class OneTurnOneReviewTests(unittest.TestCase):
             self.store, Queued(AgentDecision(goal_id="goal-1"), AgentDecision(call=stale),
                                AgentDecision(response="Blocked.")),
             lambda call, state: self._executed(call), (REVIEW_DEFINITION,),
-            clock=lambda: later, turn_bound_capabilities=TURN_BOUND,
+            clock=lambda: later, turn_bound_capabilities=TURN_BOUND, approval_exempt_when=EXEMPT,
         ).process(conversation, RETENTION, 4)
-        self.assertEqual(self.dispatched, [REQUEST_EXTERNAL_REVIEW])
+        self.assertEqual(self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE])
         self.assertIn("repeated_rejected_call",
                       [item.reason_code for item in outcome.snapshot.state.attempts])
 
     def _executed(self, call):
-        self.dispatched.append(call.capability_id)
+        self.dispatched.append(_dispatched_as(call))
         return CapabilityAttempt(
             call,
             CapabilityAttemptDisposition.EXECUTED,
@@ -566,11 +598,11 @@ class StandingScopeTests(unittest.TestCase):
                 approval_required=True,
                 standing_scope_allowed=True,
             ),
-            REQUEST_EXTERNAL_REVIEW: AuthorityPolicy(
+            CODE: AuthorityPolicy(
                 frozenset({"review.request"}), approval_required=True
             ),
         }
-        self.assertEqual(self._bound(policies), {REQUEST_EXTERNAL_REVIEW})
+        self.assertEqual(self._bound(policies), {CODE})
 
     def test_the_real_mail_cleanup_policies_stay_repeatable(self) -> None:
         """The actual policies the mail runtime declares, not a restatement."""
@@ -619,7 +651,7 @@ class BackgroundReadTests(unittest.TestCase):
         )
 
     def _executed(self, call, state):
-        self.dispatched.append(call.capability_id)
+        self.dispatched.append(_dispatched_as(call))
         return CapabilityAttempt(
             call,
             CapabilityAttemptDisposition.EXECUTED,
@@ -633,9 +665,9 @@ class BackgroundReadTests(unittest.TestCase):
         )
 
     def test_a_volunteered_approval_does_not_refuse_a_background_read(self) -> None:
-        call = CapabilityCall(
+        call = code_call(
             "call-read-1",
-            READ_EXTERNAL_REVIEW,
+            READ_REVIEW,
             {"pull_request_number": 21, "head_sha": "c" * 40},
             approval_id="approve-read-1",
         )
@@ -662,11 +694,12 @@ class BackgroundReadTests(unittest.TestCase):
             clock=lambda: NOW,
             identifier_factory=lambda: "goal-1",
             turn_bound_capabilities=TURN_BOUND,
-            # Reading needs permission only, and the composition says so.
-            approval_free_capabilities=frozenset({READ_EXTERNAL_REVIEW}),
+            approval_exempt_when=EXEMPT,
+            # Reading needs permission only, and the composition says so
+            # through the actions `code` exempts from approval.
         ).process(self._background(), RETENTION, 4)
 
-        self.assertEqual(self.dispatched, [READ_EXTERNAL_REVIEW])
+        self.assertEqual(self.dispatched, [READ_REVIEW])
         reasons = [
             item.reason_code
             for item in outcome.snapshot.state.attempts
@@ -697,7 +730,7 @@ class BackgroundReadTests(unittest.TestCase):
             clock=lambda: NOW,
             identifier_factory=lambda: "goal-1",
             turn_bound_capabilities=TURN_BOUND,
-            approval_free_capabilities=frozenset({READ_EXTERNAL_REVIEW}),
+            approval_exempt_when=EXEMPT,
         ).process(self._background(), RETENTION, 4)
 
         self.assertEqual(self.dispatched, [])
@@ -722,7 +755,7 @@ class PolicyDerivationTests(unittest.TestCase):
         )
         derived = frozenset(
             capability_id
-            for capability_id, policy in runtime.policies.items()
+            for capability_id, policy in code_runtime(runtime).policies.items()
             if policy.approval_required
         )
         self.assertEqual(derived, frozenset())

@@ -31,7 +31,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
-from alx.contracts import CapabilityResultState  # noqa: E402
+from alx.contracts import CapabilityResultState, CodeAction  # noqa: E402
 from alx.contracts.sandbox import (  # noqa: E402
     MAX_FILE_BYTES,
     MAX_WALKED_FILES,
@@ -287,9 +287,15 @@ class TruncatedArtifactCountTest(unittest.TestCase):
 
     def test_the_capability_declares_the_field(self) -> None:
         """A schema with extra_properties=False would otherwise reject it."""
-        from alx.tools.sandbox import DEFINITION
+        from alx.tools.code import code_definition
+        from alx.tools.sandbox import CONTRACT
 
-        self.assertIn("state_truncated", DEFINITION.output_schema.properties)
+        self.assertIn("state_truncated", CONTRACT.output_schema.properties)
+        # And the one `code` capability that offers the experiment (D-074).
+        self.assertIn(
+            "state_truncated",
+            code_definition((CodeAction.EXPERIMENT,)).output_schema.properties,
+        )
 
     def test_truncation_carries_no_experiment_authored_bytes(self) -> None:
         """It is a boolean, so making counts honest costs no privacy."""
@@ -362,7 +368,7 @@ class PreLaunchAccountingTest(unittest.TestCase):
                 raise SandboxError("workspace_unavailable")
 
         runtime = self._runtime(FailsBeforeLaunch())
-        executor = runtime.executors["run_sandbox_experiment"]
+        executor = runtime.actions[CodeAction.EXPERIMENT]
         for _ in range(3):
             executor(
                 {"experiment_id": "exp-f7", "session_id": "ses-f7", "source": "print(1)"}
@@ -390,7 +396,7 @@ class PreLaunchAccountingTest(unittest.TestCase):
                 raise RuntimeError("manifest write failed after execution")
 
         runtime = self._runtime(FailsAfterLaunch())
-        executor = runtime.executors["run_sandbox_experiment"]
+        executor = runtime.actions[CodeAction.EXPERIMENT]
         for _ in range(3):
             executor(
                 {"experiment_id": "exp-f7b", "session_id": "ses-f7b", "source": "print(1)"}
@@ -666,7 +672,7 @@ class ResilienceAndAccountingTest(unittest.TestCase):
 
     def test_a_zero_wall_time_is_refused_before_anything_runs(self) -> None:
         """R4: `or` turned an explicit zero into the 30-second default."""
-        from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT, build_sandbox_executors
+        from alx.tools.sandbox import build_sandbox_executors
 
         reached: list[object] = []
 
@@ -676,7 +682,7 @@ class ResilienceAndAccountingTest(unittest.TestCase):
 
         executor = build_sandbox_executors(
             never, lambda: "call-1", lambda: "run-1"
-        )[RUN_SANDBOX_EXPERIMENT]
+        )[CodeAction.EXPERIMENT]
 
         for value in (0, -1):
             with self.subTest(wall_seconds=value):
@@ -695,7 +701,7 @@ class ResilienceAndAccountingTest(unittest.TestCase):
     def test_an_omitted_wall_time_still_takes_the_default(self) -> None:
         """The fix must not turn a missing value into a refusal."""
         from alx.contracts.sandbox import DEFAULT_WALL_SECONDS
-        from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT, build_sandbox_executors
+        from alx.tools.sandbox import build_sandbox_executors
 
         seen: list[int] = []
 
@@ -705,7 +711,7 @@ class ResilienceAndAccountingTest(unittest.TestCase):
 
         executor = build_sandbox_executors(
             capture, lambda: "call-1", lambda: "run-1"
-        )[RUN_SANDBOX_EXPERIMENT]
+        )[CodeAction.EXPERIMENT]
         executor(
             {"experiment_id": "exp-d", "session_id": "ses-d", "source": "print(1)"}
         )

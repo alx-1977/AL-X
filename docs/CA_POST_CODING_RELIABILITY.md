@@ -9,17 +9,17 @@ the laws or an approval of external review.
 
 ## Production path
 
-- `request_external_review` retains its existing single-use approval. Its
+- The `code` action `request_review` retains its existing single-use approval. Its
   production callback records the exact requested PR/head in the existing task
   store and joins `TaskPoller`. Only `TaskPoller.run/tick` polls the reviewer.
   The dispatch waits on a condition; it does not run another polling loop.
   Polling has a 900-second window. Completion, failure, missing observation or
   timeout returns to the existing Core. No review content is judged by code.
-- `read_external_review` retrieves the completed exact-head evidence for AL/X.
+- The `code` action `read_review` retrieves the completed exact-head evidence for AL/X.
   Unavailable content is a concrete failure, not a successful pending result
   inviting another Core poll.
 - AL/X reads the external evidence and chooses whether the exact head may
-  merge. `merge_pull_request` remains the sole GitHub merge capability.
+  merge. The `code` action `merge` remains the sole GitHub merge path.
   `GitHubMergeProvider.merge` checks the current head, base ancestry,
   mergeability and required checks, with at most 30 observations separated by
   30 seconds. Pending checks stay inside that call. GitHub still enforces its

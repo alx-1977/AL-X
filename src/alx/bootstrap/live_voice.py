@@ -26,12 +26,14 @@ from alx.bootstrap.mail import (
 )
 from alx.bootstrap.research import build_research_runtime
 from alx.bootstrap.sandbox import build_sandbox_runtime
+from alx.bootstrap.code import CodePart, build_code_runtime
 from alx.bootstrap.coding import build_coding_runtime
 from alx.bootstrap.pull_request_checks import build_pull_request_checks_runtime
 from alx.bootstrap.repository import build_repository_runtime
 from alx.bootstrap.repository_authority import build_repository_authority_runtime
 from alx.bootstrap.review import build_review_runtime
 from alx.bootstrap.tasks import build_task_runtime
+from alx.contracts.code import CodeAction
 from alx.contracts.cognition import CognitionOrigin
 from alx.contracts.continuity import CognitionOpportunity
 from alx.contracts.task import ExternalTask, TaskState
@@ -126,10 +128,7 @@ from alx.memories import SQLiteMemoryStore
 from alx.safety import AuthorityContext, AuthorityPolicy, SafetyGate
 from alx.observability.self_record import SQLiteTraceRecord, keep_briefing, read_log, RuntimeLogHandler, runtime_log_paths
 from alx.providers.self_restart import start_restart
-from alx.tools.self_restart import (
-    DEFINITION as SELF_RESTART_DEFINITION,
-    build_self_restart_executors,
-)
+from alx.tools.self_restart import build_self_restart_executors
 from alx.tools.display import (
     DEFINITIONS as DISPLAY_DEFINITIONS,
     DisplayBoard,
@@ -762,11 +761,6 @@ async def run(repository_root: Path) -> None:
             voice_settings.sandbox.daily_wall_seconds,
         ),
     )
-    if sandbox_runtime is not None:
-        register(sandbox_runtime.definitions, TraceSubsystem.SANDBOX)
-        policies.update(sandbox_runtime.policies)
-        executors.update(sandbox_runtime.executors)
-        permissions.update(sandbox_runtime.permissions)
 
     # Requesting an external review is effectful and spends paid reviews, so
     # the ones AL/X asks for are counted against Friedl's allowance (three a
@@ -835,11 +829,6 @@ async def run(repository_root: Path) -> None:
     if task_runtime is None:
         # Do not spend review credits when completion cannot be watched.
         review_runtime = None
-    if review_runtime is not None:
-        register(review_runtime.definitions, TraceSubsystem.REVIEW)
-        policies.update(review_runtime.policies)
-        executors.update(review_runtime.executors)
-        permissions.update(review_runtime.permissions)
 
     # AL/X's repository authority. Hers, never the Coding Agent's: a job
     # commits on the feature branch prepared in the canonical checkout and
@@ -863,11 +852,6 @@ async def run(repository_root: Path) -> None:
         reserve_checkout=lambda: reserve_checkout(),
         release_checkout=lambda: release_checkout(),
     )
-    if repository_runtime is not None:
-        register(repository_runtime.definitions, TraceSubsystem.GIT)
-        policies.update(repository_runtime.policies)
-        executors.update(repository_runtime.executors)
-        permissions.update(repository_runtime.permissions)
 
     # Capture once for the runtime facts below.
     running_commit = running_commit_of(
@@ -884,26 +868,17 @@ async def run(repository_root: Path) -> None:
         repository_runtime=repository_runtime,
         review_reader=None if review_runtime is None else review_runtime.provider,
     )
-    if merge_runtime is not None:
-        register(merge_runtime.definitions, TraceSubsystem.GITHUB)
-        policies.update(merge_runtime.policies)
-        executors.update(merge_runtime.executors)
-        permissions.update(merge_runtime.permissions)
 
     # Reading check results is not merging and not requesting a review.
     # Those stay behind their own switches. This read is available whenever
-    # the repository and token they already use are configured, and holding
-    # it grants neither permission.
+    # the repository and token they already use are configured. Each job
+    # declares its own permission; the one `code` policy holds those of the
+    # jobs composed (D-074), so a job that is not composed is not offered.
     checks_runtime = build_pull_request_checks_runtime(
         merge_configuration.repository,
         merge_configuration.token,
         current_call_id.get,
     )
-    if checks_runtime is not None:
-        register(checks_runtime.definitions, TraceSubsystem.GITHUB)
-        policies.update(checks_runtime.policies)
-        executors.update(checks_runtime.executors)
-        permissions.update(checks_runtime.permissions)
 
     # D-028 authorises one bounded coding job in the configured checkout. It is
     # a separate authority from sandbox.execute: the sandbox cannot touch a
@@ -956,12 +931,9 @@ async def run(repository_root: Path) -> None:
     )
     # D-055: she restarts herself onto code she has merged. Composed only
     # where she can read main and is running from the launcher's snapshot.
+    restart_part = None
     if repository_runtime is not None:
-        register((SELF_RESTART_DEFINITION,), TraceSubsystem.CORE)
-        policies[SELF_RESTART_DEFINITION.capability_id] = AuthorityPolicy(
-            frozenset({"runtime.restart"}))
-        permissions.add("runtime.restart")
-        executors.update(build_self_restart_executors(
+        restart_part = CodePart(build_self_restart_executors(
             lambda: running_commit_of(CODE_ROOT, repository_runtime.authority),
             repository_runtime.authority.main_commit,
             lambda: coding_runtime is None or coding_runtime.agent.reserve_for_restart(),
@@ -972,12 +944,19 @@ async def run(repository_root: Path) -> None:
                 and coding_runtime.agent.release_restart(),
             ),
             current_call_id.get,
-        ))
-    if coding_runtime is not None:
-        register(coding_runtime.definitions, TraceSubsystem.CODING)
-        policies.update(coding_runtime.policies)
-        executors.update(coding_runtime.executors)
-        permissions.update(coding_runtime.permissions)
+        ), {CodeAction.RESTART: frozenset({"runtime.restart"})})
+    # D-074: every code job above is an action of one capability, `code`,
+    # each keeping its own composition, permission and approval rule.
+    code_runtime = build_code_runtime(
+        (coding_runtime, repository_runtime, checks_runtime, review_runtime,
+         merge_runtime, restart_part, sandbox_runtime),
+        current_call_id.get,
+    )
+    if code_runtime is not None:
+        register(code_runtime.definitions, TraceSubsystem.CODING)
+        policies.update(code_runtime.policies)
+        executors.update(code_runtime.executors)
+        permissions.update(code_runtime.permissions)
 
     # D-016 authorises the narrowly scoped supplier-bill capability. Missing
     # configuration leaves Xero absent without weakening mail or voice.

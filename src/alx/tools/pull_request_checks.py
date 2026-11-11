@@ -24,6 +24,8 @@ from datetime import UTC, datetime
 from typing import Any, Mapping
 
 from alx.contracts import (
+    CODE,
+    CodeAction,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -44,7 +46,6 @@ from alx.contracts.pull_request_checks import (
 
 LOGGER = logging.getLogger(__name__)
 
-READ_PULL_REQUEST_CHECKS = "read_pull_request_checks"
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
@@ -109,8 +110,8 @@ _STATUS = StructuredSchema(
 )
 
 
-DEFINITION = CapabilityDefinition(
-    READ_PULL_REQUEST_CHECKS,
+CONTRACT = CapabilityDefinition(
+    CodeAction.READ_CHECKS.value,
     "Read GitHub's own check runs, commit statuses, and Actions log tails "
     "for one pull request at one exact head revision. Returns them as GitHub "
     "reported them. It does not rerun, cancel, merge, or score anything.",
@@ -188,10 +189,10 @@ def _outcome(values: Mapping[str, Any]) -> ExecutionOutcome:
 def build_pull_request_checks_executors(
     read_checks: Callable[[PullRequestChecksRequest], Any],
     call_id_source: Callable[[], str],
-) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
+) -> Mapping[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Bind the one check-read primitive to its provider."""
 
-    def read_pull_request_checks(arguments: Mapping[str, Any]) -> CapabilityResult:
+    def read_head_checks(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
         try:
             number = arguments["pull_request_number"]
@@ -226,7 +227,7 @@ def build_pull_request_checks_executors(
 
         return CapabilityResult(
             call_id,
-            READ_PULL_REQUEST_CHECKS,
+            CODE,
             CapabilityResultState.SUCCEEDED,
             values,
             # The revision stays citable. The check text and the log do not.
@@ -238,13 +239,13 @@ def build_pull_request_checks_executors(
             outcome=_outcome(values),
         )
 
-    return {READ_PULL_REQUEST_CHECKS: read_pull_request_checks}
+    return {CodeAction.READ_CHECKS: read_head_checks}
 
 
 def _failed(call_id: str, code: str, **details: object) -> CapabilityResult:
     return CapabilityResult(
         call_id,
-        READ_PULL_REQUEST_CHECKS,
+        CODE,
         CapabilityResultState.FAILED,
         failure={
             "code": code,
@@ -257,7 +258,6 @@ def _failed(call_id: str, code: str, **details: object) -> CapabilityResult:
 
 
 __all__ = [
-    "DEFINITION",
-    "READ_PULL_REQUEST_CHECKS",
+    "CONTRACT",
     "build_pull_request_checks_executors",
 ]

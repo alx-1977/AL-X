@@ -16,6 +16,17 @@ from alx.core.plan_results import classify_planned_result, PlanResultKind
 from alx.goals import SQLiteGoalStore
 from alx.contracts.result_summary import STRING_LIMIT
 from alx.tools.coding import build_coding_executors, goal_coding_branch
+from alx.contracts import CodeAction
+from code_actions import RUN_JOB, code_arguments, code_call
+
+
+def coding_goal(values, failure=None, arguments=None):
+    """A goal whose one attempt was a `code` run_job call (D-074)."""
+    state = goal(values, failure, capability_id='code')
+    attempt = state.attempts[0]
+    return replace(state, attempts=(replace(attempt, call=replace(
+        attempt.call, arguments=code_arguments(RUN_JOB, arguments),
+        durable_arguments=None)),))
 
 
 def reload_goal(tmp_path, state):
@@ -67,13 +78,12 @@ def test_large_checkpoint_resumes_after_close_and_reopen(tmp_path):
                   'plan': {'files': ['file-' + str(i) for i in range(1000)]}}
     raw = json.dumps(checkpoint)
     assert len(raw) > STRING_LIMIT
-    state = goal({'status': 'failed', 'checkpoint': raw},
-                 {'code': 'task_failed', 'details': 'failure detail' * 1000},
-                 capability_id='run_coding_task')
+    state = coding_goal({'status': 'failed', 'checkpoint': raw},
+                        {'code': 'task_failed', 'details': 'failure detail' * 1000})
     attempt = state.attempts[0]
-    state = replace(state, attempts=(replace(attempt, call=CapabilityCall(
-        'call-1', 'run_coding_task', {'task': 'repair', 'repair_branch': 'fix/work',
-                                    'commit_message': 'repair'})),))
+    state = replace(state, attempts=(replace(attempt, call=code_call(
+        'call-1', RUN_JOB, {'task': 'repair', 'repair_branch': 'fix/work',
+                            'commit_message': 'repair'})),))
     with reload_goal(tmp_path, state) as store:
         loaded = store.load(state.goal_id)
         requests = []
@@ -84,8 +94,10 @@ def test_large_checkpoint_resumes_after_close_and_reopen(tmp_path):
                                    as_values=lambda: {'done': True},
                                    durable_values=lambda: {'done': True})
 
+        # The run_job action itself: this fake job's values are not a full
+        # run_job result, which the one `code` executor would refuse.
         result = build_coding_executors(run, lambda: 'resumed', lambda: loaded.state)[
-            'run_coding_task']({'resume_job_id': 'call-1', 'corrective_action': 'repair it'})
+            CodeAction.RUN_JOB]({'resume_job_id': 'call-1', 'corrective_action': 'repair it'})
         assert result.values.get('done') is True
         assert requests[0].resume_checkpoint == checkpoint
         assert requests[0].corrected_failure['details'] == 'failure detail' * 1000
@@ -126,11 +138,14 @@ def test_plan_conditions_read_exact_oversized_facts_after_reload(tmp_path, secti
             assert classify_planned_result(step, attempt, None).kind is PlanResultKind.ADVANCE
 
 
-def test_coding_branch_uses_exact_facts_after_reload(tmp_path):
+@pytest.mark.parametrize('saved_before_d074', [False, True])
+def test_coding_branch_uses_exact_facts_after_reload(tmp_path, saved_before_d074):
     branch = 'fix/work'
-    state = goal({**{f'evidence_{i}': i for i in range(1000)},
-                  'commit': {'branch': branch, 'commit_sha': 'a' * 40}},
-                 capability_id='run_coding_task')
+    values = {**{f'evidence_{i}': i for i in range(1000)},
+              'commit': {'branch': branch, 'commit_sha': 'a' * 40}}
+    # A goal saved before D-074 holds the call under its former id.
+    state = (goal(values, capability_id='run_coding_task') if saved_before_d074
+             else coding_goal(values))
     with reload_goal(tmp_path, state) as store:
         continuation = goal_coding_branch(store.load(state.goal_id).state, branch)
         assert continuation is not None
@@ -224,7 +239,7 @@ def test_interruption_progress_uses_exact_checkpoints_after_reload(tmp_path):
         values = {**attempt.result.values, 'checkpoint': json.dumps(checkpoint)}
         attempts.append(replace(attempt, result=replace(attempt.result, values=values, durable_values=values)))
     state = replace(goal({}), attempts=tuple(attempts))
-    call = CapabilityCall('resume', 'run_coding_task', {'resume_job_id': 'job2'})
+    call = code_call('resume', RUN_JOB, {'resume_job_id': 'job2'})
     with reload_goal(tmp_path, state) as store:
         assert CoreAgent._coding_interruption_exhaustion_reason(store.load(state.goal_id).state, call) == 'coding_interruption_no_progress'
 
@@ -235,14 +250,13 @@ def test_legacy_noop_and_failure_classification_survive_reload(tmp_path):
     checkpoint = {'stage': 'test', 'branch': 'fix/work', 'head_sha': 'a' * 40,
                   'files': [], 'preexisting_dirty': [], 'state_digest': 'b' * 64,
                   'padding': 'x' * 10000}
-    state = goal({'checkpoint': json.dumps(checkpoint), 'status': 'failed',
-                  'baseline': {'clean': True, 'head_sha': 'a' * 40, 'branch': 'fix/work',
-                               'inherited_dirty': []},
-                  'file_count': 0, 'diff_digest': hashlib.sha256(b'').hexdigest(),
-                  'all_required_verification_passed': True},
-                 {**{f'item_{i}': i for i in range(1000)}, 'code': 'task_failed',
-                  'phase': 'test', 'session_completed': True, 'requires_judgement': True},
-                 capability_id='run_coding_task')
+    state = coding_goal({'checkpoint': json.dumps(checkpoint), 'status': 'failed',
+                         'baseline': {'clean': True, 'head_sha': 'a' * 40, 'branch': 'fix/work',
+                                      'inherited_dirty': []},
+                         'file_count': 0, 'diff_digest': hashlib.sha256(b'').hexdigest(),
+                         'all_required_verification_passed': True},
+                        {**{f'item_{i}': i for i in range(1000)}, 'code': 'task_failed',
+                         'phase': 'test', 'session_completed': True, 'requires_judgement': True})
     with reload_goal(tmp_path, state) as store:
         attempt = store.load(state.goal_id).state.attempts[0]
         assert CoreAgent._completed_unchanged_coding_result(attempt)
@@ -259,10 +273,7 @@ def test_legacy_noop_and_failure_classification_survive_reload(tmp_path):
 ])
 def test_coding_failure_count_ignores_summary_omissions(tmp_path, facts):
     failure = {**{f'item_{i}': i for i in range(1000)}, **facts}
-    state = goal({'status': 'failed'}, failure, capability_id='run_coding_task')
-    attempt = state.attempts[0]
-    state = replace(state, attempts=(replace(attempt, call=replace(
-        attempt.call, arguments={'corrective_action': 'diagnosed'}, durable_arguments=None)),))
+    state = coding_goal({'status': 'failed'}, failure, {'corrective_action': 'diagnosed'})
     with reload_goal(tmp_path, state) as store:
         loaded = store.load(state.goal_id).state
         assert (CoreAgent._counts_as_coding_failure(loaded.attempts[0])

@@ -49,7 +49,7 @@ from alx.providers.coding_session import GrokCodingSession  # noqa: E402
 from alx.providers.grok_subscription import PROVIDER_NAME  # noqa: E402
 from alx.providers.coding_agent import PLAN_SCHEMA  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools.coding import RUN_CODING_TASK  # noqa: E402
+from code_actions import RUN_JOB, code_call, code_runtime  # noqa: E402
 from datetime import UTC, datetime  # noqa: E402
 
 
@@ -291,19 +291,20 @@ class GrokSubscriptionTransportTests(unittest.TestCase):
             True, model, lambda: "call-1", session=_StubSession(root),
             repository=root,
         )
+        code = code_runtime(runtime)
         broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         )
         attempt = broker.dispatch(
-            CapabilityCall(
+            code_call(
                 "call-1",
-                RUN_CODING_TASK,
+                RUN_JOB,
                 {"task": "inspect", "repair_branch": "fix/inspect",
                  "commit_message": "inspect repository"},
             ),
-            AuthorityContext("friedl", runtime.permissions, NOW),
+            AuthorityContext("friedl", code.permissions, NOW),
         )
         self.assertIs(attempt.disposition, CapabilityAttemptDisposition.EXECUTED)
         self.assertIs(attempt.result.state, CapabilityResultState.FAILED)

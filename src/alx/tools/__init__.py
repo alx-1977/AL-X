@@ -34,61 +34,15 @@ from alx.tools.research import (
 )
 from alx.tools.dhl import build_dhl_executors
 
-from alx.tools.sandbox import (
-    DEFINITION as SANDBOX_DEFINITION,
-    RUN_SANDBOX_EXPERIMENT,
-    build_sandbox_executors,
-)
-from alx.tools.review import (
-    DEFINITION as REVIEW_DEFINITION,
-    REQUEST_EXTERNAL_REVIEW,
-    build_review_executors,
-)
-from alx.tools.review_content import (
-    DEFINITION as REVIEW_CONTENT_DEFINITION,
-    READ_EXTERNAL_REVIEW,
-    build_review_content_executors,
-)
-from alx.tools.pull_request_checks import (
-    DEFINITION as PULL_REQUEST_CHECKS_DEFINITION,
-    READ_PULL_REQUEST_CHECKS,
-    build_pull_request_checks_executors,
-)
-from alx.tools.repository import (
-    DEFINITION as MERGE_DEFINITION,
-    MERGE_PULL_REQUEST,
-    build_repository_executors,
-)
-from alx.tools.coding import (
-    DEFINITION as CODING_DEFINITION,
-    RUN_CODING_TASK,
-    STOP_CODING_JOB,
-    STOP_DEFINITION as STOP_CODING_DEFINITION,
-    build_coding_executors,
+from alx.tools.code import (
+    build_code_executors,
+    code_definition,
 )
 
 
 __all__ = [
-    "RUN_SANDBOX_EXPERIMENT",
-    "SANDBOX_DEFINITION",
-    "build_sandbox_executors",
-    "REQUEST_EXTERNAL_REVIEW",
-    "REVIEW_DEFINITION",
-    "build_review_executors",
-    "READ_EXTERNAL_REVIEW",
-    "REVIEW_CONTENT_DEFINITION",
-    "build_review_content_executors",
-    "READ_PULL_REQUEST_CHECKS",
-    "PULL_REQUEST_CHECKS_DEFINITION",
-    "build_pull_request_checks_executors",
-    "MERGE_DEFINITION",
-    "MERGE_PULL_REQUEST",
-    "build_repository_executors",
-    "CODING_DEFINITION",
-    "RUN_CODING_TASK",
-    "STOP_CODING_JOB",
-    "STOP_CODING_DEFINITION",
-    "build_coding_executors",
+    "build_code_executors",
+    "code_definition",
     "CONTINUITY_DEFINITIONS",
     "MINIMUM_HORIZON_SECONDS",
     "OPEN_THOUGHT_LIMIT",

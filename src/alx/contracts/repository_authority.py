@@ -109,7 +109,7 @@ class Operation(str, Enum):
     CHERRY_PICK = "cherry_pick"
     REVERT = "revert"
     # `local_merge`, not `merge`: this joins one local history to another and
-    # knows nothing about pull requests. `merge_pull_request` is the GitHub
+    # knows nothing about pull requests. The `code` merge action is the GitHub
     # operation, bound to an exact reviewed head and subject to branch
     # protection. Naming this one `merge` invited them to be read as duplicates
     # of each other, which a reviewer duly did.

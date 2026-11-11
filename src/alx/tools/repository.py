@@ -22,6 +22,8 @@ from collections.abc import Callable
 from typing import Any, Mapping
 
 from alx.contracts import (
+    CODE,
+    CodeAction,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -38,15 +40,14 @@ from alx.contracts.repository import (
 
 LOGGER = logging.getLogger(__name__)
 
-MERGE_PULL_REQUEST = "merge_pull_request"
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
 _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
 
 
-DEFINITION = CapabilityDefinition(
-    MERGE_PULL_REQUEST,
+CONTRACT = CapabilityDefinition(
+    CodeAction.MERGE.value,
     "Merge one pull request at one exact reviewed revision. Requires the head "
     "commit that was reviewed, and the merge does not happen if the branch has "
     "moved since. Waits boundedly for required checks, then merges and syncs "
@@ -94,10 +95,10 @@ DEFINITION = CapabilityDefinition(
 def build_repository_executors(
     merge: Callable[[MergeRequest], Any],
     call_id_source: Callable[[], str],
-) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
+) -> Mapping[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Wire the one merge outcome to its structured capability result."""
 
-    def merge_pull_request(arguments: Mapping[str, Any]) -> CapabilityResult:
+    def merge_at_head(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
         try:
             request = MergeRequest(
@@ -128,18 +129,18 @@ def build_repository_executors(
 
         return CapabilityResult(
             call_id,
-            MERGE_PULL_REQUEST,
+            CODE,
             CapabilityResultState.SUCCEEDED,
             outcome.as_values(),
         )
 
-    return {MERGE_PULL_REQUEST: merge_pull_request}
+    return {CodeAction.MERGE: merge_at_head}
 
 
 def _failed(call_id: str, code: str, **details) -> CapabilityResult:
     return CapabilityResult(
         call_id,
-        MERGE_PULL_REQUEST,
+        CODE,
         CapabilityResultState.FAILED,
         failure={"code": code, **details, "requires_judgement": code != "arguments_unusable"},
     )

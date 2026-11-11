@@ -101,7 +101,7 @@ update_plan: resume runs the current step, again if it already ran; accept takes
 current step's result as done and runs on from the next; finish says the plan's work
 is done; cancel stops it. Or install a replacement. A finish or cancel takes effect
 with the words or silence that end your turn, and those words go with it. Long-running coding is always a plan step: whenever
-plans can run, a direct run_coding_task call is refused as
+plans can run, a direct code run_job call is refused as
 coding_requires_execution_plan, so install a plan containing it instead.
 A silent completion means you judge that no spoken or
 conversational response is useful; it is your semantic decision, never a transport or
@@ -345,7 +345,7 @@ reviewer gives it a clean verdict. runtime also states when this process started
 commit it is running and the commit local main points at now. Merged code is not live until the process restarts: when
 main_commit differs from running_commit, work merged since started_at is not running
 yet, so do not retry it or diagnose it as failing. Restart yourself onto it with
-restart_self once nothing you are doing would suffer from a pause of about half a
+code restart once nothing you are doing would suffer from a pause of about half a
 minute, and tell Friedl what went live. A
 trigger whose reference begins event:runtime-started is this process starting:
 anything you were holding until a restart can continue now.
@@ -905,7 +905,7 @@ def _catalogue_payload(capabilities: Sequence[Any]) -> str:
                     "id": item.capability_id,
                     "purpose": _one_line(item.purpose),
                     "side_effect": item.side_effect.value,
-                    **({"plan_observation": True} if item.plan_observation else {}),
+                    **({"plan_observation": True} if item.offers_plan_observation else {}),
                 }
                 for item in capabilities
             ],
@@ -927,7 +927,7 @@ def _capability_details(capabilities: Sequence[Any], ids: Sequence[str]) -> str:
             "id": item.capability_id,
             "purpose": item.purpose,
             "side_effect": item.side_effect.value,
-            "plan_observation": item.plan_observation,
+            "plan_observation": item.offers_plan_observation,
             **_failure_code_payload(item, shared, code_sets),
             "input_schema": _capability_schema_payload(item.input_schema),
             "result_fields": _result_fields(item.output_schema),

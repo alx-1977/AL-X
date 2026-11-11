@@ -29,6 +29,8 @@ from collections.abc import Callable
 from typing import Any, Mapping
 
 from alx.contracts import (
+    CODE,
+    CodeAction,
     CapabilityDefinition,
     CapabilityResult,
     CapabilityResultState,
@@ -50,7 +52,6 @@ from alx.contracts.review_content import (
 
 LOGGER = logging.getLogger(__name__)
 
-READ_EXTERNAL_REVIEW = "read_external_review"
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
@@ -64,8 +65,8 @@ _COMMENT = StructuredSchema(
 )
 
 
-DEFINITION = CapabilityDefinition(
-    READ_EXTERNAL_REVIEW,
+CONTRACT = CapabilityDefinition(
+    CodeAction.READ_REVIEW.value,
     "Read what the external reviewer published about one pull request at one "
     "exact revision. Returns the reviewer's own summary and comments as "
     "written, or reports that no review covers that revision. It does not "
@@ -112,10 +113,10 @@ DEFINITION = CapabilityDefinition(
 def build_review_content_executors(
     read_review: Callable[[ReviewContentRequest], Any],
     call_id_source: Callable[[], str],
-) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
+) -> Mapping[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Bind the one review-read primitive to its provider."""
 
-    def read_external_review(arguments: Mapping[str, Any]) -> CapabilityResult:
+    def read_one_review(arguments: Mapping[str, Any]) -> CapabilityResult:
         call_id = call_id_source()
         try:
             request = ReviewContentRequest(
@@ -156,7 +157,7 @@ def build_review_content_executors(
 
         return CapabilityResult(
             call_id,
-            READ_EXTERNAL_REVIEW,
+            CODE,
             CapabilityResultState.SUCCEEDED,
             values,
             # Metadata only. What the reviewer said stays in this turn's
@@ -183,14 +184,14 @@ def build_review_content_executors(
             outcome=ExecutionOutcome.AMBIGUOUS,
         )
 
-    return {READ_EXTERNAL_REVIEW: read_external_review}
+    return {CodeAction.READ_REVIEW: read_one_review}
 
 
 def _failed(call_id: str, code: str, outcome: ExecutionOutcome | None = None,
             **details) -> CapabilityResult:
     return CapabilityResult(
         call_id,
-        READ_EXTERNAL_REVIEW,
+        CODE,
         CapabilityResultState.FAILED,
         failure={"code": code, **details, "requires_judgement": code != "arguments_unusable"},
         outcome=outcome,

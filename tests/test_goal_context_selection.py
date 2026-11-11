@@ -1097,7 +1097,7 @@ class StoppingTheRunningCodingJobTests(Fixture):
     """
 
     def test_a_stop_with_no_goal_reaches_dispatch(self) -> None:
-        from alx.tools.coding import STOP_DEFINITION
+        from code_actions import STOP_JOB, code_call, definition
 
         calls = []
 
@@ -1112,15 +1112,15 @@ class StoppingTheRunningCodingJobTests(Fixture):
             )
 
         reasoner = Queued(
-            AgentDecision(call=CapabilityCall("call-stop", "stop_coding_job", {})),
+            AgentDecision(call=code_call("call-stop", STOP_JOB)),
             AgentDecision(response="Stopped."),
         )
         outcome = CoreAgent(
-            self.store, reasoner, dispatch, (STOP_DEFINITION, REMOVE),
+            self.store, reasoner, dispatch, (definition(STOP_JOB), REMOVE),
             clock=lambda: NOW, identifier_factory=lambda: "goal-b",
         ).process(conversation(), RETENTION, 25)
         self.assertEqual(outcome.state, CoreState.RESPONDED)
-        self.assertEqual(calls, [("stop_coding_job", None)])
+        self.assertEqual(calls, [("code", None)])
         self.assertEqual(reasoner.contexts[1].transient_attempts[0].result.values,
                          {"stopped": True})
 

@@ -52,6 +52,7 @@ from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel  # noqa: E402
 from alx.providers.codex_subscription import CodexSubscriptionReasoningModel  # noqa: E402
 from alx.safety.gate import AuthorityContext, AuthorityPolicy, SafetyGate  # noqa: E402
+from code_actions import READ_CHECKS, code_call  # noqa: E402
 
 NOW = datetime(2026, 10, 5, 8, 14, 38, tzinfo=UTC)
 RETENTION = NOW + timedelta(days=30)
@@ -672,31 +673,34 @@ class CapabilityActivityTests(unittest.TestCase):
         return CapabilityBroker(
             registry, SafetyGate({definition.capability_id: policy}),
             {definition.capability_id: executor}, trace=traced.append,
-            subsystems={definition.capability_id: TraceSubsystem.GITHUB},
+            subsystems={definition.capability_id: TraceSubsystem.CODING},
         ), AuthorityContext("friedl", frozenset({"use"} if allowed else set()), NOW)
 
     def test_a_dispatch_is_traced_with_its_declared_identifier(self) -> None:
+        # D-074: reading checks is the `code` capability's read_checks action,
+        # registered under CODING; the action is a declared trace field.
         definition = CapabilityDefinition(
-            "read_pull_request_checks", "Read checks",
+            "code", "Read checks",
             StructuredSchema(ValueKind.OBJECT, {
+                "action": StructuredSchema(ValueKind.STRING),
                 "pull_request_number": StructuredSchema(ValueKind.INTEGER),
                 "note": StructuredSchema(ValueKind.STRING),
             }),
-            SCHEMA, SideEffect.NONE, trace_fields=("pull_request_number",),
+            SCHEMA, SideEffect.NONE, trace_fields=("action", "pull_request_number"),
         )
         traced: list = []
         broker, authority = self._broker(definition, lambda arguments: CapabilityResult(
-            "call-1", "read_pull_request_checks", CapabilityResultState.SUCCEEDED, {},
+            "call-1", "code", CapabilityResultState.SUCCEEDED, {},
         ), traced)
-        broker.dispatch(CapabilityCall(
-            "call-1", "read_pull_request_checks",
+        broker.dispatch(code_call(
+            "call-1", READ_CHECKS,
             {"pull_request_number": 39, "note": "private wording"},
         ), authority)
 
         self.assertEqual(
             [(item.subsystem, item.status, item.label, item.reference) for item in traced],
-            [(TraceSubsystem.GITHUB, TraceStatus.STARTED, "Read pull request checks", "#39"),
-             (TraceSubsystem.GITHUB, TraceStatus.COMPLETED, "Read pull request checks", "#39")],
+            [(TraceSubsystem.CODING, TraceStatus.STARTED, "Code", "read_checks #39"),
+             (TraceSubsystem.CODING, TraceStatus.COMPLETED, "Code", "read_checks #39")],
         )
         self.assertIsNotNone(traced[-1].duration_ms)
         self.assertNotIn("private wording", repr(traced))

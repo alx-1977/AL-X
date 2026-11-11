@@ -27,8 +27,10 @@ from alx.bootstrap.repository import (  # noqa: E402
 )
 from alx.capabilities import CapabilityBroker, CapabilityRegistry  # noqa: E402
 from alx.contracts import (  # noqa: E402
+    CODE,
     CapabilityAttemptDisposition,
     CapabilityCall,
+    CodeAction,
     CapabilityResultState,
     MergeError,
     MergeOutcome,
@@ -41,7 +43,9 @@ from alx.contracts.review_content import (  # noqa: E402
     ReviewReadError,
 )
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools.repository import DEFINITION, MERGE_PULL_REQUEST  # noqa: E402
+from alx.tools.repository import CONTRACT as DEFINITION  # noqa: E402
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
+from code_actions import MERGE, addressed, code_arguments, code_call, code_runtime  # noqa: E402
 
 
 HEAD = "a" * 40
@@ -111,10 +115,11 @@ class MergeAuthorityTest(unittest.TestCase):
         )
 
     def _broker(self, runtime):
+        code = code_runtime(runtime)
         return CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         )
 
     @staticmethod
@@ -127,9 +132,9 @@ class MergeAuthorityTest(unittest.TestCase):
 
     @staticmethod
     def _call(head: str = HEAD, number: int = 21) -> CapabilityCall:
-        return CapabilityCall(
+        return code_call(
             "call-1",
-            MERGE_PULL_REQUEST,
+            MERGE,
             {"pull_request_number": number, "head_sha": head},
         )
 
@@ -158,9 +163,9 @@ class MergeAuthorityTest(unittest.TestCase):
 
     def test_a_missing_policy_fails_closed(self) -> None:
         provider = RecordingProvider()
-        runtime = self._runtime(provider)
+        code = code_runtime(self._runtime(provider))
         broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions), SafetyGate({}), runtime.executors
+            CapabilityRegistry(code.definitions), SafetyGate({}), code.executors
         )
         attempt = broker.dispatch(
             self._call(), self._authority(frozenset({REPOSITORY_MERGE_PERMISSION}))
@@ -198,9 +203,9 @@ class MergeAuthorityTest(unittest.TestCase):
     def test_an_unusable_argument_is_a_declared_failure(self) -> None:
         provider = RecordingProvider()
         attempt = self._broker(self._runtime(provider)).dispatch(
-            CapabilityCall(
+            code_call(
                 "call-1",
-                MERGE_PULL_REQUEST,
+                MERGE,
                 {"pull_request_number": 1, "head_sha": "short"},
             ),
             self._authority(frozenset({REPOSITORY_MERGE_PERMISSION})),
@@ -244,7 +249,11 @@ class MergeAuthorityTest(unittest.TestCase):
     def test_the_policy_requires_no_person_approval(self) -> None:
         """Friedl delegated the authority rather than approving each merge."""
         runtime = self._runtime(RecordingProvider())
-        policy = runtime.policies[MERGE_PULL_REQUEST]
+        self.assertEqual(
+            runtime.action_permissions,
+            {CodeAction.MERGE: frozenset({REPOSITORY_MERGE_PERMISSION})},
+        )
+        policy = code_runtime(runtime).policies[CODE]
         self.assertEqual(
             policy.permission_references, frozenset({REPOSITORY_MERGE_PERMISSION})
         )
@@ -259,9 +268,11 @@ class MergeAuthorityTest(unittest.TestCase):
         apply. An external review caught this test asserting the opposite.
         """
         runtime = self._runtime(RecordingProvider())
-        definition = runtime.definitions[0]
+        self.assertTrue(DEFINITION.transmits_authored_text)
+        definition = code_runtime(runtime).definitions[0]
         self.assertIs(definition.side_effect, SideEffect.EFFECTFUL)
-        self.assertTrue(definition.transmits_authored_text)
+        self.assertTrue(definition.transmits_authored_text_for(
+            code_arguments(MERGE, {"pull_request_number": 21, "head_sha": HEAD})))
 
     def test_an_unconfigured_runtime_registers_nothing(self) -> None:
         """Honestly absent rather than registered and always failing."""
@@ -289,7 +300,7 @@ class CleanReviewRequiredTest(unittest.TestCase):
         runtime = build_repository_runtime(
             True, "owner/repo", "token", lambda: "call-1", provider=provider,
             review_reader=reviews)
-        result = runtime.executors[MERGE_PULL_REQUEST](
+        result = addressed(runtime.actions, MERGE)(
             {"pull_request_number": 7, "head_sha": HEAD})
         return result, provider
 

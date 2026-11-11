@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts import CapabilityResultState  # noqa: E402
+from alx.contracts import CapabilityResultState, CodeAction  # noqa: E402
 from alx.core.model_reasoner import PROTOCOL_INSTRUCTIONS  # noqa: E402
 from alx.providers.self_restart import restart_environment  # noqa: E402
-from alx.tools.self_restart import RESTART_SELF, build_self_restart_executors  # noqa: E402
+from alx.tools.self_restart import build_self_restart_executors  # noqa: E402
 
 
 class RestartSelfTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class RestartSelfTests(unittest.TestCase):
             lambda: running, lambda: main, lambda: not coding,
             lambda: self.released.append(1),
             launch or (lambda: self.restarts.append(1)), lambda: "call-1",
-        )[RESTART_SELF]
+        )[CodeAction.RESTART]
 
     def test_a_restart_that_cannot_start_lets_jobs_run_again(self) -> None:
         def broken():
@@ -148,7 +148,7 @@ class LauncherExitingEarlyTests(unittest.TestCase):
 class SheKnowsTests(unittest.TestCase):
     def test_she_restarts_herself_and_improves_around_her_core(self) -> None:
         text = " ".join(PROTOCOL_INSTRUCTIONS.split())
-        self.assertIn("Restart yourself onto it with restart_self", text)
+        self.assertIn("Restart yourself onto it with code restart", text)
         self.assertNotIn("tell Friedl a restart is needed", text)
         self.assertIn("Improving yourself is yours too", text)
         self.assertIn("first in the work you do together, but not only there", text)

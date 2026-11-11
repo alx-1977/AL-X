@@ -44,9 +44,17 @@ from alx.providers.github_review import (  # noqa: E402
     GitHubReviewProvider,
 )
 from alx.tools.review_content import (  # noqa: E402
-    DEFINITION,
-    READ_EXTERNAL_REVIEW,
+    CONTRACT as DEFINITION,
     build_review_content_executors,
+)
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
+from code_actions import (  # noqa: E402
+    READ_REVIEW,
+    REQUEST_REVIEW,
+    addressed,
+    code_call,
+    code_runtime,
+    definition,
 )
 
 
@@ -393,9 +401,10 @@ class ReadOnlyTests(unittest.TestCase):
         self.assertIn("build_review_content_executors(reader.read", source)
 
     def test_the_declaration_carries_no_authored_text(self) -> None:
-        from alx.tools.review_content import DEFINITION
-
         self.assertFalse(DEFINITION.transmits_authored_text)
+        # Nor does reading through the one `code` capability (D-074).
+        self.assertFalse(definition().transmits_authored_text_for(
+            {"action": READ_REVIEW, "pull_request_number": 21, "head_sha": HEAD}))
 
 
 class ExternalEvidenceTests(unittest.TestCase):
@@ -405,7 +414,7 @@ class ExternalEvidenceTests(unittest.TestCase):
         executors = build_review_content_executors(
             lambda request: content, lambda: "call-1"
         )
-        return executors[READ_EXTERNAL_REVIEW](
+        return addressed(executors, READ_REVIEW)(
             {"pull_request_number": 21, "head_sha": HEAD}
         )
 
@@ -494,7 +503,7 @@ class ExternalEvidenceTests(unittest.TestCase):
             raise AssertionError("must not be reached")
 
         executors = build_review_content_executors(reader, lambda: "call-1")
-        result = executors[READ_EXTERNAL_REVIEW](
+        result = addressed(executors, READ_REVIEW)(
             {"pull_request_number": 21, "head_sha": "not-a-sha"}
         )
         self.assertIs(result.state, CapabilityResultState.FAILED)
@@ -512,7 +521,7 @@ class ExternalEvidenceTests(unittest.TestCase):
         executors = build_review_content_executors(
             lambda request: MalformedContent(), lambda: "call-1"
         )
-        result = executors[READ_EXTERNAL_REVIEW](
+        result = addressed(executors, READ_REVIEW)(
             {"pull_request_number": 21, "head_sha": HEAD}
         )
 
@@ -524,7 +533,7 @@ class ExternalEvidenceTests(unittest.TestCase):
             lambda request: self._content(retrieved_at="not-a-time"),
             lambda: "call-1",
         )
-        result = executors[READ_EXTERNAL_REVIEW](
+        result = addressed(executors, READ_REVIEW)(
             {"pull_request_number": 21, "head_sha": HEAD}
         )
 
@@ -558,45 +567,48 @@ class AuthorityTests(unittest.TestCase):
             started=lambda *args: "completed",
         )
 
+    def _allowed(self, action: str, permissions: frozenset[str] | None = None) -> bool:
+        """Whether the safety gate lets this review action through unapproved."""
+        from alx.safety import AuthorityContext, SafetyGate
+
+        code = code_runtime(self._runtime())
+        arguments = {"pull_request_number": 21}
+        if action == READ_REVIEW:
+            arguments["head_sha"] = HEAD
+        return SafetyGate(code.policies).evaluate(
+            code_call("call-1", action, arguments),
+            AuthorityContext("friedl", code.permissions if permissions is None else permissions,
+                             datetime.now(UTC)),
+        ).allowed
+
     def test_reading_needs_no_approval_from_friedl(self) -> None:
         """She is woken to evaluate a review; she must be able to read it."""
-        runtime = self._runtime()
-        self.assertFalse(runtime.policies[READ_EXTERNAL_REVIEW].approval_required)
+        self.assertTrue(self._allowed(READ_REVIEW))
 
     def test_requesting_is_plain_permission_too(self) -> None:
         """Delegated to AL/X on 2026-10-06 (D-026, "Requesting the review")."""
-        from alx.tools.review import REQUEST_EXTERNAL_REVIEW
-
-        runtime = self._runtime()
-        self.assertFalse(
-            runtime.policies[REQUEST_EXTERNAL_REVIEW].approval_required
-        )
+        self.assertTrue(self._allowed(REQUEST_REVIEW))
 
     def test_the_two_authorities_are_separate(self) -> None:
         from alx.bootstrap.review import (
             REVIEW_READ_PERMISSION,
             REVIEW_REQUEST_PERMISSION,
         )
-        from alx.tools.review import REQUEST_EXTERNAL_REVIEW
+        from alx.contracts import CodeAction
 
         runtime = self._runtime()
-        read_policy = runtime.policies[READ_EXTERNAL_REVIEW]
-        request_policy = runtime.policies[REQUEST_EXTERNAL_REVIEW]
+        read_permissions = runtime.action_permissions[CodeAction.READ_REVIEW]
+        request_permissions = runtime.action_permissions[CodeAction.REQUEST_REVIEW]
 
-        self.assertEqual(
-            read_policy.permission_references, frozenset({REVIEW_READ_PERMISSION})
-        )
+        self.assertEqual(read_permissions, frozenset({REVIEW_READ_PERMISSION}))
         # Holding the read permission grants no ability to request one.
-        self.assertNotIn(
-            REVIEW_REQUEST_PERMISSION, read_policy.permission_references
-        )
-        self.assertNotIn(
-            REVIEW_READ_PERMISSION, request_policy.permission_references
-        )
+        self.assertNotIn(REVIEW_REQUEST_PERMISSION, read_permissions)
+        self.assertNotIn(REVIEW_READ_PERMISSION, request_permissions)
+        self.assertFalse(self._allowed(REQUEST_REVIEW, frozenset({REVIEW_READ_PERMISSION})))
 
     def test_reading_grants_no_merge_authority(self) -> None:
-        runtime = self._runtime()
-        for permission in runtime.permissions:
+        code = code_runtime(self._runtime())
+        for permission in code.permissions:
             self.assertNotIn("merge", permission)
 
 

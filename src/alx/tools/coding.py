@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alx.contracts import (
+    CODE,
+    CodeAction,
+    is_code_action,
     CapabilityAttemptDisposition,
     GoalState,
     CapabilityDefinition,
@@ -54,8 +57,9 @@ from alx.contracts.coding import (
 
 LOGGER = logging.getLogger(__name__)
 
-RUN_CODING_TASK = "run_coding_task"
-STOP_CODING_JOB = "stop_coding_job"
+# Results carry the one capability id; the action is the call's (D-074).
+_RUN = CodeAction.RUN_JOB.value
+_STOP = CodeAction.STOP_JOB.value
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _INTEGER = StructuredSchema(ValueKind.INTEGER)
@@ -152,8 +156,8 @@ _VERIFICATION = StructuredSchema(
 )
 
 
-DEFINITION = CapabilityDefinition(
-    RUN_CODING_TASK,
+RUN_CONTRACT = CapabilityDefinition(
+    _RUN,
     # Bounds the runtime enforces are stated here because the structured
     # schema cannot carry them: StructuredSchema describes kinds, not numeric
     # ranges or path semantics. Constants are interpolated rather than written
@@ -172,7 +176,7 @@ DEFINITION = CapabilityDefinition(
     "whether the change is still needed. A completed session that changes no "
     "files can return no_change_required with its report and clean-checkout "
     "evidence for your judgement. It leaves a clean feature branch; position "
-    "the checkout on main through repository_operation before a new job. "
+    "the checkout on main through the git action before a new job. "
     "By default the job requires clean main, then "
     "creates and switches to the requested new feature branch before the coding "
     "session may edit. With continue_goal_branch=true, it instead continues on "
@@ -227,7 +231,7 @@ DEFINITION = CapabilityDefinition(
     "reproduced check output, and her corrective_action, and continues through "
     "verification and commit unchanged. Repeating an attempt without "
     "a new diagnosis is bounded per failure episode, and each recorded failure "
-    "admits a bounded number of distinct corrections. stop_coding_job stops "
+    "admits a bounded number of distinct corrections. stop_job stops "
     "the running job; cancellation preserves its branch and diff and returns "
     "a checkpoint.",
     StructuredSchema(
@@ -317,12 +321,12 @@ DEFINITION = CapabilityDefinition(
 # Friedl wants a job stopped he says so, and AL/X decides and calls this. It
 # replaced the console's "Stop coding job" button, which was the only way to
 # stop a job and bypassed her entirely.
-STOP_DEFINITION = CapabilityDefinition(
-    STOP_CODING_JOB,
+STOP_CONTRACT = CapabilityDefinition(
+    _STOP,
     "Stop the coding job that is running now. It may be called from the goal "
     "whose plan is running the job, which admits no other call while the job "
     "runs, or with no goal selected. job_id, when given, must name that job: the call_id of "
-    "its run_coding_task step. The stopped job keeps "
+    "its run_job step. The stopped job keeps "
     "its branch and diff and its own result returns a checkpoint. stopped is "
     "false when no job is running, the named job is not the running one, or "
     "the job is already committing.",
@@ -342,7 +346,8 @@ STOP_DEFINITION = CapabilityDefinition(
     ("arguments_unusable",),
 )
 
-DEFINITIONS = (DEFINITION, STOP_DEFINITION)
+# Each action keeps its own contract; nothing registers these (D-074).
+CONTRACTS = {CodeAction.RUN_JOB: RUN_CONTRACT, CodeAction.STOP_JOB: STOP_CONTRACT}
 
 # First match wins. Not CODING_FAILURES: sandbox_unusable / session_failed
 # sit late there and would invert this order. task_failed is the fallback
@@ -369,7 +374,7 @@ def goal_coding_branch(
 
     Ownership is the branch, not a commit (2026-10-24): a hand commit, or a
     merge that rebased and force-pushed the pull request, moves HEAD without
-    making the branch any less this goal's. Every run_coding_task attempt of
+    making the branch any less this goal's. Every run_job attempt of
     the goal that reached implementation counts, succeeded or failed: the
     branch it recorded, or the repair_branch it was asked for when it recorded
     none. A recorded branch wins because a taken name gets a numbered branch
@@ -395,7 +400,7 @@ def _attempt_branches(attempt: Any) -> frozenset[str]:
         attempt.disposition is not CapabilityAttemptDisposition.EXECUTED
         or not attempt.implementation_invoked
         or attempt.call is None
-        or attempt.call.capability_id != RUN_CODING_TASK
+        or not is_code_action(attempt.call, CodeAction.RUN_JOB)
         or result is None
     ):
         return frozenset()
@@ -437,7 +442,7 @@ def build_coding_executors(
     call_id_source: Callable[[], str],
     goal_state_source: Callable[[], GoalState | None] = lambda: None,
     stop_job: Callable[[str | None], bool] | None = None,
-) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
+) -> Mapping[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]]:
     """Wire the coding outcomes to their structured capability results."""
 
     def run(arguments: Mapping[str, Any]) -> CapabilityResult:
@@ -464,7 +469,7 @@ def build_coding_executors(
             recorded = {
                 item.call.call_id: item
                 for item in (() if state is None else state.attempts)
-                if item.call is not None and item.call.capability_id == RUN_CODING_TASK
+                if is_code_action(item.call, CodeAction.RUN_JOB)
                 and item.result is not None
                 and (
                     item.result.state is CapabilityResultState.FAILED
@@ -585,7 +590,7 @@ def build_coding_executors(
         values = outcome.as_values()
         if outcome.status == "interrupted":
             return CapabilityResult(
-                call_id, RUN_CODING_TASK, CapabilityResultState.PARTIAL,
+                call_id, CODE, CapabilityResultState.PARTIAL,
                 values, durable_values=outcome.durable_values(),
                 provenance=RetentionPolicy().non_mail(
                     ContentOrigin.EXTERNAL, outcome.finished_at
@@ -599,7 +604,7 @@ def build_coding_executors(
             )
             return CapabilityResult(
                 call_id,
-                RUN_CODING_TASK,
+                CODE,
                 CapabilityResultState.FAILED,
                 values,
                 failure={
@@ -618,7 +623,7 @@ def build_coding_executors(
             )
         return CapabilityResult(
             call_id,
-            RUN_CODING_TASK,
+            CODE,
             CapabilityResultState.SUCCEEDED,
             values,
             durable_values=outcome.durable_values(),
@@ -635,20 +640,20 @@ def build_coding_executors(
             and (not isinstance(job_id, str) or not job_id_permitted(job_id))
         ):
             return _failed(
-                call_id, "arguments_unusable", capability=STOP_CODING_JOB,
+                call_id, "arguments_unusable", capability=CODE,
                 **_argument_failure("job_id", "unsafe", "job_id is invalid"),
             )
         stopped = bool(stop_job(job_id)) if stop_job is not None else False
         return CapabilityResult(
-            call_id, STOP_CODING_JOB, CapabilityResultState.SUCCEEDED,
+            call_id, CODE, CapabilityResultState.SUCCEEDED,
             {"stopped": stopped},
         )
 
-    executors: dict[str, Callable[[Mapping[str, Any]], CapabilityResult]] = {
-        RUN_CODING_TASK: run,
+    executors: dict[CodeAction, Callable[[Mapping[str, Any]], CapabilityResult]] = {
+        CodeAction.RUN_JOB: run,
     }
     if stop_job is not None:
-        executors[STOP_CODING_JOB] = stop
+        executors[CodeAction.STOP_JOB] = stop
     return executors
 
 
@@ -656,7 +661,7 @@ def parse_coding_arguments(
     arguments: Mapping[str, Any],
     job_id: str,
 ) -> tuple[CodingRequest | None, dict[str, object] | None]:
-    """Validate run_coding_task arguments field by field.
+    """Validate run_job arguments field by field.
 
     The schema already rejects the wrong JSON kinds. These checks name the
     field and bound that CodingRequest would otherwise swallow as a bare
@@ -977,7 +982,7 @@ def _argument_failure(
 
 
 def _failed(call_id: str, code: str, **fields: object) -> CapabilityResult:
-    capability = str(fields.pop("capability", RUN_CODING_TASK))
+    capability = str(fields.pop("capability", CODE))
     failure = {"code": code}
     failure.update(fields)
     return CapabilityResult(

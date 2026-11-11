@@ -25,10 +25,9 @@ from tests.test_coding_agent import (  # noqa: E402
 )
 from alx.contracts import (  # noqa: E402
     AgentDecision, CapabilityAttempt, CapabilityAttemptDisposition,
-    CapabilityCall, CapabilityDefinition, CapabilityResult,
+    CapabilityCall, CapabilityResult,
     CapabilityResultState, ConversationOrigin, ConversationSnapshot,
-    ConversationTurn, GoalState, Objective, SideEffect, StructuredSchema,
-    SuccessCriterion, ValueKind,
+    ConversationTurn, GoalState, Objective, SuccessCriterion,
 )
 from alx.contracts.coding import CodingError, CodingSessionResult  # noqa: E402
 from alx.contracts.coding_verification import pytest_failed_tests  # noqa: E402
@@ -36,12 +35,10 @@ from alx.core import CoreAgent  # noqa: E402
 from alx.goals import SQLiteGoalStore  # noqa: E402
 from alx.providers.coding_agent import CodingAgent  # noqa: E402
 from alx.tools.coding import build_coding_executors  # noqa: E402
+from code_actions import RUN_JOB, addressed, code_call, definition  # noqa: E402
 
-DEFINITION = CapabilityDefinition(
-    "run_coding_task", "bounded coding job",
-    StructuredSchema(ValueKind.OBJECT), StructuredSchema(ValueKind.OBJECT),
-    SideEffect.EFFECTFUL,
-)
+# The real one `code` capability offering coding jobs (D-074).
+DEFINITION = definition(RUN_JOB)
 _WRONG = "def add(a, b):\n    return a * b\n"
 _FAILED_TEST = "test_app.py::AddTests::test_add"
 
@@ -54,10 +51,10 @@ def verification_failed(call_id: str, arguments: dict, *, tests=(),
         "head_sha": "a" * 40, "state_digest": digest,
     }
     return CapabilityAttempt(
-        CapabilityCall(call_id, "run_coding_task", arguments),
+        code_call(call_id, RUN_JOB, arguments),
         CapabilityAttemptDisposition.EXECUTED, True,
         CapabilityResult(
-            call_id, "run_coding_task", CapabilityResultState.FAILED,
+            call_id, "code", CapabilityResultState.FAILED,
             {"status": "failed", "checkpoint": json.dumps(checkpoint),
              "verification": {"checks": [
                  {"name": "diff_check", "passed": True, "findings": []},
@@ -73,10 +70,10 @@ def verification_failed(call_id: str, arguments: dict, *, tests=(),
 def timed_out(call_id: str, arguments: dict) -> CapabilityAttempt:
     """A pre-watchdog timeout; each one recorded progress on the tree."""
     return CapabilityAttempt(
-        CapabilityCall(call_id, "run_coding_task", arguments),
+        code_call(call_id, RUN_JOB, arguments),
         CapabilityAttemptDisposition.EXECUTED, True,
         CapabilityResult(
-            call_id, "run_coding_task", CapabilityResultState.FAILED,
+            call_id, "code", CapabilityResultState.FAILED,
             {"status": "failed", "checkpoint": json.dumps({
                 "job_id": call_id, "stage": "execution", "head_sha": "a" * 40,
                 "state_digest": call_id.ljust(64, "0"),
@@ -89,16 +86,16 @@ def timed_out(call_id: str, arguments: dict) -> CapabilityAttempt:
 
 def refused(call_id: str, arguments: dict, reason: str) -> CapabilityAttempt:
     return CapabilityAttempt(
-        CapabilityCall(call_id, "run_coding_task", arguments),
+        code_call(call_id, RUN_JOB, arguments),
         CapabilityAttemptDisposition.REJECTED, False, reason_code=reason,
     )
 
 
 def succeeded(call_id: str) -> CapabilityAttempt:
     return CapabilityAttempt(
-        CapabilityCall(call_id, "run_coding_task", {"task": call_id}),
+        code_call(call_id, RUN_JOB, {"task": call_id}),
         CapabilityAttemptDisposition.EXECUTED, True,
-        CapabilityResult(call_id, "run_coding_task",
+        CapabilityResult(call_id, "code",
                          CapabilityResultState.SUCCEEDED, {"status": "succeeded"}),
     )
 
@@ -111,7 +108,7 @@ def goal(*attempts: CapabilityAttempt) -> GoalState:
 
 
 def corrective(resume: str, action: str) -> CapabilityCall:
-    return CapabilityCall("probe", "run_coding_task", {
+    return code_call("probe", RUN_JOB, {
         "resume_job_id": resume, "corrective_action": action,
     })
 
@@ -136,9 +133,9 @@ def failed(call_id: str, failure: dict, values: dict | None = None,
            state: CapabilityResultState = CapabilityResultState.FAILED,
            arguments: dict | None = None) -> CapabilityAttempt:
     return CapabilityAttempt(
-        CapabilityCall(call_id, "run_coding_task", arguments or {"task": call_id}),
+        code_call(call_id, RUN_JOB, arguments or {"task": call_id}),
         CapabilityAttemptDisposition.EXECUTED, True,
-        CapabilityResult(call_id, "run_coding_task", state,
+        CapabilityResult(call_id, "code", state,
                          {"status": "failed", **(values or {})}, failure),
     )
 
@@ -286,7 +283,7 @@ class ConsecutiveFailureAccounting(unittest.TestCase):
         ))
         # A refusal of a retired bound does not bind an identical call.
         self.assertIsNone(CoreAgent._binding_rejected_call(
-            state, CapabilityCall("again", "run_coding_task", {"task": "y"}), NOW
+            state, code_call("again", RUN_JOB, {"task": "y"}), NOW
         ))
 
     def test_the_recorded_timeouts_do_not_count(self):
@@ -345,15 +342,15 @@ class CoreOwnsTheTransition(unittest.TestCase):
             dispatched.append(call)
             return CapabilityAttempt(
                 call, CapabilityAttemptDisposition.EXECUTED, True,
-                CapabilityResult(call.call_id, "run_coding_task",
+                CapabilityResult(call.call_id, "code",
                                  CapabilityResultState.SUCCEEDED, {"status": "succeeded"}),
             )
 
         script = [
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(call=CapabilityCall("replay", "run_coding_task",
+            AgentDecision(call=code_call("replay", RUN_JOB,
                                               {"resume_job_id": "resume-05"})),
-            AgentDecision(call=CapabilityCall("repair", "run_coding_task", {
+            AgentDecision(call=code_call("repair", RUN_JOB, {
                 "resume_job_id": "resume-05",
                 "corrective_action": "Both provider stubs lack the new method; add it.",
             })),
@@ -371,7 +368,7 @@ class CoreOwnsTheTransition(unittest.TestCase):
         state = goal(*(verification_failed(f"f{n}", {"task": "a"}) for n in range(4)))
         script = [
             AgentDecision(goal_id="goal-a"),
-            AgentDecision(call=CapabilityCall("repair", "run_coding_task", {
+            AgentDecision(call=code_call("repair", RUN_JOB, {
                 "resume_job_id": "f3", "corrective_action": "a new diagnosis",
             })),
             AgentDecision(response="Four in a row failed."),
@@ -411,7 +408,7 @@ class CoreOwnsTheTransition(unittest.TestCase):
             if number % 2:
                 arguments["corrective_action"] = f"diagnosis {number}"
             return AgentDecision(
-                call=CapabilityCall(f"call-{number}", "run_coding_task", arguments),
+                call=code_call(f"call-{number}", RUN_JOB, arguments),
             )
 
         outcome, store = self.process(
@@ -437,11 +434,11 @@ class CorrectiveSessionCarriesTheFailure(unittest.TestCase):
 
     def run_call(self, call_id: str, arguments: dict, session) -> CapabilityResult:
         agent = CodingAgent(self.planner, session, self.planner, repository=self.root)
-        result = build_coding_executors(
+        result = addressed(build_coding_executors(
             agent.run, lambda: call_id, lambda: self.goal,
-        )["run_coding_task"](arguments)
+        ), RUN_JOB)(arguments)
         attempt = CapabilityAttempt(
-            CapabilityCall(call_id, "run_coding_task", arguments),
+            code_call(call_id, RUN_JOB, arguments),
             CapabilityAttemptDisposition.EXECUTED, True, result,
         )
         self.goal = replace(self.goal, attempts=(*self.goal.attempts, attempt))
@@ -531,25 +528,25 @@ class CorrectiveSessionCarriesTheFailure(unittest.TestCase):
         self.failed_job()
         for arguments, reason in refused_before:
             with self.subTest(reason=reason):
-                result = build_coding_executors(
+                result = addressed(build_coding_executors(
                     lambda request: self.fail("must not run"), lambda: "job-9",
                     lambda: self.goal,
-                )["run_coding_task"](arguments)
+                ), RUN_JOB)(arguments)
                 self.assertEqual(result.failure["code"], "arguments_unusable")
                 self.assertEqual(result.failure["reason_code"], reason)
 
         interrupted = CapabilityAttempt(
-            CapabilityCall("job-i", "run_coding_task", {"resume_job_id": "job-1"}),
+            code_call("job-i", RUN_JOB, {"resume_job_id": "job-1"}),
             CapabilityAttemptDisposition.EXECUTED, True,
-            CapabilityResult("job-i", "run_coding_task", CapabilityResultState.PARTIAL,
+            CapabilityResult("job-i", "code", CapabilityResultState.PARTIAL,
                              {"status": "interrupted", "checkpoint": json.dumps({
                                  "job_id": "job-i", "branch": "fix/job-1",
                                  "stage": "execution"})}),
         )
         at_commit = CapabilityAttempt(
-            CapabilityCall("job-c", "run_coding_task", {"resume_job_id": "job-1"}),
+            code_call("job-c", RUN_JOB, {"resume_job_id": "job-1"}),
             CapabilityAttemptDisposition.EXECUTED, True,
-            CapabilityResult("job-c", "run_coding_task", CapabilityResultState.FAILED,
+            CapabilityResult("job-c", "code", CapabilityResultState.FAILED,
                              {"status": "failed", "checkpoint": json.dumps({
                                  "job_id": "job-c", "branch": "fix/job-1",
                                  "stage": "commit", "commit_candidate_sha": "b" * 40})},
@@ -559,18 +556,18 @@ class CorrectiveSessionCarriesTheFailure(unittest.TestCase):
         for resume, reason in (("job-i", "corrective_action_without_failure"),
                                ("job-c", "corrective_action_stage_unsupported")):
             with self.subTest(reason=reason):
-                result = build_coding_executors(
+                result = addressed(build_coding_executors(
                     lambda request: self.fail("must not run"), lambda: "job-9",
                     lambda: self.goal,
-                )["run_coding_task"]({"resume_job_id": resume, "corrective_action": "fix"})
+                ), RUN_JOB)({"resume_job_id": resume, "corrective_action": "fix"})
                 self.assertEqual(result.failure["reason_code"], reason)
                 self.assertIs(result.failure["implementation_reached"], False)
 
     def test_a_correction_cannot_change_the_authorised_request(self):
         self.failed_job()
-        result = build_coding_executors(
+        result = addressed(build_coding_executors(
             lambda request: self.fail("must not run"), lambda: "job-9", lambda: self.goal,
-        )["run_coding_task"]({
+        ), RUN_JOB)({
             "resume_job_id": "job-1", "corrective_action": "fix",
             "task": "something else entirely",
         })

@@ -25,7 +25,8 @@ from alx.providers.sandbox_macos import (  # noqa: E402
 )
 from alx.providers.sandbox_macos import launcher as sandbox_launcher  # noqa: E402
 from alx.providers.sandbox_workspace import SandboxWorkspace  # noqa: E402
-from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT, build_sandbox_executors  # noqa: E402
+from alx.contracts import CodeAction  # noqa: E402
+from alx.tools.sandbox import build_sandbox_executors  # noqa: E402
 
 
 @unittest.skipUnless(sys.platform == "darwin", "requires the macOS Sandbox backend")
@@ -253,7 +254,7 @@ class TrustedLauncherTest(unittest.TestCase):
 
         executor = build_sandbox_executors(
             run, lambda: "call-launch-failed", lambda: "run-launch-failed"
-        )[RUN_SANDBOX_EXPERIMENT]
+        )[CodeAction.EXPERIMENT]
         result = executor(
             {
                 "experiment_id": "exp-launch-failed",

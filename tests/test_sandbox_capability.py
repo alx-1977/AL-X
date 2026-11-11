@@ -28,6 +28,8 @@ from alx.contracts import (  # noqa: E402
     CapabilityAttemptDisposition,
     CapabilityCall,
     CapabilityResultState,
+    CODE,
+    CodeAction,
     ContentOrigin,
     SideEffect,
 )
@@ -38,7 +40,7 @@ from alx.bootstrap.sandbox import (  # noqa: E402
 )
 from alx.observability.sandbox_ledger import SandboxBudget  # noqa: E402
 from alx.safety import AuthorityContext, SafetyGate  # noqa: E402
-from alx.tools.sandbox import RUN_SANDBOX_EXPERIMENT  # noqa: E402
+from code_actions import EXPERIMENT, code_arguments, code_call, code_runtime, contract  # noqa: E402
 
 
 PRODUCTION_ROOT = REPOSITORY_ROOT / "src" / "alx"
@@ -188,9 +190,10 @@ class SandboxCapabilityTest(unittest.TestCase):
         )
         if self.runtime is None:
             self.skipTest("no supported confinement mechanism on this platform")
-        self.registry = CapabilityRegistry(self.runtime.definitions)
+        self.code = code_runtime(self.runtime)
+        self.registry = CapabilityRegistry(self.code.definitions)
         self.broker = CapabilityBroker(
-            self.registry, SafetyGate(self.runtime.policies), self.runtime.executors
+            self.registry, SafetyGate(self.code.policies), self.code.executors
         )
 
     def _authority(self, permissions: frozenset[str]) -> AuthorityContext:
@@ -201,9 +204,9 @@ class SandboxCapabilityTest(unittest.TestCase):
         )
 
     def _call(self, source: str, session: str = "ses-a") -> CapabilityCall:
-        return CapabilityCall(
+        return code_call(
             "call-1",
-            RUN_SANDBOX_EXPERIMENT,
+            EXPERIMENT,
             {"experiment_id": "exp-a", "session_id": session, "source": source},
         )
 
@@ -227,7 +230,7 @@ class SandboxCapabilityTest(unittest.TestCase):
         self.assertEqual(attempt.reason_code, "permission_missing")
 
     def test_a_missing_policy_fails_closed(self) -> None:
-        broker = CapabilityBroker(self.registry, SafetyGate({}), self.runtime.executors)
+        broker = CapabilityBroker(self.registry, SafetyGate({}), self.code.executors)
         attempt = broker.dispatch(
             self._call("print(1)\n"),
             self._authority(frozenset({SANDBOX_EXECUTE_PERMISSION})),
@@ -242,7 +245,11 @@ class SandboxCapabilityTest(unittest.TestCase):
         varied by origin would put a development host's limitation inside
         AL/X's authority model.
         """
-        policy = self.runtime.policies[RUN_SANDBOX_EXPERIMENT]
+        self.assertEqual(
+            self.runtime.action_permissions[CodeAction.EXPERIMENT],
+            frozenset({SANDBOX_EXECUTE_PERMISSION}),
+        )
+        policy = self.code.policies[CODE]
         self.assertEqual(
             policy.permission_references, frozenset({SANDBOX_EXECUTE_PERMISSION})
         )
@@ -274,16 +281,21 @@ class SandboxCapabilityTest(unittest.TestCase):
             self._call(f"print({marker!r})\n"),
             self._authority(frozenset({SANDBOX_EXECUTE_PERMISSION})),
         )
-        definition = self.registry.lookup(RUN_SANDBOX_EXPERIMENT)
         self.assertEqual(
-            definition.durable_input_fields, ("experiment_id", "session_id")
+            contract(EXPERIMENT).durable_input_fields, ("experiment_id", "session_id")
+        )
+        definition = self.registry.lookup(CODE)
+        self.assertEqual(
+            definition.durable_input_fields, ("action", "experiment_id", "session_id")
         )
         # The Core applies the projection when it builds the call, so assert
         # the field list here and the projection it produces below.
-        arguments = {"experiment_id": "exp-a", "session_id": "ses-a", "source": marker}
+        arguments = code_arguments(
+            EXPERIMENT, {"experiment_id": "exp-a", "session_id": "ses-a", "source": marker}
+        )
         projected = CapabilityCall(
             "call-1",
-            RUN_SANDBOX_EXPERIMENT,
+            CODE,
             arguments,
             durable_arguments={
                 field: arguments[field] for field in definition.durable_input_fields
@@ -291,7 +303,7 @@ class SandboxCapabilityTest(unittest.TestCase):
         )
         self.assertNotIn("source", projected.durable_arguments)
         self.assertEqual(
-            set(projected.durable_arguments), {"experiment_id", "session_id"}
+            set(projected.durable_arguments), {"action", "experiment_id", "session_id"}
         )
         self.assertNotIn(marker, repr(projected.durable_arguments))
 
@@ -340,7 +352,7 @@ class SandboxCapabilityTest(unittest.TestCase):
         self.assertIs(attempt.result.state, CapabilityResultState.SUCCEEDED)
         self.assertIn("approved for production", attempt.result.values["stdout"])
         self.assertEqual(
-            self.runtime.policies[RUN_SANDBOX_EXPERIMENT].permission_references,
+            self.code.policies[CODE].permission_references,
             frozenset({SANDBOX_EXECUTE_PERMISSION}),
         )
         # And nothing scans output for what it appears to be asking for.
@@ -368,9 +380,9 @@ class SandboxCapabilityTest(unittest.TestCase):
 
     def test_unusable_arguments_return_a_declared_failure_code(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall(
+            code_call(
                 "call-1",
-                RUN_SANDBOX_EXPERIMENT,
+                EXPERIMENT,
                 {"experiment_id": "../escape", "session_id": "ses-a", "source": "print(1)"},
             ),
             self._authority(frozenset({SANDBOX_EXECUTE_PERMISSION})),
@@ -380,9 +392,9 @@ class SandboxCapabilityTest(unittest.TestCase):
 
     def test_an_empty_entry_filename_is_not_replaced_by_the_default(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall(
+            code_call(
                 "call-1",
-                RUN_SANDBOX_EXPERIMENT,
+                EXPERIMENT,
                 {
                     "experiment_id": "exp-a",
                     "session_id": "ses-a",
@@ -398,9 +410,9 @@ class SandboxCapabilityTest(unittest.TestCase):
 
     def test_non_utf8_source_is_rejected_before_workspace_creation(self) -> None:
         attempt = self.broker.dispatch(
-            CapabilityCall(
+            code_call(
                 "call-1",
-                RUN_SANDBOX_EXPERIMENT,
+                EXPERIMENT,
                 {
                     "experiment_id": "exp-a",
                     "session_id": "ses-a",
@@ -421,10 +433,11 @@ class SandboxCapabilityTest(unittest.TestCase):
             lambda: "call-1",
             budget=SandboxBudget(1, 300),
         )
+        code = code_runtime(runtime)
         broker = CapabilityBroker(
-            CapabilityRegistry(runtime.definitions),
-            SafetyGate(runtime.policies),
-            runtime.executors,
+            CapabilityRegistry(code.definitions),
+            SafetyGate(code.policies),
+            code.executors,
         )
         authority = self._authority(frozenset({SANDBOX_EXECUTE_PERMISSION}))
         first = broker.dispatch(self._call("print(1)\n"), authority)
@@ -434,9 +447,12 @@ class SandboxCapabilityTest(unittest.TestCase):
         self.assertEqual(second.result.failure["code"], "budget_exhausted")
 
     def test_the_capability_is_effectful_and_transmits_no_authored_text(self) -> None:
-        definition = self.registry.lookup(RUN_SANDBOX_EXPERIMENT)
+        self.assertIs(contract(EXPERIMENT).side_effect, SideEffect.EFFECTFUL)
+        self.assertFalse(contract(EXPERIMENT).transmits_authored_text)
+        definition = self.registry.lookup(CODE)
         self.assertIs(definition.side_effect, SideEffect.EFFECTFUL)
-        self.assertFalse(definition.transmits_authored_text)
+        self.assertFalse(definition.transmits_authored_text_for(
+            code_arguments(EXPERIMENT, {"experiment_id": "exp-a"})))
 
     def test_a_disabled_runtime_registers_nothing(self) -> None:
         """Honestly absent rather than registered and always failing."""
@@ -1019,12 +1035,22 @@ class SingleExecutionSiteTest(unittest.TestCase):
     def test_the_capability_is_the_only_public_sandbox_entry_point(self) -> None:
         from alx.tools import sandbox as sandbox_tool
 
+        # The sandbox tool names no capability of its own any more: it is the
+        # experiment action of the one `code` capability (D-074).
         capabilities = [
             value
             for name, value in vars(sandbox_tool).items()
             if name.isupper() and isinstance(value, str) and name.endswith("EXPERIMENT")
         ]
-        self.assertEqual(capabilities, [RUN_SANDBOX_EXPERIMENT])
+        self.assertEqual(capabilities, [])
+        self.assertEqual(sandbox_tool.CONTRACT.capability_id, EXPERIMENT)
+        executors = sandbox_tool.build_sandbox_executors(
+            lambda request: None, lambda: "call-1", lambda: "run-1"
+        )
+        self.assertEqual(set(executors), {CodeAction.EXPERIMENT})
+        code = code_runtime(executors)
+        self.assertEqual(code.offered, (CodeAction.EXPERIMENT,))
+        self.assertEqual(set(code.executors), {CODE})
 
 
 if __name__ == "__main__":

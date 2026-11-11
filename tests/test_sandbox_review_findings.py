@@ -23,6 +23,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.bootstrap.sandbox import build_sandbox_runtime  # noqa: E402
+from alx.contracts import CodeAction  # noqa: E402
 from alx.contracts.sandbox import (  # noqa: E402
     MAX_FILE_BYTES,
     MAX_WORKSPACE_BYTES,
@@ -168,7 +169,7 @@ class Finding3SweepCadenceTest(unittest.TestCase):
             original(*args, **kwargs),
         )[1]
 
-        executor = runtime.executors["run_sandbox_experiment"]
+        executor = runtime.actions[CodeAction.EXPERIMENT]
         for _ in range(3):
             executor(
                 {"experiment_id": "exp-a", "session_id": "ses-a", "source": "print(1)"}
@@ -211,7 +212,7 @@ class Finding4ReservationAccountingTest(unittest.TestCase):
                 raise RuntimeError("manifest write failed after execution")
 
         runtime = self._runtime(ExplodingAfterRun())
-        executor = runtime.executors["run_sandbox_experiment"]
+        executor = runtime.actions[CodeAction.EXPERIMENT]
         for _ in range(3):
             executor(
                 {"experiment_id": "exp-a", "session_id": "ses-a", "source": "print(1)"}
@@ -232,7 +233,7 @@ class Finding4ReservationAccountingTest(unittest.TestCase):
                 raise AssertionError("must not run")
 
         runtime = self._runtime(UnavailableAtRun())
-        executor = runtime.executors["run_sandbox_experiment"]
+        executor = runtime.actions[CodeAction.EXPERIMENT]
         # An invalid identifier fails in workspace.prepare, before execution.
         executor(
             {"experiment_id": "exp-a", "session_id": "ses-a", "source": "print(1)"}

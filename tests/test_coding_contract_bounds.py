@@ -20,11 +20,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.core.model_reasoner import _capability_details  # noqa: E402
-from alx.tools.coding import DEFINITION, build_coding_executors  # noqa: E402
+from alx.tools.coding import RUN_CONTRACT, build_coding_executors  # noqa: E402
+from code_actions import RUN_JOB, addressed, definition  # noqa: E402
 
 
 def catalogue_entry() -> dict:
-    payload = json.loads(_capability_details((DEFINITION,), [DEFINITION.capability_id]))
+    code = definition()
+    payload = json.loads(_capability_details((code,), [code.capability_id]))
     return payload["capabilities"][0]
 
 
@@ -37,7 +39,8 @@ class TheStepBudgetIsGone(unittest.TestCase):
         entry = catalogue_entry()
         self.assertNotIn("step_budget", entry["purpose"])
         self.assertNotIn("step_budget", entry["input_schema"]["properties"])
-        self.assertNotIn("step_budget", DEFINITION.durable_input_fields)
+        self.assertNotIn("step_budget", RUN_CONTRACT.durable_input_fields)
+        self.assertNotIn("step_budget", definition().durable_input_fields)
         self.assertFalse(hasattr(coding, "_optional_step_budget"))
         self.assertFalse(hasattr(contract, "MAX_STEP_BUDGET"))
         self.assertFalse(hasattr(contract, "DEFAULT_STEP_BUDGET"))
@@ -45,8 +48,11 @@ class TheStepBudgetIsGone(unittest.TestCase):
 
     def test_a_supplied_step_budget_is_refused_by_the_schema(self) -> None:
         call = {"task": "x", "repair_branch": "fix/x", "commit_message": "x"}
-        self.assertTrue(DEFINITION.input_schema.accepts(call))
-        self.assertFalse(DEFINITION.input_schema.accepts({**call, "step_budget": 8}))
+        self.assertTrue(RUN_CONTRACT.input_schema.accepts(call))
+        self.assertFalse(RUN_CONTRACT.input_schema.accepts({**call, "step_budget": 8}))
+        code = definition()
+        self.assertTrue(code.input_schema.accepts({"action": RUN_JOB, **call}))
+        self.assertFalse(code.input_schema.accepts({"action": RUN_JOB, **call, "step_budget": 8}))
 
 
 class TheCheckoutIsNotSomethingCoreNames(unittest.TestCase):
@@ -73,7 +79,7 @@ class InvalidValuesStillFailClosed(unittest.TestCase):
 
     def _run(self, arguments: dict):
         executors = build_coding_executors(lambda request: None, lambda: "call-1")
-        return executors["run_coding_task"](arguments)
+        return addressed(executors, RUN_JOB)(arguments)
 
     def test_a_worktree_that_does_not_exist_is_still_refused(self) -> None:
         """The live "AL-X" case: a name, not a path that exists.
@@ -100,13 +106,16 @@ class ExistingValidCallsAreUnchanged(unittest.TestCase):
         """
         entry = catalogue_entry()
         schema = entry["input_schema"]
-        self.assertEqual(schema.get("required", []), [])
+        # The one `code` capability requires only its action; run_job itself
+        # requires nothing, so a resume may name only its job ID.
+        self.assertEqual(schema.get("required", []), ["action"])
+        self.assertEqual(RUN_CONTRACT.input_schema.required, ())
         self.assertNotIn("worktree", schema["properties"])
 
     def test_a_new_call_still_requires_its_task(self) -> None:
-        result = build_coding_executors(
+        result = addressed(build_coding_executors(
             lambda request: None, lambda: "call-1"
-        )["run_coding_task"]({"repair_branch": "fix/new", "commit_message": "fix"})
+        ), RUN_JOB)({"repair_branch": "fix/new", "commit_message": "fix"})
         self.assertEqual(result.failure["code"], "arguments_unusable")
         self.assertEqual(result.failure["invalid_field"], "task")
 

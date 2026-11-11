@@ -53,7 +53,7 @@ RESULT = {
     'business_outcome': 'part-number search is case-insensitive; change merged', 'pr_number': 80,
     'commit': 'abc123def456', 'tests_passed': 142,
     'main_sync': 'complete', 'branch_cleanup': 'deleted',
-    'capability': 'run_coding_task', 'provider': 'claude_subscription',
+    'capability': 'code', 'action': 'run_job', 'provider': 'claude_subscription',
     'reviewer': 'coding_agent_review',
 }
 SAMPLES = (
