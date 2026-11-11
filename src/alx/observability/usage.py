@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Any, Mapping
+from time import monotonic
+from typing import Any, Callable, Mapping
 
 
 # Cost is only reported for models whose price is actually known. An unpriced
@@ -82,6 +83,14 @@ def bill_budget_for(provider: str) -> ExecutionBudget:
     return XERO_BILL_BUDGET
 
 
+# A bill task that has reached for no bill capability in this long is over,
+# whether or not it committed a bill. On 2026-11-11 a find_bill at 08:04
+# armed the ceiling, nothing settled it, and five hours of unrelated work in
+# the same conversation filled it: at 13:12 every later turn, Friedl's
+# included, was stopped before it was heard.
+BILL_TASK_IDLE_SECONDS = 30 * 60
+
+
 class BudgetExceeded(Exception):
     """Raised to stop a task that has exceeded its reasoning-call ceiling."""
 
@@ -95,10 +104,15 @@ class BudgetExceeded(Exception):
 class SQLiteUsageRecorder:
     """Record reasoning usage per call and per task, and enforce a ceiling."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, clock: Callable[[], float] = monotonic,
+                 idle_seconds: float = BILL_TASK_IDLE_SECONDS) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
         self._lock = Lock()
+        self._clock = clock
+        self._idle_seconds = idle_seconds
+        # When the budgeted task last reached for one of its capabilities.
+        self._last_activity: dict[str, float] = {}
         self._budgets: dict[str, ExecutionBudget] = {}
         # Call id the ceiling starts counting from, per task.
         self._windows: dict[str, int] = {}
@@ -185,6 +199,9 @@ class SQLiteUsageRecorder:
         here: only calls recorded from this point count.
         """
         with self._lock:
+            if self._lapsed(task_id):
+                self._settled[task_id] = True
+            self._last_activity[task_id] = self._clock()
             if task_id in self._budgets and not self._settled.get(task_id, False):
                 # An unfinished task keeps its window, so reaching for a second
                 # capability within one bill does not hand it a fresh ceiling.
@@ -198,6 +215,11 @@ class SQLiteUsageRecorder:
             self._budgets[task_id] = budget
             self._windows[task_id] = self._window_start(task_id)
             self._recovery.discard(task_id)
+
+    def _lapsed(self, task_id: str) -> bool:
+        """Whether the budgeted task has been idle long enough to be over."""
+        last = self._last_activity.get(task_id)
+        return last is not None and self._clock() - last >= self._idle_seconds
 
     def _window_start(self, task_id: str) -> int:
         """Open the window before the call that reached for the capability.
@@ -522,6 +544,10 @@ class SQLiteUsageRecorder:
             budget = self._budgets.get(task_id)
             if budget is None:
                 return
+            if self._lapsed(task_id):
+                # Not a bill any more: the window belongs to work that
+                # stopped reaching for bills, not to the conversation.
+                self._settled[task_id] = True
             if self._settled.get(task_id, False):
                 # The work finished. Its ceiling stopped that task running
                 # away; it must not also stop AL/X saying what she did. The

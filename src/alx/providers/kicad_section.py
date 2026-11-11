@@ -229,7 +229,13 @@ for name in sorted(set(joins) | set(tracks) | set(vias)):
     net_rows.append({"name": name, "pads": joins.get(name, []), "tracks": tracks.get(name, 0),
                      "vias": vias.get(name, 0)})
 zones = []
+# Teardrops are zones too, hundreds on a finished board; listed, they buried
+# the real pours and keep-outs (2026-11-10). They are counted instead.
+teardrops = 0
 for zone in board.Zones():
+    if zone.IsTeardropArea():
+        teardrops += 1
+        continue
     box = zone.GetBoundingBox()
     zones.append({"name": zone.GetZoneName(), "net": zone.GetNetname(), "keepout": bool(zone.GetIsRuleArea()),
                   "layers": [COPPER.get(layer, board.GetLayerName(layer)) for layer in zone.GetLayerSet().Seq()],
@@ -239,7 +245,7 @@ edge = board.GetBoardEdgesBoundingBox()
 out = {"board": {"outline": [round(mm(edge.GetX()), 3), round(mm(edge.GetY()), 3),
                              round(mm(edge.GetRight()), 3), round(mm(edge.GetBottom()), 3)],
                  "copper_layers": [COPPER[layer] for layer in sorted(COPPER) if board.IsLayerEnabled(layer)],
-                 "parts_total": len(board.GetFootprints())},
+                 "parts_total": len(board.GetFootprints()), "teardrops": teardrops},
        "parts": parts[:limit], "nets": net_rows[:limit], "zones": zones[:limit],
        "truncated": {"parts": len(parts) > limit, "nets": len(net_rows) > limit, "zones": len(zones) > limit}}
 (board_path.parent / "section.json").write_text(json.dumps(out))

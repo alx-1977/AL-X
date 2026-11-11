@@ -435,7 +435,7 @@
 
   async function load() {
     const response = await fetch('/display.json', { cache: 'no-store' });
-    const { display } = await response.json();
+    const { id, version, display } = await response.json();
     if (!display) { close(); return; }
     column(display);
     const svg = $('view');
@@ -447,6 +447,8 @@
       tallest = Math.max(tallest, height);
     }
     if (x) svg.setAttribute('viewBox', `0 0 ${x - 120} ${tallest}`);
+    // Only now is it on screen; she may say so only after this report.
+    await fetch(`/display-drawn.json?id=${encodeURIComponent(id)}&version=${version}`, { cache: 'no-store' });
   }
   load().catch(() => close());
 })();

@@ -1458,11 +1458,14 @@ async def run(repository_root: Path) -> None:
             "Goal proposal rejected: %s", record,
         ),
     )
+    live_server: list[Any] = []
     gateway = ConversationGateway(
         core,
         conversation_store,
         contextual_events=mail_runtime.source.contextual_events,
         conversation_events=program_source.contextual_events,
+        # The server is built below; until then there is no screen.
+        live_thread=lambda: None if not live_server else live_server[0].live_conversation(),
     )
     # One Core-turn lock for the whole runtime. Person turns and autonomous
     # turns serialize through this same object: AL/X has one Core, so she has
@@ -1503,6 +1506,7 @@ async def run(repository_root: Path) -> None:
         provider_settings.speech_to_text.sample_rate_hz,
         CODE_ROOT / "src/alx/interfaces/assets",
         display=display_board.snapshot,
+        display_drawn=display_board.mark_drawn,
         reader_tile=None if reader_runtime is None else tile_source(
             reader_runtime.calendar, lambda: datetime.now(UTC), monitor=reader_watch,
             display=ReaderSettings.from_environment(environment).display),
@@ -1515,6 +1519,7 @@ async def run(repository_root: Path) -> None:
         phone=phone_link,
         mark_undelivered=opportunity_ledger.mark_response_undelivered,
     )
+    live_server.append(server)
     if phone_link is not None:
         phone_link.fallback = lambda text: server.deliver(PHONE_CONVERSATION_ID, text)
     # Every kind of occasion reaches the Core through one producer, one

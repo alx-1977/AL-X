@@ -112,6 +112,25 @@ class InspectTests(unittest.TestCase):
         self.assertIn("GetIsRuleArea()", INSPECT_SCRIPT)
         self.assertIn("pcbnew.F_Cu", INSPECT_SCRIPT)
 
+    def test_teardrops_are_counted_not_listed(self) -> None:
+        # 2026-11-10: 908 teardrop zones on P0009 buried its 47 real zones.
+        # Runs the real script on a board with two pours and two teardrops.
+        from alx.config.settings import KiCadSettings
+        from alx.providers.coding_process import kicad_containment_available, run_kicad_python
+        python = KiCadSettings.__dataclass_fields__["kicad_python"].default
+        if not python.exists() or not kicad_containment_available():
+            self.skipTest("KiCad is not installed here")
+        board = Path(self.directory.name) / "td" / "board.kicad_pcb"
+        board.parent.mkdir()
+        board.write_text((REPOSITORY_ROOT / "tests/fixtures/teardrops.kicad_pcb").read_text())
+        for limit, listed in ((50, ["3V3 pour", "GND pour"]), (1, ["GND pour"])):
+            with self.subTest(limit=limit):
+                out = read_overview(board, {"limit": limit}, scratch_root=self.scratch,
+                                    kicad_python=python, execute_python=run_kicad_python)
+                self.assertEqual(out["board"]["teardrops"], 2)
+                self.assertEqual(sorted(zone["name"] for zone in out["zones"]), listed)
+                self.assertEqual(out["truncated"]["zones"], limit == 1)
+
 
 class TurnBoundByActionTests(unittest.TestCase):
     """Review of c19c8c4: one free kicad call spent the turn's instruction."""

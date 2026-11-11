@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,7 +53,8 @@ class ShowOnScreenTests(unittest.TestCase):
         def section(arguments):
             self.read.append(dict(arguments))
             return GEOMETRY
-        self.show = build_display_executors(self.board, section, lambda: "call-1")[SHOW_ON_SCREEN]
+        self.show = build_display_executors(self.board, section, lambda: "call-1",
+                                            draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
 
     def test_a_display_is_published_with_the_board_geometry(self) -> None:
         result = self.show(display())
@@ -120,7 +123,8 @@ class ShowOnScreenTests(unittest.TestCase):
     def test_a_board_that_cannot_be_read_is_reported_and_nothing_is_shown(self) -> None:
         def broken(_):
             raise SectionError("board_unavailable", "not a .kicad_pcb file")
-        show = build_display_executors(self.board, broken, lambda: "call-1")[SHOW_ON_SCREEN]
+        show = build_display_executors(self.board, broken, lambda: "call-1",
+                                       draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
         result = show(display())
         self.assertEqual(result.failure["code"], "board_unavailable")
         self.assertEqual(self.board.snapshot()["display"], None)
@@ -142,6 +146,40 @@ class ShowOnScreenTests(unittest.TestCase):
                 self.assertEqual(result.failure["code"], "arguments_unusable")
                 self.assertIn("label", result.failure["reason"])
         self.assertEqual(self.read, [])
+
+    def test_it_is_shown_only_when_the_screen_reports_drawing_it(self) -> None:
+        # 2026-11-10: the screen had crashed and she said it was on screen.
+        self.assertFalse(self.show(display()).values["shown"])
+        board_id = self.board.snapshot()["id"]
+
+        def screen():
+            while self.board.snapshot()["version"] < 2:
+                time.sleep(0.005)
+            self.board.mark_drawn(board_id, 2)
+
+        drawer = threading.Thread(target=screen)
+        drawer.start()
+        show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "call-2",
+                                       draw_wait_seconds=5)[SHOW_ON_SCREEN]
+        self.assertTrue(show(display()).values["shown"])
+        drawer.join()
+
+    def test_a_report_from_another_run_or_a_future_version_counts_for_nothing(self) -> None:
+        self.board.publish({"title": "x"})
+        self.board.mark_drawn("someone-else", 1)
+        self.board.mark_drawn(self.board.snapshot()["id"], 5)
+        self.assertFalse(self.board.wait_drawn(1, 0.01))
+        self.board.mark_drawn(self.board.snapshot()["id"], 1)
+        self.assertTrue(self.board.wait_drawn(1, 0.01))
+
+    def test_the_viewer_reports_after_drawing_and_the_server_takes_it(self) -> None:
+        script = (ASSETS / "show.js").read_text()
+        drawn_at = script.index("/display-drawn.json")
+        self.assertGreater(drawn_at, script.index("svg.setAttribute('viewBox'"))
+        source = (REPOSITORY_ROOT / "src/alx/interfaces/server.py").read_text()
+        self.assertIn('parsed.path == "/display-drawn.json"', source)
+        wiring = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
+        self.assertIn("display_drawn=display_board.mark_drawn", wiring)
 
     def test_it_changes_nothing_outside_her_screen(self) -> None:
         self.assertEqual(DEFINITIONS[0].side_effect.name, "NONE")
