@@ -700,6 +700,8 @@ def _state_payload(
                 # recorded on the goal and shown to her as "rejected" and
                 # nothing else is a refusal she cannot learn from.
                 "reason_code": item.reason_code or None,
+                # Exactly what was wrong with a refused input, when known.
+                "reason_detail": item.reason_detail,
                 "recorded_at": None if item.recorded_at is None else item.recorded_at.isoformat(),
                 "started_at": None if item.started_at is None else item.started_at.isoformat(),
                 "duration_seconds": item.duration_seconds,
@@ -854,6 +856,8 @@ def _attempt_payload(item: Any) -> dict[str, Any]:
         # them could ever have passed. A machine-readable reason we already
         # hold is hers to reason from.
         "reason_code": item.reason_code or None,
+        # Exactly what was wrong with a refused input, when known.
+        "reason_detail": item.reason_detail,
         "recorded_at": None if item.recorded_at is None else item.recorded_at.isoformat(),
         "started_at": None if item.started_at is None else item.started_at.isoformat(),
         "duration_seconds": item.duration_seconds,

@@ -79,9 +79,11 @@ class CapabilityBroker:
             definition = self._registry.lookup(call.capability_id)
         except UnknownCapability:
             return record(self._failed(call, "capability_unknown"))
-        if not definition.input_schema.accepts(call.arguments):
+        problem = definition.input_schema.violation(call.arguments)
+        if problem is not None:
             return record(CapabilityAttempt(
                 call, CapabilityAttemptDisposition.REJECTED, False, reason_code="input_invalid",
+                reason_detail=problem[:300],
             ), definition)
         safety = self._safety.evaluate(call, authority)
         if not safety.allowed:

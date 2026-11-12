@@ -116,7 +116,12 @@ class KiCadTests(unittest.TestCase):
             import contextlib
             import io
             out, err = io.StringIO(), io.StringIO()
-            with patch.object(sys, 'argv', [argv[-2], argv[-1]]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            # The tested helpers ahead of every script import pcbnew at the top;
+            # here a stand-in carries only the layer numbers they read at load.
+            fake_pcbnew = SimpleNamespace(F_Cu=0, B_Cu=31, F_SilkS=37, B_SilkS=36, F_Fab=49, B_Fab=48,
+                                          F_CrtYd=47, B_CrtYd=46)
+            with patch.object(sys, 'argv', [argv[-2], argv[-1]]), patch.dict(sys.modules, {'pcbnew': fake_pcbnew}), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 exec(compile(Path(argv[-2]).read_text(), argv[-2], 'exec'), {})
             return SimpleNamespace(returncode=0, stdout=out.getvalue(), stderr=err.getvalue())
         board = Path(argv[-1])
@@ -320,6 +325,76 @@ class KiCadTests(unittest.TestCase):
     def write_args(self, result):
         return {'work_copy_id': result['work_copy_id'], 'work_copy_revision': result['work_copy_revision'],
                 'project_dir': str(self.project)}
+
+    def test_what_kicad_keeps_beside_the_design_is_never_copied_or_compared(self):
+        """2026-11-12: backups bloated every work copy; a settings rewrite refused write-backs."""
+        (self.project / 'backups').mkdir()
+        (self.project / 'backups' / 'test-2026-11-12_100000.zip').write_bytes(b'zip')
+        (self.project / 'test-backups').mkdir()
+        (self.project / 'test-backups' / 'old.zip').write_bytes(b'zip')
+        (self.project / 'test.kicad_prl').write_text('{"board": {"active_layer": 0}}')
+        result = self.fixed()
+        root = self.storage / 'kicad' / result['work_copy_id'] / 'project'
+        self.assertFalse((root / 'backups').exists())
+        self.assertFalse((root / 'test-backups').exists())
+        self.assertFalse((root / 'test.kicad_prl').exists())
+        # KiCad rewriting its settings or adding a backup is not a changed board.
+        (self.project / 'test.kicad_prl').write_text('{"board": {"active_layer": 31}}')
+        (self.project / 'backups' / 'test-2026-11-12_110000.zip').write_bytes(b'zip2')
+        from alx.providers.kicad import design_inventory, not_design
+        self.assertEqual({path.name for path in not_design(self.project)},
+                         {'.history', 'backups', 'test-backups', 'test.kicad_prl'})
+        names = set(design_inventory(self.project))
+        self.assertIn('test.kicad_pcb', names)
+        self.assertFalse(any(name.startswith(('backups', 'test-backups')) or name == 'test.kicad_prl'
+                             for name in names))
+        written = self.success('write_back_kicad_board', **self.write_args(result))
+        self.assertTrue(written)
+        # His settings file and backups are untouched by the write-back.
+        self.assertEqual((self.project / 'test.kicad_prl').read_text(), '{"board": {"active_layer": 31}}')
+        self.assertTrue((self.project / 'backups' / 'test-2026-11-12_110000.zip').exists())
+
+    def test_a_kicad_crash_is_reported_as_a_crash_with_its_usual_cause(self):
+        checked = self.check()
+        original = self.run_cli
+
+        def crash(argv, **kwargs):
+            if argv[0] == '/usr/bin/sandbox-exec':
+                return SimpleNamespace(returncode=-11, stdout='', stderr='')
+            return original(argv, **kwargs)
+        self.runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, crash)
+        result = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertEqual(result.failure['code'], 'script_failed')
+        self.assertIn('KiCad crashed', result.failure['recovery']['crashed'])
+        self.assertIn('remove_graphic', result.failure['recovery']['crashed'])
+
+    def test_every_edit_script_starts_with_the_tested_helpers(self):
+        from alx.providers.kicad_helpers import HELPERS, NAMES, script_runner
+        checked = self.check()
+        seen = []
+        original = self.run_cli
+
+        def capture(argv, **kwargs):
+            if argv[0] == '/usr/bin/sandbox-exec':
+                seen.append(Path(argv[-2]).read_text())
+            return original(argv, **kwargs)
+        self.runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, capture)
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertTrue(seen[0].startswith(HELPERS))
+        self.assertIn(repr(EDIT_SCRIPT), seen[0])
+        # Her script is compiled on its own: a __future__ import still runs
+        # (review of 66c4b3b), and its line numbers are her own.
+        future = 'from __future__ import annotations\nprint("ran", __name__)\nraise ValueError("x")\n'
+        out = subprocess.run([sys.executable, '-c', 'import sys, types; sys.modules["pcbnew"] = '
+                              'types.SimpleNamespace(F_Cu=0, B_Cu=31, F_SilkS=37, B_SilkS=36, F_Fab=49, '
+                              'B_Fab=48, F_CrtYd=47, B_CrtYd=46); exec(sys.stdin.read())', 'board.kicad_pcb'],
+                             input=HELPERS + script_runner(future), capture_output=True, text=True)
+        self.assertIn('ran __main__', out.stdout)
+        self.assertIn('File "script", line 3', out.stderr)
+        description = (Path(__file__).parents[1] / 'src/alx/tools/kicad.py').read_text()
+        for name in NAMES:
+            if name not in ('mm', 'point', 'xy', 'layer'):
+                self.assertIn(name, description)
 
     def test_write_locks_original_inventory_and_revision_refusals(self):
         result = self.fixed()

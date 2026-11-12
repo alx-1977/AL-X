@@ -139,7 +139,7 @@ def _goal_to_data(goal: GoalState, recovery: list[Any] | None = None) -> dict[st
              _recorded_result(item.result, recovery), item.reason_code,
              _time_to_data(item.recorded_at), item.repeated_call_id,
              _time_to_data(item.repeated_recorded_at), item.repeated_reason_code,
-             _time_to_data(item.started_at), item.duration_seconds]
+             _time_to_data(item.started_at), item.duration_seconds, item.reason_detail]
             for item in goal.attempts
         ],
         "blockers": [[item.item_id, item.summary] for item in goal.blockers],
@@ -349,6 +349,7 @@ def _attempts(data: dict[str, Any]) -> tuple[CapabilityAttempt, ...]:
             item[11] if len(item) > 11 else None,
             _time_from_data(item[12]) if len(item) > 12 else None,
             item[13] if len(item) > 13 else None,
+            item[14] if len(item) > 14 else None,
         ))
     return tuple(values)
 

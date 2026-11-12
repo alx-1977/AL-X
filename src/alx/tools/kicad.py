@@ -90,7 +90,19 @@ _ACTION_DEFINITIONS = (
         'from before and after the edit; later edits keep them. Read them with '
         'read_reference_file, continuing long text with offset. evidence_full when retained '
         'evidence would exceed its own limit; the edit is then undone. Review the report before '
-        'requesting write-back approval; a new revision invalidates previous approval.',
+        'requesting write-back approval; a new revision invalidates previous approval. '
+        'Tested helpers come before your script, in millimetres and degrees, layers as '
+        "'F', 'B', 'In1': b = load(); describe(b, ref) gives position, rotation and every pad; "
+        'part, move_part(b, ref, x, y), rotate_part(b, ref, deg), pad(b, ref, n), '
+        'set_pad(b, ref, n, size=(w, h), at=(x, y)), tracks(b, net), track_ends(t), '
+        'add_track(b, net, [(x, y), ...], width, on), vias(b, net), add_via(b, net, (x, y)), '
+        'remove(b, item), zones(b, net, keepout), zone_corners(z), set_zone_corners(z, corners), '
+        "a part's drawings by id: graphics(b, ref, on='F.Silk'), set_graphic(b, ref, id, start, "
+        "end), remove_graphic(b, ref, id), add_line(b, ref, on, start, end, width); "
+        'refill(b) and save(b). Use them rather than guessing pcbnew names; refill after every '
+        "change. Never remove items while looping over pcbnew's own lists, and never Remove a "
+        "part's drawing through the board: both crash KiCad. The script may write only inside "
+        'the work copy.',
         obj({'work_copy_id': S, 'script': S}),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS}),

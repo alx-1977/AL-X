@@ -19,6 +19,7 @@ from contextlib import contextmanager, suppress
 import fcntl
 
 from alx.providers.credential_paths import denied
+from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 from alx.providers.kicad_circuit import (
@@ -102,16 +103,32 @@ def inventory(root, *, exclude=frozenset()):
 KICAD_LOCAL_HISTORY = '.history'
 
 
+def not_design(source):
+    """What KiCad keeps beside a design that is not the design, by exact path.
+
+    Its save history, its backup folder (named `backups` in Friedl's layout,
+    `<project>-backups` by default) and each project's local settings file,
+    which KiCad rewrites on every open and close. On 2026-11-12 the backups
+    were 31 of the 48 MB copied into every work copy and its evidence, and a
+    rewritten settings file twice refused a write-back as a changed board.
+    """
+    stems = sorted(path.stem for path in source.glob('*.kicad_pro'))
+    names = {KICAD_LOCAL_HISTORY, 'backups', *(stem + '-backups' for stem in stems),
+             *(stem + '.kicad_prl' for stem in stems)}
+    return {source / name for name in names}
+
+
 def design_inventory(source, *, exclude=frozenset()):
-    """A design folder's inventory without KiCad's own save history."""
-    return inventory(source, exclude={*exclude, source / KICAD_LOCAL_HISTORY})
+    """A design folder's inventory without what KiCad keeps beside the design."""
+    return inventory(source, exclude={*exclude, *not_design(source)})
 
 
 def _without_local_history(source):
-    """A copytree ignore that leaves out only the design's top-level history."""
+    """A copytree ignore that leaves out exactly what is not the design."""
+    skipped = {path.name for path in not_design(source)}
+
     def ignore(directory, names):
-        return [KICAD_LOCAL_HISTORY] if (
-            Path(directory) == source and KICAD_LOCAL_HISTORY in names) else []
+        return [name for name in names if name in skipped] if Path(directory) == source else []
     return ignore
 
 
@@ -634,12 +651,24 @@ class KiCadProvider:
             try:
                 before = self._drc(root, meta)['totals']
                 facts_before = board_facts(board.read_text())
-                script_path.write_text(script)
+                # Tested helpers first, then her script compiled on its own, so
+                # its own first lines (a __future__ import) and line numbers
+                # stay as she wrote them (2026-11-12).
+                script_path.write_text(HELPERS + script_runner(script))
                 stage = 'script'
                 executed = self.execute_python(str(self.settings.kicad_python), script_path, board)
                 stdout, stderr = (getattr(executed, key, '') or '' for key in ('stdout', 'stderr'))
                 if executed.returncode:
-                    raise KiCadError('script_failed', {'stdout': stdout[:16000], 'stderr': stderr[:16000]})
+                    detail = {'stdout': stdout[:16000], 'stderr': stderr[:16000]}
+                    # A signal is KiCad itself crashing, not a Python error
+                    # (2026-11-12: four segmentation faults in two minutes).
+                    if executed.returncode < 0 or executed.returncode >= 128:
+                        detail['crashed'] = (
+                            'KiCad crashed while running the script (exit %d). Usually an item '
+                            'removed with Remove, or through the board while it belongs to a part, '
+                            'then saved; use the remove, remove_graphic and add_line helpers.'
+                            % executed.returncode)
+                    raise KiCadError('script_failed', detail)
                 inventory(project)
                 stage = 'after_drc'
                 after = self._drc(root, meta)['totals']
@@ -749,8 +778,9 @@ class KiCadProvider:
             relative = Path(arguments['output_dir'])
             if (relative.is_absolute() or not relative.parts
                     or any(p in ('.', '..') for p in relative.parts)
-                    # KiCad's own history is never part of the design (review of #208).
-                    or relative.parts[0] == KICAD_LOCAL_HISTORY):
+                    # What KiCad keeps beside the design is never written to (review of #208).
+                    or self._source(meta['source']) / relative.parts[0] in not_design(
+                        self._source(meta['source']))):
                 raise KiCadError('path_denied')
             source = self._source(meta['source'])
             output = source / relative

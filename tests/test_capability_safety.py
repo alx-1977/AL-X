@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.capabilities import CapabilityBroker, CapabilityRegistry, DuplicateCapability  # noqa: E402
 from alx.contracts import (  # noqa: E402
-    Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttemptDisposition,
+    Approval, ApprovalLifecycle, ApprovalScope, CapabilityAttempt, CapabilityAttemptDisposition,
     CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
     SideEffect, StructuredSchema, ValueKind,
 )
@@ -41,6 +41,45 @@ class SchemaTests(unittest.TestCase):
             StructuredSchema(ValueKind.ARRAY, items=object())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             StructuredSchema(ValueKind.OBJECT, extra_properties=1)  # type: ignore[arg-type]
+
+class ViolationTests(unittest.TestCase):
+    """2026-11-12: ten refusals said only input_invalid, so she retried blind."""
+
+    def test_the_first_violation_is_named_by_its_path(self) -> None:
+        self.assertIsNone(INPUT.violation({"value": 1, "items": ["a"]}))
+        self.assertEqual(INPUT.violation({"value": True}), "arguments.value must be a whole number")
+        self.assertEqual(INPUT.violation({"items": []}), "arguments needs value")
+        self.assertEqual(INPUT.violation({"value": 1, "extra": 2}),
+                         "arguments has unknown extra; allowed: items, value")
+        self.assertEqual(INPUT.violation({"value": 1, "items": ["a", 2]}), "arguments.items[1] must be text")
+        self.assertEqual(INPUT.violation("x"), "arguments must be an object")
+        # The detailed check and the plain one never disagree.
+        for value in ({"value": 1}, {"value": "1"}, {"value": 1, "items": [None]}, [], {"value": 1.5}):
+            self.assertEqual(INPUT.violation(value) is None, INPUT.accepts(value), value)
+
+    def test_a_refusal_carries_the_violation_and_it_survives_storage(self) -> None:
+        from alx.goals.store import _attempts, _goal_to_data
+        from alx.contracts import GoalState, Objective, SuccessCriterion
+        registry = CapabilityRegistry((definition(),))
+        broker = CapabilityBroker(registry, SafetyGate({"capability-1": AuthorityPolicy()}), {})
+        attempt = broker.dispatch(CapabilityCall("call-1", "capability-1", {"value": "7"}), authority())
+        self.assertEqual((attempt.reason_code, attempt.reason_detail),
+                         ("input_invalid", "arguments.value must be a whole number"))
+        goal = GoalState("g1", Objective("turn:t1", "x"), (SuccessCriterion("c", "d"),), attempts=(attempt,))
+        [restored] = _attempts(_goal_to_data(goal))
+        self.assertEqual(restored.reason_detail, attempt.reason_detail)
+        # A record saved before this field existed loads with none.
+        old = _goal_to_data(goal)
+        old["attempts"] = [item[:14] for item in old["attempts"]]
+        self.assertIsNone(_attempts(old)[0].reason_detail)
+        with self.assertRaises(ValueError):
+            CapabilityAttempt(attempt.call, attempt.disposition, False, reason_code="input_invalid",
+                              reason_detail="x" * 301)
+
+    def test_she_is_shown_the_detail(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "src/alx/core/model_reasoner.py").read_text()
+        self.assertEqual(source.count('"reason_detail": item.reason_detail,'), 2)
+
 
 class RegistryAndBrokerTests(unittest.TestCase):
     def test_registry_is_descriptive_and_rejects_duplicates(self) -> None:
