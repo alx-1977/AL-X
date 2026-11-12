@@ -18,6 +18,7 @@ from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.contracts.records import freeze_data  # noqa: E402
 from alx.interfaces.server import LiveVoiceServer  # noqa: E402
 from alx.providers.kicad_section import SECTION_SCRIPT, SectionError, read_section  # noqa: E402
+from alx.providers.page_image import PageError, render_section  # noqa: E402
 from alx.tools.display import (  # noqa: E402
     DEFINITIONS,
     SHOW_ON_SCREEN,
@@ -262,400 +263,295 @@ class ViewerBehaviourTests(unittest.TestCase):
         self.assertEqual(result["requests"], len(answers))
 
 
-class BoardLabelLayoutTests(unittest.TestCase):
-    def render(self, rotate=False, view=None):
-        import shutil
-        import subprocess
-        node = shutil.which("node")
-        if node is None:
-            self.skipTest("node is not installed")
-        # The real asset runs with SVG font metrics supplied by this DOM double.
-        # Negative glyph bearings catch incorrect baseline/box conversions.
-        script = r"""
-const fs = require('node:fs'), vm = require('node:vm');
-const source = fs.readFileSync(process.argv[1], 'utf8');
-const api = { module: { exports: {} } };
-vm.runInNewContext(source, api);
-const all = [];
-// Model the cascade relevant to these labels using the loaded stylesheet:
-// svg text overrides presentation attributes, while inline styles win.
-const css = fs.readFileSync(process.argv[3], 'utf8');
-const svgFont = css.match(/svg text\s*\{[^}]*font-family:\s*([^;}]+)/)[1];
-const font = n => String(n.attrs.style || '').match(/font-family:\s*([^;]+)/)?.[1] || svgFont;
-function element(tag) {
-  const n = { tag, attrs: {}, children: [], textContent: '',
-    setAttribute(k,v) { this.attrs[k] = v; },
-    getAttribute(k) { return this.attrs[k]; },
-    removeAttribute(k) { delete this.attrs[k]; },
-    appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter(x => x !== c);
-      this.children.push(c); c.parent = this; },
-    replaceChildren() { this.children = []; }, append() {}, addEventListener() {},
-    getBBox() { const size = Number(this.attrs['font-size']);
-      return { x: -1.5, y: -size * .8, width: this.textContent.length * size * .8, height: size }; }
-  };
-  all.push(n); return n;
-}
-const ids = {};
-const display = JSON.parse(process.argv[2]);
-const context = { document: { getElementById(id) { return ids[id] ||= element(id); },
-  createElementNS(ns, tag) { return element(tag); }, createElement: element },
-  window: { addEventListener() {}, parent: { postMessage() { throw Error('viewer closed'); } } },
-  fetch: async () => ({ json: async () => ({ display }) }) };
-vm.runInNewContext(source, context);
-setImmediate(() => {
-  const texts = all.filter(n => n.tag === 'text').map(n => {
-    const m = n.getBBox();
-    let box = { x: Number(n.attrs.x) + m.x, y: Number(n.attrs.y) + m.y, width: m.width, height: m.height };
-    const rotation = String(n.attrs.transform || '').match(/rotate\(([-.0-9]+),([-.0-9]+),([-.0-9]+)\)/);
-    const angle = rotation ? Number(rotation[1]) : 0;
-    if (rotation) {
-      const [a, cx, cy] = rotation.slice(1).map(Number), r = a * Math.PI / 180;
-      const points = [box.x, box.x + box.width].flatMap(x => [box.y, box.y + box.height].map(y =>
-        [cx + (x-cx)*Math.cos(r) - (y-cy)*Math.sin(r), cy + (x-cx)*Math.sin(r) + (y-cy)*Math.cos(r)]));
-      const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
-      box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs)-Math.min(...xs), height: Math.max(...ys)-Math.min(...ys) };
-    }
-    return { angle, text: n.textContent, size: n.attrs['font-size'],
-      font: font(n), hidden: n.attrs.visibility, clipped: !!n.parent.attrs['clip-path'],
-      box };
-  });
-  const arrows = all.filter(n => n.tag === 'polygon').map(n => n.attrs.points.split(' ').map(p => p.split(',').map(Number)));
-  const lines = all.filter(n => n.tag === 'line').map(n => n.attrs);
-  const labels = texts.map(t => ({ kind: 'title', text: t.text, anchor: [100, 100], width: t.box.width, height: t.box.height }));
-  const place = api.module.exports.placeLabels;
-  const layout = place(labels, []);
-  console.log(JSON.stringify({ texts, arrows, lines, layout,
-    repeated: place(labels, []), reversed: place([...labels].reverse(), []),
-    viewBox: ids.view.attrs.viewBox, transforms: ids.view.children.map(n => n.attrs.transform) }));
-});
-"""
-        def pad(ref, x, y):
-            return {"ref": ref, "polygons": [{"outer": [[x, y], [x+.6, y], [x+.6, y+.5], [x, y+.5]]}]}
-        view = view or {"geometry": {"window": [142, 114, 162, 136], "pads": [
-            pad("AE1", 148.7, 124), pad("C61", 149.2, 124.6), pad("L3", 149.6, 125)]},
-            "rotate": rotate, "label": "Crowded board", "sublabel": "Readable dimensions",
-            "dims": [
-                {"from": [149.626, 122], "to": [149.626, 126.55], "text": "4.55"},
-                {"from": [148, 124], "to": [149.2, 124], "text": "1.20"},
-                {"from": [148.8, 124], "to": [148.8, 124.45], "text": "0.45"},
-                {"from": [147.8, 122], "to": [147.8, 127], "text": "5.00"}]}
-        result = subprocess.run([node, "-e", script, str(ASSETS / "show.js"),
-                                 json.dumps({"views": [view, view]}), str(ASSETS / "show.css")],
-                                capture_output=True, text=True, check=True, timeout=30)
-        return json.loads(result.stdout)
-
-    def test_offscreen_parts_do_not_change_labels_or_view_bounds(self):
-        def pad(ref, box):
-            x0, y0, x1, y1 = box
-            return {"ref": ref, "polygons": [{"outer": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}]}
-        for rotate in (False, True):
-            with self.subTest(rotate=rotate):
-                view = {"geometry": {"window": [10, 20, 30, 40], "pads": []}, "rotate": rotate}
-                empty = self.render(view=view)
-                view["geometry"]["pads"] = [pad("OFF", [1000, -500, 1001, -499]),
-                                             pad("TOUCH", [30, 25, 31, 26])]
-                outside = self.render(view=view)
-                self.assertEqual(outside["texts"], [])
-                self.assertEqual(outside["viewBox"], empty["viewBox"])
-                for full, clipped in (([5, 25, 12, 26], [10, 25, 12, 26]),
-                                      ([28, 39, 35, 45], [28, 39, 30, 40])):
-                    view["geometry"]["pads"] = [pad("EDGE", full)]
-                    edge = self.render(view=view)
-                    view["geometry"]["pads"] = [pad("EDGE", clipped)]
-                    visible = self.render(view=view)
-                    self.assertEqual(edge["texts"], visible["texts"])
-                    self.assertEqual(edge["lines"], visible["lines"])
-                    self.assertEqual(edge["viewBox"], visible["viewBox"])
-
-    def test_reference_font_wins_over_the_loaded_svg_text_rule(self):
-        for text in self.render()["texts"]:
-            if text["text"] in ("AE1", "C61", "L3"):
-                self.assertEqual(text["font"], '"Helvetica Neue",Arial,sans-serif')
-            else:
-                self.assertIn("Courier New", text["font"])
-
-    def test_leaders_clear_all_text_including_the_unrotated_045_500_case(self):
-        # Independently intersect each rendered segment with each ink box.
-        def crosses(line, box):
-            lo, hi = 0.0, 1.0
-            for start, end, lower, size in ((line["x1"], line["x2"], box["x"], box["width"]),
-                                             (line["y1"], line["y2"], box["y"], box["height"])):
-                delta = end - start
-                if abs(delta) < 1e-10:
-                    if not lower <= start <= lower + size:
-                        return False
-                else:
-                    a, b = sorted(((lower-start)/delta, (lower+size-start)/delta))
-                    lo, hi = max(lo, a), min(hi, b)
-                    if lo > hi:
-                        return False
-            return True
-        for rotate in (False, True):
-            result = self.render(rotate)
-            for leader in result["lines"]:
-                if leader.get("stroke-width") == .6:
-                    for text in result["texts"]:
-                        self.assertFalse(crosses(leader, text["box"]), (rotate, leader, text))
-    def test_crowded_labels_clear_each_other_and_all_arrowheads(self):
-        for rotate in (False, True):
-            with self.subTest(rotate=rotate):
-                result = self.render(rotate)
-                # Two identical views have identical local layouts and disjoint
-                # outer bounds. Every text kind is included in the same search.
-                texts = result["texts"][:9]
-                self.assertEqual(texts, result["texts"][9:])
-                self.assertEqual(len(texts), 9)
-                def overlaps(a, b):
-                    return (a["x"] < b["x"] + b["width"] and b["x"] < a["x"] + a["width"]
-                            and a["y"] < b["y"] + b["height"] and b["y"] < a["y"] + a["height"])
-                for index, label in enumerate(texts):
-                    self.assertGreaterEqual(label["size"], 12)
-                    self.assertNotIn("hidden", label)
-                    self.assertFalse(label["clipped"])
-                    for other in texts[index+1:]:
-                        expanded = {**label["box"], "x": label["box"]["x"]-4, "y": label["box"]["y"]-4,
-                                    "width": label["box"]["width"]+8, "height": label["box"]["height"]+8}
-                        self.assertFalse(overlaps(expanded, other["box"]), (label, other))
-                    for arrow in result["arrows"][:8]:
-                        xs, ys = zip(*arrow)
-                        self.assertFalse(overlaps(label["box"], {"x": min(xs), "y": min(ys),
-                            "width": max(xs)-min(xs), "height": max(ys)-min(ys)}))
-                # Even short dimensions remain centred along their segment.
-                # Clearance is perpendicular, with no endpoint callout.
-                for dim in (
-                    {"text": "4.55", "from": [149.626, 122], "to": [149.626, 126.55]},
-                    {"text": "1.20", "from": [148, 124], "to": [149.2, 124]},
-                    {"text": "0.45", "from": [148.8, 124], "to": [148.8, 124.45]},
-                    {"text": "5.00", "from": [147.8, 122], "to": [147.8, 127]},
-                ):
-                    def point(p):
-                        x, y = p
-                        return ((y-114)*10, (162-x)*10) if rotate else ((x-142)*10, (y-114)*10)
-                    a, b = point(dim["from"]), point(dim["to"])
-                    text = next(t for t in texts if t["text"] == dim["text"])
-                    box = text["box"]
-                    cx, cy = box["x"]+box["width"]/2, box["y"]+box["height"]/2
-                    dx, dy = b[0]-a[0], b[1]-a[1]
-                    self.assertAlmostEqual((cx-(a[0]+b[0])/2)*dx + (cy-(a[1]+b[1])/2)*dy, 0)
-                    self.assertTrue(-90 <= text["angle"] <= 90)
-                    import math
-                    self.assertAlmostEqual(math.sin(math.radians(text["angle"]))*dx -
-                                           math.cos(math.radians(text["angle"]))*dy, 0)
-                self.assertEqual(result["layout"], result["repeated"])
-                self.assertEqual(result["layout"], result["reversed"])
-                # The expanded viewBox encloses labels in both adjacent views.
-                import re
-                _, _, width, height = map(float, result["viewBox"].split())
-                bounds = []
-                for transform in result["transforms"]:
-                    tx, ty = map(float, re.findall(r"[-0-9.]+", transform))
-                    boxes = [t["box"] for t in texts]
-                    self.assertTrue(all(b["x"]+tx >= 4 and b["y"]+ty >= 4
-                        and b["x"]+tx+b["width"] <= width-4 and b["y"]+ty+b["height"] <= height-4 for b in boxes))
-                    bounds.append((min(b["x"]+tx for b in boxes), max(b["x"]+tx+b["width"] for b in boxes)))
-                self.assertLess(bounds[0][1], bounds[1][0])
+def run_show_js(test, script, *arguments):
+    """Run a script against show.js's pure functions in node."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        test.skipTest("node is not installed")
+    prelude = "const show = require(process.argv[1]);\n"
+    result = subprocess.run([node, "-e", prelude + script, str(ASSETS / "show.js"), *arguments],
+                            capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(result.stdout)
 
 
-    def routing_case(self, labels, obstacles, budget=2_000_000):
-        import shutil
-        import subprocess
-        node = shutil.which("node")
-        if node is None:
-            self.skipTest("node is not installed")
-        # Count both collision tests and band/obstacle visits. The VM timeout
-        # also catches work that bypasses these counters.
-        script = """
-const fs = require('fs'), vm = require('vm');
-let source = fs.readFileSync(process.argv[1], 'utf8');
-source = source.replace('function intersects([a, b], box) {',
-  'function intersects([a, b], box) { if (++work > budget) throw Error("routing_work_exceeded");');
-source = source.replace('for (const b of rects) {',
-  'for (const b of rects) { if (++work > budget) throw Error("routing_work_exceeded");');
-const context = {module: {exports: {}}, work: 0, budget: Number(process.argv[3])};
-vm.createContext(context);
-vm.runInContext(source, context);
-context.fixture = JSON.parse(process.argv[2]);
-vm.runInContext('layout = module.exports.placeLabels(fixture.labels, fixture.obstacles)', context, {timeout: 3000});
-console.log(JSON.stringify({layout: context.layout, work: context.work}));
-"""
-        result = subprocess.run([node, "-e", script, str(ASSETS / "show.js"),
-                                 json.dumps({"labels": labels, "obstacles": obstacles}), str(budget)],
-                                capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)
+class BoardDrawingTests(unittest.TestCase):
+    """Friedl, 11 Nov 2026: a name sits beside its part; no leader lines."""
 
-    def assert_segment_misses(self, a, b, box):
-        lo, hi = 0, 1
-        for axis, lower, size in ((0, box["x"], box["width"]),
-                                  (1, box["y"], box["height"])):
-            delta = b[axis] - a[axis]
-            if abs(delta) < 1e-10:
-                if not lower <= a[axis] <= lower + size:
-                    return
-            else:
-                ends = sorted(((lower-a[axis])/delta, (lower+size-a[axis])/delta))
-                lo, hi = max(lo, ends[0]), min(hi, ends[1])
-                if lo > hi:
-                    return
-        self.fail(f"Leader segment {a}, {b} intersects {box}")
+    # The renderer's own rule: free, or asked for a cost, the area covered.
+    FREE = ("const obstacles = JSON.parse(process.argv[2]);\n"
+            "const free = (b, cost = false) => cost ? obstacles.reduce((sum, o) => sum"
+            " + Math.max(0, Math.min(b.x + b.w, o.x + o.w) - Math.max(b.x, o.x))"
+            " * Math.max(0, Math.min(b.y + b.h, o.y + o.h) - Math.max(b.y, o.y)), 0)"
+            " : !obstacles.some((o) => show.overlap(b, o, show.CLEAR));\n")
 
-    def test_overflow_leader_escapes_another_parts_pad(self):
-        ref = {"kind": "ref", "text": "R1", "anchor": [0, 0],
-               "part": [-5, -5, 5, 5], "width": 20, "height": 12}
-        obstacles = [{"x": -40, "y": -40, "width": 80, "height": 80, "owner": "U1"},
-                     {"x": 45, "y": -20, "width": 10, "height": 40, "owner": "U2"}]
-        for extra in ([], [{"x": -20, "y": -50, "width": 70, "height": 70, "owner": "U3"}]):
-            with self.subTest(extra_origin_pad=bool(extra)):
-                label = self.routing_case([ref], obstacles + extra)["layout"][0]
-                self.assertTrue(label["displaced"])
-                self.assertTrue(label["leader"])
-                self.assertEqual(label["leader"][0], ref["anchor"])
-                self.assertGreater(label["box"]["x"], 55)
-                # Every segment after the escape stays outside all origin
-                # pads, and even the escape must avoid the unrelated pad.
-                for index, (a, b) in enumerate(zip(label["leader"], label["leader"][1:])):
-                    for obstacle in (obstacles + extra if index else obstacles[1:]):
-                        self.assert_segment_misses(a, b, obstacle)
-        # Exercise load() too: the render harness fails if the viewer closes.
-        def pad(ref, lo, hi):
-            return {"ref": ref, "polygons": [{"outer": [[lo, lo], [hi, lo], [hi, hi], [lo, hi]]}]}
-        rendered = self.render(view={"geometry": {"window": [-10, -10, 10, 10],
-            "pads": [pad("R1", -.5, .5), pad("U1", -4, 4)]}})
-        self.assertEqual({t["text"] for t in rendered["texts"]}, {"R1", "U1"})
+    def test_a_name_sits_right_beside_a_small_part(self):
+        spot = run_show_js(self, self.FREE + (
+            "console.log(JSON.stringify(show.nameSpot({x: 100, y: 100, w: 10, h: 20, large: false}, 24, 14, free)));"),
+            "[]")
+        self.assertEqual(spot, [114, 103])
 
-    def test_many_pad_overflow_routing_has_bounded_work(self):
-        refs = [{"kind": "ref", "text": f"R{i:02}", "anchor": [0, 0],
-                 "part": [-5, -5, 5, 5], "width": 20, "height": 12} for i in range(12)]
-        # Force repeated overflow destinations as text accumulates. The wall
-        # blocks straight leaders; the remote pads still count as obstacles.
-        obstacles = [{"x": -40, "y": -40, "width": 80, "height": 80, "copper": True},
-                     {"x": 10, "y": -200, "width": 4, "height": 400, "owner": "WALL"}]
-        obstacles += [{"x": 30 + x*8, "y": -180 + y*8, "width": 3, "height": 3,
-                       "owner": "U1"} for x in range(30) for y in range(40)]
-        result = self.routing_case(refs, obstacles)
-        self.assertEqual(len(result["layout"]), len(refs))
-        self.assertTrue(all(l["displaced"] and l["leader"] for l in result["layout"]))
-        self.assertGreater(len({l["center"][1] for l in result["layout"]}), 1)
-        self.assertLess(result["work"], 2_000_000)
-        for label in result["layout"]:
-            for a, b in zip(label["leader"], label["leader"][1:]):
-                for obstacle in obstacles[1:] + [l["box"] for l in result["layout"]]:
-                    self.assert_segment_misses(a, b, obstacle)
-        self.assertEqual(result["layout"], self.routing_case(list(reversed(refs)), obstacles)["layout"])
+    def test_a_crowded_name_takes_the_nearest_free_place_without_a_line(self):
+        # Copper right, left, above and below the part, as at C61 on P0020.
+        obstacles = [{"x": 114, "y": 90, "w": 60, "h": 40}, {"x": 40, "y": 90, "w": 56, "h": 40},
+                     {"x": 90, "y": 70, "w": 30, "h": 26}, {"x": 90, "y": 124, "w": 30, "h": 26}]
+        spot = run_show_js(self, self.FREE + (
+            "const s = show.nameSpot({x: 100, y: 100, w: 10, h: 20, large: false}, 24, 14, free);\n"
+            "console.log(JSON.stringify({s, free: free({x: s[0], y: s[1], w: 24, h: 14})}));"),
+            json.dumps(obstacles))
+        self.assertTrue(spot["free"])
+        centre = (spot["s"][0] + 12, spot["s"][1] + 7)
+        self.assertLess(abs(centre[0] - 105) + abs(centre[1] - 110), 120)
 
-    def test_preferred_sides_overflow_columns_and_dimension_angles(self):
-        import math
-        import shutil
-        import subprocess
-        node = shutil.which("node")
-        if node is None:
-            self.skipTest("node is not installed")
-        ref = {"kind": "ref", "text": "R1", "anchor": [0, 0],
-               "part": [-5, -5, 5, 5], "width": 20, "height": 12}
-        cases = [
-            {"labels": [ref], "obstacles": []},
-            {"labels": [ref], "obstacles": [{"x": -40, "y": -25, "width": 80, "height": 14}]},
-            {"labels": [{**ref, "text": f"R{i}", "anchor": [0, i*30],
-                         "part": [-5, i*30-5, 5, i*30+5]} for i in range(4)],
-             "obstacles": [{"x": -40, "y": -40, "width": 80, "height": 180, "copper": True}]},
-            {"labels": [ref], "obstacles": [
-                {"x": -40, "y": -40, "width": 80, "height": 80, "copper": True},
-                {"x": -5, "y": -5, "width": 10, "height": 10, "dimension": True},
-                {"x": 10, "y": -40, "width": 4, "height": 80, "owner": "R2"}]},
-        ]
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (3, 4), (-3, -4), (-3, 4), (3, -4)):
-            cases.append({"labels": [{"kind": "dim", "text": "0.45", "anchor": [0, 0],
-                                      "width": 48, "height": 12, "direction": [dx/math.hypot(dx, dy), dy/math.hypot(dx, dy)]}],
-                          "obstacles": [{"segment": [[-dx, -dy], [dx, dy]], "stroke": 1}]})
-        script = """
-const {placeLabels} = require(process.argv[1]);
-const cases = JSON.parse(process.argv[2]);
-console.log(JSON.stringify(cases.map(c => ({layout: placeLabels(c.labels, c.obstacles),
-  again: placeLabels(c.labels, c.obstacles), reversed: placeLabels([...c.labels].reverse(), c.obstacles)}))));
-"""
-        result = json.loads(subprocess.run([node, "-e", script, str(ASSETS / "show.js"), json.dumps(cases)],
-                            capture_output=True, text=True, check=True, timeout=30).stdout)
-        for case in result:
-            self.assertEqual(case["layout"], case["again"])
-            self.assertEqual(case["layout"], case["reversed"])
-        above, right = result[0]["layout"][0], result[1]["layout"][0]
-        self.assertLess(above["box"]["y"] + above["box"]["height"], -5)
-        self.assertGreater(right["box"]["x"], 5)
-        for label in (above, right):
-            self.assertEqual(label["angle"], 0)
-            self.assertIsNone(label["leader"])
-            self.assertFalse(label["displaced"])
-        overflow = result[2]["layout"]
-        self.assertEqual(len({l["box"]["x"] for l in overflow}), 1)
-        for label in overflow:
-            self.assertTrue(label["displaced"])
-            self.assertTrue(label["leader"])
-            self.assertEqual(label["angle"], 0)
-            self.assertAlmostEqual(label["center"][1] % 20, 0)
-        routed = result[3]["layout"][0]
-        self.assertTrue(routed["displaced"])
-        self.assertGreater(len(routed["leader"]), 2)
-        for case, source in zip(result[4:], cases[4:]):
-            label = case["layout"][0]
-            dx, dy = source["labels"][0]["direction"]
-            cx, cy = label["center"]
-            self.assertAlmostEqual(cx*dx + cy*dy, 0)
-            self.assertTrue(-90 <= label["angle"] <= 90)
-            self.assertAlmostEqual(math.sin(math.radians(label["angle"]))*dx -
-                                   math.cos(math.radians(label["angle"]))*dy, 0)
-            self.assertIsNone(label["leader"])
-            if dx == 0 or dy == 0:
-                self.assertAlmostEqual(math.hypot(cx, cy), 11)
-        for a, b in ((4, 5), (6, 7), (8, 9), (10, 11)):
-            self.assertEqual(result[a]["layout"][0]["center"], result[b]["layout"][0]["center"])
+    def test_when_nowhere_is_free_the_least_covered_place_is_chosen_not_the_first(self):
+        # Review of 6474114: the first try was returned even when rejected.
+        result = run_show_js(self, self.FREE + (
+            "const body = {x: 100, y: 100, w: 10, h: 20, large: false};\n"
+            "const s = show.nameSpot(body, 24, 14, free);\n"
+            "const cost = ([x, y]) => free({x, y, w: 24, h: 14}, true);\n"
+            "const d = show.dimensionSpot([0, 300], [100, 300], 40, 14, free);\n"
+            "console.log(JSON.stringify({chosen: cost(s), first: cost([114, 103]),"
+            " dim: free({x: d[0], y: d[1], w: 40, h: 14}, true), dimFirst: free({x: 30, y: 277, w: 40, h: 14}, true)}));"),
+            json.dumps([{"x": 0, "y": 0, "w": 400, "h": 400}, {"x": 400, "y": 0, "w": 100, "h": 100}]))
+        # Everything is covered somewhere; the choice covers less than the first try.
+        self.assertLess(result["chosen"], result["first"])
+        self.assertLessEqual(result["dim"], result["dimFirst"])
 
-    def test_every_label_clears_pads_and_full_dimension_segments(self):
-        # Representative P0020 AE1 feed components and short dimensions, in both
-        # orientations and both side-by-side views. Check rendered ink, not
-        # the placement routine's own collision predicate.
-        def crosses(a, b, box):
-            low, high = 0, 1
-            for axis, lower, size in ((0, box["x"], box["width"]), (1, box["y"], box["height"])):
-                delta = b[axis]-a[axis]
-                if abs(delta) < 1e-10:
-                    if not lower <= a[axis] <= lower+size:
-                        return False
-                else:
-                    ends = sorted(((lower-a[axis])/delta, (lower+size-a[axis])/delta))
-                    low, high = max(low, ends[0]), min(high, ends[1])
-                    if low > high:
-                        return False
-            return True
-        for rotate in (False, True):
-            def point(x, y):
-                return ((y-114)*10, (162-x)*10) if rotate else ((x-142)*10, (y-114)*10)
-            result = self.render(rotate)
-            refs = [t for t in result["texts"] if t["text"] in ("AE1", "C61", "L3")]
-            self.assertEqual({t["size"] for t in refs}, {12})
-            self.assertEqual({t["angle"] for t in refs}, {0})
-            for text in result["texts"]:
-                b = text["box"]
-                box = {**b, "x": b["x"]-4, "y": b["y"]-4, "width": b["width"]+8, "height": b["height"]+8}
-                for x, y in ((148.7, 124), (149.2, 124.6), (149.6, 125)):
-                    a, c = point(x, y), point(x+.6, y+.5)
-                    pad = {"x": min(a[0], c[0]), "y": min(a[1], c[1]),
-                           "width": abs(a[0]-c[0]), "height": abs(a[1]-c[1])}
-                    self.assertFalse(box["x"] < pad["x"]+pad["width"] and pad["x"] < box["x"]+box["width"]
-                                     and box["y"] < pad["y"]+pad["height"] and pad["y"] < box["y"]+box["height"], text)
-                for line in result["lines"]:
-                    if line.get("stroke-width") != .6:
-                        # Include half of the dimension stroke in the clearance.
-                        stroke_box = {**box, "x": box["x"]-.49, "y": box["y"]-.49,
-                                      "width": box["width"]+.98, "height": box["height"]+.98}
-                        self.assertFalse(crosses([line["x1"], line["y1"]], [line["x2"], line["y2"]], stroke_box), text)
+    def test_a_narrow_screen_shrinks_the_spacing_not_the_boards_to_nothing(self):
+        # Review of 6474114: below ~578 px the scale went negative.
+        scales = run_show_js(self, (
+            "const sizes = [[25.5, 47], [25.5, 47]];\n"
+            "console.log(JSON.stringify([show.fitScale(400, 600, sizes), show.fitScale(1120, 766, sizes)]));"))
+        narrow, wide = scales
+        self.assertGreater(narrow, 1)
+        self.assertAlmostEqual(wide, min((1120 - 370) / 51, (766 - 72) / 47))
 
-    def test_only_one_board_annotation_path_exists(self):
+    def test_a_wide_datasheet_section_fits_the_width(self):
+        # Review of 6474114: a wide section ran past the right edge.
+        width = run_show_js(self, (
+            "console.log(JSON.stringify(show.fitReference(1000, 800, [{w: 800, h: 100}], 18)));"))
+        self.assertEqual(width, 1000 - 2 * 190)
+        tall = run_show_js(self, (
+            "console.log(JSON.stringify(show.fitReference(1000, 800, [{w: 200, h: 300}], 18)));"))
+        self.assertAlmostEqual(tall, 800 * 200 / 300)
+
+    def test_only_what_is_on_screen_is_named(self):
+        # Review of 6474114: names went to the off-screen centre of a part.
         source = (ASSETS / "show.js").read_text()
-        self.assertEqual(source.count("function placeLabels("), 1)
-        self.assertEqual(source.count("const layout = placeLabels("), 1)
-        self.assertEqual(source.count("function leaderRouter("), 1)
-        self.assertNotIn("routeLeader(", source)
-        self.assertNotIn("Math.cos(angle) * radius", source)
+        self.assertIn("if (right > left && bottom > top) {", source)
+        self.assertIn("for (const [ref, body] of Object.entries(named)) {", source)
+
+    def test_a_large_part_is_named_inside(self):
+        spot = run_show_js(self, self.FREE + (
+            "console.log(JSON.stringify(show.nameSpot({x: 0, y: 0, w: 100, h: 400, large: true}, 30, 14, free)));"),
+            "[]")
+        self.assertEqual(spot, [35, 193])
+
+    def test_dimension_text_is_level_beside_the_middle_of_its_line(self):
+        spots = run_show_js(self, self.FREE + (
+            "console.log(JSON.stringify([show.dimensionSpot([0, 50], [100, 50], 40, 14, free),"
+            " show.dimensionSpot([50, 0], [50, 100], 40, 14, free)]));"), "[]")
+        self.assertEqual(spots, [[30, 27], [60, 43]])
+        source = (ASSETS / "show.js").read_text()
+        self.assertNotIn("rotate(", source)
+
+    def test_only_one_board_drawing_path_exists(self):
+        # Law 0: the collision router and its label columns are deleted, not kept.
+        source = (ASSETS / "show.js").read_text()
+        for gone in ("placeLabels", "leaderRouter", "label_layout_exhausted", "displaced"):
+            self.assertNotIn(gone, source)
+        self.assertEqual(source.count("function nameSpot("), 1)
+        self.assertEqual(source.count("function dimensionSpot("), 1)
+        self.assertEqual(source.count("function view("), 1)
+
+
+class ReferencePageTests(unittest.TestCase):
+    """The datasheet section is shown as printed, behind a link (D-073, 11 Nov)."""
+
+    SECTION = [575.3, 87.7, 783.4, 391.7]
+
+    def setUp(self) -> None:
+        self.board = DisplayBoard()
+        self.pages = []
+
+        def page(arguments):
+            self.pages.append(dict(arguments))
+            return b"\x89PNG\r\n\x1a\n" + bytes([len(self.pages)])
+        self.show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "call-1",
+                                            draw_wait_seconds=0.01, read_page=page)[SHOW_ON_SCREEN]
+
+    def reference(self, **changes):
+        values = {"label": "Würth 7488918022", "sublabel": "Datasheet p.2, as printed",
+                  "document": "/designs/P0020/datasheets/ae1.pdf",
+                  "pages": [{"page": 2, "section": self.SECTION, "caption": "Layout", "boxes": [
+                      {"at": [623.2, 259.5, 718.9, 292.9], "label": "feed + ground line", "side": "left"},
+                      {"at": [700, 380, 800, 400], "label": "yours 0.32"}]}]}
+        values.update(changes)
+        return values
+
+    def test_boxes_become_places_on_the_image_and_the_page_is_read_once(self):
+        result = self.show(display(reference=self.reference()))
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertEqual(result.values["reference_pages"], 1)
+        self.assertEqual(self.pages, [{"document": "/designs/P0020/datasheets/ae1.pdf", "page": 2,
+                                       "section": self.SECTION}])
+        shown = self.board.snapshot()["display"]["reference"]
+        page = shown["pages"][0]
+        self.assertEqual((page["asset"], round(page["w"], 1), round(page["h"], 1)), (0, 208.1, 304.0))
+        first, second = page["boxes"]
+        self.assertAlmostEqual(first["x"], (623.2 - 575.3) / 208.1)
+        self.assertAlmostEqual(first["h"], (292.9 - 259.5) / 304.0)
+        self.assertEqual((first["tone"], first["side"]), ("bad", "left"))
+        # A box running past the section is cut at its edge.
+        self.assertAlmostEqual(second["x"] + second["w"], 1.0)
+        self.assertAlmostEqual(second["y"] + second["h"], 1.0)
+        # The image itself stays out of the display her screen polls.
+        self.assertNotIn("PNG", json.dumps(self.board.snapshot()))
+
+    def test_images_are_served_for_the_version_on_screen_only(self):
+        self.show(display(reference=self.reference()))
+        board_id = self.board.snapshot()["id"]
+        server = LiveVoiceServer(session=None, host="127.0.0.1", port=0, sample_rate_hz=16_000,
+                                 asset_root=ASSETS, display=self.board.snapshot,
+                                 display_asset=self.board.asset)
+
+        def get(query):
+            return server._serve_asset(None, SimpleNamespace(path="/display-asset.png?" + query))
+        served = get(f"id={board_id}&version=1&n=0")
+        self.assertEqual(served.status_code, 200)
+        self.assertTrue(served.body.startswith(b"\x89PNG"))
+        self.assertEqual(served.headers["Content-Type"], "image/png")
+        for query in (f"id=other&version=1&n=0", f"id={board_id}&version=1&n=1",
+                      f"id={board_id}&version=x&n=0"):
+            with self.subTest(query=query):
+                self.assertEqual(get(query).status_code, 404)
+        self.show(display())
+        self.assertEqual(get(f"id={board_id}&version=1&n=0").status_code, 404)
+
+    def test_a_bad_reference_is_refused_before_anything_is_read(self):
+        page = self.reference()["pages"][0]
+        for bad in (
+            self.reference(pages=[]),
+            self.reference(pages=[page, page, page]),
+            self.reference(pages=[{**page, "section": [10, 10, 5, 20]}]),
+            self.reference(pages=[{**page, "boxes": [{"at": [0, 0, 10, 10], "label": "outside"}]}]),
+            self.reference(pages=[{**page, "boxes": [{"at": [600, 100, 620, 120], "label": "x", "side": "up"}]}]),
+            self.reference(pages=[{**page, "boxes": [{"at": [600, 100, 620, 120], "label": "x", "tone": "loud"}]}]),
+            self.reference(document=""),
+        ):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.show(display(reference=bad)).failure["code"], "arguments_unusable")
+        self.assertEqual(self.pages, [])
+        self.assertEqual(self.board.snapshot()["version"], 0)
+
+    def test_a_page_that_cannot_be_rendered_is_reported_and_nothing_is_shown(self):
+        def broken(_):
+            raise PageError("page_failed", "renderer stopped")
+        show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "call-1",
+                                       draw_wait_seconds=0.01, read_page=broken)[SHOW_ON_SCREEN]
+        self.assertEqual(show(display(reference=self.reference())).failure["code"], "page_failed")
+        show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "call-1",
+                                       draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
+        self.assertEqual(show(display(reference=self.reference())).failure["code"], "unavailable")
+        self.assertIsNone(self.board.snapshot()["display"])
+
+    def test_titles_are_short(self):
+        result = self.show(display(title="P0020 AE1 — yours vs Würth 7488918022 layout"))
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertIn("title", result.failure["reason"])
+
+    def test_the_viewer_opens_the_page_from_a_link_and_closes_back_to_the_boards(self):
+        page = (ASSETS / "show.html").read_text()
+        for element in ('id="reflink"', 'id="refpage"', 'id="refback"', 'id="refview"'):
+            self.assertIn(element, page)
+        script = (ASSETS / "show.js").read_text()
+        self.assertIn("/display-asset.png?id=", script)
+        self.assertIn("filter: 'url(#lineart)'", script)
+        wiring = (REPOSITORY_ROOT / "src/alx/bootstrap/live_voice.py").read_text()
+        self.assertIn("display_asset=display_board.asset", wiring)
+        self.assertIn("read_page=None if kicad_runtime.provider is None else kicad_runtime.provider.datasheet_section",
+                      wiring)
+
+
+class RenderSectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name)
+        self.document = root / "designs" / "ae1.pdf"
+        self.document.parent.mkdir()
+        self.document.write_bytes(b"%PDF-1.4 datasheet")
+        self.renderer = root / "pdftoppm"
+        self.renderer.write_text("")
+        self.scratch = root / "scratch"
+        self.seen = []
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def execute(self, renderer, arguments, directory, output=b"\x89PNG\r\n\x1a\nimage"):
+        self.seen.append((list(map(str, arguments)), Path(directory)))
+        self.assertEqual((Path(directory) / "document.pdf").read_bytes(), b"%PDF-1.4 datasheet")
+        (Path(directory) / "section.png").write_bytes(output)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    def render(self, arguments, execute=None):
+        return render_section(self.document, arguments, scratch_root=self.scratch,
+                              renderer=self.renderer, execute=execute or self.execute)
+
+    def test_one_section_of_one_page_is_rendered_from_a_copy_that_is_then_removed(self):
+        image = self.render({"page": 2, "section": [72, 144, 216, 360]})
+        self.assertTrue(image.startswith(b"\x89PNG"))
+        arguments, directory = self.seen[0]
+        # 2000 px on the long side: 216 points high at 666 dpi, capped at 600.
+        self.assertEqual(arguments, ["-f", "2", "-l", "2", "-r", "600", "-x", "600", "-y", "1200",
+                                     "-W", "1200", "-H", "1800", "-png", "-singlefile",
+                                     "document.pdf", "section"])
+        self.assertTrue(directory.is_relative_to(self.scratch))
+        self.assertEqual(list(self.scratch.iterdir()), [])
+        self.assertEqual(self.document.read_bytes(), b"%PDF-1.4 datasheet")
+
+    def test_bad_requests_are_refused_before_anything_runs(self):
+        for arguments in ({"page": 0, "section": [0, 0, 1, 1]}, {"page": True, "section": [0, 0, 1, 1]},
+                          {"page": 1, "section": [5, 0, 1, 1]}, {"page": 1, "section": [0, 0, 1]},
+                          {"page": 1, "section": [0, 0, 4000, 10]}):
+            with self.subTest(arguments=arguments), self.assertRaises(PageError) as caught:
+                self.render(arguments)
+            self.assertEqual(caught.exception.code, "arguments_unusable")
+        with self.assertRaises(PageError) as caught:
+            render_section(self.document.with_suffix(".txt"), {"page": 1, "section": [0, 0, 1, 1]},
+                           scratch_root=self.scratch, renderer=self.renderer, execute=self.execute)
+        self.assertEqual(caught.exception.code, "document_unavailable")
+        self.assertEqual(self.seen, [])
+
+    def test_what_is_not_an_image_is_not_shown(self):
+        with self.assertRaises(PageError) as caught:
+            self.render({"page": 1, "section": [0, 0, 100, 100]},
+                        lambda r, a, d: self.execute(r, a, d, output=b"<html>"))
+        self.assertEqual(caught.exception.code, "page_failed")
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_the_renderer_runs_in_the_kicad_script_confinement(self):
+        import os
+        import pwd
+        from unittest.mock import patch
+        from alx.providers.coding_process import run_page_render
+        result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch("alx.providers.coding_process.kicad_containment_available", return_value=True), \
+                patch("alx.providers.coding_process.run_coding_subprocess", return_value=result) as run:
+            run_page_render("pdftoppm", ["-png", "document.pdf", "section"], self.scratch)
+        argv = run.call_args.args[1]
+        self.assertEqual(argv[:2], ["/usr/bin/sandbox-exec", "-p"])
+        directory = json.dumps(str(self.scratch.resolve()))
+        home = json.dumps(str(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()))
+        for rule in ("(deny file-read* (subpath " + home + "))", "(deny file-write*)",
+                     "(allow file-write* (subpath " + directory, "(deny network*)", "(deny process-fork)"):
+            self.assertIn(rule, argv[2])
+        self.assertEqual(argv[3:], ["pdftoppm", "-png", "document.pdf", "section"])
+        self.assertEqual(run.call_args.kwargs["env"]["HOME"], str(self.scratch.resolve()))
+        with patch("alx.providers.coding_process.kicad_containment_available", return_value=False), \
+                self.assertRaises(OSError):
+            run_page_render("pdftoppm", [], self.scratch)
 
 
 class ViewerAssetTests(unittest.TestCase):
@@ -679,6 +575,15 @@ class ViewerAssetTests(unittest.TestCase):
     def test_board_outlines_keep_their_shape(self) -> None:
         for kind in ("SHAPE_T_ARC", "SHAPE_T_RECT", "SHAPE_T_CIRCLE", "SHAPE_T_POLY"):
             self.assertIn(kind, SECTION_SCRIPT)
+
+    def test_copper_shapes_and_the_board_area_are_read(self) -> None:
+        # 11 Nov: Wurth's 1.2 mm feed was a copper shape and went undrawn.
+        self.assertIn('drawing.GetLayer() in COPPER and drawing.GetClass() == "PCB_SHAPE"', SECTION_SCRIPT)
+        self.assertIn('out["shapes"].append', SECTION_SCRIPT)
+        self.assertIn("board.GetBoardPolygonOutlines(outline, False)", SECTION_SCRIPT)
+        script = (ASSETS / "show.js").read_text()
+        self.assertIn("geo.shapes", script)
+        self.assertIn("geo.board", script)
 
     def test_her_screen_opens_the_viewer_on_a_new_version(self) -> None:
         self.assertIn('src="/display.js"', (ASSETS / "index.html").read_text())

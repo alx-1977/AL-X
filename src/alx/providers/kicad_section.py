@@ -74,7 +74,7 @@ def points(track):
     return [[mm(track.GetStart().x), mm(track.GetStart().y)], [mm(track.GetEnd().x), mm(track.GetEnd().y)]]
 
 out = {"window": [x0, y0, x1, y1], "tracks": [], "vias": [], "pads": [], "parts": [],
-       "planes": [], "keepouts": [], "edges": []}
+       "planes": [], "keepouts": [], "edges": [], "shapes": [], "board": []}
 for track in board.GetTracks():
     net = track.GetNetname()
     if track.GetClass() == "PCB_VIA":
@@ -119,7 +119,22 @@ for zone in board.Zones():
             shape.BooleanIntersection(window)
             if shape.OutlineCount():
                 out["planes"].append({"layer": name, "net": zone.GetNetname(), "polygons": polys(shape)})
+# The board's own area inside the window, so nothing is drawn past its edge.
+outline = pcbnew.SHAPE_POLY_SET()
+if board.GetBoardPolygonOutlines(outline, False):
+    outline.BooleanIntersection(window)
+    out["board"] = polys(outline)
 for drawing in board.GetDrawings():
+    if drawing.GetLayer() in COPPER and drawing.GetClass() == "PCB_SHAPE" and drawing.GetNetname() in nets:
+        # Copper drawn as a shape, not a track: Wurth's 1.2 mm feed rectangle
+        # was one, and the viewer left it out (2026-11-11).
+        shape = pcbnew.SHAPE_POLY_SET()
+        drawing.TransformShapeToPolygon(shape, drawing.GetLayer(), 0, nm(0.005), pcbnew.ERROR_INSIDE)
+        shape.BooleanIntersection(window)
+        if shape.OutlineCount():
+            out["shapes"].append({"layer": COPPER[drawing.GetLayer()], "net": drawing.GetNetname(),
+                                  "polygons": polys(shape)})
+        continue
     if drawing.GetLayer() != pcbnew.Edge_Cuts:
         continue
     try:

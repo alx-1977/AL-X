@@ -310,6 +310,7 @@ class KiCadProvider:
         self.work_root = settings.work_root.expanduser().resolve()
         self.engine_paths = {}
         self.execute_engine = None
+        self.execute_page = None
 
     def _engine(self, name, arguments, directory):
         executable = self.engine_paths.get(name)
@@ -565,6 +566,26 @@ class KiCadProvider:
                                 kicad_python=self.settings.kicad_python,
                                 execute_python=self.execute_python)
         except SectionError as error:
+            raise KiCadError(error.code, {'detail': error.detail}) from error
+
+    def datasheet_section(self, arguments):
+        """One section of a datasheet page as a PNG, for the viewer (D-073).
+
+        `document` is a PDF in a design root, read through a copy rendered
+        under the KiCad script confinement; it is never changed.
+        """
+        from alx.providers.page_image import PageError, render_section
+        if self.execute_page is None:
+            raise KiCadError('engine_unavailable')
+        document = arguments.get('document')
+        if not isinstance(document, str) or not document.strip():
+            raise KiCadError('arguments_unusable', {'detail': 'document is the path of a PDF'})
+        document = bounded(document, self.design_roots)
+        try:
+            return render_section(document, arguments, scratch_root=self.work_root / 'sections',
+                                  renderer=self.engine_paths.get('pdftoppm') or Path('/nonexistent'),
+                                  execute=self.execute_page)
+        except PageError as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error
 
     def read_reference(self, arguments):

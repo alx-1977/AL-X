@@ -95,6 +95,7 @@ class LiveVoiceServer:
         # D-073: what AL/X is showing on the viewer, and its version.
         display: Callable[[], dict[str, Any]] | None = None,
         display_drawn: Callable[[str, int], None] | None = None,
+        display_asset: Callable[[str, int, int], bytes | None] | None = None,
         # Copies a delivered reply into the conversation Friedl is in.
         relay: Callable[[str, str, str], bool] | None = None,
         locate: Callable[[str, str], tuple[str, Any] | None] | None = None,
@@ -122,6 +123,7 @@ class LiveVoiceServer:
         self._reader_tile = reader_tile
         self._display = display
         self._display_drawn = display_drawn
+        self._display_asset = display_asset
         self._host = host
         self._port = port
         self._sample_rate_hz = sample_rate_hz
@@ -693,6 +695,19 @@ class LiveVoiceServer:
                         else self._display())
             return self._response(200, json.dumps(snapshot).encode(),
                                   "application/json; charset=utf-8")
+        if parsed.path == "/display-asset.png":
+            # A datasheet section of the display on screen now; nothing older.
+            query = parse_qs(parsed.query)
+            try:
+                version = int(query.get("version", ["0"])[0])
+                index = int(query.get("n", ["-1"])[0])
+            except ValueError:
+                version, index = 0, -1
+            image = None if self._display_asset is None else self._display_asset(
+                query.get("id", [""])[0], version, index)
+            if image is None:
+                return self._response(404, b"Not found", "text/plain; charset=utf-8")
+            return self._response(200, image, "image/png")
         if parsed.path == "/display-drawn.json":
             # The viewer reports a version it has drawn; nothing else changes.
             query = parse_qs(parsed.query)
