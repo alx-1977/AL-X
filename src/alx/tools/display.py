@@ -87,7 +87,11 @@ DEFINITION = CapabilityDefinition(
     "left of the page, boxes the places where his layout differs, in the same points, each "
     "with a short label such as his value. Showing replaces what is on screen; he closes it. "
     "shown is true only when the screen reported drawing it; when false it is not on screen "
-    "(closed, not open or broken), so say that, never that it is showing.",
+    "(closed, not open or broken), so say that, never that it is showing. When shown, the "
+    "screen itself comes back to you as a picture with this result: look at it before you "
+    "say anything about it, and if something is missing or wrong on it, fix it and show "
+    "again rather than describe the gap. Names not on the board are refused; every "
+    "connection of a part you name is drawn, with its silkscreen marks.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"title": _STRING, "subtitle": _STRING, "context": _STRING, "verdict": _TONED,
@@ -100,7 +104,12 @@ DEFINITION = CapabilityDefinition(
                            "version": StructuredSchema(ValueKind.INTEGER),
                            "views": StructuredSchema(ValueKind.ARRAY,
                                                      items=StructuredSchema(ValueKind.OBJECT)),
-                           "reference_pages": StructuredSchema(ValueKind.INTEGER)},
+                           "reference_pages": StructuredSchema(ValueKind.INTEGER),
+                           "image_sha256": StructuredSchema(ValueKind.STRING),
+                           "screen_image": StructuredSchema(ValueKind.STRING),
+                           "nets_drawn": StructuredSchema(ValueKind.ARRAY,
+                                                          items=StructuredSchema(ValueKind.ARRAY,
+                                                                                 items=StructuredSchema(ValueKind.STRING)))},
         ("shown", "version"), extra_properties=False),
     SideEffect.NONE,
     _FAILURES,
@@ -237,6 +246,7 @@ def build_display_executors(
     call_id_source: Callable[[], str],
     draw_wait_seconds: float = 12.0,
     read_page: Callable[[Mapping[str, Any]], bytes] | None = None,
+    capture: Callable[[str, int], str | None] | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     def failed(code: str, reason: str = "") -> CapabilityResult:
         failure = {"code": code, **({"reason": reason[:300]} if reason else {})}
@@ -296,6 +306,12 @@ def build_display_executors(
                 code = code if code in _FAILURES else "section_failed"
                 detail = getattr(error, "recovery", None) or {}
                 return failed(code, str(detail.get("detail", "") if isinstance(detail, Mapping) else ""))
+            # A name that is not on the board is a mistake to correct, never
+            # something to draw as nothing (2026-11-12: two feeds went missing).
+            missing = {kind: list(names) for kind, names in (geometry.get("missing") or {}).items() if names}
+            if missing:
+                return failed("arguments_unusable", "not on this board: " + "; ".join(
+                    f"{kind} {', '.join(names)}" for kind, names in sorted(missing.items())))
             drawn.append({
                 "label": _text(view.get("label"), 40, "label"),
                 "sublabel": _text(view.get("sublabel"), 60, "sublabel"),
@@ -317,9 +333,19 @@ def build_display_executors(
         version = board.publish(display, tuple(assets))
         # The screen polls every two seconds, then loads and draws the page.
         shown = board.wait_drawn(version, draw_wait_seconds)
+        # D-075: what she put on his screen comes back to her as a picture, so
+        # she sees what he sees before she says anything about it.
+        seen = None
+        if shown and capture is not None:
+            try:
+                seen = capture(board.snapshot()["id"], version)
+            except Exception:  # noqa: BLE001 - a missing picture is reported as such
+                seen = None
         return CapabilityResult(
             call_id_source(), SHOW_ON_SCREEN, CapabilityResultState.SUCCEEDED,
             {"shown": shown, "version": version,
+             **({"image_sha256": seen} if seen else {"screen_image": "not captured"}),
+             "nets_drawn": [item["geometry"].get("nets_drawn", []) for item in drawn],
              "views": [{"label": item["label"],
                         "parts": sorted(part["ref"] for part in item["geometry"].get("parts", ())),
                         "tracks": len(item["geometry"].get("tracks", ()))} for item in drawn],

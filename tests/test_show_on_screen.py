@@ -276,6 +276,98 @@ def run_show_js(test, script, *arguments):
     return json.loads(result.stdout)
 
 
+class ScreenTruthTests(unittest.TestCase):
+    """12 Nov: a guessed net name drew nothing, and she showed it anyway."""
+
+    def setUp(self) -> None:
+        self.board = DisplayBoard()
+
+    def show_with(self, geometry, capture=None, drawn=True):
+        def section(_):
+            return geometry
+        show = build_display_executors(self.board, section, lambda: "c1", draw_wait_seconds=2,
+                                       capture=capture)[SHOW_ON_SCREEN]
+        if drawn:
+            def screen():
+                while self.board.snapshot()["version"] < 1:
+                    time.sleep(0.005)
+                self.board.mark_drawn(self.board.snapshot()["id"], 1)
+            threading.Thread(target=screen).start()
+        return show(display())
+
+    def test_names_not_on_the_board_are_refused_and_nothing_is_shown(self) -> None:
+        geometry = {**GEOMETRY, "missing": {"refs": ["C99"], "nets": ["Net-(AE2-Feed_Low)"], "planes": []}}
+        result = self.show_with(geometry, drawn=False)
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertIn("Net-(AE2-Feed_Low)", result.failure["reason"])
+        self.assertIn("C99", result.failure["reason"])
+        self.assertIsNone(self.board.snapshot()["display"])
+
+    def test_the_screen_as_drawn_comes_back_to_her_by_digest(self) -> None:
+        asked = []
+
+        def capture(board_id, version):
+            asked.append((board_id, version))
+            return "f" * 64
+        result = self.show_with({**GEOMETRY, "nets_drawn": ["GND", "Net-(AE2-Feed_Low_Band)"]}, capture)
+        self.assertTrue(result.values["shown"])
+        self.assertEqual(result.values["image_sha256"], "f" * 64)
+        self.assertEqual(asked, [(self.board.snapshot()["id"], 1)])
+        self.assertEqual(list(result.values["nets_drawn"][0]), ["GND", "Net-(AE2-Feed_Low_Band)"])
+
+    def test_no_picture_is_claimed_when_none_was_taken(self) -> None:
+        def broken(*_):
+            raise OSError("no browser")
+        for capture, drawn in ((broken, True), (lambda *_: None, True), (lambda *_: "f" * 64, False)):
+            with self.subTest(drawn=drawn):
+                self.board = DisplayBoard()
+                result = self.show_with(GEOMETRY, capture, drawn)
+                self.assertNotIn("image_sha256", result.values)
+                self.assertEqual(result.values["screen_image"], "not captured")
+
+    def test_the_section_read_reports_missing_names_and_draws_every_connection(self) -> None:
+        self.assertIn('out["missing"] = {"refs": sorted(refs - present_refs)', SECTION_SCRIPT)
+        self.assertIn('if fp.GetReference() in refs:', SECTION_SCRIPT)
+        self.assertIn('not pad.GetNetname().startswith("unconnected-")', SECTION_SCRIPT)
+        self.assertIn("pcbnew.F_SilkS, pcbnew.B_SilkS", SECTION_SCRIPT)
+        script = (ASSETS / "show.js").read_text()
+        self.assertIn("for (const mark of geo.silk || [])", script)
+
+    def test_a_capture_draws_but_never_reports_the_screen_as_drawn(self) -> None:
+        script = (ASSETS / "show.js").read_text()
+        guard = script.index("if (new URLSearchParams(location.search).has('capture')) return;")
+        self.assertLess(guard, script.index("/display-drawn.json"))
+
+    def test_the_capture_loads_only_her_viewer_and_keeps_the_picture(self) -> None:
+        from alx.providers.look_image import png
+        from alx.providers.screen_capture import capture_screen
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            browser = root / "chrome"
+            browser.write_text("")
+            runs = []
+
+            def execute(tool, arguments, folder):
+                runs.append(list(arguments))
+                (Path(folder) / "screen.png").write_bytes(png(4, 3, b"\x00" * 36))
+                return SimpleNamespace(returncode=0)
+            digest = capture_screen("run-1", 7, base_url="http://127.0.0.1:8765", browser=browser,
+                                    store=root / "looks", scratch_root=root / "scratch", execute=execute)
+            self.assertTrue((root / "looks" / (digest + ".png")).is_file())
+            self.assertEqual(runs[0][-1], "http://127.0.0.1:8765/show?capture=run-1&version=7")
+            self.assertIn("--window-size=1568,980", runs[0])
+            self.assertEqual(list((root / "scratch").iterdir()), [])
+            self.assertIsNone(capture_screen("run-1", 7, base_url="x", browser=root / "missing",
+                                             store=root / "looks", scratch_root=root / "scratch",
+                                             execute=execute))
+
+    def test_views_are_measured_and_drawn_again_to_fill_the_screen(self) -> None:
+        script = (ASSETS / "show.js").read_text()
+        self.assertIn("for (let pass = 0; pass < 3; pass += 1)", script)
+        self.assertIn("const boxes = groups.map(extentOf);", script)
+        self.assertIn("const clip = 'clip' + (clipCount += 1);", script)
+
+
 class BoardDrawingTests(unittest.TestCase):
     """Friedl, 11 Nov 2026: a name sits beside its part; no leader lines."""
 

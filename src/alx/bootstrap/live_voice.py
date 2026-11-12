@@ -16,6 +16,8 @@ from typing import Any, Mapping
 from alx.bootstrap.program import build_program_runtime
 from alx.bootstrap.look import build_look_runtime
 from alx.providers.look_image import stored_image
+from alx.providers.screen_capture import capture_screen
+from alx.providers.coding_process import run_kicad_engine
 from alx.continuity.program_source import ProgramCompletionSource
 from alx.providers.program import reconcile as reconcile_program
 from alx.config.program import ProgramSettings
@@ -553,12 +555,6 @@ async def run(repository_root: Path) -> None:
     register(DISPLAY_DEFINITIONS, TraceSubsystem.CORE)
     policies.update({definition.capability_id: AuthorityPolicy(frozenset({"screen.show"}))
                      for definition in DISPLAY_DEFINITIONS})
-    executors.update(build_display_executors(
-        display_board,
-        None if kicad_runtime.provider is None else kicad_runtime.provider.section,
-        current_call_id.get,
-        read_page=None if kicad_runtime.provider is None else kicad_runtime.provider.datasheet_section))
-    permissions.add("screen.show")
     # D-075: she looks at pictures and PDF pages herself.
     look_runtime = build_look_runtime(current_call_id.get, environment, storage_root,
                                       kicad_runtime.provider.design_roots)
@@ -566,6 +562,20 @@ async def run(repository_root: Path) -> None:
     policies.update(look_runtime.policies)
     executors.update(look_runtime.executors)
     permissions.update(look_runtime.permissions)
+    executors.update(build_display_executors(
+        display_board,
+        None if kicad_runtime.provider is None else kicad_runtime.provider.section,
+        current_call_id.get,
+        read_page=None if kicad_runtime.provider is None else kicad_runtime.provider.datasheet_section,
+        # D-075: the screen as drawn comes back to her as a picture.
+        capture=partial(
+            capture_screen,
+            base_url=f"http://127.0.0.1:{voice_settings.port}",
+            browser=Path(environment.get(
+                "ALX_CHROME", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")),
+            store=look_runtime.store, scratch_root=storage_root / "look-scratch",
+            execute=partial(run_kicad_engine, timeout_seconds=60))))
+    permissions.add("screen.show")
     particle_local_runtime = build_particle_local_runtime(current_call_id.get, environment, storage_root)
     register(particle_local_runtime.definitions, TraceSubsystem.CORE)
     policies.update(particle_local_runtime.policies)
