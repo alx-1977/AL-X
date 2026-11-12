@@ -217,20 +217,103 @@ def zones(board, net=None, keepout=None):
             and (keepout is None or bool(item.GetIsRuleArea()) == keepout)]
 
 
+def _first_outline(shapes, what):
+    """The first outline of a polygon set; KiCad crashes reading one that is not there."""
+    if shapes.OutlineCount() < 1:
+        raise ValueError("%s has no outline" % what)
+    return shapes.Outline(0)
+
+
 def zone_corners(item):
     """The corners of a zone's first outline (cutouts and further outlines aside)."""
-    outline = item.Outline().Outline(0)
+    outline = _first_outline(item.Outline(), "this zone")
     return [xy(outline.CPoint(index)) for index in range(outline.PointCount())]
 
 
 def set_zone_corners(item, corners):
     """Replace the corners of a zone's first outline, in mm; its cutouts and
     any further outlines are kept as they are."""
-    outline = item.Outline().Outline(0)
+    outline = _first_outline(item.Outline(), "this zone")
     outline.Clear()
     for x, y in corners:
         outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
     outline.SetClosed(True)
+
+
+def _copper_shapes(board):
+    return [item for item in board.GetDrawings()
+            if item.GetClass() == "PCB_SHAPE" and _pcbnew.IsCopperLayer(item.GetLayer())]
+
+
+def _copper_shape(board, identifier):
+    for item in _copper_shapes(board):
+        if item.m_Uuid.AsString() == identifier:
+            return item
+    raise KeyError("no copper shape %s on this board" % identifier)
+
+
+def copper_shapes(board, net=None):
+    """Copper drawn as a shape, not a track (a feed rectangle, a pad extension):
+    id, net, layer, shape, whether solid, and its corners in board mm."""
+    names = {number: name for name, number in _LAYERS.items()}
+    found = []
+    for item in _copper_shapes(board):
+        if net is not None and item.GetNetname() != net:
+            continue
+        outline = _pcbnew.SHAPE_POLY_SET()
+        item.TransformShapeToPolygon(outline, item.GetLayer(), 0, _pcbnew.FromMM(0.005), _pcbnew.ERROR_INSIDE)
+        corners = []
+        if outline.OutlineCount():
+            chain = outline.Outline(0)
+            corners = [xy(chain.CPoint(index)) for index in range(chain.PointCount())]
+        found.append({"id": item.m_Uuid.AsString(), "net": item.GetNetname(),
+                      "layer": names.get(item.GetLayer(), str(item.GetLayer())),
+                      "shape": item.ShowShape().lower(), "solid": item.IsSolidFill(), "corners": corners})
+    return found
+
+
+def set_copper_corners(board, identifier, corners):
+    """Make a copper shape a solid polygon with these (x, y) corners in mm."""
+    item = _copper_shape(board, identifier)
+    item.SetShape(_pcbnew.SHAPE_T_POLY)
+    item.SetPolyPoints([point(x, y) for x, y in corners])
+    item.SetFilled(True)
+
+
+def remove_copper(board, identifier):
+    """Delete a copper shape by its id from copper_shapes()."""
+    board.Delete(_copper_shape(board, identifier))
+
+
+def add_copper(board, net, on, corners):
+    """A solid copper polygon of `net` on copper layer `on`, corners in mm."""
+    code = board.FindNet(net)
+    if code is None:
+        raise KeyError("no net %s on this board" % net)
+    item = _pcbnew.PCB_SHAPE(board)
+    item.SetShape(_pcbnew.SHAPE_T_POLY)
+    item.SetLayer(layer(on))
+    item.SetPolyPoints([point(x, y) for x, y in corners])
+    item.SetFilled(True)
+    item.SetWidth(0)
+    item.SetNet(code)
+    board.Add(item)
+    return item
+
+
+def add_taper(board, net, on, narrow, narrow_width, wide, wide_width):
+    """A straight taper (teardrop) from a narrow end to a wide one: centres
+    (x, y) in mm and the width at each end. Friedl's rule: copper wider than
+    the pad it leaves or meets joins it through a taper, never a step; where
+    the pad is the wider one, no taper is needed."""
+    (x0, y0), (x1, y1) = narrow, wide
+    length = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+    if length <= 0:
+        raise ValueError("the two ends of a taper must differ")
+    nx, ny = -(y1 - y0) / length, (x1 - x0) / length
+    a, b = narrow_width / 2, wide_width / 2
+    return add_copper(board, net, on, [(x0 + nx * a, y0 + ny * a), (x1 + nx * b, y1 + ny * b),
+                                       (x1 - nx * b, y1 - ny * b), (x0 - nx * a, y0 - ny * a)])
 
 
 def refill(board):
@@ -247,6 +330,7 @@ def script_runner(script):
 NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rotate_part", "pad",
          "set_pad", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
          "graphics", "set_graphic", "remove_graphic", "add_line",
-         "zones", "zone_corners", "set_zone_corners", "refill")
+         "zones", "zone_corners", "set_zone_corners",
+         "copper_shapes", "set_copper_corners", "remove_copper", "add_copper", "add_taper", "refill")
 
 __all__ = ["HELPERS", "NAMES", "script_runner"]

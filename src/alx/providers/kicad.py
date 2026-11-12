@@ -664,9 +664,10 @@ class KiCadProvider:
                     # (2026-11-12: four segmentation faults in two minutes).
                     if executed.returncode < 0 or executed.returncode >= 128:
                         detail['crashed'] = (
-                            'KiCad crashed while running the script (exit %d). Usually an item '
-                            'removed with Remove, or through the board while it belongs to a part, '
-                            'then saved; use the remove, remove_graphic and add_line helpers.'
+                            'KiCad crashed while running the script (exit %d). Usual causes: a pcbnew '
+                            'call on something that is not there (an outline index of an empty shape, '
+                            'a removed item) or an item removed with Remove; KiCad does not check. '
+                            'Use the helpers (remove, remove_graphic, copper_shapes, zone_corners).'
                             % executed.returncode)
                     raise KiCadError('script_failed', detail)
                 inventory(project)

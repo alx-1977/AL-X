@@ -98,11 +98,18 @@ _ACTION_DEFINITIONS = (
         'add_track(b, net, [(x, y), ...], width, on), vias(b, net), add_via(b, net, (x, y)), '
         'remove(b, item), zones(b, net, keepout), zone_corners(z), set_zone_corners(z, corners), '
         "a part's drawings by id: graphics(b, ref, on='F.Silk'), set_graphic(b, ref, id, start, "
-        "end), remove_graphic(b, ref, id), add_line(b, ref, on, start, end, width); "
-        'refill(b) and save(b). Use them rather than guessing pcbnew names; refill after every '
-        "change. Never remove items while looping over pcbnew's own lists, and never Remove a "
-        "part's drawing through the board: both crash KiCad. The script may write only inside "
-        'the work copy.',
+        "end), remove_graphic(b, ref, id), add_line(b, ref, on, start, end, width); copper "
+        'drawn as a shape: copper_shapes(b, net), set_copper_corners(b, id, corners), '
+        'remove_copper(b, id), '
+        'add_copper(b, net, on, corners), add_taper(b, net, on, narrow, narrow_width, wide, '
+        "wide_width); refill(b) and save(b). Use them rather than guessing pcbnew names; refill "
+        "after every change. Never remove items while looping over pcbnew's own lists, never "
+        "Remove a part's drawing through the board, never read an outline that is not there: "
+        'all crash KiCad. The script may write only inside the work copy. Friedl\'s layout rules: '
+        'copper wider than the pad it leaves or meets joins it through a taper (add_taper), '
+        'never a step; where the pad is the wider one, no taper; inside an antenna clearance '
+        "follow the manufacturer's geometry exactly. Check every edit against them before "
+        'showing it.',
         obj({'work_copy_id': S, 'script': S}),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS}),
