@@ -341,6 +341,10 @@ def build_display_executors(
                 seen = capture(board.snapshot()["id"], version)
             except Exception:  # noqa: BLE001 - a missing picture is reported as such
                 seen = None
+            # Versions only rise: if this one is still current after the
+            # picture, the picture is of this one. Otherwise it may not be.
+            if board.snapshot()["version"] != version:
+                seen = None
         return CapabilityResult(
             call_id_source(), SHOW_ON_SCREEN, CapabilityResultState.SUCCEEDED,
             {"shown": shown, "version": version,

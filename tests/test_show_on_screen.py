@@ -335,7 +335,8 @@ class ScreenTruthTests(unittest.TestCase):
 
     def test_a_capture_draws_but_never_reports_the_screen_as_drawn(self) -> None:
         script = (ASSETS / "show.js").read_text()
-        guard = script.index("if (new URLSearchParams(location.search).has('capture')) return;")
+        guard = script.index("if (asked.has('capture')) return;")
+        self.assertIn("asked.get('capture') !== id || Number(asked.get('version')) !== version", script)
         self.assertLess(guard, script.index("/display-drawn.json"))
 
     def test_the_capture_loads_only_her_viewer_and_keeps_the_picture(self) -> None:
@@ -361,10 +362,36 @@ class ScreenTruthTests(unittest.TestCase):
                                              store=root / "looks", scratch_root=root / "scratch",
                                              execute=execute))
 
-    def test_views_are_measured_and_drawn_again_to_fill_the_screen(self) -> None:
+    def test_a_picture_of_a_replaced_display_is_not_returned(self) -> None:
+        # Review of 8a5d1f0: another show could replace it while Chrome starts.
+        def capture(board_id, version):
+            self.board.publish({"title": "newer"})
+            return "f" * 64
+        result = self.show_with(GEOMETRY, capture)
+        self.assertNotIn("image_sha256", result.values)
+
+    def test_the_drawing_settles_where_it_fits_and_fills_and_is_drawn_there_last(self) -> None:
+        # Review of 8a5d1f0: the third pass could change the scale without drawing.
+        cases = [
+            # area, board mm, label room that grows a little with scale
+            {"area": 1100, "mm": 50, "fixed": 300, "per": 0.0},
+            {"area": 1100, "mm": 50, "fixed": 250, "per": 4.0},
+            {"area": 600, "mm": 120, "fixed": 400, "per": 0.5},
+        ]
+        results = run_show_js(self, (
+            "const cases = JSON.parse(process.argv[2]);\n"
+            "console.log(JSON.stringify(cases.map((c) => {\n"
+            "  const drawn = [];\n"
+            "  const fit = (S) => { drawn.push(S); return (c.area - c.fixed - c.per * S) / c.mm; };\n"
+            "  const S = show.settleScale(1, fit);\n"
+            "  return {S, last: drawn[drawn.length - 1], best: (c.area - c.fixed) / (c.mm + c.per)};\n"
+            "})));"), json.dumps(cases))
+        for result in results:
+            self.assertEqual(result["S"], result["last"])
+            self.assertLessEqual(result["S"] * 1.0, result["best"] + 1e-9)
+            self.assertGreater(result["S"], result["best"] * 0.95)
         script = (ASSETS / "show.js").read_text()
-        self.assertIn("for (let pass = 0; pass < 3; pass += 1)", script)
-        self.assertIn("const boxes = groups.map(extentOf);", script)
+        self.assertIn("settleScale(fitScale(area.width, area.height, views.map(extent)), drawAndFit);", script)
         self.assertIn("const clip = 'clip' + (clipCount += 1);", script)
 
 

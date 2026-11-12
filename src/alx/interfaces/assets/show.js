@@ -88,8 +88,26 @@
     return Math.max(1, Math.min(byHeight, width - 2 * LABEL_ROOM));
   }
 
+  // The scale the boards are drawn at: draw, measure, draw again until what is
+  // drawn both fits and fills. The last drawing is always at the scale returned.
+  function settleScale(start, drawAndFit) {
+    let S = start;
+    for (let pass = 0; pass < 6; pass += 1) {
+      const next = drawAndFit(S);
+      if (next >= S && next <= S * 1.01) return S;
+      S = next;
+    }
+    // Not settled: shrink until what is drawn certainly fits.
+    for (let pass = 0; pass < 6; pass += 1) {
+      const next = drawAndFit(S);
+      if (next >= S) return S;
+      S = next * 0.98;
+    }
+    return S;
+  }
+
   // Node tests exercise the same pure functions as the renderer.
-  if (typeof module !== 'undefined') { module.exports = { nameSpot, dimensionSpot, overlap, CLEAR, fitScale, fitReference }; return; }
+  if (typeof module !== 'undefined') { module.exports = { nameSpot, dimensionSpot, overlap, CLEAR, fitScale, fitReference, settleScale }; return; }
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, attrs, parent) => {
@@ -345,6 +363,9 @@
     const response = await fetch('/display.json', { cache: 'no-store' });
     const { id, version, display } = await response.json();
     if (!display) { close(); return; }
+    // A capture is of one exact version; a newer display is not drawn for it.
+    const asked = new URLSearchParams(location.search);
+    if (asked.has('capture') && (asked.get('capture') !== id || Number(asked.get('version')) !== version)) return;
     column(display);
     const svg = $('view');
     svg.replaceChildren();
@@ -355,19 +376,19 @@
       // Draw, measure what the labels actually took, and draw again as large
       // as the screen allows: the boards fill the space, the text stays its size.
       const gap = Math.min(GAP, area.width * 0.05);
-      let S = fitScale(area.width, area.height, views.map(extent)), groups = [];
-      for (let pass = 0; pass < 3; pass += 1) {
+      let groups = [];
+      // Draws at S and answers the largest scale at which what was drawn fits.
+      const drawAndFit = (S) => {
         svg.replaceChildren();
         groups = views.map((item) => view(svg, item, 0, 0, S));
         const boxes = groups.map(extentOf);
         const boards = views.map((item) => extent(item).map((mm) => mm * S));
         const extraW = boxes.reduce((sum, b, i) => sum + b.width - boards[i][0], 0) + gap * (views.length - 1);
         const extraH = Math.max(...boxes.map((b, i) => b.height - boards[i][1]));
-        const next = Math.max(0.01, Math.min((area.width - extraW) / views.reduce((sum, item) => sum + extent(item)[0], 0),
+        return Math.max(0.01, Math.min((area.width - extraW) / views.reduce((sum, item) => sum + extent(item)[0], 0),
           (area.height - extraH) / Math.max(...views.map((item) => extent(item)[1]))));
-        if (Math.abs(next - S) < 0.01 * S) break;
-        S = next;
-      }
+      };
+      settleScale(fitScale(area.width, area.height, views.map(extent)), drawAndFit);
       let x = 0;
       for (const g of groups) {
         const box = extentOf(g);
@@ -392,7 +413,7 @@
     }
     // A capture of the screen for her (D-075) draws the same, but reports
     // nothing: only his screen drawing it makes it shown.
-    if (new URLSearchParams(location.search).has('capture')) return;
+    if (asked.has('capture')) return;
     // Only now is it on screen; she may say so only after this report.
     await fetch(`/display-drawn.json?id=${encodeURIComponent(id)}&version=${version}`, { cache: 'no-store' });
   }

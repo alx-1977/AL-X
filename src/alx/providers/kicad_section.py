@@ -79,12 +79,16 @@ out = {"window": [x0, y0, x1, y1], "tracks": [], "vias": [], "pads": [], "parts"
 # nothing (2026-11-12: a guessed feed net name left both feeds off screen).
 footprints = list(board.GetFootprints())
 present_refs = {fp.GetReference() for fp in footprints}
+# A net is drawable when anything copper carries it; a plane must be a zone's.
 present_nets = {pad.GetNetname() for fp in footprints for pad in fp.Pads()}
 present_nets |= {item.GetNetname() for item in board.GetTracks()}
-present_nets |= {zone.GetNetname() for zone in board.Zones()}
+present_nets |= {zone.GetNetname() for zone in board.Zones() if not zone.GetIsRuleArea()}
+present_nets |= {item.GetNetname() for item in board.GetDrawings()
+                 if item.GetClass() == "PCB_SHAPE" and item.GetLayer() in COPPER}
 present_nets.discard("")
+zone_nets = {zone.GetNetname() for zone in board.Zones() if not zone.GetIsRuleArea()} - {""}
 out["missing"] = {"refs": sorted(refs - present_refs), "nets": sorted(nets - present_nets),
-                  "planes": sorted(planes - present_nets)}
+                  "planes": sorted(planes - zone_nets)}
 # Every connection of a named part is drawn, whether or not its net is named.
 for fp in footprints:
     if fp.GetReference() in refs:
