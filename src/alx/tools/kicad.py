@@ -48,7 +48,8 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
-    'after_copy_path': S, 'layout_rules': array(StructuredSchema(ValueKind.OBJECT))},
+    'after_copy_path': S, 'layout_rules': obj({'findings': array(StructuredSchema(ValueKind.OBJECT)), 'omitted': I,
+                         'not_checked': S}, ('findings', 'omitted'))},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})

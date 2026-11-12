@@ -687,7 +687,8 @@ class KiCadProvider:
                         board, scratch_root=self.work_root / 'sections',
                         kicad_python=self.settings.kicad_python, execute_python=self.execute_python)
                 except Exception as error:  # noqa: BLE001 - a fact for her, not a failed edit
-                    report['layout_rules'] = [{'rule': 'not_checked', 'reason': str(error)[:200]}]
+                    report['layout_rules'] = {'findings': [], 'omitted': 0,
+                                              'not_checked': str(error)[:200]}
                 diffs, budget = [], 24000
                 for name in changed[:200]:
                     left = (snapshot / name).read_text(errors='replace') if name in original else ''

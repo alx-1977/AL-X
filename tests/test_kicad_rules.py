@@ -28,14 +28,19 @@ def run(executable, script, board):
 
 @unittest.skipUnless(PYTHON.is_file(), "KiCad is not installed")
 class LayoutRuleTests(unittest.TestCase):
-    def test_a_step_is_found_a_taper_passes_and_a_pad_on_wide_copper_is_no_joint(self) -> None:
-        # U1: 1.2 mm copper starts at a 0.5 mm pad. U2: tapers from 0.5 to 1.2 mm.
-        # U3: sits on the side of a wide strip that runs past it.
+    def test_steps_are_found_on_every_layer_and_angle_and_tapers_pass(self) -> None:
+        # Steps: U1 a 1.2 mm shape at a 0.5 mm pad, U5 a wide track at a pad
+        # turned 45 degrees, U6 a wide track on an inner layer, U7 a wide arc.
+        # No steps: U2 tapers, U3 sits on the side of a wide strip, U4 a track
+        # no wider than its pad that bends away.
         with tempfile.TemporaryDirectory() as scratch:
-            findings = check_layout_rules(FIXTURES / "rules_board.kicad_pcb", scratch_root=Path(scratch),
-                                          kicad_python=PYTHON, execute_python=run)
-        self.assertEqual(findings, [{"rule": "taper_where_copper_is_wider_than_its_pad", "pad": "U1.1",
-                                     "net": "STEP", "side": "bottom", "pad_mm": 0.5, "copper_mm": 1.2}])
+            result = check_layout_rules(FIXTURES / "rules_board.kicad_pcb", scratch_root=Path(scratch),
+                                        kicad_python=PYTHON, execute_python=run)
+        self.assertEqual(result["omitted"], 0)
+        found = sorted((f["pad"], f["net"], f["layer"], f["where"], f["copper_mm"]) for f in result["findings"])
+        self.assertEqual(found, [("U1.1", "STEP", "F.Cu", "bottom", 1.2), ("U5.1", "TURNED", "F.Cu", "track", 1.2),
+                                 ("U6.1", "INNER", "In1.Cu", "track", 1.2), ("U7.1", "ARC", "F.Cu", "track", 1.2)])
+        self.assertEqual({f["rule"] for f in result["findings"]}, {"taper_where_copper_is_wider_than_its_pad"})
 
     def test_copper_shape_helpers_and_the_outline_guard(self) -> None:
         script = '''
@@ -65,9 +70,9 @@ print("result", len(before), mine["shape"], sorted(mine["corners"]))
             self.assertIn("removed 1", done.stdout)
             self.assertIn("result 1 polygon [(14.4, 9.0), (14.7, 10.0), (15.3, 10.0), (15.6, 9.0)]", done.stdout)
             # The step reshaped into a taper now passes the rule.
-            findings = check_layout_rules(board, scratch_root=Path(folder) / "scratch",
-                                          kicad_python=PYTHON, execute_python=run)
-            self.assertEqual(findings, [])
+            result = check_layout_rules(board, scratch_root=Path(folder) / "scratch",
+                                        kicad_python=PYTHON, execute_python=run)
+            self.assertNotIn("U1.1", [f["pad"] for f in result["findings"]])
 
 
 if __name__ == "__main__":
