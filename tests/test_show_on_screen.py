@@ -395,6 +395,29 @@ class ScreenTruthTests(unittest.TestCase):
         self.assertIn("const clip = 'clip' + (clipCount += 1);", script)
 
 
+class TwoViewTests(unittest.TestCase):
+    """Friedl, 12 Nov: two views are headed Current and Amended; silk under pads."""
+
+    def test_two_views_are_headed_current_and_amended(self) -> None:
+        board = DisplayBoard()
+        show = build_display_executors(board, lambda _: GEOMETRY, lambda: "c1",
+                                       draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
+        two = display(views=[{**display()["views"][0], "label": "Your board"},
+                             {**display()["views"][0], "label": "My copy", "sublabel": "Würth p.2"}])
+        self.assertEqual(show(two).state, CapabilityResultState.SUCCEEDED)
+        views = board.snapshot()["display"]["views"]
+        self.assertEqual([(v["label"], v["sublabel"]) for v in views],
+                         [("Current", "Your board"), ("Amended", "My copy · Würth p.2")])
+        show(display())
+        self.assertEqual(board.snapshot()["display"]["views"][0]["label"], "Yours")
+
+    def test_silkscreen_lies_under_the_pads(self) -> None:
+        script = (ASSETS / "show.js").read_text()
+        self.assertLess(script.index("for (const mark of geo.silk || [])"),
+                        script.index("for (const pad of geo.pads || []) {\n      el('path'"))
+        self.assertNotIn("changed_tone", script)
+
+
 class BoardDrawingTests(unittest.TestCase):
     """Friedl, 11 Nov 2026: a name sits beside its part; no leader lines."""
 

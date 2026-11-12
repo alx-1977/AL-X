@@ -245,15 +245,22 @@
         named[ref] = { x: left, y: top, w: right - left, h: bottom - top, large: body.large };
       }
     }
+    // Silkscreen under the pads, as on a real board, where pads cover it.
+    for (const mark of geo.silk || []) {
+      el('path', { d: path(mark.polygons), fill: SILK, opacity: mark.side === 'F' ? 0.6 : 0.3 }, c);
+    }
     for (const pad of geo.pads || []) {
       el('path', { d: path(pad.polygons), fill: tone(marks[pad.ref] ?? marks['net:' + pad.net], COPPER) }, c);
       taken.push(bounds(pad.polygons.flatMap((poly) => poly.outer.map((p) => P(...p)))));
     }
-    // The part's own silkscreen: pin 1, polarity, orientation marks.
-    for (const mark of geo.silk || []) {
-      el('path', { d: path(mark.polygons), fill: SILK, opacity: mark.side === 'F' ? 0.85 : 0.4 }, c);
-    }
-    for (const body of Object.values(bodies)) {
+    // A part's own silkscreen stands for its outline; a drawn outline is
+    // added only for a part without one, or a large part.
+    const silked = new Set((geo.silk || []).map((mark) => mark.ref));
+    for (const [ref, body] of Object.entries(bodies)) {
+      if (silked.has(ref) && !body.large) {
+        taken.push(body);
+        continue;
+      }
       el('rect', { x: body.x, y: body.y, width: body.w, height: body.h, fill: 'none', 'stroke-width': 1,
         stroke: body.large ? 'rgba(127,233,255,.75)' : SILK }, c);
       // A large part's name goes inside it, so only small bodies are obstacles.

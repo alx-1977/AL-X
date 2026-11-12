@@ -91,7 +91,8 @@ DEFINITION = CapabilityDefinition(
     "screen itself comes back to you as a picture with this result: look at it before you "
     "say anything about it, and if something is missing or wrong on it, fix it and show "
     "again rather than describe the gap. Names not on the board are refused; every "
-    "connection of a part you name is drawn, with its silkscreen marks.",
+    "connection of a part you name is drawn, with its silkscreen marks. Two views are "
+    "headed Current (his board) and Amended (your copy), in that order.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"title": _STRING, "subtitle": _STRING, "context": _STRING, "verdict": _TONED,
@@ -319,6 +320,12 @@ def build_display_executors(
                 "marks": dict(view.get("marks") or {}), "dims": list(view.get("dims") or ()),
                 "geometry": geometry,
             })
+        # Two views are always his board as it is and her amended copy, under
+        # the same two headings (Friedl, 2026-11-12); her own label moves under.
+        if len(drawn) == 2:
+            for item, heading in zip(drawn, ("Current", "Amended")):
+                item["sublabel"] = " · ".join(text for text in (item["label"], item["sublabel"]) if text)
+                item["label"] = heading
         display["views"] = drawn
         assets = []
         for request in page_requests:
