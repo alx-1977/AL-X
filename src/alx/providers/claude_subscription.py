@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import base64
 import json
 import http.client
 import logging
@@ -66,6 +67,7 @@ from alx.contracts import (
     ModelCompletion,
     ModelRequest,
     ModelRole,
+    ToolImage,
     normalise_usage,
     usage_telemetry,
 )
@@ -549,15 +551,20 @@ class _NativeSession:
         self.close()
         raise subprocess.TimeoutExpired("claude", timeout_seconds)
 
-    def answer(self, text: str) -> None:
-        """Return the Core's result to the paused call."""
+    def answer(self, text: str, images: tuple[ToolImage, ...] = ()) -> None:
+        """Return the Core's result to the paused call, with any pictures (D-075)."""
         if self._idle_timer is not None:
             self._idle_timer.cancel()
         connection, self._pending = self._pending, None
         if connection is None:
             raise _ClaudeProtocolError("native_call_not_pending")
+        message: dict[str, Any] = {"text": text}
+        if images:
+            message["images"] = [{"mimeType": item.media_type,
+                                  "data": base64.b64encode(item.data).decode("ascii")}
+                                 for item in images]
         try:
-            connection.sendall((json.dumps({"text": text}) + "\n").encode("utf-8"))
+            connection.sendall((json.dumps(message) + "\n").encode("utf-8"))
         finally:
             connection.close()
 
@@ -918,6 +925,24 @@ class ClaudeSubscriptionReasoningModel:
         ]
         return "\n\n".join(parts)
 
+    @classmethod
+    def _fresh_prompt(cls, request: ModelRequest) -> str:
+        """The prompt of a new session, saying so when pictures were lost (D-075).
+
+        A result whose session has gone is answered from the full request, in
+        which the Core recorded the result but not its pictures: a new session
+        cannot be handed them. Rather than let her take the result for having
+        seen, the prompt states, as a fact, that the pictures were not
+        delivered, so she can look again.
+        """
+        prompt = cls._user_prompt(request)
+        if not request.tool_images:
+            return prompt
+        return prompt + "\n\n" + json.dumps({"transport_fact": "images_not_delivered",
+            "images": len(request.tool_images),
+            "detail": "The reasoning session restarted, so the image(s) returned with your "
+                      "last capability call were not shown to you. Look again to see them."})
+
     @staticmethod
     def _user_prompt(request: ModelRequest) -> str:
         parts = [
@@ -1009,10 +1034,10 @@ class ClaudeSubscriptionReasoningModel:
         """
         session = self._session
         if request.tool_result is not None and session is not None and session.alive:
-            session.answer(request.tool_result)
+            session.answer(request.tool_result, request.tool_images)
         else:
             self.abandon_session()
-            prompt = self._user_prompt(request)
+            prompt = self._fresh_prompt(request)
             session = _NativeSession(
                 self._launcher, lambda path, tools: self.native_command(request, path, tools),
                 prompt, {**self.child_environment(),

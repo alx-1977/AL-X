@@ -35,6 +35,24 @@ _PURPOSES = frozenset(item.value for item in ReasoningPurpose)
 
 
 @dataclass(frozen=True, slots=True)
+class ToolImage:
+    """A picture returned with a native tool result (D-075).
+
+    Only what she asked to look at, for the one step that follows the call;
+    it is never written to a goal or a conversation record.
+    """
+
+    media_type: str
+    data: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if self.media_type not in ("image/png", "image/jpeg"):
+            raise ValueError("a tool image is a PNG or JPEG")
+        if not isinstance(self.data, bytes) or not self.data:
+            raise ValueError("a tool image has data")
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRequest:
     """A model request created by AL/X reasoning, not by a frontend."""
 
@@ -77,6 +95,8 @@ class ModelRequest:
     # D-065: continue the paused session with this result for the native call
     # it last returned, instead of starting a new one. The Core composes it.
     tool_result: str | None = None
+    # D-075: pictures that answer the same native call, beside its result.
+    tool_images: tuple[ToolImage, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
@@ -87,6 +107,11 @@ class ModelRequest:
             raise ValueError("each native tool has its own name")
         if self.tool_result is not None and not self.tools:
             raise ValueError("a tool result continues a native-tool session")
+        object.__setattr__(self, "tool_images", tuple(self.tool_images))
+        if self.tool_images and self.tool_result is None:
+            raise ValueError("tool images answer a native call beside its result")
+        if any(not isinstance(item, ToolImage) for item in self.tool_images):
+            raise ValueError("tool images are ToolImage values")
         if self.purpose and self.purpose not in _PURPOSES:
             raise ValueError("purpose must be a ReasoningPurpose value")
         if not self.messages:

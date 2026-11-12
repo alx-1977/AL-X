@@ -24,6 +24,7 @@ from alx.contracts import (
     CapabilityCall,
     CapabilityResultState,
     DecisionValidationError,
+    ToolImage,
     Evidence,
     GoalMutationKind,
     GoalProposal,
@@ -1774,6 +1775,7 @@ class ModelReasoner:
         on_request_dispatched: Callable[[Mapping[str, Any]], None] | None = None,
         *,
         trace: TraceSink | None = None,
+        image_source: Callable[[str], bytes | None] | None = None,
     ) -> None:
         """One reasoner over one model.
 
@@ -1814,6 +1816,9 @@ class ModelReasoner:
         # The operator's trace. A lookup answered inside a step is recorded
         # here, because the Core loop never sees it.
         self._trace = trace
+        # D-075: reads an image a capability made, by the digest its result
+        # names, to hand to the session with that result. None: no images.
+        self._image_source = image_source
         # D-065: the native step this reasoner's paused session is waiting on.
         self._native_pending: _NativePending | None = None
         # The spend reservation of a paused session, settled when it ends.
@@ -1867,7 +1872,30 @@ class ModelReasoner:
         self._spend_authority.settle(reservation, usage)
         return completion
 
-    def _continue(self, request: ModelRequest, result: str):
+    def _native_images(self, context: ReasoningContext) -> tuple[ToolImage, ...]:
+        """The picture the paused call made, to go with its result (D-075).
+
+        Only for a capability call that ran in this step and succeeded with a
+        result naming an image by its digest, and only while that exact image
+        is still held; a refusal or anything else answers with text alone.
+        The image is never written to a goal or the conversation: it reaches
+        the model for this one answer, and her record keeps the result.
+        """
+        pending = self._native_pending
+        if (self._image_source is None or pending is None or pending.tool != CALL_CAPABILITY
+                or pending.ran_before or context.refused_calls[pending.refusals:]
+                or context.refused_goal_selections[pending.selection_refusals:]):
+            return ()
+        attempt = self._turn_attempt(context, pending.key)
+        result = None if attempt is None else attempt.result
+        if result is None or result.state is not CapabilityResultState.SUCCEEDED:
+            return ()
+        digest = (result.values or {}).get("image_sha256")
+        data = self._image_source(digest) if isinstance(digest, str) else None
+        return () if not data else (ToolImage("image/png", data),)
+
+    def _continue(self, request: ModelRequest, result: str,
+                  images: tuple[ToolImage, ...] = ()):
         """Continue the paused session, settling its reservation when it ends.
 
         A session that fails or is abandoned settles with its usage unknown, so
@@ -1878,7 +1906,7 @@ class ModelReasoner:
             if callable(preflight):
                 preflight()
         try:
-            completion = self._model.complete(replace(request, tool_result=result))
+            completion = self._model.complete(replace(request, tool_result=result, tool_images=images))
         except Exception:
             self._settle_session(None)
             raise
@@ -2032,7 +2060,7 @@ class ModelReasoner:
         if result is not None:
             # D-065: continue the paused session with the outcome. Nothing new
             # is reserved: the session's reservation covers the whole run.
-            completion = self._continue(request, result)
+            completion = self._continue(request, result, self._native_images(context))
         else:
             if self._native_pending is not None:
                 self.abandon()
