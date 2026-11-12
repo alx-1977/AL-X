@@ -19,7 +19,7 @@ from contextlib import contextmanager, suppress
 import fcntl
 
 from alx.providers.credential_paths import denied
-from alx.providers.kicad_helpers import HELPERS
+from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 from alx.providers.kicad_circuit import (
@@ -651,8 +651,10 @@ class KiCadProvider:
             try:
                 before = self._drc(root, meta)['totals']
                 facts_before = board_facts(board.read_text())
-                # Tested helpers first, her script after (2026-11-12).
-                script_path.write_text(HELPERS + script)
+                # Tested helpers first, then her script compiled on its own, so
+                # its own first lines (a __future__ import) and line numbers
+                # stay as she wrote them (2026-11-12).
+                script_path.write_text(HELPERS + script_runner(script))
                 stage = 'script'
                 executed = self.execute_python(str(self.settings.kicad_python), script_path, board)
                 stdout, stderr = (getattr(executed, key, '') or '' for key in ('stdout', 'stderr'))

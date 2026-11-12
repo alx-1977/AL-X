@@ -97,8 +97,8 @@ _ACTION_DEFINITIONS = (
         'set_pad(b, ref, n, size=(w, h), at=(x, y)), tracks(b, net), track_ends(t), '
         'add_track(b, net, [(x, y), ...], width, on), vias(b, net), add_via(b, net, (x, y)), '
         'remove(b, item), zones(b, net, keepout), zone_corners(z), set_zone_corners(z, corners), '
-        "a part's drawings by index: graphics(b, ref, on='F.Silk'), set_graphic(b, ref, i, start, "
-        "end), remove_graphic(b, ref, i), add_line(b, ref, on, start, end, width); "
+        "a part's drawings by id: graphics(b, ref, on='F.Silk'), set_graphic(b, ref, id, start, "
+        "end), remove_graphic(b, ref, id), add_line(b, ref, on, start, end, width); "
         'refill(b) and save(b). Use them rather than guessing pcbnew names; refill after every '
         "change. Never remove items while looping over pcbnew's own lists, and never Remove a "
         "part's drawing through the board: both crash KiCad. The script may write only inside "

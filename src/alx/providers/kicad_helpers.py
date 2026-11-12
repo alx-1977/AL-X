@@ -156,41 +156,42 @@ _LAYER_NAMES = {number: name for name, number in _GRAPHIC_LAYERS.items()}
 
 
 def graphics(board, ref, on=None):
-    """A part's own drawings (silkscreen, fab, courtyard; text excluded), as a
-    fixed list: index, layer, shape and points in board mm. Lists from pcbnew
-    are live; change items through these helpers, by index, never while
-    looping over pcbnew's own list."""
-    items = [item for item in part(board, ref).GraphicalItems() if item.GetClass() == "PCB_SHAPE"]
+    """A part's own drawings (silkscreen, fab, courtyard; text excluded): id,
+    layer, shape and points in board mm. Each id stays valid while others are
+    deleted; change drawings through these helpers by id, never while looping
+    over pcbnew's own list."""
     found = []
-    for index, item in enumerate(items):
+    for item in part(board, ref).GraphicalItems():
+        if item.GetClass() != "PCB_SHAPE":
+            continue
         name = _LAYER_NAMES.get(item.GetLayer(), str(item.GetLayer()))
         if on is not None and name != on:
             continue
-        found.append({"index": index, "layer": name, "shape": item.ShowShape().lower(),
+        found.append({"id": item.m_Uuid.AsString(), "layer": name, "shape": item.ShowShape().lower(),
                       "start": xy(item.GetStart()), "end": xy(item.GetEnd()),
                       "width": round(_pcbnew.ToMM(item.GetWidth()), 4)})
     return found
 
 
-def _graphic(board, ref, index):
-    items = [item for item in part(board, ref).GraphicalItems() if item.GetClass() == "PCB_SHAPE"]
-    if not 0 <= index < len(items):
-        raise KeyError("%s has no drawing %s" % (ref, index))
-    return items[index]
+def _graphic(board, ref, identifier):
+    for item in part(board, ref).GraphicalItems():
+        if item.GetClass() == "PCB_SHAPE" and item.m_Uuid.AsString() == identifier:
+            return item
+    raise KeyError("%s has no drawing %s" % (ref, identifier))
 
 
-def set_graphic(board, ref, index, start=None, end=None):
+def set_graphic(board, ref, identifier, start=None, end=None):
     """Move a part's drawing (a line's or rectangle's ends) in board mm."""
-    item = _graphic(board, ref, index)
+    item = _graphic(board, ref, identifier)
     if start is not None:
         item.SetStart(point(*start))
     if end is not None:
         item.SetEnd(point(*end))
 
 
-def remove_graphic(board, ref, index):
-    """Delete a part's drawing by its index from graphics()."""
-    part(board, ref).Delete(_graphic(board, ref, index))
+def remove_graphic(board, ref, identifier):
+    """Delete a part's drawing by its id from graphics()."""
+    part(board, ref).Delete(_graphic(board, ref, identifier))
 
 
 def add_line(board, ref, on, start, end, width=0.12):
@@ -217,17 +218,19 @@ def zones(board, net=None, keepout=None):
 
 
 def zone_corners(item):
+    """The corners of a zone's first outline (cutouts and further outlines aside)."""
     outline = item.Outline().Outline(0)
     return [xy(outline.CPoint(index)) for index in range(outline.PointCount())]
 
 
 def set_zone_corners(item, corners):
-    """Replace a zone's outline with these (x, y) corners in mm."""
-    outline = item.Outline()
-    outline.RemoveAllContours()
-    outline.NewOutline()
+    """Replace the corners of a zone's first outline, in mm; its cutouts and
+    any further outlines are kept as they are."""
+    outline = item.Outline().Outline(0)
+    outline.Clear()
     for x, y in corners:
         outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
+    outline.SetClosed(True)
 
 
 def refill(board):
@@ -236,9 +239,14 @@ def refill(board):
 # ---- end of helpers; your script follows ----
 '''
 
+def script_runner(script):
+    """Her script, compiled as its own file named "script" with the helpers in reach."""
+    return "exec(compile(%r, 'script', 'exec'), dict(globals(), __name__='__main__'))\n" % script
+
+
 NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rotate_part", "pad",
          "set_pad", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
          "graphics", "set_graphic", "remove_graphic", "add_line",
          "zones", "zone_corners", "set_zone_corners", "refill")
 
-__all__ = ["HELPERS", "NAMES"]
+__all__ = ["HELPERS", "NAMES", "script_runner"]

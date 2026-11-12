@@ -369,7 +369,7 @@ class KiCadTests(unittest.TestCase):
         self.assertIn('remove_graphic', result.failure['recovery']['crashed'])
 
     def test_every_edit_script_starts_with_the_tested_helpers(self):
-        from alx.providers.kicad_helpers import HELPERS, NAMES
+        from alx.providers.kicad_helpers import HELPERS, NAMES, script_runner
         checked = self.check()
         seen = []
         original = self.run_cli
@@ -381,7 +381,16 @@ class KiCadTests(unittest.TestCase):
         self.runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, capture)
         self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
         self.assertTrue(seen[0].startswith(HELPERS))
-        self.assertTrue(seen[0].endswith(EDIT_SCRIPT))
+        self.assertIn(repr(EDIT_SCRIPT), seen[0])
+        # Her script is compiled on its own: a __future__ import still runs
+        # (review of 66c4b3b), and its line numbers are her own.
+        future = 'from __future__ import annotations\nprint("ran", __name__)\nraise ValueError("x")\n'
+        out = subprocess.run([sys.executable, '-c', 'import sys, types; sys.modules["pcbnew"] = '
+                              'types.SimpleNamespace(F_Cu=0, B_Cu=31, F_SilkS=37, B_SilkS=36, F_Fab=49, '
+                              'B_Fab=48, F_CrtYd=47, B_CrtYd=46); exec(sys.stdin.read())', 'board.kicad_pcb'],
+                             input=HELPERS + script_runner(future), capture_output=True, text=True)
+        self.assertIn('ran __main__', out.stdout)
+        self.assertIn('File "script", line 3', out.stderr)
         description = (Path(__file__).parents[1] / 'src/alx/tools/kicad.py').read_text()
         for name in NAMES:
             if name not in ('mm', 'point', 'xy', 'layer'):
