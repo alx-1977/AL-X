@@ -395,57 +395,27 @@ class ScreenTruthTests(unittest.TestCase):
         self.assertIn("const clip = 'clip' + (clipCount += 1);", script)
 
 
-class ChangeColourTests(unittest.TestCase):
-    """12 Nov: red on his board and green on her copy, without her marking it."""
+class TwoViewTests(unittest.TestCase):
+    """Friedl, 12 Nov: two views are headed Current and Amended; silk under pads."""
 
-    PAD = {"ref": "C64", "number": "1", "net": "N1",
-           "polygons": [{"outer": [[1, 1], [1.5, 1], [1.5, 1.5], [1, 1.5]], "holes": []}]}
-    TRACK = {"points": [[0, 0], [5, 0]], "width": 0.35, "layer": "F", "net": "N1"}
-
-    def geometry(self, **changes):
-        values = {"window": [0, 0, 10, 10], "pads": [self.PAD], "tracks": [self.TRACK], "vias": [],
-                  "shapes": [], "keepouts": [], "parts": [{"ref": "C64", "at": [1.25, 1.25],
-                                                           "rotation": 0, "side": "F"}],
-                  "planes": [{"net": "GND", "layer": "B", "polygons": []}]}
-        values.update(changes)
-        return values
-
-    def test_only_what_differs_is_flagged_on_both_sides(self) -> None:
-        from alx.tools.display import _mark_changes
-        wider = {**self.TRACK, "width": 0.75}
-        before, after = _mark_changes(self.geometry(), self.geometry(tracks=[wider]))
-        self.assertTrue(before["tracks"][0]["changed"])
-        self.assertTrue(after["tracks"][0]["changed"])
-        self.assertNotIn("changed", before["pads"][0])
-        self.assertNotIn("changed", after["parts"][0])
-        # A repour reshapes planes without anyone changing them: never flagged.
-        self.assertNotIn("changed", after["planes"][0])
-
-    def test_a_moved_part_and_a_change_below_a_hundredth_of_a_mm(self) -> None:
-        from alx.tools.display import _mark_changes
-        nudged = {**self.TRACK, "points": [[0, 0.001], [5, 0]]}
-        moved = [{"ref": "C64", "at": [1.25, 1.75], "rotation": 0, "side": "F"}]
-        before, after = _mark_changes(self.geometry(), self.geometry(tracks=[nudged], parts=moved))
-        self.assertNotIn("changed", after["tracks"][0])
-        self.assertTrue(after["parts"][0]["changed"])
-
-    def test_two_views_are_compared_and_her_marks_still_win(self) -> None:
+    def test_two_views_are_headed_current_and_amended(self) -> None:
         board = DisplayBoard()
-        geometries = iter([self.geometry(), self.geometry(tracks=[{**self.TRACK, "width": 0.75}])])
-        show = build_display_executors(board, lambda _: next(geometries), lambda: "c1",
+        show = build_display_executors(board, lambda _: GEOMETRY, lambda: "c1",
                                        draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
-        two = display(views=[display()["views"][0], {**display()["views"][0], "label": "Copy"}])
+        two = display(views=[{**display()["views"][0], "label": "Your board"},
+                             {**display()["views"][0], "label": "My copy", "sublabel": "Würth p.2"}])
         self.assertEqual(show(two).state, CapabilityResultState.SUCCEEDED)
         views = board.snapshot()["display"]["views"]
-        self.assertEqual([view["changed_tone"] for view in views], ["bad", "ok"])
-        self.assertTrue(views[1]["geometry"]["tracks"][0]["changed"])
-        script = (ASSETS / "show.js").read_text()
-        self.assertIn("tone(mark ?? (changed ? item.changed_tone : undefined), fallback)", script)
+        self.assertEqual([(v["label"], v["sublabel"]) for v in views],
+                         [("Current", "Your board"), ("Amended", "Würth p.2")])
+        show(display())
+        self.assertEqual(board.snapshot()["display"]["views"][0]["label"], "Yours")
 
     def test_silkscreen_lies_under_the_pads(self) -> None:
         script = (ASSETS / "show.js").read_text()
         self.assertLess(script.index("for (const mark of geo.silk || [])"),
                         script.index("for (const pad of geo.pads || []) {\n      el('path'"))
+        self.assertNotIn("changed_tone", script)
 
 
 class BoardDrawingTests(unittest.TestCase):
@@ -740,7 +710,7 @@ class ViewerAssetTests(unittest.TestCase):
         self.assertIn("(x, y) => [(y - y0) * S, (x1 - x) * S]", (ASSETS / "show.js").read_text())
 
     def test_planes_take_their_net_tone_and_the_column_scrolls(self) -> None:
-        self.assertIn("shade(marks['net:' + plane.net], false, COPPER)", (ASSETS / "show.js").read_text())
+        self.assertIn("tone(marks['net:' + plane.net], COPPER)", (ASSETS / "show.js").read_text())
         css = (ASSETS / "show.css").read_text()
         self.assertIn("max-height: 72vh; overflow-y: auto;", css)
 

@@ -91,9 +91,8 @@ DEFINITION = CapabilityDefinition(
     "screen itself comes back to you as a picture with this result: look at it before you "
     "say anything about it, and if something is missing or wrong on it, fix it and show "
     "again rather than describe the gap. Names not on the board are refused; every "
-    "connection of a part you name is drawn, with its silkscreen marks. With two views, "
-    "whatever differs between them is coloured for you: red on his board, green on your "
-    "copy; your own marks override that.",
+    "connection of a part you name is drawn, with its silkscreen marks. Two views are "
+    "headed Current (his board) and Amended (your copy), in that order.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"title": _STRING, "subtitle": _STRING, "context": _STRING, "verdict": _TONED,
@@ -242,51 +241,6 @@ def _reference(value: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return {"label": label, "sublabel": sublabel, "pages": shown}, requests
 
 
-def _signature(kind: str, item: Mapping[str, Any]) -> tuple:
-    """What an item is, to a hundredth of a millimetre, for comparing two boards."""
-    r = lambda value: round(float(value), 2)
-    def box(polygons):
-        points = [p for poly in polygons for p in poly.get("outer", ())]
-        if not points:
-            return ()
-        return (r(min(p[0] for p in points)), r(min(p[1] for p in points)),
-                r(max(p[0] for p in points)), r(max(p[1] for p in points)))
-    if kind == "pads":
-        return (item.get("ref"), item.get("number"), item.get("net"), box(item.get("polygons", ())))
-    if kind == "tracks":
-        ends = sorted(tuple(r(v) for v in point) for point in item.get("points", ()))
-        return (item.get("net"), item.get("layer"), r(item.get("width", 0)), tuple(ends))
-    if kind == "vias":
-        return (item.get("net"), tuple(r(v) for v in item.get("at", ())), r(item.get("diameter", 0)))
-    if kind == "parts":
-        return (item.get("ref"), tuple(r(v) for v in item.get("at", ())), r(item.get("rotation", 0)),
-                item.get("side"))
-    return (item.get("net"), item.get("layer"), box(item.get("polygons", ())))
-
-
-# Copper and outlines that a change can move. Planes are left out: a repour
-# reshapes every pour without anyone having changed it.
-_COMPARED = ("pads", "tracks", "vias", "shapes", "keepouts", "parts")
-
-
-def _mark_changes(before: Mapping[str, Any], after: Mapping[str, Any]) -> tuple[dict, dict]:
-    """His board and her copy, each item that differs flagged, mechanically.
-
-    What differs between the two is a fact; whether it is right is hers to
-    judge. The viewer colours a flagged item red on his board and green on her
-    copy, unless she marked it herself.
-    """
-    flagged = []
-    for this, other in ((before, after), (after, before)):
-        copy = dict(this)
-        for kind in _COMPARED:
-            theirs = {_signature(kind, item) for item in other.get(kind, ())}
-            copy[kind] = [{**item, "changed": True} if _signature(kind, item) not in theirs else dict(item)
-                          for item in this.get(kind, ())]
-        flagged.append(copy)
-    return flagged[0], flagged[1]
-
-
 def build_display_executors(
     board: DisplayBoard,
     read_section: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
@@ -366,11 +320,12 @@ def build_display_executors(
                 "marks": dict(view.get("marks") or {}), "dims": list(view.get("dims") or ()),
                 "geometry": geometry,
             })
-        # Two views are his board and her copy: what differs is coloured.
+        # Two views are always his board as it is and her amended copy, under
+        # the same two headings (Friedl, 2026-11-12); her own label moves under.
         if len(drawn) == 2:
-            drawn[0]["geometry"], drawn[1]["geometry"] = _mark_changes(drawn[0]["geometry"],
-                                                                       drawn[1]["geometry"])
-            drawn[0]["changed_tone"], drawn[1]["changed_tone"] = "bad", "ok"
+            for item, heading in zip(drawn, ("Current", "Amended")):
+                item["sublabel"] = item["sublabel"] or item["label"]
+                item["label"] = heading
         display["views"] = drawn
         assets = []
         for request in page_requests:
