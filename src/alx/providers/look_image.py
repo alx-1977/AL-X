@@ -18,7 +18,7 @@ import zlib
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from alx.providers.page_image import PageError, render_section
+from alx.providers.page_image import MAX_DOCUMENT_BYTES, PageError, render_section
 
 # Claude reads an image at up to about 1568 pixels on its long side; more is
 # scaled down on arrival and only costs allowance.
@@ -162,6 +162,9 @@ def look(
     if not path.is_file():
         raise LookError("document_unavailable", "no such file")
     if suffix == ".pdf":
+        # Bounded before anything opens it: reading a huge PDF is the risk.
+        if path.stat().st_size > MAX_DOCUMENT_BYTES:
+            raise LookError("document_unavailable", "the document is too large")
         page = arguments.get("page", 1)
         if isinstance(page, bool) or not isinstance(page, int):
             raise LookError("arguments_unusable", "page is a page number from 1")

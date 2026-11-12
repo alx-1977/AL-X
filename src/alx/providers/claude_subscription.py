@@ -925,6 +925,24 @@ class ClaudeSubscriptionReasoningModel:
         ]
         return "\n\n".join(parts)
 
+    @classmethod
+    def _fresh_prompt(cls, request: ModelRequest) -> str:
+        """The prompt of a new session, saying so when pictures were lost (D-075).
+
+        A result whose session has gone is answered from the full request, in
+        which the Core recorded the result but not its pictures: a new session
+        cannot be handed them. Rather than let her take the result for having
+        seen, the prompt states, as a fact, that the pictures were not
+        delivered, so she can look again.
+        """
+        prompt = cls._user_prompt(request)
+        if not request.tool_images:
+            return prompt
+        return prompt + "\n\n" + json.dumps({"transport_fact": "images_not_delivered",
+            "images": len(request.tool_images),
+            "detail": "The reasoning session restarted, so the image(s) returned with your "
+                      "last capability call were not shown to you. Look again to see them."})
+
     @staticmethod
     def _user_prompt(request: ModelRequest) -> str:
         parts = [
@@ -1019,7 +1037,7 @@ class ClaudeSubscriptionReasoningModel:
             session.answer(request.tool_result, request.tool_images)
         else:
             self.abandon_session()
-            prompt = self._user_prompt(request)
+            prompt = self._fresh_prompt(request)
             session = _NativeSession(
                 self._launcher, lambda path, tools: self.native_command(request, path, tools),
                 prompt, {**self.child_environment(),

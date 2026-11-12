@@ -118,6 +118,16 @@ class LookProviderTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, code)
         self.assertEqual(self.runs, [])
 
+    def test_a_huge_pdf_is_refused_before_it_is_opened(self) -> None:
+        # Review of 908947d: the size bound came after pypdf had read it.
+        from unittest.mock import patch
+        with patch("alx.providers.look_image.MAX_DOCUMENT_BYTES", 10), \
+                patch("alx.providers.look_image.page_box") as opened:
+            with self.assertRaises(LookError) as caught:
+                self.look(self.pdf, {"page": 1})
+        self.assertEqual(caught.exception.code, "document_unavailable")
+        opened.assert_not_called()
+
     def test_a_changed_or_unnamed_image_is_not_handed_back(self) -> None:
         facts = self.look(self.picture, {})
         digest = facts["image_sha256"]

@@ -143,6 +143,16 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual([list(item) for item in final.output["pictures"]],
                          [[], ["image/png:" + base64.b64encode(picture).decode()]])
 
+    def test_a_restarted_session_is_told_its_pictures_were_not_delivered(self) -> None:
+        # Review of 908947d: a lost session must not pass a look off as seen.
+        model = ClaudeSubscriptionReasoningModel
+        looked = request(tool_result="looked", tool_images=(ToolImage("image/png", b"x"),))
+        fact = json.loads(model._fresh_prompt(looked).rsplit("\n\n", 1)[1])
+        self.assertEqual((fact["transport_fact"], fact["images"]), ("images_not_delivered", 1))
+        self.assertEqual(model._fresh_prompt(request(tool_result="read")), model._user_prompt(request()))
+        source = (Path(__file__).resolve().parents[1] / "src/alx/providers/claude_subscription.py").read_text()
+        self.assertIn("prompt = self._fresh_prompt(request)", source)
+
     def test_pictures_only_answer_a_native_call(self) -> None:
         image = ToolImage("image/png", b"x")
         with self.assertRaises(ValueError):
