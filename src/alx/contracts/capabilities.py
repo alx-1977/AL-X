@@ -52,6 +52,43 @@ class StructuredSchema:
         if set(self.required) - set(self.properties):
             raise ValueError("required properties must be declared")
 
+    def violation(self, value: Any, where: str = "arguments") -> str | None:
+        """The first way a value breaks this schema, by its path; None when it fits.
+
+        A refusal that names the field lets the caller correct it at once
+        instead of guessing (2026-11-12: ten refusals said only input_invalid).
+        """
+        names = {ValueKind.STRING: "text", ValueKind.INTEGER: "a whole number",
+                 ValueKind.NUMBER: "a number", ValueKind.BOOLEAN: "true or false",
+                 ValueKind.ARRAY: "a list", ValueKind.OBJECT: "an object", ValueKind.NULL: "null"}
+        if self.kind is ValueKind.ARRAY and isinstance(value, (tuple, list)):
+            for index, item in enumerate(value):
+                found = (None if self.items is None else self.items.violation(item, f"{where}[{index}]"))
+                if found or not _structured(item):
+                    return found or f"{where}[{index}] is not plain data"
+            return None
+        if self.kind is ValueKind.OBJECT and isinstance(value, Mapping) and all(
+                isinstance(key, str) for key in value):
+            missing = [key for key in self.required if key not in value]
+            if missing:
+                return f"{where} needs {', '.join(missing)}"
+            if not self.extra_properties:
+                unknown = sorted(set(value) - set(self.properties))
+                if unknown:
+                    return (f"{where} has unknown {', '.join(unknown)}; allowed: "
+                            f"{', '.join(sorted(self.properties))}")
+            for key, item in value.items():
+                if key in self.properties:
+                    found = self.properties[key].violation(item, f"{where}.{key}")
+                    if found:
+                        return found
+                elif not _structured(item):
+                    return f"{where}.{key} is not plain data"
+            return None
+        if self.accepts(value):
+            return None
+        return f"{where} must be {names.get(self.kind, self.kind.value)}"
+
     def accepts(self, value: Any) -> bool:
         if self.kind is ValueKind.ANY:
             return _structured(value)
