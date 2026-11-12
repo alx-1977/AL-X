@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.contracts import ModelMessage, ModelRequest, ModelRole  # noqa: E402
+from alx.contracts import ModelMessage, ModelRequest, ModelRole, ToolImage  # noqa: E402
 from alx.core.model_reasoner import native_tools  # noqa: E402
 from alx.providers.claude_subscription import ClaudeSubscriptionReasoningModel  # noqa: E402
 
@@ -59,7 +59,7 @@ FAKE_CLI = textwrap.dedent('''\
     assert allowed == ["mcp__alx__" + name for name in names], (allowed, names)
     unknown = rpc(3, "tools/call", {{"name": "run_shell", "arguments": {{}}}})
     assert unknown["error"]["message"] == "unknown tool"
-    seen = []
+    seen, pictures = [], []
     for number, (name, arguments) in enumerate((
             ("select_goal", {{"goal_id": "g1"}}),
             ("call_capability", {{"call_id": "c2", "capability_id": "read_record",
@@ -68,13 +68,18 @@ FAKE_CLI = textwrap.dedent('''\
         assistant(f"m{{number}}", 1000 * (number + 1),
                   {{"type": "tool_use", "name": "mcp__alx__" + name, "input": arguments}})
         result = rpc(10 + number, "tools/call", {{"name": name, "arguments": arguments}})
-        text = result["result"]["content"][0]["text"]
+        content = result["result"]["content"]
+        text = content[0]["text"]
         seen.append(text)
+        # D-075: any picture beside the text, as the model would receive it.
+        pictures.append([item["mimeType"] + ":" + item["data"] for item in content[1:]
+                         if item["type"] == "image"])
         emit({{"type": "user", "message": {{"content": [
             {{"type": "tool_result", "content": [{{"type": "text", "text": text}}]}}]}}}})
     assistant("m-final", 3000, {{"type": "tool_use", "name": "StructuredOutput", "input": {{}}}})
     emit({{"type": "result", "subtype": "success", "is_error": False,
-                      "structured_output": {{"seen": seen, "prompt_chars": len(prompt),
+                      "structured_output": {{"seen": seen, "pictures": pictures,
+                                            "prompt_chars": len(prompt),
                                             "tools": names}},
                       "usage": {{"input_tokens": 10, "output_tokens": 5}},
                       "modelUsage": {{"claude-sonnet-5-5": {{"inputTokens": 10}}}}}})
@@ -125,6 +130,27 @@ class NativeSessionTests(unittest.TestCase):
                          [item["name"] for item in native_tools()])
         # The prompt went in once, at the start; results continued the same run.
         self.assertGreater(final.output["prompt_chars"], 0)
+
+    def test_a_picture_reaches_the_model_beside_its_result_through_the_bridge(self) -> None:
+        # D-075: the image goes into the same session, as MCP image content.
+        import base64
+        self.model.complete(request())
+        self.model.complete(request(tool_result="goal one"))
+        picture = b"\x89PNG\r\n\x1a\nlooked"
+        final = self.model.complete(request(tool_result="looked at page 2",
+                                            tool_images=(ToolImage("image/png", picture),)))
+        self.assertEqual(list(final.output["seen"]), ["goal one", "looked at page 2"])
+        self.assertEqual([list(item) for item in final.output["pictures"]],
+                         [[], ["image/png:" + base64.b64encode(picture).decode()]])
+
+    def test_pictures_only_answer_a_native_call(self) -> None:
+        image = ToolImage("image/png", b"x")
+        with self.assertRaises(ValueError):
+            request(tool_images=(image,))
+        with self.assertRaises(ValueError):
+            ToolImage("image/svg+xml", b"<svg/>")
+        with self.assertRaises(ValueError):
+            request(tool_result="r", tool_images=("not an image",))
 
     def test_every_call_of_a_session_is_logged_and_the_whole_run_kept(self) -> None:
         """D-069: on 2026-11-05 a 14-call turn left one usage total and nothing else.

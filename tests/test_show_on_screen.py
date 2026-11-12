@@ -535,11 +535,11 @@ class RenderSectionTests(unittest.TestCase):
         import os
         import pwd
         from unittest.mock import patch
-        from alx.providers.coding_process import run_page_render
+        from alx.providers.coding_process import run_confined_converter
         result = SimpleNamespace(returncode=0, stdout="", stderr="")
         with patch("alx.providers.coding_process.kicad_containment_available", return_value=True), \
                 patch("alx.providers.coding_process.run_coding_subprocess", return_value=result) as run:
-            run_page_render("pdftoppm", ["-png", "document.pdf", "section"], self.scratch)
+            run_confined_converter("pdftoppm", ["-png", "document.pdf", "section"], self.scratch)
         argv = run.call_args.args[1]
         self.assertEqual(argv[:2], ["/usr/bin/sandbox-exec", "-p"])
         directory = json.dumps(str(self.scratch.resolve()))
@@ -551,7 +551,7 @@ class RenderSectionTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["env"]["HOME"], str(self.scratch.resolve()))
         with patch("alx.providers.coding_process.kicad_containment_available", return_value=False), \
                 self.assertRaises(OSError):
-            run_page_render("pdftoppm", [], self.scratch)
+            run_confined_converter("pdftoppm", [], self.scratch)
 
 
 class ViewerAssetTests(unittest.TestCase):

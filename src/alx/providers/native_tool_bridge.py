@@ -33,8 +33,12 @@ def _error(message_id: Any, code: int, text: str) -> None:
     sys.stdout.flush()
 
 
-def _relay(socket_path: str, name: str, arguments: Any) -> str:
-    """Send one call to the runtime and wait for its answer."""
+def _relay(socket_path: str, name: str, arguments: Any) -> list[dict[str, Any]]:
+    """Send one call to the runtime and wait for its answer, as MCP content.
+
+    The answer is its text and, when the call was to look at something
+    (D-075), the pictures the runtime attached, each passed on as it came.
+    """
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.connect(socket_path)
         connection.sendall((json.dumps({"name": name, "input": arguments}) + "\n").encode("utf-8"))
@@ -46,7 +50,12 @@ def _relay(socket_path: str, name: str, arguments: Any) -> str:
             received += chunk
     if not received:
         raise ConnectionError("runtime closed the call without an answer")
-    return str(json.loads(received.decode("utf-8"))["text"])
+    answer = json.loads(received.decode("utf-8"))
+    content: list[dict[str, Any]] = [{"type": "text", "text": str(answer["text"])}]
+    for image in answer.get("images") or ():
+        content.append({"type": "image", "data": str(image["data"]),
+                        "mimeType": str(image["mimeType"])})
+    return content
 
 
 def serve(socket_path: str, tools_path: str) -> None:
@@ -73,13 +82,13 @@ def serve(socket_path: str, tools_path: str) -> None:
                 _error(message_id, -32602, "unknown tool")
                 continue
             try:
-                text = _relay(socket_path, name, params.get("arguments", {}))
+                content = _relay(socket_path, name, params.get("arguments", {}))
             except (OSError, ValueError, KeyError) as error:
                 _reply(message_id, {"content": [{"type": "text", "text": (
                     f"The runtime did not answer this call ({type(error).__name__}).")}],
                     "isError": True})
                 continue
-            _reply(message_id, {"content": [{"type": "text", "text": text}]})
+            _reply(message_id, {"content": content})
         elif message_id is not None:
             _reply(message_id, {})
 

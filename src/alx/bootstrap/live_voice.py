@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextvars import ContextVar
+from functools import partial
 import logging
 from uuid import uuid4
 import os
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alx.bootstrap.program import build_program_runtime
+from alx.bootstrap.look import build_look_runtime
+from alx.providers.look_image import stored_image
 from alx.continuity.program_source import ProgramCompletionSource
 from alx.providers.program import reconcile as reconcile_program
 from alx.config.program import ProgramSettings
@@ -556,6 +559,13 @@ async def run(repository_root: Path) -> None:
         current_call_id.get,
         read_page=None if kicad_runtime.provider is None else kicad_runtime.provider.datasheet_section))
     permissions.add("screen.show")
+    # D-075: she looks at pictures and PDF pages herself.
+    look_runtime = build_look_runtime(current_call_id.get, environment, storage_root,
+                                      kicad_runtime.provider.design_roots)
+    register(look_runtime.definitions, TraceSubsystem.CORE)
+    policies.update(look_runtime.policies)
+    executors.update(look_runtime.executors)
+    permissions.update(look_runtime.permissions)
     particle_local_runtime = build_particle_local_runtime(current_call_id.get, environment, storage_root)
     register(particle_local_runtime.definitions, TraceSubsystem.CORE)
     policies.update(particle_local_runtime.policies)
@@ -1160,10 +1170,13 @@ async def run(repository_root: Path) -> None:
     # refused, never answered by the conversational model, because a silent
     # fallback would spend on a Core nobody selected and record the result as
     # if the experiment had run.
+    # D-075: each Core reads the images she looked at, by digest.
+    look_images = partial(stored_image, look_runtime.store)
     conversational_reasoner = build_model_reasoner(
         providers.reasoning, CODE_ROOT,
         on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
         trace=diagnostics.trace,
+        image_source=look_images,
     )
     reasoner = OriginSelectedReasoner(
         conversational_reasoner,
@@ -1189,6 +1202,7 @@ async def run(repository_root: Path) -> None:
             ),
             on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
             trace=diagnostics.trace,
+            image_source=look_images,
         ),
         # EX-001 as amended 2026-11-03: the lighter model reasons first, with
         # the same bounds and the same per-occasion spend record.
@@ -1207,6 +1221,7 @@ async def run(repository_root: Path) -> None:
             ),
             on_request_dispatched=ClaudeSubscriptionReasoningModel.acknowledge_setup_token_notice,
             trace=diagnostics.trace,
+            image_source=look_images,
         ),
     )
 

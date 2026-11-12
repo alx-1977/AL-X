@@ -521,8 +521,8 @@ def _confined_profile(project, *readable):
     ))
 
 
-def run_page_render(executable, arguments, directory, *, runner=None, timeout_seconds=60):
-    """A datasheet page made into an image, confined like a KiCad script (D-073).
+def run_confined_converter(executable, arguments, directory, *, runner=None, timeout_seconds=60):
+    """A document or picture made into an image, confined like a KiCad script (D-073, D-075).
 
     The document is a copy inside `directory`, the only place the renderer
     may read in the home folder or write at all.

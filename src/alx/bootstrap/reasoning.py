@@ -40,6 +40,7 @@ def build_model_reasoner(
     on_request_dispatched=None,
     *,
     trace=None,
+    image_source=None,
 ) -> ModelReasoner:
     """Build a reasoner over the approved Laws and identity.
 
@@ -58,6 +59,7 @@ def build_model_reasoner(
         spend_authority,
         on_request_dispatched,
         trace=trace,
+        image_source=image_source,
     )
 
 

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import base64
 import json
 import http.client
 import logging
@@ -66,6 +67,7 @@ from alx.contracts import (
     ModelCompletion,
     ModelRequest,
     ModelRole,
+    ToolImage,
     normalise_usage,
     usage_telemetry,
 )
@@ -549,15 +551,20 @@ class _NativeSession:
         self.close()
         raise subprocess.TimeoutExpired("claude", timeout_seconds)
 
-    def answer(self, text: str) -> None:
-        """Return the Core's result to the paused call."""
+    def answer(self, text: str, images: tuple[ToolImage, ...] = ()) -> None:
+        """Return the Core's result to the paused call, with any pictures (D-075)."""
         if self._idle_timer is not None:
             self._idle_timer.cancel()
         connection, self._pending = self._pending, None
         if connection is None:
             raise _ClaudeProtocolError("native_call_not_pending")
+        message: dict[str, Any] = {"text": text}
+        if images:
+            message["images"] = [{"mimeType": item.media_type,
+                                  "data": base64.b64encode(item.data).decode("ascii")}
+                                 for item in images]
         try:
-            connection.sendall((json.dumps({"text": text}) + "\n").encode("utf-8"))
+            connection.sendall((json.dumps(message) + "\n").encode("utf-8"))
         finally:
             connection.close()
 
@@ -1009,7 +1016,7 @@ class ClaudeSubscriptionReasoningModel:
         """
         session = self._session
         if request.tool_result is not None and session is not None and session.alive:
-            session.answer(request.tool_result)
+            session.answer(request.tool_result, request.tool_images)
         else:
             self.abandon_session()
             prompt = self._user_prompt(request)

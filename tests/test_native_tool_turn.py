@@ -505,5 +505,80 @@ class ContinuationBoundaryTests(unittest.TestCase):
         self.assertIs(GoalStatus(answer["selected_goal"]["status"]), GoalStatus.ACTIVE)
 
 
+
+class NativeImageTests(unittest.TestCase):
+    """D-075: a look's picture goes with its result, to that one answer only."""
+
+    PICTURE = b"\x89PNG\r\n\x1a\nlooked"
+    DIGEST = "a" * 64
+    LOOK = CapabilityDefinition("look", "Look at a picture", SCHEMA, SCHEMA, SideEffect.NONE,
+                                ("page_failed",))
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = SQLiteGoalStore(Path(directory.name) / "goals.sqlite3", clock=lambda: NOW)
+        self.addCleanup(self.store.close)
+        self.asked = []
+
+    def images(self, digest):
+        self.asked.append(digest)
+        return self.PICTURE if digest == self.DIGEST else None
+
+    def run_turn(self, transport, values, state=CapabilityResultState.SUCCEEDED, source=True):
+        def dispatch(call, _state):
+            # Only the first call looks; any later call reads a note.
+            looked = not dispatched
+            dispatched.append(call.call_id)
+            if not looked:
+                values_now, state_now = {"text": "a note"}, CapabilityResultState.SUCCEEDED
+            else:
+                values_now, state_now = values, state
+            ok = state_now is CapabilityResultState.SUCCEEDED
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id, state_now,
+                                                      values_now if ok else {},
+                                                      failure=None if ok else {"code": "page_failed"}))
+        dispatched = []
+        reasoner = ModelReasoner(transport, "laws", "identity",
+                                 image_source=self.images if source else None)
+        core = CoreAgent(self.store, reasoner, dispatch, (READ, CLEAN, self.LOOK), clock=lambda: NOW,
+                         identifier_factory=lambda: "g-new")
+        return core.process(conversation("Look at the datasheet"), RETENTION, 8)
+
+    def test_the_picture_goes_with_the_result_that_names_it_and_with_nothing_else(self) -> None:
+        transport = PausingTransport([native("look1", "look"), native("n2")], base_output(response="Seen."))
+        self.run_turn(transport, {"image_sha256": self.DIGEST, "pixels": [10, 10]})
+        first, second = transport.requests[1:]
+        self.assertEqual([(item.media_type, item.data) for item in first.tool_images],
+                         [("image/png", self.PICTURE)])
+        # Her record keeps the result, never the picture.
+        self.assertEqual(json.loads(first.tool_result)["result_values"]["image_sha256"], self.DIGEST)
+        self.assertNotIn("looked", first.tool_result)
+        # The next answer carries its own result only; the picture is not repeated.
+        self.assertEqual(second.tool_images, ())
+
+    def test_no_picture_for_a_failure_an_unknown_digest_or_without_a_source(self) -> None:
+        cases = (
+            ({"image_sha256": self.DIGEST}, CapabilityResultState.FAILED, True),
+            ({"image_sha256": "b" * 64}, CapabilityResultState.SUCCEEDED, True),
+            ({"text": "no image"}, CapabilityResultState.SUCCEEDED, True),
+            ({"image_sha256": self.DIGEST}, CapabilityResultState.SUCCEEDED, False),
+        )
+        for number, (values, state, source) in enumerate(cases):
+            with self.subTest(values=values, state=state, source=source):
+                transport = PausingTransport([native(f"case{number}", "look")],
+                                             base_output(response="Done."))
+                self.run_turn(transport, values, state, source)
+                self.assertEqual(transport.requests[1].tool_images, ())
+
+    def test_a_refused_call_is_answered_without_a_picture(self) -> None:
+        transport = PausingTransport([native("r1", "not_a_capability")], base_output(response="No."))
+        self.run_turn(transport, {"image_sha256": self.DIGEST})
+        self.assertIn("refused", json.loads(transport.requests[1].tool_result))
+        self.assertEqual(transport.requests[1].tool_images, ())
+        self.assertEqual(self.asked, [])
+
+
 if __name__ == "__main__":
     unittest.main()

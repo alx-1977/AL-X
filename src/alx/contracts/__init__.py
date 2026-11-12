@@ -196,6 +196,7 @@ from alx.contracts.models import (
     ModelCompletion,
     ModelMessage,
     ModelRequest,
+    ToolImage,
     ModelRole,
     ReasoningModel,
 )
@@ -351,7 +352,7 @@ __all__ = [
     "AgentDecision", "CapabilityDispatch", "ConversationSnapshot", "DecisionValidationError", "DurableConversationStore", "DurableGoalStore", "DurableMemoryStore", "GoalSnapshot", "GoalSummary", "PendingMemoryBatch", "PlanOperation", "PlanUpdate", "ReasoningContext", "ReasoningProvider",
     "AudioChunk", "SpeechSynthesizer", "SpeechTranscriber", "TranscriptionEvent",
     "TranscriptionState",
-    "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole",
+    "ModelCompletion", "ModelMessage", "ModelRequest", "ModelRole", "ToolImage",
     "ReasoningModel",
     "MemoryCorrection", "MemoryIdentityConflict", "MemoryKind",
     "MemoryMatchReason", "MemoryProposal", "MemoryQuery", "MemorySupersession",
