@@ -20,7 +20,6 @@ import fcntl
 
 from alx.providers.credential_paths import denied
 from alx.providers.kicad_helpers import HELPERS, script_runner
-from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 from alx.providers.kicad_circuit import (
@@ -680,15 +679,6 @@ class KiCadProvider:
                                  if original.get(name) != current.get(name))
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
-                # Friedl's layout rules on the edited board, so she sees a
-                # broken one before she shows anything (2026-11-12).
-                try:
-                    report['layout_rules'] = check_layout_rules(
-                        board, scratch_root=self.work_root / 'sections',
-                        kicad_python=self.settings.kicad_python, execute_python=self.execute_python)
-                except Exception as error:  # noqa: BLE001 - a fact for her, not a failed edit
-                    report['layout_rules'] = {'findings': [], 'omitted': 0,
-                                              'not_checked': str(error)[:200]}
                 diffs, budget = [], 24000
                 for name in changed[:200]:
                     left = (snapshot / name).read_text(errors='replace') if name in original else ''

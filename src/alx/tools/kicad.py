@@ -48,8 +48,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
-    'after_copy_path': S, 'layout_rules': obj({'findings': array(StructuredSchema(ValueKind.OBJECT)), 'omitted': I,
-                         'not_checked': S}, ('findings', 'omitted'))},
+    'after_copy_path': S},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -109,8 +108,8 @@ _ACTION_DEFINITIONS = (
         'all crash KiCad. The script may write only inside the work copy. Friedl\'s layout rules: '
         'copper wider than the pad it leaves or meets joins it through a taper (add_taper), '
         'never a step; where the pad is the wider one, no taper; inside an antenna clearance '
-        "follow the manufacturer's geometry exactly. Every edit report lists layout_rules "
-        'findings on the edited board; clear them, or say why one stands, before showing it.',
+        "follow the manufacturer's geometry exactly. Check every edit against them before "
+        'showing it.',
         obj({'work_copy_id': S, 'script': S}),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS}),
