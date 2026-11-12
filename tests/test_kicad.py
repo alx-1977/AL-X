@@ -379,7 +379,10 @@ class KiCadTests(unittest.TestCase):
                 seen.append(Path(argv[-2]).read_text())
             return original(argv, **kwargs)
         self.runtime = build_kicad_runtime(lambda: 'call', self.environment, self.storage, capture)
-        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        # Every edit report carries Friedl's layout rules (here KiCad is a
+        # stand-in, so the check reports that it could not run).
+        self.assertIn('layout_rules', edited['change_report'])
         self.assertTrue(seen[0].startswith(HELPERS))
         self.assertIn(repr(EDIT_SCRIPT), seen[0])
         # Her script is compiled on its own: a __future__ import still runs
