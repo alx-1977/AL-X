@@ -452,6 +452,53 @@ class TwoViewTests(unittest.TestCase):
         script = (ASSETS / "show.js").read_text()
         self.assertIn("let x = Math.max(0, (area.width - total) / 2);", script)
 
+    def test_the_real_section_script_frames_and_sorts_pours_on_a_real_board(self) -> None:
+        # Review of fd11712: run SECTION_SCRIPT itself on a small KiCad board.
+        # Parts R1 and R2 (pads 9.4-15.5 x 9.7-10.3 mm), a SIG track and small
+        # SIG pour on F, a GND plane on B. Needs KiCad's Python; skipped without it.
+        import subprocess
+        python = Path("/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3")
+        if not python.is_file():
+            self.skipTest("KiCad is not installed")
+        board = REPOSITORY_ROOT / "tests/fixtures/section_board.kicad_pcb"
+
+        def run(executable, script, copy):
+            return subprocess.run([executable, str(script), str(copy)], capture_output=True, text=True,
+                                  cwd=script.parent, timeout=120)
+        with tempfile.TemporaryDirectory() as scratch:
+            def read(**arguments):
+                return read_section(board, {"window": None, "refs": ["R1", "R2"], **arguments},
+                                    scratch_root=Path(scratch), kicad_python=python, execute_python=run)
+            signal = read(nets=["SIG"], planes=["GND"])
+            # 2 mm margin, outwards to the half millimetre.
+            self.assertEqual(signal["window"], [7.0, 7.5, 17.5, 12.5])
+            self.assertEqual([(s["net"], s["layer"]) for s in signal["shapes"]], [("SIG", "F")])
+            self.assertEqual({(p["net"], p["layer"]) for p in signal["planes"]}, {("GND", "B")})
+            both = read(nets=["SIG"], planes=["GND", "SIG"])
+            self.assertEqual(both["shapes"], [])
+            self.assertIn(("SIG", "F"), {(p["net"], p["layer"]) for p in both["planes"]})
+            wrong = read_section(board, {"window": None, "refs": ["R1", "R9"], "nets": ["NOPE"],
+                                         "planes": []}, scratch_root=Path(scratch),
+                                 kicad_python=python, execute_python=run)
+            self.assertEqual((wrong["missing"]["refs"], wrong["missing"]["nets"]), (["R9"], ["NOPE"]))
+
+    def test_every_read_is_checked_for_names_not_on_the_board(self) -> None:
+        # Review of fd11712: the board can change between the first and shared-frame reads.
+        board = DisplayBoard()
+        reads = []
+
+        def section(arguments):
+            reads.append(arguments["window"])
+            if arguments["window"] is None:
+                return {**GEOMETRY, "window": [0, 0, 10, 10] if len(reads) == 1 else [1, 1, 11, 11]}
+            return {**GEOMETRY, "window": list(arguments["window"]), "missing": {"refs": ["C61"]}}
+        show = build_display_executors(board, section, lambda: "c1", draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
+        view = {key: value for key, value in display()["views"][0].items() if key != "window"}
+        result = show(display(views=[view, {**view, "label": "Copy"}]))
+        self.assertEqual(result.failure["code"], "arguments_unusable")
+        self.assertIn("C61", result.failure["reason"])
+        self.assertIsNone(board.snapshot()["display"])
+
     def test_silkscreen_lies_under_the_pads(self) -> None:
         script = (ASSETS / "show.js").read_text()
         self.assertLess(script.index("for (const mark of geo.silk || [])"),
