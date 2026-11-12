@@ -16,6 +16,7 @@
   const SIDE = 70;   // room either side of a view for names and dimensions
   const GAP = 90;    // between two views
   const CLEAR = 3;   // text keeps this far from copper, parts and other text
+  let clipCount = 0;
   const LABEL_ROOM = 190;  // beside a datasheet section, for her box labels
   const tone = (value, fallback) => TONE[value] || fallback;
   const overlap = (a, b, gap = 0) => a.x - gap < b.x + b.w && b.x - gap < a.x + a.w
@@ -87,8 +88,26 @@
     return Math.max(1, Math.min(byHeight, width - 2 * LABEL_ROOM));
   }
 
+  // The scale the boards are drawn at: draw, measure, draw again until what is
+  // drawn both fits and fills. The last drawing is always at the scale returned.
+  function settleScale(start, drawAndFit) {
+    let S = start;
+    for (let pass = 0; pass < 6; pass += 1) {
+      const next = drawAndFit(S);
+      if (next >= S && next <= S * 1.01) return S;
+      S = next;
+    }
+    // Not settled: shrink until what is drawn certainly fits.
+    for (let pass = 0; pass < 6; pass += 1) {
+      const next = drawAndFit(S);
+      if (next >= S) return S;
+      S = next * 0.98;
+    }
+    return S;
+  }
+
   // Node tests exercise the same pure functions as the renderer.
-  if (typeof module !== 'undefined') { module.exports = { nameSpot, dimensionSpot, overlap, CLEAR, fitScale, fitReference }; return; }
+  if (typeof module !== 'undefined') { module.exports = { nameSpot, dimensionSpot, overlap, CLEAR, fitScale, fitReference, settleScale }; return; }
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, attrs, parent) => {
@@ -162,9 +181,10 @@
       return { x: Math.min(...xs), y: Math.min(...ys),
         w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
     };
-    const clip = 'clip' + ox;
+    const clip = 'clip' + (clipCount += 1);
     el('rect', { x: 0, y: 0, width: W, height: H }, el('clipPath', { id: clip }, g));
     const c = el('g', { 'clip-path': `url(#${clip})` }, g);
+    g.drawn = { clipped: c, width: W, height: H };
 
     // The board's own area; nothing past its edge is board.
     const area = (geo.board || []).length ? path(geo.board) : `M0,0H${W}V${H}H0Z`;
@@ -229,6 +249,10 @@
       el('path', { d: path(pad.polygons), fill: tone(marks[pad.ref] ?? marks['net:' + pad.net], COPPER) }, c);
       taken.push(bounds(pad.polygons.flatMap((poly) => poly.outer.map((p) => P(...p)))));
     }
+    // The part's own silkscreen: pin 1, polarity, orientation marks.
+    for (const mark of geo.silk || []) {
+      el('path', { d: path(mark.polygons), fill: SILK, opacity: mark.side === 'F' ? 0.85 : 0.4 }, c);
+    }
     for (const body of Object.values(bodies)) {
       el('rect', { x: body.x, y: body.y, width: body.w, height: body.h, fill: 'none', 'stroke-width': 1,
         stroke: body.large ? 'rgba(127,233,255,.75)' : SILK }, c);
@@ -281,7 +305,7 @@
     write(g, (item.label || '').toUpperCase(), { x: 0, y: -HEAD + 20, fill: tone(item.tone, TONE.info),
       'font-size': 17, 'font-weight': 700, 'letter-spacing': '.16em' });
     if (item.sublabel) write(g, item.sublabel, { x: 0, y: -HEAD + 46, fill: '#c4e2ea', 'letter-spacing': '.06em' });
-    return W;
+    return g;
   }
 
   // The datasheet section as printed: black lines on white become her cyan
@@ -321,10 +345,27 @@
     }
   }
 
+  // What a view takes on screen: its board window, cut where the window
+  // ends, and everything drawn around it (labels, names, dimensions).
+  function extentOf(g) {
+    let left = 0, top = 0, right = g.drawn.width, bottom = g.drawn.height;
+    for (const child of g.children) {
+      if (child === g.drawn.clipped || child.tagName === 'clipPath') continue;
+      const box = child.getBBox();
+      if (!box.width && !box.height) continue;
+      left = Math.min(left, box.x); top = Math.min(top, box.y);
+      right = Math.max(right, box.x + box.width); bottom = Math.max(bottom, box.y + box.height);
+    }
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  }
+
   async function load() {
     const response = await fetch('/display.json', { cache: 'no-store' });
     const { id, version, display } = await response.json();
     if (!display) { close(); return; }
+    // A capture is of one exact version; a newer display is not drawn for it.
+    const asked = new URLSearchParams(location.search);
+    if (asked.has('capture') && (asked.get('capture') !== id || Number(asked.get('version')) !== version)) return;
     column(display);
     const svg = $('view');
     svg.replaceChildren();
@@ -332,11 +373,28 @@
     svg.setAttribute('viewBox', `0 0 ${area.width} ${area.height}`);
     const views = display.views || [];
     if (views.length) {
-      const S = fitScale(area.width, area.height, views.map(extent));
-      const spacing = Math.min(views.length * 2 * SIDE + (views.length - 1) * GAP, area.width * 0.4);
-      const unit = spacing / (views.length * 2 * SIDE + (views.length - 1) * GAP);
-      let x = SIDE * unit;
-      for (const item of views) x += view(svg, item, x, HEAD, S) + (2 * SIDE + GAP) * unit;
+      // Draw, measure what the labels actually took, and draw again as large
+      // as the screen allows: the boards fill the space, the text stays its size.
+      const gap = Math.min(GAP, area.width * 0.05);
+      let groups = [];
+      // Draws at S and answers the largest scale at which what was drawn fits.
+      const drawAndFit = (S) => {
+        svg.replaceChildren();
+        groups = views.map((item) => view(svg, item, 0, 0, S));
+        const boxes = groups.map(extentOf);
+        const boards = views.map((item) => extent(item).map((mm) => mm * S));
+        const extraW = boxes.reduce((sum, b, i) => sum + b.width - boards[i][0], 0) + gap * (views.length - 1);
+        const extraH = Math.max(...boxes.map((b, i) => b.height - boards[i][1]));
+        return Math.max(0.01, Math.min((area.width - extraW) / views.reduce((sum, item) => sum + extent(item)[0], 0),
+          (area.height - extraH) / Math.max(...views.map((item) => extent(item)[1]))));
+      };
+      settleScale(fitScale(area.width, area.height, views.map(extent)), drawAndFit);
+      let x = 0;
+      for (const g of groups) {
+        const box = extentOf(g);
+        g.setAttribute('transform', `translate(${x - box.x},${-box.y})`);
+        x += box.width + gap;
+      }
     }
     const link = $('reflink');
     link.hidden = !display.reference;
@@ -353,6 +411,9 @@
       };
       $('refback').onclick = () => { $('refpage').hidden = true; };
     }
+    // A capture of the screen for her (D-075) draws the same, but reports
+    // nothing: only his screen drawing it makes it shown.
+    if (asked.has('capture')) return;
     // Only now is it on screen; she may say so only after this report.
     await fetch(`/display-drawn.json?id=${encodeURIComponent(id)}&version=${version}`, { cache: 'no-store' });
   }

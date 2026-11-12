@@ -74,7 +74,27 @@ def points(track):
     return [[mm(track.GetStart().x), mm(track.GetStart().y)], [mm(track.GetEnd().x), mm(track.GetEnd().y)]]
 
 out = {"window": [x0, y0, x1, y1], "tracks": [], "vias": [], "pads": [], "parts": [],
-       "planes": [], "keepouts": [], "edges": [], "shapes": [], "board": []}
+       "planes": [], "keepouts": [], "edges": [], "shapes": [], "board": [], "silk": []}
+# Names that are not on this board are reported, never silently drawn as
+# nothing (2026-11-12: a guessed feed net name left both feeds off screen).
+footprints = list(board.GetFootprints())
+present_refs = {fp.GetReference() for fp in footprints}
+# A net is drawable when anything copper carries it; a plane must be a zone's.
+present_nets = {pad.GetNetname() for fp in footprints for pad in fp.Pads()}
+present_nets |= {item.GetNetname() for item in board.GetTracks()}
+present_nets |= {zone.GetNetname() for zone in board.Zones() if not zone.GetIsRuleArea()}
+present_nets |= {item.GetNetname() for item in board.GetDrawings()
+                 if item.GetClass() == "PCB_SHAPE" and item.GetLayer() in COPPER}
+present_nets.discard("")
+zone_nets = {zone.GetNetname() for zone in board.Zones() if not zone.GetIsRuleArea()} - {""}
+out["missing"] = {"refs": sorted(refs - present_refs), "nets": sorted(nets - present_nets),
+                  "planes": sorted(planes - zone_nets)}
+# Every connection of a named part is drawn, whether or not its net is named.
+for fp in footprints:
+    if fp.GetReference() in refs:
+        nets |= {pad.GetNetname() for pad in fp.Pads()
+                 if pad.GetNetname() and not pad.GetNetname().startswith("unconnected-")}
+out["nets_drawn"] = sorted(nets)
 for track in board.GetTracks():
     net = track.GetNetname()
     if track.GetClass() == "PCB_VIA":
@@ -88,10 +108,20 @@ for track in board.GetTracks():
     if crosses(shape):
         out["tracks"].append({"points": shape, "width": mm(track.GetWidth()),
                               "layer": COPPER[track.GetLayer()], "net": net})
-for footprint in board.GetFootprints():
+for footprint in footprints:
     ref = footprint.GetReference()
     if ref not in refs:
         continue
+    # Its silkscreen marks: pin 1, polarity, orientation (not the text).
+    for item in footprint.GraphicalItems():
+        layer = item.GetLayer()
+        if item.GetClass() != "PCB_SHAPE" or layer not in (pcbnew.F_SilkS, pcbnew.B_SilkS):
+            continue
+        shape = pcbnew.SHAPE_POLY_SET()
+        item.TransformShapeToPolygon(shape, layer, 0, nm(0.005), pcbnew.ERROR_INSIDE)
+        if shape.OutlineCount():
+            out["silk"].append({"ref": ref, "side": "F" if layer == pcbnew.F_SilkS else "B",
+                                "polygons": polys(shape)})
     p = footprint.GetPosition()
     side = pcbnew.B_Cu if footprint.IsFlipped() else pcbnew.F_Cu
     out["parts"].append({"ref": ref, "value": footprint.GetValue(), "at": [mm(p.x), mm(p.y)],

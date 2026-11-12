@@ -211,13 +211,19 @@ def look(
         facts = {"kind": "picture"}
     else:
         raise LookError("arguments_unusable", "a PDF or a picture (PNG, JPEG, GIF, TIFF, WebP, BMP)")
+    return {"source": str(path), **facts, "pixels": [width, height], "image_sha256": keep_image(store, image)}
+
+
+def keep_image(store: Path, image: bytes) -> str:
+    """Keep a PNG in her look store under its digest; the newest KEEP_LOOKS stay."""
+    png_size(image)
     digest = hashlib.sha256(image).hexdigest()
     store.mkdir(parents=True, exist_ok=True)
     (store / (digest + ".png")).write_bytes(image)
     kept = sorted(store.glob("*.png"), key=lambda item: item.stat().st_mtime, reverse=True)
     for old in kept[KEEP_LOOKS:]:
         old.unlink(missing_ok=True)
-    return {"source": str(path), **facts, "pixels": [width, height], "image_sha256": digest}
+    return digest
 
 
 def stored_image(store: Path, digest: Any) -> bytes | None:
@@ -231,4 +237,4 @@ def stored_image(store: Path, digest: Any) -> bytes | None:
     return data if hashlib.sha256(data).hexdigest() == digest else None
 
 
-__all__ = ["LookError", "look", "stored_image"]
+__all__ = ["LookError", "keep_image", "look", "stored_image"]
