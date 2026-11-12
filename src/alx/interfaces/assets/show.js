@@ -396,12 +396,14 @@
           (area.height - extraH) / Math.max(...views.map((item) => extent(item)[1]))));
       };
       settleScale(fitScale(area.width, area.height, views.map(extent)), drawAndFit);
-      let x = 0;
-      for (const g of groups) {
-        const box = extentOf(g);
-        g.setAttribute('transform', `translate(${x - box.x},${-box.y})`);
-        x += box.width + gap;
-      }
+      // Centred in the drawing area, so the boards sit in the same place every time.
+      const boxes = groups.map(extentOf);
+      const total = boxes.reduce((sum, box) => sum + box.width, 0) + gap * (groups.length - 1);
+      let x = Math.max(0, (area.width - total) / 2);
+      groups.forEach((g, i) => {
+        g.setAttribute('transform', `translate(${x - boxes[i].x},${-boxes[i].y})`);
+        x += boxes[i].width + gap;
+      });
     }
     const link = $('reflink');
     link.hidden = !display.reference;
