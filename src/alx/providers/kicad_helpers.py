@@ -280,6 +280,11 @@ def set_copper_corners(board, identifier, corners):
     item.SetFilled(True)
 
 
+def remove_copper(board, identifier):
+    """Delete a copper shape by its id from copper_shapes()."""
+    board.Delete(_copper_shape(board, identifier))
+
+
 def add_copper(board, net, on, corners):
     """A solid copper polygon of `net` on copper layer `on`, corners in mm."""
     code = board.FindNet(net)
@@ -326,6 +331,6 @@ NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rot
          "set_pad", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
          "graphics", "set_graphic", "remove_graphic", "add_line",
          "zones", "zone_corners", "set_zone_corners",
-         "copper_shapes", "set_copper_corners", "add_copper", "add_taper", "refill")
+         "copper_shapes", "set_copper_corners", "remove_copper", "add_copper", "add_taper", "refill")
 
 __all__ = ["HELPERS", "NAMES", "script_runner"]

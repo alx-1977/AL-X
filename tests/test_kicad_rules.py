@@ -48,6 +48,9 @@ try:
     zone_corners(type("Z", (), {"Outline": lambda self: _pcbnew.SHAPE_POLY_SET()})())
 except ValueError as error:
     print("guard", error)
+extra = add_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])
+remove_copper(b, extra.m_Uuid.AsString())
+print("removed", len(copper_shapes(b, "SIDE")))
 save(b)
 print("result", len(before), mine["shape"], sorted(mine["corners"]))
 '''
@@ -59,6 +62,7 @@ print("result", len(before), mine["shape"], sorted(mine["corners"]))
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("guard this zone has no outline", done.stdout)
+            self.assertIn("removed 1", done.stdout)
             self.assertIn("result 1 polygon [(14.4, 9.0), (14.7, 10.0), (15.3, 10.0), (15.6, 9.0)]", done.stdout)
             # The step reshaped into a taper now passes the rule.
             findings = check_layout_rules(board, scratch_root=Path(folder) / "scratch",

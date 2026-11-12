@@ -100,6 +100,7 @@ _ACTION_DEFINITIONS = (
         "a part's drawings by id: graphics(b, ref, on='F.Silk'), set_graphic(b, ref, id, start, "
         "end), remove_graphic(b, ref, id), add_line(b, ref, on, start, end, width); copper "
         'drawn as a shape: copper_shapes(b, net), set_copper_corners(b, id, corners), '
+        'remove_copper(b, id), '
         'add_copper(b, net, on, corners), add_taper(b, net, on, narrow, narrow_width, wide, '
         "wide_width); refill(b) and save(b). Use them rather than guessing pcbnew names; refill "
         "after every change. Never remove items while looping over pcbnew's own lists, never "
