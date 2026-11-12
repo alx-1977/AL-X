@@ -16,6 +16,7 @@
   const SIDE = 70;   // room either side of a view for names and dimensions
   const GAP = 90;    // between two views
   const CLEAR = 3;   // text keeps this far from copper, parts and other text
+  const LABEL_ROOM = 190;  // beside a datasheet section, for her box labels
   const tone = (value, fallback) => TONE[value] || fallback;
   const overlap = (a, b, gap = 0) => a.x - gap < b.x + b.w && b.x - gap < a.x + a.w
     && a.y - gap < b.y + b.h && b.y - gap < a.y + a.h;
@@ -30,32 +31,64 @@
       : [[body.x + body.w + g, cy], [body.x - g - w, cy], [cx, body.y - g - h], [cx, body.y + body.h + g],
          [body.x + body.w + g, body.y - h], [body.x - g - w, body.y - h],
          [body.x + body.w + g, body.y + body.h], [body.x - g - w, body.y + body.h]];
-    const fits = ([x, y]) => free({ x, y, w, h });
-    let spot = tries.find(fits);
-    for (let r = 4; !spot && r <= 40; r += 3) {
-      for (let k = 0; k < 16 && !spot; k += 1) {
+    for (let r = 4; r <= 80; r += 3) {
+      for (let k = 0; k < 16; k += 1) {
         const a = k / 16 * 2 * Math.PI;
-        const candidate = [body.x + body.w / 2 + Math.cos(a) * (body.w / 2 + w / 2 + r) - w / 2,
-          body.y + body.h / 2 + Math.sin(a) * (body.h / 2 + h / 2 + r) - h / 2];
-        if (fits(candidate)) spot = candidate;
+        tries.push([body.x + body.w / 2 + Math.cos(a) * (body.w / 2 + w / 2 + r) - w / 2,
+          body.y + body.h / 2 + Math.sin(a) * (body.h / 2 + h / 2 + r) - h / 2]);
       }
     }
-    return spot || tries[0];
+    return settle(tries, w, h, free);
+  }
+
+  // The first free place in order; when none is free, the place that covers
+  // the least - chosen on purpose, not by falling back to the first try.
+  function settle(tries, w, h, free) {
+    const spot = tries.find(([x, y]) => free({ x, y, w, h }));
+    if (spot) return spot;
+    let best = null, least = Infinity;
+    for (const [x, y] of tries) {
+      const covered = free({ x, y, w, h }, true);
+      if (covered < least) { least = covered; best = [x, y]; }
+    }
+    return best;   // null only when every place lies outside the view
   }
 
   // Where a dimension's text goes: level, beside the middle of its line.
   function dimensionSpot(a, b, w, h, free) {
     const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
-    const tries = Math.abs(b[0] - a[0]) >= Math.abs(b[1] - a[1])
-      ? [[mx - w / 2, my - 9 - h], [mx - w / 2, my + 9],
-         [Math.max(a[0], b[0]) + 14, my - h / 2], [Math.min(a[0], b[0]) - 14 - w, my - h / 2]]
-      : [[mx + 10, my - h / 2], [mx - 10 - w, my - h / 2],
-         [mx - w / 2, Math.min(a[1], b[1]) - 14 - h], [mx - w / 2, Math.max(a[1], b[1]) + 14]];
-    return tries.find(([x, y]) => free({ x, y, w, h })) || tries[0];
+    const level = Math.abs(b[0] - a[0]) >= Math.abs(b[1] - a[1]);
+    const tries = [];
+    // Beside the middle first, then stepping further out, never turned.
+    for (let step = 0; step <= 60; step += 6) {
+      tries.push(...(level
+        ? [[mx - w / 2, my - 9 - h - step], [mx - w / 2, my + 9 + step],
+           [Math.max(a[0], b[0]) + 14 + step, my - h / 2], [Math.min(a[0], b[0]) - 14 - w - step, my - h / 2]]
+        : [[mx + 10 + step, my - h / 2], [mx - 10 - w - step, my - h / 2],
+           [mx - w / 2, Math.min(a[1], b[1]) - 14 - h - step], [mx - w / 2, Math.max(a[1], b[1]) + 14 + step]]));
+    }
+    return settle(tries, w, h, free);
+  }
+
+  // One scale for every view, so the same millimetre is the same size. On a
+  // narrow screen the spacing gives way before the boards do.
+  function fitScale(width, height, sizes) {
+    const spacing = Math.min(sizes.length * 2 * SIDE + (sizes.length - 1) * GAP, width * 0.4);
+    const widest = sizes.reduce((sum, [w]) => sum + w, 0);
+    const tallest = Math.max(...sizes.map(([, h]) => h));
+    return Math.max(0.01, Math.min((width - spacing) / widest, (Math.max(height - HEAD - 8, height * 0.5)) / tallest));
+  }
+
+  // The datasheet's width: as tall as the page allows, but never wider than
+  // the room left beside its box labels.
+  function fitReference(width, height, pages, gap) {
+    const shape = pages.reduce((s, p) => s + p.h / p.w, 0);
+    const byHeight = (height - gap * (pages.length - 1)) / shape;
+    return Math.max(1, Math.min(byHeight, width - 2 * LABEL_ROOM));
   }
 
   // Node tests exercise the same pure functions as the renderer.
-  if (typeof module !== 'undefined') { module.exports = { nameSpot, dimensionSpot, overlap, CLEAR }; return; }
+  if (typeof module !== 'undefined') { module.exports = { nameSpot, dimensionSpot, overlap, CLEAR, fitScale, fitReference }; return; }
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, attrs, parent) => {
@@ -176,7 +209,7 @@
     for (const pad of geo.pads || []) {
       (corners[pad.ref] ??= []).push(...pad.polygons.flatMap((poly) => poly.outer.map((p) => P(...p))));
     }
-    const bodies = {};
+    const bodies = {}, named = {};
     for (const [ref, points] of Object.entries(corners)) {
       const b = bounds(points), margin = 0.2 * S;
       const body = { x: b.x - margin, y: b.y - margin, w: b.w + 2 * margin, h: b.h + 2 * margin };
@@ -184,6 +217,13 @@
       bodies[ref] = body;
       el('rect', { x: body.x, y: body.y, width: body.w, height: body.h,
         fill: body.large ? 'rgba(127,233,255,.05)' : '#020c16' }, c);
+      // A name belongs to what is on screen: the visible part of a part that
+      // crosses the window edge, and no name at all for a part outside it.
+      const left = Math.max(0, body.x), top = Math.max(0, body.y);
+      const right = Math.min(W, body.x + body.w), bottom = Math.min(H, body.y + body.h);
+      if (right > left && bottom > top) {
+        named[ref] = { x: left, y: top, w: right - left, h: bottom - top, large: body.large };
+      }
     }
     for (const pad of geo.pads || []) {
       el('path', { d: path(pad.polygons), fill: tone(marks[pad.ref] ?? marks['net:' + pad.net], COPPER) }, c);
@@ -196,9 +236,17 @@
       if (!body.large) taken.push(body);
     }
 
-    const free = (b) => b.x >= -SIDE + 4 && b.x + b.w <= W + SIDE - 4 && b.y >= 0 && b.y + b.h <= H
-      && !taken.some((o) => overlap(b, o, CLEAR));
-    const place = (node, [x, y]) => {
+    // Whether a place is free; asked for a cost, how much it would cover.
+    const free = (b, cost = false) => {
+      const inside = b.x >= -SIDE + 4 && b.x + b.w <= W + SIDE - 4 && b.y >= 0 && b.y + b.h <= H;
+      if (!cost) return inside && !taken.some((o) => overlap(b, o, CLEAR));
+      const covered = taken.reduce((sum, o) => sum + Math.max(0, Math.min(b.x + b.w, o.x + o.w) - Math.max(b.x, o.x))
+        * Math.max(0, Math.min(b.y + b.h, o.y + o.h) - Math.max(b.y, o.y)), 0);
+      return inside ? covered : Infinity;
+    };
+    const place = (node, spot) => {
+      if (!spot) { node.remove(); return; }
+      const [x, y] = spot;
       const box = node.getBBox();
       node.setAttribute('x', x);
       node.setAttribute('y', y - box.y);
@@ -224,7 +272,7 @@
       const size = text.getBBox();
       place(text, dimensionSpot(a, b, size.width, size.height, free));
     }
-    for (const [ref, body] of Object.entries(bodies)) {
+    for (const [ref, body] of Object.entries(named)) {
       const text = write(g, ref, { fill: marks[ref] === 'bad' ? TONE.bad : SILK, 'letter-spacing': '.03em' },
         '"Helvetica Neue",Arial,sans-serif');
       const size = text.getBBox();
@@ -242,8 +290,8 @@
     const box = svg.getBoundingClientRect();
     const g = el('g', {}, svg);
     const gap = 18;
-    const W = (H - gap * (ref.pages.length - 1)) / ref.pages.reduce((s, p) => s + p.h / p.w, 0);
-    g.setAttribute('transform', `translate(${Math.max(SIDE, (box.width - W) / 2)},${HEAD})`);
+    const W = fitReference(box.width, H, ref.pages, gap);
+    g.setAttribute('transform', `translate(${Math.max(LABEL_ROOM, (box.width - W) / 2)},${HEAD})`);
     // The filter covers the image only: past its edge (transparent black) it
     // would turn every empty pixel solid cyan.
     const filter = el('filter', { id: 'lineart', 'color-interpolation-filters': 'sRGB',
@@ -284,13 +332,11 @@
     svg.setAttribute('viewBox', `0 0 ${area.width} ${area.height}`);
     const views = display.views || [];
     if (views.length) {
-      // One scale for every view, so the same millimetre is the same size.
-      const widest = views.reduce((sum, item) => sum + extent(item)[0], 0);
-      const tallest = Math.max(...views.map((item) => extent(item)[1]));
-      const S = Math.min((area.width - views.length * 2 * SIDE - (views.length - 1) * GAP) / widest,
-        (area.height - HEAD - 8) / tallest);
-      let x = SIDE;
-      for (const item of views) x += view(svg, item, x, HEAD, S) + 2 * SIDE + GAP;
+      const S = fitScale(area.width, area.height, views.map(extent));
+      const spacing = Math.min(views.length * 2 * SIDE + (views.length - 1) * GAP, area.width * 0.4);
+      const unit = spacing / (views.length * 2 * SIDE + (views.length - 1) * GAP);
+      let x = SIDE * unit;
+      for (const item of views) x += view(svg, item, x, HEAD, S) + (2 * SIDE + GAP) * unit;
     }
     const link = $('reflink');
     link.hidden = !display.reference;

@@ -279,8 +279,12 @@ def run_show_js(test, script, *arguments):
 class BoardDrawingTests(unittest.TestCase):
     """Friedl, 11 Nov 2026: a name sits beside its part; no leader lines."""
 
+    # The renderer's own rule: free, or asked for a cost, the area covered.
     FREE = ("const obstacles = JSON.parse(process.argv[2]);\n"
-            "const free = (b) => !obstacles.some((o) => show.overlap(b, o, show.CLEAR));\n")
+            "const free = (b, cost = false) => cost ? obstacles.reduce((sum, o) => sum"
+            " + Math.max(0, Math.min(b.x + b.w, o.x + o.w) - Math.max(b.x, o.x))"
+            " * Math.max(0, Math.min(b.y + b.h, o.y + o.h) - Math.max(b.y, o.y)), 0)"
+            " : !obstacles.some((o) => show.overlap(b, o, show.CLEAR));\n")
 
     def test_a_name_sits_right_beside_a_small_part(self):
         spot = run_show_js(self, self.FREE + (
@@ -299,6 +303,44 @@ class BoardDrawingTests(unittest.TestCase):
         self.assertTrue(spot["free"])
         centre = (spot["s"][0] + 12, spot["s"][1] + 7)
         self.assertLess(abs(centre[0] - 105) + abs(centre[1] - 110), 120)
+
+    def test_when_nowhere_is_free_the_least_covered_place_is_chosen_not_the_first(self):
+        # Review of 6474114: the first try was returned even when rejected.
+        result = run_show_js(self, self.FREE + (
+            "const body = {x: 100, y: 100, w: 10, h: 20, large: false};\n"
+            "const s = show.nameSpot(body, 24, 14, free);\n"
+            "const cost = ([x, y]) => free({x, y, w: 24, h: 14}, true);\n"
+            "const d = show.dimensionSpot([0, 300], [100, 300], 40, 14, free);\n"
+            "console.log(JSON.stringify({chosen: cost(s), first: cost([114, 103]),"
+            " dim: free({x: d[0], y: d[1], w: 40, h: 14}, true), dimFirst: free({x: 30, y: 277, w: 40, h: 14}, true)}));"),
+            json.dumps([{"x": 0, "y": 0, "w": 400, "h": 400}, {"x": 400, "y": 0, "w": 100, "h": 100}]))
+        # Everything is covered somewhere; the choice covers less than the first try.
+        self.assertLess(result["chosen"], result["first"])
+        self.assertLessEqual(result["dim"], result["dimFirst"])
+
+    def test_a_narrow_screen_shrinks_the_spacing_not_the_boards_to_nothing(self):
+        # Review of 6474114: below ~578 px the scale went negative.
+        scales = run_show_js(self, (
+            "const sizes = [[25.5, 47], [25.5, 47]];\n"
+            "console.log(JSON.stringify([show.fitScale(400, 600, sizes), show.fitScale(1120, 766, sizes)]));"))
+        narrow, wide = scales
+        self.assertGreater(narrow, 1)
+        self.assertAlmostEqual(wide, min((1120 - 370) / 51, (766 - 72) / 47))
+
+    def test_a_wide_datasheet_section_fits_the_width(self):
+        # Review of 6474114: a wide section ran past the right edge.
+        width = run_show_js(self, (
+            "console.log(JSON.stringify(show.fitReference(1000, 800, [{w: 800, h: 100}], 18)));"))
+        self.assertEqual(width, 1000 - 2 * 190)
+        tall = run_show_js(self, (
+            "console.log(JSON.stringify(show.fitReference(1000, 800, [{w: 200, h: 300}], 18)));"))
+        self.assertAlmostEqual(tall, 800 * 200 / 300)
+
+    def test_only_what_is_on_screen_is_named(self):
+        # Review of 6474114: names went to the off-screen centre of a part.
+        source = (ASSETS / "show.js").read_text()
+        self.assertIn("if (right > left && bottom > top) {", source)
+        self.assertIn("for (const [ref, body] of Object.entries(named)) {", source)
 
     def test_a_large_part_is_named_inside(self):
         spot = run_show_js(self, self.FREE + (
