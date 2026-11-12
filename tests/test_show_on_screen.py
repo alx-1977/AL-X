@@ -407,7 +407,7 @@ class TwoViewTests(unittest.TestCase):
         self.assertEqual(show(two).state, CapabilityResultState.SUCCEEDED)
         views = board.snapshot()["display"]["views"]
         self.assertEqual([(v["label"], v["sublabel"]) for v in views],
-                         [("Current", "Your board"), ("Amended", "Würth p.2")])
+                         [("Current", "Your board"), ("Amended", "My copy · Würth p.2")])
         show(display())
         self.assertEqual(board.snapshot()["display"]["views"][0]["label"], "Yours")
 

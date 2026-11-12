@@ -324,7 +324,7 @@ def build_display_executors(
         # the same two headings (Friedl, 2026-11-12); her own label moves under.
         if len(drawn) == 2:
             for item, heading in zip(drawn, ("Current", "Amended")):
-                item["sublabel"] = item["sublabel"] or item["label"]
+                item["sublabel"] = " · ".join(text for text in (item["label"], item["sublabel"]) if text)
                 item["label"] = heading
         display["views"] = drawn
         assets = []
