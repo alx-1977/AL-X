@@ -670,8 +670,14 @@ class CapabilityAttempt:
     repeated_reason_code: str | None = None
     started_at: datetime | None = None
     duration_seconds: float | None = None
+    # What exactly was wrong when a call was refused for its input; at most
+    # 300 characters, structural only (a field path and the rule it broke).
+    reason_detail: str | None = None
 
     def __post_init__(self) -> None:
+        if self.reason_detail is not None and (not isinstance(self.reason_detail, str)
+                                               or len(self.reason_detail) > 300):
+            raise ValueError("reason_detail is text of at most 300 characters")
         for name in ("recorded_at", "repeated_recorded_at", "started_at"):
             value = getattr(self, name)
             if value is not None:
