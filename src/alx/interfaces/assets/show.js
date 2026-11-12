@@ -168,6 +168,8 @@
   function view(svg, item, ox, oy, S) {
     const g = el('g', { transform: `translate(${ox},${oy})` }, svg);
     const geo = item.geometry, marks = item.marks || {};
+    // Her own mark first; else, on two views, red or green where the boards differ.
+    const shade = (mark, changed, fallback) => tone(mark ?? (changed ? item.changed_tone : undefined), fallback);
     const [x0, y0, x1, y1] = geo.window;
     // Rotated a quarter turn anticlockwise: the board's y runs left to right
     // and its x bottom to top. One axis is reversed, so the board is turned,
@@ -191,11 +193,11 @@
     el('path', { d: area, fill: 'rgba(8,30,52,.72)', 'fill-rule': 'evenodd' }, c);
     for (const plane of geo.planes || []) {
       el('path', { d: path(plane.polygons), 'fill-rule': 'evenodd',
-        fill: tone(marks['net:' + plane.net], COPPER), 'fill-opacity': 0.10 }, c);
+        fill: shade(marks['net:' + plane.net], false, COPPER), 'fill-opacity': 0.10 }, c);
     }
     for (const keepout of geo.keepouts || []) {
       el('path', { d: path(keepout.polygons), fill: 'none', 'stroke-dasharray': '7 5', 'stroke-width': 1.3,
-        stroke: tone(marks.keepout, 'rgba(127,233,255,.5)') }, c);
+        stroke: shade(marks.keepout, keepout.changed, 'rgba(127,233,255,.5)') }, c);
     }
     for (const edge of geo.edges || []) {
       el('polyline', { points: edge.map((p) => P(...p).join(',')).join(' '), fill: 'none',
@@ -205,7 +207,7 @@
     for (const track of geo.tracks || []) {
       const width = Math.max(1.2, track.width * S);
       el('polyline', { points: track.points.map((p) => P(...p).join(',')).join(' '), fill: 'none',
-        stroke: tone(marks['net:' + track.net], COPPER), 'stroke-width': width,
+        stroke: shade(marks['net:' + track.net], track.changed, COPPER), 'stroke-width': width,
         'stroke-linecap': 'round', 'stroke-linejoin': 'round', opacity: track.layer === 'F' ? 1 : 0.4 }, c);
       for (let i = 1; i < track.points.length; i += 1) {
         const b = bounds([P(...track.points[i - 1]), P(...track.points[i])]);
@@ -213,14 +215,14 @@
       }
     }
     for (const shape of geo.shapes || []) {
-      el('path', { d: path(shape.polygons), fill: tone(marks['net:' + shape.net], COPPER),
+      el('path', { d: path(shape.polygons), fill: shade(marks['net:' + shape.net], shape.changed, COPPER),
         opacity: shape.layer === 'F' ? 1 : 0.4 }, c);
       taken.push(bounds(shape.polygons.flatMap((poly) => poly.outer.map((p) => P(...p)))));
     }
     for (const via of geo.vias || []) {
       const [vx, vy] = P(...via.at);
       el('circle', { cx: vx, cy: vy, r: Math.max(2, via.diameter / 2 * S), fill: '#020c16',
-        stroke: tone(marks['net:' + via.net], COPPER), 'stroke-width': 1.2 }, c);
+        stroke: shade(marks['net:' + via.net], via.changed, COPPER), 'stroke-width': 1.2 }, c);
     }
 
     // Parts over the copper: a dark body (see-through when large, an antenna
@@ -245,17 +247,25 @@
         named[ref] = { x: left, y: top, w: right - left, h: bottom - top, large: body.large };
       }
     }
+    // Silkscreen under the pads, as on a real board, where pads cover it.
+    for (const mark of geo.silk || []) {
+      el('path', { d: path(mark.polygons), fill: SILK, opacity: mark.side === 'F' ? 0.6 : 0.3 }, c);
+    }
     for (const pad of geo.pads || []) {
-      el('path', { d: path(pad.polygons), fill: tone(marks[pad.ref] ?? marks['net:' + pad.net], COPPER) }, c);
+      el('path', { d: path(pad.polygons), fill: shade(marks[pad.ref] ?? marks['net:' + pad.net], pad.changed, COPPER) }, c);
       taken.push(bounds(pad.polygons.flatMap((poly) => poly.outer.map((p) => P(...p)))));
     }
-    // The part's own silkscreen: pin 1, polarity, orientation marks.
-    for (const mark of geo.silk || []) {
-      el('path', { d: path(mark.polygons), fill: SILK, opacity: mark.side === 'F' ? 0.85 : 0.4 }, c);
-    }
-    for (const body of Object.values(bodies)) {
+    // A part's own silkscreen stands for its outline; a drawn outline is
+    // added only for a part without one, a large part, or a part that moved.
+    const silked = new Set((geo.silk || []).map((mark) => mark.ref));
+    const moved = new Set((geo.parts || []).filter((part) => part.changed).map((part) => part.ref));
+    for (const [ref, body] of Object.entries(bodies)) {
+      if (silked.has(ref) && !body.large && !moved.has(ref)) {
+        taken.push(body);
+        continue;
+      }
       el('rect', { x: body.x, y: body.y, width: body.w, height: body.h, fill: 'none', 'stroke-width': 1,
-        stroke: body.large ? 'rgba(127,233,255,.75)' : SILK }, c);
+        stroke: moved.has(ref) ? shade(undefined, true, SILK) : body.large ? 'rgba(127,233,255,.75)' : SILK }, c);
       // A large part's name goes inside it, so only small bodies are obstacles.
       if (!body.large) taken.push(body);
     }
