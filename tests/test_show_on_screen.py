@@ -411,6 +411,47 @@ class TwoViewTests(unittest.TestCase):
         show(display())
         self.assertEqual(board.snapshot()["display"]["views"][0]["label"], "Yours")
 
+    def test_a_heading_her_words_only_repeat_is_not_shown_twice(self) -> None:
+        board = DisplayBoard()
+        show = build_display_executors(board, lambda _: GEOMETRY, lambda: "c1",
+                                       draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
+        two = display(views=[{**display()["views"][0], "label": "Current"},
+                             {**display()["views"][0], "label": "AMENDED", "sublabel": "Würth p.2"}])
+        show(two)
+        views = board.snapshot()["display"]["views"]
+        self.assertEqual([(v["label"], v["sublabel"]) for v in views],
+                         [("Current", ""), ("Amended", "Würth p.2")])
+
+    def test_unframed_views_share_one_frame(self) -> None:
+        # 12 Nov: five different windows in one day made every screen look different.
+        board = DisplayBoard()
+        asked = []
+
+        def section(arguments):
+            asked.append(arguments["window"])
+            if arguments["window"] is None:
+                own = [0, 0, 10, 10] if len(asked) == 1 else [2, -1, 12, 9]
+                return {**GEOMETRY, "window": own}
+            return {**GEOMETRY, "window": list(arguments["window"])}
+        show = build_display_executors(board, section, lambda: "c1", draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
+        view = {key: value for key, value in display()["views"][0].items() if key != "window"}
+        self.assertEqual(show(display(views=[view, {**view, "label": "Copy"}])).state,
+                         CapabilityResultState.SUCCEEDED)
+        self.assertEqual(asked, [None, None, [0, -1, 12, 10], [0, -1, 12, 10]])
+        frames = [v["geometry"]["window"] for v in board.snapshot()["display"]["views"]]
+        self.assertEqual(frames[0], frames[1])
+        # A window she names is kept as she named it.
+        asked.clear()
+        show(display())
+        self.assertEqual(asked, [[133, 113, 181, 138]])
+
+    def test_the_section_frames_named_parts_and_draws_named_signal_pours(self) -> None:
+        self.assertIn('if args["window"] is None:', SECTION_SCRIPT)
+        self.assertIn("fp.GetBoundingBox(False, False)", SECTION_SCRIPT)
+        self.assertIn('zone.GetNetname() in named_nets and zone.GetNetname() not in planes', SECTION_SCRIPT)
+        script = (ASSETS / "show.js").read_text()
+        self.assertIn("let x = Math.max(0, (area.width - total) / 2);", script)
+
     def test_silkscreen_lies_under_the_pads(self) -> None:
         script = (ASSETS / "show.js").read_text()
         self.assertLess(script.index("for (const mark of geo.silk || [])"),

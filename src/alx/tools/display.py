@@ -53,7 +53,7 @@ _VIEW = StructuredSchema(
      "refs": _NAMES, "nets": _NAMES, "planes": _NAMES,
      "marks": StructuredSchema(ValueKind.OBJECT), "rotate": StructuredSchema(ValueKind.BOOLEAN),
      "dims": StructuredSchema(ValueKind.ARRAY, items=_DIM)},
-    ("label", "window"), extra_properties=False)
+    ("label",), extra_properties=False)
 _BOX = StructuredSchema(ValueKind.OBJECT, {"at": _POINT, "label": _STRING, "tone": _STRING,
                                            "side": _STRING}, ("at", "label"), extra_properties=False)
 _PAGE = StructuredSchema(
@@ -76,9 +76,12 @@ DEFINITION = CapabilityDefinition(
     "names the project. Tones: ok (green, correct), bad (red, needs attention), info (cyan). "
     "Lead the items with what is wrong; what is correct gets one quiet item. A view reads a "
     "window [x0, y0, x1, y1] in mm of a KiCad board - board is a path in his design folders "
-    "(read through a copy, never changed), work_copy_id one of your own copies. Include every "
+    "(read through a copy, never changed), work_copy_id one of your own copies. Leave window "
+    "out: the named parts are then framed with a fixed margin, both views in one frame, the "
+    "same way every time. Include every "
     "part of the circuit, from its connector on. refs are the parts to draw, nets the tracks, "
-    "vias and copper shapes, planes the zone nets to show faintly. marks colours a part, "
+    "vias and copper shapes, planes the ground or power pours to show faintly; a signal pour "
+    "named in nets and not in planes is drawn as copper. marks colours a part, "
     "'net:<name>' or 'keepout' by tone; mark what differs red on his board and green on your "
     "copy; unmarked copper is blue. rotate turns the view 90 degrees. dims draws dimension "
     "lines between two points in mm. reference is the datasheet section the layout follows, "
@@ -297,11 +300,14 @@ def build_display_executors(
             return failed("unavailable", "KiCad is not available to read boards")
         if page_requests and read_page is None:
             return failed("unavailable", "datasheet pages cannot be shown here")
+        def read(view, window):
+            arguments = {key: view.get(key) for key in ("board", "work_copy_id", "refs", "nets", "planes")}
+            return read_section({**arguments, "window": window})
+
         drawn = []
         for view in views:
             try:
-                geometry = read_section({key: view.get(key) for key in
-                                         ("board", "work_copy_id", "window", "refs", "nets", "planes")})
+                geometry = read(view, view.get("window"))
             except Exception as error:  # noqa: BLE001 - reported as her evidence
                 code = getattr(error, "code", None) or (error.args[0] if error.args else "")
                 code = code if code in _FAILURES else "section_failed"
@@ -320,11 +326,25 @@ def build_display_executors(
                 "marks": dict(view.get("marks") or {}), "dims": list(view.get("dims") or ()),
                 "geometry": geometry,
             })
+        # Framed by the tool, two views share one frame: both boards are read
+        # again over the window that holds the parts on either (2026-11-12).
+        windows = [tuple(item["geometry"].get("window") or ()) for item in drawn]
+        if len(drawn) == 2 and not any(view.get("window") for view in views) and windows[0] != windows[1]:
+            frame = [min(w[0] for w in windows), min(w[1] for w in windows),
+                     max(w[2] for w in windows), max(w[3] for w in windows)]
+            try:
+                for item, view in zip(drawn, views):
+                    item["geometry"] = read(view, frame)
+            except Exception as error:  # noqa: BLE001 - reported as her evidence
+                return failed("section_failed", str(error)[:300])
         # Two views are always his board as it is and her amended copy, under
         # the same two headings (Friedl, 2026-11-12); her own label moves under.
         if len(drawn) == 2:
             for item, heading in zip(drawn, ("Current", "Amended")):
-                item["sublabel"] = " · ".join(text for text in (item["label"], item["sublabel"]) if text)
+                # Her own words move under the heading, unless they only repeat it.
+                own = [text for text in (item["label"], item["sublabel"])
+                       if text and text.strip().casefold() != heading.casefold()]
+                item["sublabel"] = " · ".join(own)
                 item["label"] = heading
         display["views"] = drawn
         assets = []

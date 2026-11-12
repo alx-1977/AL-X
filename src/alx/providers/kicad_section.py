@@ -26,10 +26,24 @@ import pcbnew
 
 board_path = Path(sys.argv[-1])
 args = json.loads((board_path.parent / "section-args.json").read_text())
-x0, y0, x1, y1 = args["window"]
 refs, nets, planes = set(args["refs"]), set(args["nets"]), set(args["planes"])
+named_nets = set(nets)
 mm, nm = pcbnew.ToMM, pcbnew.FromMM
 board = pcbnew.LoadBoard(str(board_path))
+if args["window"] is None:
+    # No window named: the named parts and a fixed margin, on a half-millimetre
+    # grid, so the same parts are framed the same way every time (2026-11-12).
+    boxes = [fp.GetBoundingBox(False, False) for fp in board.GetFootprints() if fp.GetReference() in refs]
+    if not boxes:
+        (board_path.parent / "section.json").write_text(json.dumps({"missing": {"refs": sorted(refs)}}))
+        raise SystemExit(0)
+    floor, ceil = (lambda v: math.floor(v * 2) / 2), (lambda v: math.ceil(v * 2) / 2)
+    x0 = floor(min(mm(box.GetX()) for box in boxes) - 2)
+    y0 = floor(min(mm(box.GetY()) for box in boxes) - 2)
+    x1 = ceil(max(mm(box.GetRight()) for box in boxes) + 2)
+    y1 = ceil(max(mm(box.GetBottom()) for box in boxes) + 2)
+else:
+    x0, y0, x1, y1 = args["window"]
 COPPER = {pcbnew.F_Cu: "F", pcbnew.B_Cu: "B"}
 for index in range(1, 31):
     layer = getattr(pcbnew, "In%d_Cu" % index, None)
@@ -141,6 +155,15 @@ for zone in board.Zones():
             shape.BooleanIntersection(window)
             if shape.OutlineCount():
                 out["keepouts"].append({"layer": name, "polygons": polys(shape)})
+        elif zone.GetNetname() in named_nets and zone.GetNetname() not in planes:
+            # A pour of a net she named, not as a plane, is copper like a track.
+            filled = zone.GetFilledPolysList(layer)
+            if filled is None:
+                continue
+            shape = pcbnew.SHAPE_POLY_SET(filled)
+            shape.BooleanIntersection(window)
+            if shape.OutlineCount():
+                out["shapes"].append({"layer": name, "net": zone.GetNetname(), "polygons": polys(shape)})
         elif zone.GetNetname() in planes:
             filled = zone.GetFilledPolysList(layer)
             if filled is None:
@@ -313,10 +336,13 @@ def read_section(
 ) -> dict[str, Any]:
     """Copy one board into scratch storage, read a window of it, remove the copy."""
     window = arguments.get("window")
-    if (not isinstance(window, (list, tuple)) or len(window) != 4
+    if window is not None and (
+            not isinstance(window, (list, tuple)) or len(window) != 4
             or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in window)
             or window[0] >= window[2] or window[1] >= window[3]):
         raise SectionError("arguments_unusable", "window is [x0, y0, x1, y1] in mm, x0 < x1, y0 < y1")
+    if window is None and not arguments.get("refs"):
+        raise SectionError("arguments_unusable", "without a window, name the parts to frame")
     names = {}
     for key in ("refs", "nets", "planes"):
         value = arguments.get(key) or []
@@ -324,7 +350,7 @@ def read_section(
                 or not all(isinstance(v, str) and v for v in value)):
             raise SectionError("arguments_unusable", f"{key} is a list of up to {MAX_NAMES} names")
         names[key] = list(value)
-    return _run(board, {"window": list(window), **names}, SECTION_SCRIPT, scratch_root,
+    return _run(board, {"window": None if window is None else list(window), **names}, SECTION_SCRIPT, scratch_root,
                 kicad_python, execute_python)
 
 
