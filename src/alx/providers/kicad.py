@@ -402,6 +402,11 @@ class KiCadProvider:
         self.settings, self.execute_cli = settings, execute_cli
         self.execute_python = execute_python
         self.design_roots = tuple(p.expanduser().resolve() for p in settings.design_roots)
+        # Datasheets may also be in her own storage (ALX_Storage), as her
+        # picture tool already allows (2026-11-13: copies to his Desktop).
+        self.reference_roots = self.design_roots
+        self.datasheet_folder = None
+        self.datasheet_sources = None
         self.work_root = settings.work_root.expanduser().resolve()
         self.engine_paths = {}
         self.execute_engine = None
@@ -675,7 +680,7 @@ class KiCadProvider:
         document = arguments.get('document')
         if not isinstance(document, str) or not document.strip():
             raise KiCadError('arguments_unusable', {'detail': 'document is the path of a PDF'})
-        document = bounded(document, self.design_roots)
+        document = bounded(document, self.reference_roots)
         try:
             return render_section(document, arguments, scratch_root=self.work_root / 'sections',
                                   renderer=self.engine_paths.get('pdftoppm') or Path('/nonexistent'),
@@ -757,7 +762,7 @@ class KiCadProvider:
         document = arguments.get('document')
         if not isinstance(document, str) or not document.strip():
             raise KiCadError('arguments_unusable', {'detail': 'document is the path of a PDF'})
-        document = bounded(document, self.design_roots)
+        document = bounded(document, self.reference_roots)
         try:
             page, section = section_box(arguments)
             words = extract_words(document, page, scratch_root=self.work_root / 'sections',
@@ -1005,6 +1010,21 @@ class KiCadProvider:
         except (KiCadError, OSError, ValueError):
             result['current'] = False
         return result
+
+    def fetch_datasheet(self, arguments):
+        """A part's datasheet PDF by part number, into her datasheets folder (2026-11-13)."""
+        from alx.providers.datasheet_fetch import DatasheetError, fetch_datasheet
+        if self.datasheet_sources is None or self.datasheet_folder is None:
+            raise KiCadError('engine_unavailable', {'detail': 'no datasheet source is configured'})
+        client, nexar, digikey, download = self.datasheet_sources()
+        try:
+            with client:
+                return fetch_datasheet(arguments.get('part_number', ''), arguments.get('manufacturer') or '',
+                                       self.datasheet_folder, client=client, nexar=nexar, digikey=digikey,
+                                       download=download)
+        except DatasheetError as error:
+            raise KiCadError(error.code if error.code != 'not_found' else 'document_unavailable',
+                             {'detail': error.detail}) from error
 
     def read_reference(self, arguments):
         raw = Path(arguments['path']).expanduser().absolute()

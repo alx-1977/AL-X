@@ -230,6 +230,15 @@ INSPECT = CapabilityDefinition('inspect',
     obj({'board': MAP, 'parts': array(MAP), 'nets': array(MAP), 'zones': array(MAP),
          'truncated': MAP}), SideEffect.NONE, FAILURES)
 
+FETCH_DATASHEET = CapabilityDefinition('fetch_datasheet',
+    "A part's datasheet as a PDF, by manufacturer part number (manufacturer narrows it). "
+    "Asks Nexar (Octopart keeps copies of most datasheets) and then DigiKey for links, "
+    'downloads each plainly and keeps the first real PDF, in ALX_Storage/Datasheets, where '
+    'check_layout, look and read_reference can read it. Use it before saying a datasheet '
+    'cannot be found; tried lists every source and why it failed.',
+    obj({'part_number': S, 'manufacturer': S}, ('part_number',)),
+    obj({'path': S, 'source': S, 'url': S, 'tried': array(MAP)}),
+    SideEffect.NONE, FAILURES)
 COPY_LIBRARY = CapabilityDefinition('copy_library',
     'A work copy of a KiCad library folder (the FireFli library: footprints and symbols), for '
     'adding or correcting parts. Edit it with edit (argv[1] is a file in the copy folder; '
@@ -324,6 +333,7 @@ class KiCadAction(str, Enum):
     CONFIRM_LAYOUT_READINGS = 'confirm_layout_readings'
     MAKE_HIERARCHICAL = 'make_hierarchical'
     COPY_LIBRARY = 'copy_library'
+    FETCH_DATASHEET = 'fetch_datasheet'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -340,12 +350,13 @@ CONTRACTS = {
     KiCadAction.CONFIRM_LAYOUT_READINGS: CONFIRM_READINGS,
     KiCadAction.MAKE_HIERARCHICAL: MAKE_HIERARCHICAL,
     KiCadAction.COPY_LIBRARY: COPY_LIBRARY,
+    KiCadAction.FETCH_DATASHEET: FETCH_DATASHEET,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
-    KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY))
+    KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -385,7 +396,8 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.CHECK_LAYOUT: provider.check_layout,
                KiCadAction.CONFIRM_LAYOUT_READINGS: provider.confirm_layout_readings,
                KiCadAction.MAKE_HIERARCHICAL: provider.make_hierarchical,
-               KiCadAction.COPY_LIBRARY: provider.copy_library}
+               KiCadAction.COPY_LIBRARY: provider.copy_library,
+               KiCadAction.FETCH_DATASHEET: provider.fetch_datasheet}
 
     def invoke(arguments):
         code = 'arguments_unusable'

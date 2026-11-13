@@ -19,6 +19,9 @@ class KiCadRuntime:
     provider: KiCadProvider | None = None
 
 
+ALX_STORAGE = Path('~/Library/Mobile Documents/com~apple~CloudDocs/ALX_Storage')
+
+
 def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
     settings = KiCadSettings.from_environment(environment, storage_root)
     provider = KiCadProvider(settings, partial(run_kicad_cli, runner=runner,
@@ -38,6 +41,21 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
                                       timeout_seconds=settings.cli_timeout_seconds)
     # D-073: datasheet sections for the viewer, rendered under the same confinement.
     provider.execute_page = partial(run_confined_converter, runner=runner, timeout_seconds=60)
+    # Datasheets in her own storage are readable too, and fetched ones go there.
+    storage = Path(environment.get('ALX_STORAGE_ROOT', ALX_STORAGE)).expanduser().resolve()
+    provider.reference_roots = tuple(dict.fromkeys((*provider.design_roots, storage)))
+    provider.datasheet_folder = storage / 'Datasheets'
+    nexar = [(environment[a], environment[b]) for a, b in (
+        ('NEXAR_CLIENT_ID', 'NEXAR_CLIENT_SECRET'), ('NEXAR_EVAL_CLIENT_ID', 'NEXAR_EVAL_CLIENT_SECRET'))
+        if environment.get(a) and environment.get(b)]
+    digikey = ((environment['DIGIKEY_CLIENT_ID'], environment['DIGIKEY_CLIENT_SECRET'])
+               if environment.get('DIGIKEY_CLIENT_ID') and environment.get('DIGIKEY_CLIENT_SECRET') else None)
+
+    def datasheet_sources():
+        from alx.providers.datasheet_fetch import api_client
+        from alx.providers.web_fetch import HttpWebFetchProvider
+        return api_client(), nexar, digikey, HttpWebFetchProvider().fetch_pdf
+    provider.datasheet_sources = datasheet_sources if (nexar or digikey) else None
     permission = 'design.kicad'
     # D-074: one capability. export and write_back change his project and need
     # his approval of the exact call; every other action is free.

@@ -321,11 +321,52 @@ class HttpWebFetchProvider:
 
         raise WebRetrievalError(RETRIEVAL_BLOCKED, "too many redirects")
 
+    def fetch_pdf(self, url: str, max_bytes: int = 60_000_000) -> bytes:
+        """A PDF document by URL, through the same validated path as a page (2026-11-13).
+
+        For datasheets (D-079). Every hop is revalidated exactly as for a page;
+        only a response that is a PDF, uncompressed and within max_bytes, is
+        returned. The request says what it is and asks for a PDF.
+        """
+        current, seen = url, set()
+        expires_at = self._monotonic() + self._total_deadline
+        for _hop in range(MAX_REDIRECTS + 1):
+            self._check_deadline(expires_at)
+            public = parse_public_url(current, self._resolver)
+            if public.url in seen:
+                raise WebRetrievalError(RETRIEVAL_BLOCKED, "redirect loop")
+            seen.add(public.url)
+            try:
+                with self._request(public, accept="application/pdf", encoding="identity") as response:
+                    self._check_deadline(expires_at)
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location", "").strip()
+                        if not location:
+                            raise WebRetrievalError(RETRIEVAL_BLOCKED, "redirect without location")
+                        current = urljoin(public.url, location)
+                        continue
+                    if response.status_code >= 400:
+                        raise WebRetrievalError(
+                            RETRIEVAL_BLOCKED if response.status_code in (401, 403, 429) else PROVIDER_FAILED,
+                            f"status {response.status_code}")
+                    if response.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
+                        raise WebRetrievalError(UNSUPPORTED_CONTENT_TYPE, "compressed document")
+                    body = self._read_bounded(response, expires_at, max_bytes)
+                    if not body.startswith(b"%PDF-"):
+                        raise WebRetrievalError(UNSUPPORTED_CONTENT_TYPE, "not a PDF")
+                    return body
+            except httpx.TimeoutException:
+                raise WebRetrievalError(RETRIEVAL_TIMEOUT, "request timed out") from None
+            except httpx.HTTPError as error:
+                raise WebRetrievalError(PROVIDER_FAILED, type(error).__name__) from None
+        raise WebRetrievalError(RETRIEVAL_BLOCKED, "too many redirects")
+
     def _check_deadline(self, expires_at: float) -> None:
         if self._monotonic() >= expires_at:
             raise WebRetrievalError(RETRIEVAL_TIMEOUT, "total deadline expired")
 
-    def _request(self, public):
+    def _request(self, public, accept="text/html,application/xhtml+xml,text/plain;q=0.9",
+                 encoding="gzip, deflate"):
         """Connect to a validated address while keeping the real hostname.
 
         The URL carries the literal address, so httpcore connects there and
@@ -349,8 +390,8 @@ class HttpWebFetchProvider:
             headers={
                 "Host": public.host_header,
                 "User-Agent": "AL/X-web-reader/1.0 (+public read-only)",
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
+                "Accept": accept,
+                "Accept-Encoding": encoding,
             },
             # Preserves certificate validation against the real hostname
             # even though the connection went to the literal address.
@@ -515,7 +556,8 @@ class HttpWebFetchProvider:
             query=f"?{parts.query}" if parts.query else "",
         ).url
 
-    def _read_bounded(self, response: httpx.Response, expires_at: float) -> bytes:
+    def _read_bounded(self, response: httpx.Response, expires_at: float,
+                      limit: int = MAX_DOWNLOAD_BYTES) -> bytes:
         """Count the bytes actually on the wire; never trust Content-Length.
 
         A declared length is a claim by the server, so the arriving bytes are
@@ -533,7 +575,7 @@ class HttpWebFetchProvider:
             # each timeout would otherwise hold this request open forever.
             self._check_deadline(expires_at)
             total += len(chunk)
-            if total > MAX_DOWNLOAD_BYTES:
+            if total > limit:
                 raise WebRetrievalError(PAGE_TOO_LARGE, "download exceeded the bound")
             chunks.append(chunk)
         return b"".join(chunks)

@@ -420,5 +420,34 @@ class ExtractionTests(unittest.TestCase):
         self.assertGreaterEqual(scripts, 10)
 
 
+
+class PdfTests(FetchTestCase):
+    """Datasheets (D-079): a PDF through the same guarded path as a page."""
+
+    def test_a_pdf_is_returned_and_a_page_is_refused(self) -> None:
+        ROUTES["/sheet.pdf"] = lambda h: (200, {"Content-Type": "application/pdf"}, b"%PDF-1.7 sheet")
+        ROUTES["/login"] = page("<html><body>Please sign in</body></html>")
+        self.assertEqual(self.provider.fetch_pdf("http://fixture.example/sheet.pdf"), b"%PDF-1.7 sheet")
+        self.assertEqual(self.client._transport.seen[-1].headers["accept"], "application/pdf")
+        with self.assertRaises(WebRetrievalError) as caught:
+            self.provider.fetch_pdf("http://fixture.example/login")
+        self.assertEqual(caught.exception.code, UNSUPPORTED_CONTENT_TYPE)
+
+    def test_a_pdf_link_redirecting_inward_is_refused(self) -> None:
+        ROUTES["/sheet.pdf"] = lambda h: (302, {"Location": "http://internal.example/secret.pdf"}, b"")
+
+        def mixed(host: str, port: int):
+            return (private_resolver if host == "internal.example" else public_resolver)(host, port)
+        provider = HttpWebFetchProvider(client=self.client, resolver=mixed)
+        with self.assertRaises(WebRetrievalError) as caught:
+            provider.fetch_pdf("http://fixture.example/sheet.pdf")
+        self.assertEqual(caught.exception.code, URL_NOT_PUBLIC)
+
+    def test_a_pdf_over_its_bound_is_refused(self) -> None:
+        ROUTES["/big.pdf"] = lambda h: (200, {"Content-Type": "application/pdf"}, b"%PDF-" + b"x" * 5000)
+        with self.assertRaises(WebRetrievalError) as caught:
+            self.provider.fetch_pdf("http://fixture.example/big.pdf", max_bytes=1000)
+        self.assertEqual(caught.exception.code, PAGE_TOO_LARGE)
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
