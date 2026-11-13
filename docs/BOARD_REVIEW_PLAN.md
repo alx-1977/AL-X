@@ -49,6 +49,11 @@ compared KiCad with Altium, never with the datasheet.
 - **A one-time audit in one go.** It covers the 86 footprints in
   Connectors, ICs, Inductors, Misc and Semiconductors. The resistors and
   capacitors are left out because we built those ourselves.
+- **New parts from now on,** including the rest of the Altium projects,
+  are built from the manufacturer's datasheet land pattern, never copied
+  from the Altium import. She compares the result with the Altium
+  footprint and shows Friedl any difference instead of choosing, because
+  a difference may be a mistake (AE2) or a deliberate change of his.
 - **At board level,** KiCad's own DRC already reports a footprint that
   differs from the library. No new check is needed.
 
