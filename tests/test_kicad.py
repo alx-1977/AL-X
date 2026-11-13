@@ -636,6 +636,27 @@ class KiCadTests(unittest.TestCase):
             {'filename': 'b.kicad_sch', 'name': 'B', 'uuid': 'b'}]})
         (self.project / 'test.kicad_pro').write_text(json.dumps(pro))
 
+    def test_make_hierarchical_budget_exhaustion_restores_copy_and_releases_lock(self):
+        self.two_top_level_sheets()
+        label = '\n\t(global_label "NET"\n\t\t(shape passive)\n\t\t(at 10 10 0)\n\t)\n'
+        for name in ('test.kicad_sch', 'b.kicad_sch'):
+            path = self.project / name
+            path.write_text(path.read_text().rstrip()[:-1] + label + ')\n')
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id'] / 'project'
+        before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+        with patch('alx.providers.kicad_top_layout.ROUTING_WORK_LIMIT', 1, create=True):
+            failed = self.call('make_hierarchical', work_copy_id=checked['work_copy_id'])
+        self.assertIsNotNone(failed.failure)
+        self.assertEqual(failed.failure['code'], 'unsupported_project')
+        self.assertIn('top-sheet routing work budget exhausted', failed.failure['recovery']['detail'])
+        self.assertEqual({p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}, before)
+        self.assertFalse(list(root.parent.glob('snapshot-*')))
+        # Another conversion can acquire the same lock and succeeds normally.
+        done = self.success('make_hierarchical', work_copy_id=checked['work_copy_id'])
+        self.assertTrue(done['netlist_identical'])
+        self.assertEqual(done['top_sheet_crossings'], 0)
+
     def test_make_hierarchical_is_kept_only_when_the_netlist_is_unchanged(self):
         """2026-11-13: proven by KiCad's netlist; any change puts the copy back."""
         self.two_top_level_sheets()

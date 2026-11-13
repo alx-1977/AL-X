@@ -204,6 +204,37 @@ def _segment(kind: str, x1: float, y1: float, x2: float, y2: float) -> str:
             f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
 
 
+def _resize_paper(head, rectangles, routes, extent):
+    """Keep existing page dimensions and enclose final blocks/wires plus margins."""
+    paper = re.search(r'\(paper "([^"]+)"([^)]*)\)', head)
+    # KiCad's named papers, in landscape millimetres (User dimensions are explicit).
+    sizes = {"A0": (1189, 841), "A1": (841, 594), "A2": (594, 420),
+             "A3": (420, 297), "A4": (297, 210), "A5": (210, 148),
+             "A": (279.4, 215.9), "B": (431.8, 279.4), "C": (558.8, 431.8),
+             "D": (863.6, 558.8), "E": (1117.6, 863.6),
+             "USLetter": (279.4, 215.9), "USLegal": (355.6, 215.9), "USLedger": (431.8, 279.4)}
+    old_width, old_height = 0, 0
+    if paper:
+        if paper[1] == 'User':
+            old_width, old_height = map(float, paper[2].split()[:2])
+        else:
+            old_width, old_height = sizes.get(paper[1], (0, 0))
+        if 'portrait' in paper[2].split():
+            old_width, old_height = old_height, old_width
+    max_x = max([extent[0], *(x + w for x, y, w, h in rectangles),
+                 *(p[0] for segments in routes.values() for edge in segments for p in edge)])
+    max_y = max([extent[1], *(y + h for x, y, w, h in rectangles),
+                 *(p[1] for segments in routes.values() for edge in segments for p in edge)])
+    width, height = max(old_width, (max_x + 12) * GRID), max(old_height, (max_y + 20) * GRID)
+    # Preserve a sufficient named/custom declaration, including its orientation.
+    if paper and width == old_width and height == old_height:
+        return head
+    declaration = f'(paper "User" {width:.2f} {height:.2f})'
+    if paper:
+        return head[:paper.start()] + declaration + head[paper.end():]
+    return head + '\t' + declaration + '\n'
+
+
 def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
     """Show how the sheets connect, as Altium's sheet entries did (Friedl, 2026-11-13).
 
@@ -343,8 +374,7 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
 """)
     head = top[:blocks[0].start()] + "\n"
     tail = top[blocks[-1].end():]
-    if extent[0] > 150 or extent[1] > 96:
-        head = re.sub(r'\(paper "A3"\)', f'(paper "User" {(extent[0] + 12) * GRID:.2f} {(extent[1] + 20) * GRID:.2f})', head)
+    head = _resize_paper(head, rectangles, routes, extent)
     root_path.write_text(head + "".join(parts) + "".join(drawing) + tail.lstrip("\n"))
     return {"connected": shared, "reason": "", "top_sheet_crossings": crossings}
 

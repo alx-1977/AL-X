@@ -10,9 +10,26 @@ import itertools
 import math
 
 GRID = 2.54
+# One allowance for the entire layout, including candidates that are discarded.
+# Units count search nodes, neighbors and individual tree-point distance checks.
+ROUTING_WORK_LIMIT = 2_000_000
 
 
-def crossing_count(routes):
+class RoutingBudgetExceeded(ValueError):
+    """No partial layout may be accepted when the shared allowance is spent."""
+
+
+class RoutingBudget:
+    def __init__(self, limit=None):
+        self.remaining = ROUTING_WORK_LIMIT if limit is None else limit
+
+    def consume(self, units=1):
+        if self.remaining < units:
+            raise RoutingBudgetExceeded('top-sheet routing work budget exhausted; no layout accepted')
+        self.remaining -= units
+
+
+def crossing_count(routes, budget=None):
     """Proper crossings of maximal straight runs from distinct connections.
 
     Bends and intentional shared endpoints do not count; wire/bus pairs do.
@@ -23,6 +40,8 @@ def crossing_count(routes):
         hits = set()
         for a, b in routes[first]:
             for c, d in routes[second]:
+                if budget is not None:
+                    budget.consume()
                 if a[1] == b[1] and c[0] == d[0]:
                     if min(a[0], b[0]) < c[0] < max(a[0], b[0]) and min(c[1], d[1]) < a[1] < max(c[1], d[1]):
                         hits.add((c[0], a[1]))
@@ -85,7 +104,7 @@ def _pins(rectangles, uses, reverse):
     return pins
 
 
-def _route(start, targets, blocked, occupied, bounds, initial_axis):
+def _route(start, targets, blocked, occupied, bounds, initial_axis, budget):
     """Grid A* minimizes (crossings, bends, length), with stable node ties.
 
     Existing bends/endpoints and parallel overlap are obstacles. A route can
@@ -93,13 +112,18 @@ def _route(start, targets, blocked, occupied, bounds, initial_axis):
     accidental KiCad joins. Same-net tree targets are intentional junctions.
     """
     def distance(p):
-        return min(abs(p[0] - q[0]) + abs(p[1] - q[1]) for q in targets)
+        nearest = math.inf
+        for q in targets:
+            budget.consume()
+            nearest = min(nearest, abs(p[0] - q[0]) + abs(p[1] - q[1]))
+        return nearest
 
     state = start, initial_axis
     best = {state: (0, 0, 0)}
     queue = [(0, 0, distance(start), 0, start, initial_axis)]
     previous = {}
     while queue:
+        budget.consume()
         cross, bends, _, length, p, axis = heapq.heappop(queue)
         state = p, axis
         if best.get(state) != (cross, bends, length):
@@ -107,10 +131,12 @@ def _route(start, targets, blocked, occupied, bounds, initial_axis):
         if p in targets:
             path = [p]
             while state in previous:
+                budget.consume()
                 state = previous[state]
                 path.append(state[0])
             return list(reversed(path))
         for dx, dy, direction in ((-1, 0, 1), (0, -1, 2), (0, 1, 2), (1, 0, 1)):
+            budget.consume()
             q = p[0] + dx, p[1] + dy
             if not (4 <= q[0] <= bounds[0] and 8 <= q[1] <= bounds[1]) or q in blocked:
                 continue
@@ -126,14 +152,18 @@ def _route(start, targets, blocked, occupied, bounds, initial_axis):
     return None
 
 
-def _segments(edges):
+def _segments(edges, budget=None):
     """Merge unit edges into straight runs, stopping at branch junctions."""
     neighbors = {}
     for a, b in edges:
+        if budget is not None:
+            budget.consume()
         neighbors.setdefault(a, set()).add(b)
         neighbors.setdefault(b, set()).add(a)
     remaining, result = set(edges), []
     while remaining:
+        if budget is not None:
+            budget.consume(len(remaining))  # min() scans every remaining edge.
         a, b = min(remaining)
         remaining.remove((a, b))
         ends = [a, b]
@@ -141,6 +171,8 @@ def _segments(edges):
             # Use the adjacent original endpoint to establish direction.
             prev, p = (b, a) if end == 0 else (a, b)
             while len(neighbors[p]) == 2:
+                if budget is not None:
+                    budget.consume()
                 q = next(v for v in neighbors[p] if v != prev)
                 if (q[0] - p[0], q[1] - p[1]) != (p[0] - prev[0], p[1] - prev[1]):
                     break
@@ -161,6 +193,7 @@ def layout(count, uses):
     order. This minimizes crossings among evaluated candidates, not globally.
     Expand the page for designs that cannot fit the standard A3 usable area.
     """
+    budget = RoutingBudget()
     degree = max((sum(i in members for members in uses.values()) for i in range(count)), default=0)
     width, height = max(20, 2 * (degree + 1)), max(12, 2 * (degree + 1))
     best, score = None, None
@@ -178,6 +211,7 @@ def layout(count, uses):
             pins = _pins(rects, uses, reverse)
             labels = sorted(uses)
             for routing_order in (labels, list(reversed(labels))):
+                budget.consume()
                 occupied, routes, junctions = {}, {}, {}
                 for label in routing_order:
                     terminals = []
@@ -191,7 +225,7 @@ def layout(count, uses):
                     tree.add(q)
                     failed = q in occupied
                     for p, q, axis in terminals[1:]:
-                        path = None if q in occupied else _route(q, tree, blocked, occupied, (extent_x, extent_y), axis)
+                        path = None if q in occupied else _route(q, tree, blocked, occupied, (extent_x, extent_y), axis, budget)
                         if path is None:
                             failed = True
                             break
@@ -200,19 +234,20 @@ def layout(count, uses):
                         tree.update(path)
                     if failed:
                         break
-                    segments, joins = _segments(edges)
+                    segments, joins = _segments(edges, budget)
                     routes[label], junctions[label] = segments, joins
                     for a, b in segments:
                         axis = 1 if a[1] == b[1] else 2
                         dx, dy = (b[0] > a[0]) - (b[0] < a[0]), (b[1] > a[1]) - (b[1] < a[1])
                         p = a
                         while True:
+                            budget.consume()
                             occupied[p] = occupied.get(p, 0) | (3 if p in (a, b) else axis)
                             if p == b:
                                 break
                             p = p[0] + dx, p[1] + dy
                 else:
-                    crossings = crossing_count(routes)
+                    crossings = crossing_count(routes, budget)
                     if score is None or crossings < score:
                         best, score = (rects, pins, routes, junctions, crossings, (extent_x, extent_y)), crossings
                     if score == 0:

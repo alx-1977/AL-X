@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.providers.kicad_hierarchy import make_hierarchical, netlist_nets  # noqa: E402
 from alx.providers.kicad_hierarchy import connect_with_sheet_pins, _top_sheet  # noqa: E402
 from alx.providers.kicad_top_layout import crossing_count, layout, _route, _segments  # noqa: E402
+from alx.providers import kicad_top_layout as top_layout  # noqa: E402
 
 
 # Four blocks, five links, two buses: a cycle with a diagonal, like RegScanner.
@@ -137,6 +139,81 @@ def footprint(reference: str, symbol_uuid: str, sheet_name: str, sheet_file: str
 
 
 class MakeHierarchicalTests(unittest.TestCase):
+    def test_connected_page_contains_all_blocks_and_wires_for_every_paper(self):
+        for paper, minimum in ((None, (436.88, 294.64)), ('(paper "A3")', (420, 297)),
+                               ('(paper "A4" portrait)', (210, 297)),
+                               ('(paper "User" 900 800)', (900, 800))):
+            with self.subTest(paper=paper), tempfile.TemporaryDirectory() as folder:
+                project = Path(folder)
+                sheets = [{"uuid": f"s{i}", "name": f"Sheet{i}", "filename": f"s{i}.kicad_sch"}
+                          for i in range(17)]
+                labels = ''.join(f'\n\t(global_label "N{j}"\n\t\t(shape passive)\n'
+                                 f'\t\t(at 10 10 0)\n\t\t(uuid "n{j}")\n\t)\n' for j in range(11))
+                for i, info in enumerate(sheets):
+                    (project / info['filename']).write_text('(kicad_sch\n' + (labels if i < 2 else '') + ')\n')
+                (project / 'scanner.kicad_pro').write_text('{}')
+                top = _top_sheet('root', 'scanner', sheets, '')
+                if paper:
+                    top = re.sub(r'\(paper [^)]*\)', paper, top)
+                (project / 'scanner.kicad_sch').write_text(top)
+                result = connect_with_sheet_pins(project)
+                self.assertEqual(result['top_sheet_crossings'], 0)
+                top = (project / 'scanner.kicad_sch').read_text()
+                page = re.search(r'\(paper "User" ([\d.]+) ([\d.]+)\)', top)
+                self.assertIsNotNone(page)
+                width, height = map(float, page.groups())
+                self.assertGreaterEqual(width, minimum[0])
+                self.assertGreaterEqual(height, minimum[1])
+                rectangles, segments = emitted_geometry(top)
+                self.assertEqual(len(rectangles), 17)
+                self.assertTrue(segments)
+                points = [(x, y) for x, y, _, _ in rectangles]
+                points += [(x + w, y + h) for x, y, w, h in rectangles]
+                points += [p for _, a, b in segments for p in (a, b)]
+                for x, y in points:
+                    self.assertTrue(0 <= x <= width and 0 <= y <= height, (x, y, width, height))
+
+    def test_routing_budget_exhausts_inside_search(self):
+        with patch.object(top_layout, 'ROUTING_WORK_LIMIT', 10, create=True), \
+                patch.object(top_layout.heapq, 'heappop', wraps=top_layout.heapq.heappop) as pop:
+            budget = top_layout.RoutingBudget()
+            with self.assertRaisesRegex(top_layout.RoutingBudgetExceeded, 'top-sheet routing work budget exhausted'):
+                _route((4, 8), {(50, 50)}, set(), {}, (100, 100), 1, budget)
+        self.assertGreater(pop.call_count, 0)
+
+    def test_routing_budget_charges_each_tree_distance_point(self):
+        class Tree:
+            visited = 0
+
+            def __iter__(self):
+                for x in range(1000):
+                    self.visited += 1
+                    yield (x, 50)
+
+        tree = Tree()
+        budget = top_layout.RoutingBudget(3)
+        with self.assertRaisesRegex(top_layout.RoutingBudgetExceeded, 'top-sheet routing work budget exhausted'):
+            _route((4, 8), tree, set(), {}, (100, 100), 1, budget)
+        self.assertLessEqual(tree.visited, 4)
+
+    def test_routing_budget_is_shared_across_candidates(self):
+        original = top_layout._route
+        budgets = []
+
+        def route(*args):
+            budgets.append(args[-1])
+            return original(*args)
+
+        # Retained crossings force the search beyond its first candidate.
+        with patch.object(top_layout, 'ROUTING_WORK_LIMIT', 5000, create=True), \
+                patch.object(top_layout, 'crossing_count', return_value=1) as score, \
+                patch.object(top_layout, '_route', side_effect=route):
+            with self.assertRaisesRegex(ValueError, 'top-sheet routing work budget exhausted'):
+                layout(2, {'NET': [0, 1]})
+        self.assertGreater(len(budgets), 1)
+        self.assertGreater(score.call_count, 0)  # A partial best must not be returned on exhaustion.
+        self.assertTrue(all(b is budgets[0] for b in budgets))
+
     def test_planar_scanner_layout_geometry_and_determinism(self):
         outputs = []
         for _ in range(2):
@@ -210,7 +287,7 @@ class MakeHierarchicalTests(unittest.TestCase):
 
     def test_router_crosses_only_straight_interiors_when_forced(self):
         occupied = {(8, y): 2 if 8 < y < 20 else 3 for y in range(8, 21)}
-        path = _route((4, 14), {(12, 14)}, set(), occupied, (12, 20), 1)
+        path = _route((4, 14), {(12, 14)}, set(), occupied, (12, 20), 1, top_layout.RoutingBudget())
         self.assertIsNotNone(path)
         segments, _ = _segments({tuple(sorted(pair)) for pair in zip(path, path[1:])})
         self.assertEqual(crossing_count({"wire": segments, "bus": [((8, 8), (8, 20))]}), 1)
