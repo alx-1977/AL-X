@@ -162,6 +162,43 @@ def design_inventory(source, *, exclude=frozenset()):
     return inventory(source, exclude={*exclude, *not_design(source)})
 
 
+_LIBRARY_SKIPPED = frozenset({'.git', '__pycache__', 'cache', 'node_modules'})
+
+
+def library_inventory(source, *, exclude=frozenset()):
+    """A library folder's KiCad files only: footprints, symbols, library tables.
+
+    The FireFli library also holds a 749 MB download cache, scripts and its
+    git history (2026-11-13); none of it is a part, and a commit or a cache
+    refresh must never read as a changed original.
+    """
+    exclude = frozenset(exclude)
+    result, total = {}, 0
+    for directory, folders, files in os.walk(source):
+        here = Path(directory)
+        folders[:] = sorted(name for name in folders if name not in _LIBRARY_SKIPPED
+                            and here / name not in exclude and not (here / name).is_symlink())
+        for name in sorted(files):
+            path = here / name
+            if path in exclude or path.is_symlink() or not is_design_file(name):
+                continue
+            size = path.stat().st_size
+            total += size
+            if size > MAX_FILE_BYTES or total > MAX_PROJECT_BYTES:
+                raise KiCadError('project_too_large')
+            result[path.relative_to(source).as_posix()] = sha(path)
+    return result
+
+
+def _library_files(source):
+    """A copytree ignore keeping only a library's KiCad files and their folders."""
+    def ignore(directory, names):
+        here = Path(directory)
+        return [name for name in names if name in _LIBRARY_SKIPPED or (
+            not (here / name).is_dir() and not is_design_file(name))]
+    return ignore
+
+
 def _without_local_history(source):
     """A copytree ignore that leaves out exactly what is not the design."""
     skipped = {path.name for path in not_design(source)}
@@ -650,9 +687,49 @@ class KiCadProvider:
             raise KiCadError('arguments_unusable', {'detail': 'name a work_copy_id or a board, not both'})
         if arguments.get('work_copy_id'):
             root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('library'):
+                # One footprint of a library copy, on a board of its own (part FP).
+                return self._footprint_board(root, arguments.get('footprint')), meta['source'] + '|' + str(
+                    arguments.get('footprint'))
+            if arguments.get('footprint'):
+                raise KiCadError('arguments_unusable', {'detail': 'footprint is for a library copy'})
             return root / 'project' / meta['board'], meta['source']
         board = bounded(self._source(arguments['board']), self.design_roots)
         return board, str(board.parent)
+
+    def _footprint_board(self, root, footprint):
+        """A library footprint placed alone on a board, as part FP, for measuring."""
+        if not isinstance(footprint, str) or footprint.count('/') != 1:
+            raise KiCadError('arguments_unusable', {'detail': 'footprint is LIBRARY/NAME, e.g. FireFli_Misc/7488912455'})
+        library, name = footprint.split('/')
+        found = [path for path in (root / 'project').rglob(library + '.pretty') if path.is_dir()]
+        if len(found) != 1 or not (found[0] / (name + '.kicad_mod')).is_file():
+            raise KiCadError('arguments_unusable', {'detail': f'no footprint {footprint} in this library copy'})
+        digest = hashlib.sha256((found[0] / (name + '.kicad_mod')).read_bytes()).hexdigest()[:24]
+        holder = root / 'footprint-boards' / digest
+        board = holder / 'footprint.kicad_pcb'
+        if board.is_file():
+            return board
+        holder.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(found[0], holder / (library + '.pretty'), dirs_exist_ok=True)
+        script = holder.parent / ('place-' + uuid.uuid4().hex + '.py')
+        script.write_text(
+            'import sys, pcbnew\n'
+            'from pathlib import Path\n'
+            'board_path = Path(sys.argv[-1])\n'
+            'part = pcbnew.FootprintLoad(str(board_path.parent / %r), %r)\n'
+            'part.SetReference("FP")\n'
+            'part.SetPosition(pcbnew.VECTOR2I(0, 0))\n'
+            'board = pcbnew.BOARD()\n'
+            'board.Add(part)\n'
+            'pcbnew.SaveBoard(str(board_path), board)\n' % (library + '.pretty', name))
+        try:
+            executed = self.execute_python(str(self.settings.kicad_python), script, board)
+        finally:
+            script.unlink(missing_ok=True)
+        if getattr(executed, 'returncode', 1) or not board.is_file():
+            raise KiCadError('section_failed', {'detail': (getattr(executed, 'stderr', '') or '')[-500:]})
+        return board
 
     def _readings_path(self, project, digest, page, part):
         key = hashlib.sha256(f'{project}|{digest}|{page}|{part}'.encode()).hexdigest()[:32]
@@ -834,12 +911,18 @@ class KiCadProvider:
         # check of an older board or of readings since changed.
         (checks / (result['check_id'] + '.json')).write_text(json.dumps(
             dict(result, measured_state=state, board=arguments.get('board') or '',
+                 footprint=arguments.get('footprint') or '',
                  readings_path=str(path), readings_digest=digest)))
         return result
 
     def _board_state(self, arguments):
         if arguments.get('work_copy_id'):
-            root, _ = self._load(arguments['work_copy_id'])
+            root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('library'):
+                # The footprint's own file, so a change to it makes a check stale.
+                library, _, name = str(arguments.get('footprint', '')).partition('/')
+                found = [path for path in (root / 'project').rglob(library + '.pretty') if path.is_dir()]
+                return sha(found[0] / (name + '.kicad_mod')) if len(found) == 1 else ''
             return self._revision(root)
         board, _ = self._layout_target(arguments)
         return sha(board)
@@ -886,8 +969,8 @@ class KiCadProvider:
         if result is None:
             return None
         try:
-            target = ({'work_copy_id': result['work_copy_id']} if result.get('work_copy_id')
-                      else {'board': result.get('board', '')})
+            target = ({'work_copy_id': result['work_copy_id'], 'footprint': result.get('footprint', '')}
+                      if result.get('work_copy_id') else {'board': result.get('board', '')})
             _, stored = self._stored_readings(result)
             # Current only for the same board and the same readings, with the
             # same confirmation (review of #239).
@@ -933,19 +1016,22 @@ class KiCadProvider:
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
             project = root / 'project'
-            board = project / meta['board']
+            library = bool(meta.get('library'))
+            # A library copy has no board: the script's argument is its folder.
+            board = project / ('.library' if library else meta['board'])
             original = inventory(project)
             snapshot = root / ('snapshot-' + uuid.uuid4().hex)
             shutil.copytree(project, snapshot)
             if inventory(snapshot) != original:
                 raise KiCadError('verification_failed')
             self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
+            empty = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
             script_path = root / ('edit-' + uuid.uuid4().hex + '.py')
             stage = 'before_drc'
             evidence, kept = None, False
             try:
-                before = self._drc(root, meta)['totals']
-                facts_before = board_facts(board.read_text())
+                before = empty if library else self._drc(root, meta)['totals']
+                facts_before = board_facts('(kicad_pcb)' if library else board.read_text())
                 # Tested helpers first, then her script compiled on its own, so
                 # its own first lines (a __future__ import) and line numbers
                 # stay as she wrote them (2026-11-12).
@@ -970,17 +1056,18 @@ class KiCadProvider:
                     raise KiCadError('script_failed', detail)
                 inventory(project)
                 stage = 'after_drc'
-                after = self._drc(root, meta)['totals']
+                after = empty if library else self._drc(root, meta)['totals']
                 current = design_inventory(project)
-                facts_after = board_facts(board.read_text())
+                facts_after = board_facts('(kicad_pcb)' if library else board.read_text())
                 changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
                                  if original.get(name) != current.get(name))
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
                 # Friedl's taper rule on the edited board, so she sees a step
                 # before she shows anything (2026-11-12, finished 2026-11-13).
-                report['layout_rules'] = self._layout_rules(board)
-                if any(name.endswith('.kicad_sch') for name in changed):
+                report['layout_rules'] = ({'findings': [], 'omitted': 0, 'not_checked': 'a library has no board'}
+                                          if library else self._layout_rules(board))
+                if not library and any(name.endswith('.kicad_sch') for name in changed):
                     # A schematic edit is checked like the first copy (review of #239).
                     report['erc'] = self._erc(root, meta)
                 diffs, budget = [], 24000
@@ -1458,6 +1545,35 @@ class KiCadProvider:
         result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
 
+    def copy_library(self, arguments):
+        """A work copy of a KiCad library folder (the FireFli library), for footprint and symbol work.
+
+        Edited with the same tested helpers and written back with his approval,
+        like a project. On 2026-11-13 hand-written scripts on his library crashed
+        three times outside every guard the tool has.
+        """
+        source = self._source(arguments['library_dir'])
+        if source.is_relative_to(self.work_root) or self.work_root.is_relative_to(source) or not source.is_dir():
+            raise KiCadError('path_denied' if source.is_dir() else 'unsupported_project')
+        hashes = library_inventory(source)
+        pretty = sorted({str(Path(name).parent) for name in hashes if name.endswith('.kicad_mod')})
+        symbols = sorted(name for name in hashes if name.endswith('.kicad_sym'))
+        if not pretty and not symbols:
+            raise KiCadError('unsupported_project', {'detail': 'no footprint or symbol library in this folder'})
+        work_id = uuid.uuid4().hex
+        root = self.work_root / work_id
+        root.mkdir(parents=True)
+        shutil.copytree(source, root / 'project', ignore=_library_files(source))
+        if library_inventory(source) != hashes or library_inventory(root / 'project') != hashes:
+            raise KiCadError('original_changed')
+        meta = {'source': str(source), 'hashes': hashes, 'board': '', 'library': True}
+        (root / 'metadata.json').write_text(json.dumps(meta))
+        counts = Counter(str(Path(name).parent) for name in hashes if name.endswith('.kicad_mod'))
+        return {'work_copy_id': work_id, 'work_copy_revision': self._revision(root),
+                'footprint_libraries': [{'path': name, 'name': Path(name).stem, 'footprints': counts[name]}
+                                        for name in pretty],
+                'symbol_libraries': symbols}
+
     def write_back(self, arguments):
         report = arguments.get('report')
         if report is not None and (not isinstance(report, str) or not report.strip() or len(report) > 40000):
@@ -1527,11 +1643,11 @@ class KiCadProvider:
             self._source(source)
             if list(source.rglob('~*.lck')):
                 raise KiCadError('board_open')
-            current = design_inventory(source, exclude=temporary)
+            current = (library_inventory if meta.get('library') else design_inventory)(source, exclude=temporary)
             if current != expected:
                 raise KiCadError('original_changed')
         validate()
-        copied = design_inventory(root / 'project')
+        copied = (library_inventory if meta.get('library') else design_inventory)(root / 'project')
         changed = sorted((name for name, value in copied.items() if meta['hashes'].get(name) != value),
                          key=lambda name: (name not in meta['hashes'], name))
         # Any KiCad design file may be written back: a part change edits the

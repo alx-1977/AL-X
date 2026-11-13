@@ -161,3 +161,16 @@ Three findings changed the plan:
 - **The board-against-schematic check was never switched on.** It is now.
 - **Readings are kept in AL/X's storage, not the project folder.** Writing
   to the project folder would need your approval every time.
+
+## PR 2 (13 Nov)
+
+- **Library work through the tool:** a copy of the FireFli library (its
+  KiCad files only), the tested footprint helpers, and your approval to
+  write back.
+- **Footprints checked against the datasheet land pattern,** measured by
+  KiCad the same way as boards. On the real library, AE2's land pattern
+  lists 11 numbers to account for.
+- **Sheet connections drawn:** pins on the blocks and wires or buses
+  between them on the top sheet, as Altium showed.
+- **The audit** of the 86 footprints is AL/X's work with these tools,
+  once this is merged.

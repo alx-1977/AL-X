@@ -7,6 +7,7 @@ are. Needs KiCad and poppler; skipped where they are not installed (CI).
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,7 @@ from alx.providers.layout_check import read_numbers  # noqa: E402
 
 KICAD = Path("/Applications/KiCad/KiCad.app")
 POPPLER = Path("/opt/homebrew/bin/pdftotext")
+PYTHON = KICAD / "Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
 FIXTURES = REPOSITORY_ROOT / "tests/fixtures"
 
 
@@ -134,6 +136,61 @@ class RealLayoutCheckTests(unittest.TestCase):
             call("edit_kicad_work_copy", work_copy_id=copy, script="b = load()\nmove_part(b, 'U2', 16, 5)\nsave(b)\n")
             self.assertFalse(provider.layout_check_result(checked["check_id"])["current"])
 
+
+
+@unittest.skipUnless(KICAD.is_dir() and POPPLER.is_file() and kicad_containment_available(),
+                     "KiCad or poppler is not installed")
+class LibraryWorkTests(unittest.TestCase):
+    def test_a_library_footprint_is_copied_edited_measured_and_written_back(self) -> None:
+        """13 Nov: library parts through the tool; land patterns checked once per part."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            library = root / "designs" / "FireFli-KiCad-Lib"
+            pretty = library / "footprints" / "Test.pretty"
+            pretty.mkdir(parents=True)
+            (library / ".git").mkdir()
+            (library / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+            (library / "symbols").mkdir()
+            (library / "symbols" / "Test.kicad_sym").write_text("(kicad_symbol_lib (version 20241209))\n")
+            # A footprint with a 0.5 mm square pad, in KiCad's own file format.
+            (pretty / "PAD1.kicad_mod").write_text(
+                '(footprint "PAD1"\n\t(version 20241229)\n\t(generator "pcbnew")\n\t(layer "F.Cu")\n'
+                '\t(attr smd)\n\t(pad "1" smd rect\n\t\t(at 0 0)\n\t\t(size 0.5 0.5)\n'
+                '\t\t(layers "F.Cu" "F.Paste" "F.Mask")\n\t)\n)\n')
+            self.assertTrue((pretty / "PAD1.kicad_mod").is_file())
+            (library / "sheet.pdf").write_bytes(drawing([(100, 100, "0.6")]))
+            runtime = build_kicad_runtime(lambda: "call", {"ALX_KICAD_DESIGN_ROOTS": str(root / "designs")},
+                                          root / "storage")
+
+            def call(action, **arguments):
+                result = kicad_call(runtime.executors, action, arguments)
+                self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+                return result.values
+
+            copy = call("copy_library", library_dir=str(library))
+            self.assertEqual([lib["name"] for lib in copy["footprint_libraries"]], ["Test"])
+            self.assertFalse(list((root / "storage").rglob(".git")))
+            where = {"work_copy_id": copy["work_copy_id"], "footprint": "Test/PAD1", "part": "FP",
+                     "document": str(library / "sheet.pdf"), "page": 1, "section": [50, 50, 300, 200]}
+            [number] = call("check_layout", **where)["numbers"]
+            reading = [{"number": number["id"], "measures": {"pad_size": "FP.1", "axis": "x"}}]
+            first = call("check_layout", **where, readings=reading)
+            self.assertEqual((first["numbers"][0]["status"], first["numbers"][0]["board_mm"]), ("differs", 0.5))
+            edited = call("edit_kicad_work_copy", work_copy_id=copy["work_copy_id"], script=(
+                "fp = footprint('Test', 'PAD1')\n"
+                "fp.Pads()[0].SetSize(_pcbnew.PADSTACK.ALL_LAYERS, point(0.6, 0.6))\n"
+                "save_footprint('Test', fp)\n"
+                "print(footprints('Test'))\n"))
+            self.assertIn("['PAD1']", edited["stdout"])
+            self.assertEqual(list(edited["change_report"]["files_changed"]), ["footprints/Test.pretty/PAD1.kicad_mod"])
+            # The earlier check is of the old footprint; a new one matches.
+            self.assertFalse(runtime.provider.layout_check_result(first["check_id"])["current"])
+            self.assertEqual(call("check_layout", **where)["numbers"][0]["status"], "matches")
+            # A commit in the library meanwhile never reads as a changed original.
+            (library / ".git" / "HEAD").write_text("ref: refs/heads/other\n")
+            call("write_back_kicad_board", work_copy_id=edited["work_copy_id"],
+                 work_copy_revision=edited["work_copy_revision"], project_dir=str(library))
+            self.assertIn("0.6", (pretty / "PAD1.kicad_mod").read_text())
 
 if __name__ == "__main__":
     unittest.main()
