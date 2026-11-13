@@ -82,7 +82,9 @@ _ACTION_DEFINITIONS = (
         'Run all-severity KiCad DRC with zone refill on a new isolated project copy. '
         'Requires exactly one top-level board. Returns grouped facts, configured noise flags '
         'and revision for exact write approval. custom_rule_citations counts rule names '
-        'cited in violations, not all loaded rules; does not interpret findings. erc is '
+        'cited in violations, not all loaded rules; does not interpret findings. A review of his '
+        'board ends in corrections on a copy shown as Current and Amended, not in questions to '
+        'him (Friedl, 2026-11-12). erc is '
         "KiCad's electrical rules check of the schematic, errors and warnings; Friedl wants "
         'both clean, like the DRC. When erc.top_level_sheets is more than 1 (an Altium import), '
         "KiCad's board-against-schematic check (schematic_parity) reads only the first sheet: "

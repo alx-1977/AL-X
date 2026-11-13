@@ -130,12 +130,8 @@ Not yet usable.
   2026), which built the layout check against the drawing, ERC and the
   board-against-schematic check, the taper rule, one hierarchical design
   with drawn sheet connections, library work through the tool and
-  land-pattern checks. Small items, for the next change that touches KiCad:
-  - Review rule in her tool instructions: correct on a copy, show Current
-    and Amended, then one short line on intent; never ask him how to review.
-  - Viewer: long captions can crowd the boards (Greptile, #234; deferred).
-  - A wrong footprint name in check_layout reports unavailable instead of
-    arguments_unusable (Greptile, #240; deferred).
+  land-pattern checks. The small items left then were done in the top-sheet
+  change (review rule, long captions, footprint names). What remains:
   - For AL/X, not code: the one-time land-pattern audit of the 86
     footprints outside FireFli_Resistors and FireFli_Capacitors; drawing
     the sheet connections on P0020's top sheet; D4 (5V/GND) and J7 pad 8,

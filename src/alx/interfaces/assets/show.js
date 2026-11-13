@@ -350,10 +350,27 @@
       const size = text.getBBox();
       place(text, nameSpot(body, size.width, size.height, free));
     }
-    write(g, (item.label || '').toUpperCase(), { x: 0, y: -HEAD + 20, fill: tone(item.tone, TONE.info),
-      'font-size': 17, 'font-weight': 700, 'letter-spacing': '.16em' });
-    if (item.sublabel) write(g, item.sublabel, { x: 0, y: -HEAD + 46, fill: '#c4e2ea', 'letter-spacing': '.06em' });
+    // A caption never wider than its board: a long one would shrink the
+    // boards to fit it (review of #234). The full text stays as a tooltip.
+    const fit = (text) => fitWidth(text, g.drawn.width);
+    fit(write(g, (item.label || '').toUpperCase(), { x: 0, y: -HEAD + 20, fill: tone(item.tone, TONE.info),
+      'font-size': 17, 'font-weight': 700, 'letter-spacing': '.16em' }));
+    if (item.sublabel) fit(write(g, item.sublabel, { x: 0, y: -HEAD + 46, fill: '#c4e2ea', 'letter-spacing': '.06em' }));
     return g;
+  }
+
+  function fitWidth(text, width) {
+    if (!width || text.getBBox().width <= width) return text;
+    const full = text.textContent;
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    title.textContent = full;
+    let keep = full.length;
+    while (keep > 1 && text.getBBox().width > width) {
+      keep -= 1;
+      text.textContent = full.slice(0, keep).trimEnd() + '…';
+    }
+    text.append(title);
+    return text;
   }
 
   // The datasheet section as printed: black lines on white become her cyan

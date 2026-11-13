@@ -699,15 +699,23 @@ class KiCadProvider:
         board = bounded(self._source(arguments['board']), self.design_roots)
         return board, str(board.parent)
 
-    def _footprint_board(self, root, footprint):
-        """A library footprint placed alone on a board, as part FP, for measuring."""
+    @staticmethod
+    def _footprint_file(root, footprint):
+        """A footprint's file in a library copy; a wrong name says so (review of #240)."""
         if not isinstance(footprint, str) or footprint.count('/') != 1:
             raise KiCadError('arguments_unusable', {'detail': 'footprint is LIBRARY/NAME, e.g. FireFli_Misc/7488912455'})
         library, name = footprint.split('/')
         found = [path for path in (root / 'project').rglob(library + '.pretty') if path.is_dir()]
         if len(found) != 1 or not (found[0] / (name + '.kicad_mod')).is_file():
             raise KiCadError('arguments_unusable', {'detail': f'no footprint {footprint} in this library copy'})
-        digest = hashlib.sha256((found[0] / (name + '.kicad_mod')).read_bytes()).hexdigest()[:24]
+        return found[0] / (name + '.kicad_mod')
+
+    def _footprint_board(self, root, footprint):
+        """A library footprint placed alone on a board, as part FP, for measuring."""
+        source = self._footprint_file(root, footprint)
+        library, name = footprint.split('/')
+        found = [source.parent]
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:24]
         holder = root / 'footprint-boards' / digest
         board = holder / 'footprint.kicad_pcb'
         if board.is_file():
@@ -937,9 +945,7 @@ class KiCadProvider:
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('library'):
                 # The footprint's own file, so a change to it makes a check stale.
-                library, _, name = str(arguments.get('footprint', '')).partition('/')
-                found = [path for path in (root / 'project').rglob(library + '.pretty') if path.is_dir()]
-                return sha(found[0] / (name + '.kicad_mod')) if len(found) == 1 else ''
+                return sha(self._footprint_file(root, arguments.get('footprint')))
             return self._revision(root)
         board, _ = self._layout_target(arguments)
         return sha(board)
