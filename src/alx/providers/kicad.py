@@ -720,17 +720,19 @@ class KiCadProvider:
                 if differing:
                     raise KiCadError('verification_failed', {'detail': 'the netlist changed; the copy is back '
                                                              'as it was', 'nets_differing': differing[:20]})
+                # What the joined design now shows: the board against its whole
+                # schematic, and the ERC of every sheet (review of #239). Inside
+                # the undo, so a failed check never leaves the change unreported.
+                checked = self._drc(root, meta)
+                erc = self._erc(root, meta)
             except BaseException:
                 shutil.rmtree(project)
                 shutil.copytree(snapshot, project)
                 raise
             finally:
                 shutil.rmtree(snapshot, ignore_errors=True)
-            # What the joined design now shows: the board against its whole
-            # schematic, and the ERC of every sheet (review of #239).
-            checked = self._drc(root, meta)
             return dict(result, nets=len(after), netlist_identical=True,
-                        schematic_parity=checked['schematic_parity'], erc=self._erc(root, meta),
+                        schematic_parity=checked['schematic_parity'], erc=erc,
                         work_copy_id=arguments['work_copy_id'], work_copy_revision=self._revision(root))
 
     def check_layout(self, arguments):

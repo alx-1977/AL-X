@@ -647,6 +647,12 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(result.failure['code'], 'verification_failed')
         self.assertEqual(list(result.failure['recovery']['nets_differing']), ['N1'])
         self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
+        # A failed check after converting puts the copy back too (review of #239).
+        self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
+        with patch.object(KiCadProvider, '_erc', side_effect=KiCadError('cli_failed')):
+            failed = self.call('make_hierarchical', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(failed.failure['code'], 'cli_failed')
+        self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
         done = self.success('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertTrue(done['converted'] and done['netlist_identical'])
