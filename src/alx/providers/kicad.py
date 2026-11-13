@@ -798,6 +798,8 @@ class KiCadProvider:
                     raise KiCadError(error.code, {'detail': error.detail}) from error
                 result = dict(result, connected=pins['connected'],
                               reason=result['reason'] or pins['reason'])
+                if 'top_sheet_crossings' in pins:
+                    result['top_sheet_crossings'] = pins['top_sheet_crossings']
                 after = netlist() if result['converted'] or pins['connected'] else before
                 differing = sorted({before.get(k, '') for k in set(before) - set(after)}
                                    | {after.get(k, '') for k in set(after) - set(before)}

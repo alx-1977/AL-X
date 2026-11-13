@@ -656,6 +656,7 @@ class KiCadTests(unittest.TestCase):
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
         done = self.success('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertTrue(done['converted'] and done['netlist_identical'])
+        self.assertEqual(done['top_sheet_crossings'], 0)
         self.assertTrue((root / 'A.kicad_sch').is_file())
 
     def test_an_edited_schematic_gets_its_erc_again(self):

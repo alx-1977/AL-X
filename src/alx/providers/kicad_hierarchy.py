@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-SHEET_WIDTH, SHEET_HEIGHT, SHEET_GAP = 45.72, 25.4, 12.7
+from alx.providers.kicad_top_layout import GRID, layout
 
 
 class HierarchyError(Exception):
@@ -46,12 +46,12 @@ def _file_name(name: str, taken: set[str]) -> str:
 
 def _top_sheet(root_uuid: str, project: str, sheets: list[dict[str, Any]], header: str) -> str:
     blocks = []
+    rectangles, _, _, _, _, extent = layout(len(sheets), {})
     for index, sheet in enumerate(sheets):
-        x = 25.4 + index * (SHEET_WIDTH + SHEET_GAP)
-        y = 50.8
+        x, y, width, height = (v * GRID for v in rectangles[index])
         blocks.append(f"""	(sheet
 		(at {x:.2f} {y:.2f})
-		(size {SHEET_WIDTH} {SHEET_HEIGHT})
+		(size {width:.2f} {height:.2f})
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
@@ -64,7 +64,7 @@ def _top_sheet(root_uuid: str, project: str, sheets: list[dict[str, Any]], heade
 			(effects (font (size 1.524 1.524) (bold yes)) (justify left bottom))
 		)
 		(property "Sheetfile" {_quoted(sheet["filename"])}
-			(at {x:.2f} {y + SHEET_HEIGHT + 0.64:.2f} 0)
+			(at {x:.2f} {y + height + 0.64:.2f} 0)
 			(effects (font (size 1.27 1.27)) (justify left top))
 		)
 		(instances
@@ -76,12 +76,13 @@ def _top_sheet(root_uuid: str, project: str, sheets: list[dict[str, Any]], heade
 		)
 	)
 """)
+    paper = '(paper "A3")' if extent == (150, 96) else f'(paper "User" {(extent[0] + 12) * GRID:.2f} {(extent[1] + 20) * GRID:.2f})'
     return (f"""(kicad_sch
 	(version 20260306)
 	(generator "eeschema")
 	(generator_version "10.0")
 	(uuid {_quoted(root_uuid)})
-	(paper "A3")
+	{paper}
 {header}	(lib_symbols)
 """ + "".join(blocks) + """	(sheet_instances
 		(path "/"
@@ -181,9 +182,6 @@ def make_hierarchical(project: Path) -> dict[str, Any]:
             "footprints_relinked": relinked, "footprints_not_found": not_found[:40]}
 
 
-PIN_PITCH, TRACK_GAP, BLOCK_GAP = 2.54, 2.54, 12.7
-
-
 def _global_labels(schematic: str) -> list[tuple[str, str, str]]:
     """Each global label on a sheet: its whole block, its name and its shape."""
     found = []
@@ -262,7 +260,13 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             sheet["shapes"].setdefault(label, shape)
     shared = sorted(label for label, where in uses.items() if len(where) > 1)
     if not shared:
-        return {"connected": [], "reason": "no global label is used on more than one sheet"}
+        return {"connected": [], "reason": "no global label is used on more than one sheet",
+                "top_sheet_crossings": 0}
+    try:
+        rectangles, pin_positions, routes, junctions, crossings, extent = layout(
+            len(sheets), {label: uses[label] for label in shared})
+    except ValueError as error:
+        raise HierarchyError("unsupported_project", str(error)) from error
     for sheet in sheets:
         target = project / sheet["filename"]
         schematic = target.read_text()
@@ -270,40 +274,21 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             if label in shared:
                 schematic = schematic.replace(whole, _as_hierarchical(whole), 1)
         target.write_text(schematic)
-    # Two columns of blocks facing each other, as an Altium top sheet: pins
-    # on the facing edges, and between the columns one vertical track per
-    # connection, joined to each pin by a short stub. Right-hand pins sit
-    # half a step lower than left-hand ones, so no two stubs share a height:
-    # a stub crosses other tracks without touching their ends and connects
-    # only where it ends. Everything stays on KiCad's 2.54 mm grid.
-    pitch, width = 2 * PIN_PITCH, 50.8
-    lane = (len(shared) + 3) * 2 * TRACK_GAP
-    left_x = 50.8
-    right_x = left_x + width + lane
-    tracks = {label: left_x + width + 2 * TRACK_GAP * (index + 2) for index, label in enumerate(shared)}
-    pins: dict[str, list[float]] = {label: [] for label in shared}
-    stubs: list[tuple[str, float, float]] = []
     parts, drawing = [], []
-    row_y, row_height = 38.1, 0.0
     for index, sheet in enumerate(sheets):
-        column = index % 2
-        if column == 0 and index:
-            row_y += row_height + BLOCK_GAP * 2
-            row_height = 0.0
-        x0, y = (left_x, row_y) if column == 0 else (right_x, row_y)
-        mine = [label for label in shared if label in {item[1] for item in sheet["labels"]}]
-        height = max(SHEET_HEIGHT, pitch * (len(mine) + 1))
-        row_height = max(row_height, height)
-        edge = x0 + width if column == 0 else x0
+        x0, y, width, height = (v * GRID for v in rectangles[index])
         pin_blocks = []
-        for slot, label in enumerate(mine):
-            py = y + pitch * (slot + 1) + (PIN_PITCH if column else 0)
-            pins[label].append(py)
-            stubs.append((label, edge, py))
-            pin_blocks.append(f"""		(pin {_quoted(label)} {sheet["shapes"][label]}
-			(at {edge:.2f} {py:.2f} {0 if column == 0 else 180})
+        for label in shared:
+            if (index, label) not in pin_positions:
+                continue
+            (px, py), _, angle = pin_positions[index, label]
+            px, py = px * GRID, py * GRID
+            justify = "right" if angle in (0, 270) else "left"
+            pin_blocks.append(f"""
+		(pin {_quoted(label)} {sheet["shapes"][label]}
+			(at {px:.2f} {py:.2f} {angle})
 			(uuid {_quoted(str(uuid.uuid4()))})
-			(effects (font (size 1.27 1.27)) (justify {'right' if column == 0 else 'left'}))
+			(effects (font (size 1.27 1.27)) (justify {justify}))
 		)
 """)
         parts.append(f"""	(sheet
@@ -333,22 +318,17 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
 		)
 	)
 """)
-    for label, edge, py in stubs:
-        kind = "bus" if "{" in label or "[" in label else "wire"
-        drawing.append(_segment(kind, edge, py, tracks[label], py))
     for label in shared:
         kind = "bus" if "{" in label or "[" in label else "wire"
-        x = tracks[label]
-        heights = sorted(pins[label])
-        # Every track starts above the first row of blocks, where no stub
-        # runs: a track's end on another connection's stub would join them.
-        top_y = 38.1 - 2 * pitch
-        drawing.append(_segment(kind, x, top_y, x, heights[0]))
-        for upper, lower in zip(heights, heights[1:]):
-            drawing.append(_segment(kind, x, upper, x, lower))
-        for py in heights[:-1]:
-            drawing.append(f"\t(junction\n\t\t(at {x:.2f} {py:.2f})\n\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n"
+        for (x1, y1), (x2, y2) in routes[label]:
+            drawing.append(_segment(kind, x1 * GRID, y1 * GRID, x2 * GRID, y2 * GRID))
+        for jx, jy in junctions[label]:
+            drawing.append(f"\t(junction\n\t\t(at {jx * GRID:.2f} {jy * GRID:.2f})\n"
+                           f"\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n"
                            f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
+        # Preserve one global label per connection, anchored at an actual pin.
+        (px, py), _, _ = pin_positions[uses[label][0], label]
+        x, top_y = px * GRID, py * GRID
         drawing.append(f"""	(global_label {_quoted(label)}
 		(shape {shapes[label] if len({s["shapes"].get(label) for s in sheets} - {None}) == 1 else "bidirectional"})
 		(at {x:.2f} {top_y:.2f} 90)
@@ -363,8 +343,10 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
 """)
     head = top[:blocks[0].start()] + "\n"
     tail = top[blocks[-1].end():]
+    if extent[0] > 150 or extent[1] > 96:
+        head = re.sub(r'\(paper "A3"\)', f'(paper "User" {(extent[0] + 12) * GRID:.2f} {(extent[1] + 20) * GRID:.2f})', head)
     root_path.write_text(head + "".join(parts) + "".join(drawing) + tail.lstrip("\n"))
-    return {"connected": shared, "reason": ""}
+    return {"connected": shared, "reason": "", "top_sheet_crossings": crossings}
 
 
 def netlist_nets(netlist: str) -> dict[frozenset, str]:
