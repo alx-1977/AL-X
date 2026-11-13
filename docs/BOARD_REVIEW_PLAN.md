@@ -142,10 +142,15 @@ board, using copies:
 - **The old AE1 step:** caught.
 - **AE2's footprint dimensions** (pad sizes and the 0.9 gap): all measured
   and matching.
-- **The AE2 pin swap: not caught, and the reason matters for the imports.**
-  The Altium import left the schematic as four separate top-level sheets.
-  KiCad's checks read only the first one (the LEDs). The check now names
-  the sheets it can't reach. Fixing the hierarchy is part of each import.
+- **The AE2 pin swap:** caught, once the schematic is one hierarchical
+  design. KiCad 10 imports each Altium sheet as a separate top-level sheet.
+  The editor reads them all, but KiCad's command-line board-against-
+  schematic check reads only the first. Your schematic was never wrong. A
+  new tool step, `make_hierarchical`, joins the sheets into one design on
+  a copy. It is kept only if KiCad's netlist is identical before and
+  after: on the scanner, all 180 nets matched. The check then shows the
+  old AE2 swap, plus D4's pinout and J7 pad 8, both already open
+  questions. This becomes a step of every import.
 
 Three findings changed the plan:
 

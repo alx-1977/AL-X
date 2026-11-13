@@ -72,7 +72,7 @@ TUNING = obj({'components': array(obj({'reference': S, 'values': array(N),
                                      ('reference', 'values', 'tolerance_fraction'))),
               'targets': array(TARGET), 'tie_margin': N})
 
-ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'sheets_not_checked': array(S), 'groups': array(obj({
+ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, 'groups': array(obj({
     'check_type': S, 'count': I, 'severity': S, 'omitted_findings': I, 'findings': array(obj({
         'severity': S, 'sheet': S, 'description': S, 'items': array(obj({
             'description': S, 'designator': S, 'position': obj({'x': N, 'y': N}, ())}))}))}))})
@@ -84,9 +84,9 @@ _ACTION_DEFINITIONS = (
         'and revision for exact write approval. custom_rule_citations counts rule names '
         'cited in violations, not all loaded rules; does not interpret findings. erc is '
         "KiCad's electrical rules check of the schematic, errors and warnings; Friedl wants "
-        'both clean, like the DRC. erc.sheets_not_checked names schematic files the root never '
-        'places as sheets: neither ERC nor the board-against-schematic check (schematic_parity) '
-        'reads them, so say so before calling anything clean.',
+        'both clean, like the DRC. When erc.top_level_sheets is more than 1 (an Altium import), '
+        "KiCad's board-against-schematic check (schematic_parity) reads only the first sheet: "
+        'run make_hierarchical on the copy first, and write it back with his approval.',
         obj({'project_dir': S}), obj({'work_copy_id': S, 'work_copy_revision': S,
             'custom_rule_citations': RULE_CITATIONS, 'work_copy_tainted': B, 'baseline_eligible': B,
             'totals': TOTALS, 'violations': array(GROUP), 'unconnected_items': array(GROUP),
@@ -263,6 +263,19 @@ CONFIRM_READINGS = CapabilityDefinition('confirm_layout_readings',
     obj({'confirmed': B, 'readings': I}), SideEffect.EFFECTFUL, FAILURES)
 
 
+MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
+    "Join a copy's separate top-level schematic sheets (an Altium import) into one "
+    'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
+    "relinked. Proven by KiCad's netlist before and after; if any connection or net name "
+    'changes, the copy is put back and verification_failed names the nets. Part of every '
+    'import; write it back with his approval, and ask him to open it once in KiCad.',
+    obj({'work_copy_id': S}),
+    obj({'converted': B, 'reason': S, 'sheets': array(S), 'renamed': MAP, 'footprints_relinked': I,
+         'footprints_not_found': array(S), 'nets': I, 'netlist_identical': B, 'work_copy_id': S,
+         'work_copy_revision': S}),
+    SideEffect.NONE, FAILURES)
+
+
 class KiCadAction(str, Enum):
     """Every KiCad job, a closed list like the repository operations (D-074)."""
 
@@ -276,6 +289,7 @@ class KiCadAction(str, Enum):
     SIMULATE = 'simulate'
     CHECK_LAYOUT = 'check_layout'
     CONFIRM_LAYOUT_READINGS = 'confirm_layout_readings'
+    MAKE_HIERARCHICAL = 'make_hierarchical'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -290,11 +304,13 @@ CONTRACTS = {
     KiCadAction.SIMULATE: _ACTION_DEFINITIONS[6],
     KiCadAction.CHECK_LAYOUT: CHECK_LAYOUT,
     KiCadAction.CONFIRM_LAYOUT_READINGS: CONFIRM_READINGS,
+    KiCadAction.MAKE_HIERARCHICAL: MAKE_HIERARCHICAL,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
-    KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT))
+    KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
+    KiCadAction.MAKE_HIERARCHICAL))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -332,7 +348,8 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.ANALYSE_COPPER: provider.analyse_copper,
                KiCadAction.SIMULATE: provider.simulate_circuit,
                KiCadAction.CHECK_LAYOUT: provider.check_layout,
-               KiCadAction.CONFIRM_LAYOUT_READINGS: provider.confirm_layout_readings}
+               KiCadAction.CONFIRM_LAYOUT_READINGS: provider.confirm_layout_readings,
+               KiCadAction.MAKE_HIERARCHICAL: provider.make_hierarchical}
 
     def invoke(arguments):
         code = 'arguments_unusable'

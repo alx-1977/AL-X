@@ -132,23 +132,18 @@ def is_design_file(name):
     return path.suffix in DESIGN_SUFFIXES or path.name in DESIGN_NAMES
 
 
-def unreachable_sheets(root_schematic):
-    """Schematic files beside the root that its sheet hierarchy never reaches.
+def top_level_sheets(project):
+    """How many top-level sheets the project's schematic has (KiCad 10 project file).
 
-    KiCad checks (ERC, and the board against its schematic) read only the root
-    and the sheets it places. The Altium import made separate top-level
-    sheets: on P0020 three of four were never checked (2026-11-13).
+    An Altium import makes one per Altium sheet. KiCad's command-line check
+    of the board against its schematic reads only the first of them
+    (2026-11-13: an AE2 pin swap went unseen); make_hierarchical joins them.
     """
-    folder = root_schematic.parent
-    reached, waiting = set(), [root_schematic.name]
-    while waiting:
-        name = waiting.pop()
-        if name in reached or not (folder / name).is_file():
-            continue
-        reached.add(name)
-        sheet_source = (folder / name).read_text(errors='replace')
-        waiting.extend(re.findall(r'\(property "Sheet ?[Ff]ile" "([^"]+)"', sheet_source))
-    return sorted(path.name for path in folder.glob('*.kicad_sch') if path.name not in reached)[:40]
+    try:
+        settings = json.loads(next(iter(sorted(project.glob('*.kicad_pro')))).read_text())
+    except (StopIteration, OSError, ValueError):
+        return 0
+    return len((settings.get('schematic') or {}).get('top_level_sheets') or ()) or 1
 
 
 def script_hint(stderr):
@@ -689,6 +684,51 @@ class KiCadProvider:
                                                                      'confirmed': None}
         return board, document, page, section, part, numbers, path, stored
 
+    def make_hierarchical(self, arguments):
+        """Her copy's separate top-level sheets made into one hierarchical design.
+
+        Proven by KiCad's own netlist, before and after: if a single
+        connection or net name differs, the copy is put back as it was.
+        """
+        from alx.providers.kicad_hierarchy import HierarchyError, make_hierarchical, netlist_nets
+        with self._locked(arguments['work_copy_id']):
+            root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            project = root / 'project'
+            schematic = (project / meta['board']).with_suffix('.kicad_sch')
+            if not schematic.is_file():
+                raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
+
+            def netlist():
+                output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
+                output.parent.mkdir(exist_ok=True)
+                self._run('sch', 'export', 'netlist', '--output', output, schematic)
+                return netlist_nets(output.read_text(errors='replace'))
+            before = netlist()
+            snapshot = root / ('snapshot-' + uuid.uuid4().hex)
+            shutil.copytree(project, snapshot)
+            try:
+                try:
+                    result = make_hierarchical(project)
+                except HierarchyError as error:
+                    raise KiCadError(error.code, {'detail': error.detail}) from error
+                after = netlist() if result['converted'] else before
+                differing = sorted({before.get(k, '') for k in set(before) - set(after)}
+                                   | {after.get(k, '') for k in set(after) - set(before)}
+                                   | {before[k] for k in set(before) & set(after) if before[k] != after[k]})
+                if differing:
+                    raise KiCadError('verification_failed', {'detail': 'the netlist changed; the copy is back '
+                                                             'as it was', 'nets_differing': differing[:20]})
+            except BaseException:
+                shutil.rmtree(project)
+                shutil.copytree(snapshot, project)
+                raise
+            finally:
+                shutil.rmtree(snapshot, ignore_errors=True)
+            return dict(result, nets=len(after), netlist_identical=True,
+                        work_copy_id=arguments['work_copy_id'], work_copy_revision=self._revision(root))
+
     def check_layout(self, arguments):
         """Her copy, or his board, measured against the manufacturer's drawing (2026-11-13)."""
         from alx.providers.layout_check import MAX_NUMBERS, compare, label, measure_board, measurement
@@ -1180,7 +1220,7 @@ class KiCadProvider:
         if not schematic.is_file():
             return {'checked': False, 'reason': 'no schematic beside the board', 'totals':
                     {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}, 'groups': [],
-                    'sheets_not_checked': []}
+                    'top_level_sheets': 0}
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
         output.parent.mkdir(exist_ok=True)
         self._run('sch', 'erc', '--format', 'json', '--severity-all', '--output', output, schematic)
@@ -1218,7 +1258,7 @@ class KiCadProvider:
             entry['omitted_findings'] = max(0, len(entry['findings']) - FINDINGS_PER_CHECK_TYPE)
             entry['findings'] = entry['findings'][:FINDINGS_PER_CHECK_TYPE]
         return {'checked': True, 'reason': '', 'totals': totals, 'groups': ordered,
-                'sheets_not_checked': unreachable_sheets(schematic)}
+                'top_level_sheets': top_level_sheets(schematic.parent)}
 
     def _drc(self, root, meta):
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')

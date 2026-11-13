@@ -124,6 +124,13 @@ class KiCadTests(unittest.TestCase):
                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 exec(compile(Path(argv[-2]).read_text(), argv[-2], 'exec'), {})
             return SimpleNamespace(returncode=0, stdout=out.getvalue(), stderr=err.getvalue())
+        if argv[1:4] == ['sch', 'export', 'netlist']:
+            target = Path(argv[argv.index('--output') + 1])
+            nets = self.netlists.pop(0) if getattr(self, 'netlists', None) else [('N1', 'R1', '1')]
+            target.write_text('(export (nets ' + ' '.join(
+                f'(net\n(code "1") (name "{name}") (node (ref "{ref}") (pin "{pin}")))'
+                for name, ref, pin in nets) + '))')
+            return SimpleNamespace(returncode=0)
         if argv[1:3] == ['sch', 'erc']:
             target = Path(argv[argv.index('--output') + 1])
             target.write_text(json.dumps(getattr(self, 'erc_report', None) or {'sheets': [
@@ -620,12 +627,39 @@ class KiCadTests(unittest.TestCase):
         drc = [call for call in self.calls if call[1:3] == ['pcb', 'drc']]
         self.assertIn('--schematic-parity', drc[0])
 
-    def test_sheets_the_root_never_places_are_named(self):
-        """P0020: the Altium import left three of four sheets outside the hierarchy."""
-        (self.project / 'test.kicad_sch').write_text('(kicad_sch (sheet (property "Sheetfile" "power.kicad_sch")))')
-        (self.project / 'power.kicad_sch').write_text('(kicad_sch)')
-        (self.project / 'rfid.kicad_sch').write_text('(kicad_sch)')
-        self.assertEqual(list(self.check()['erc']['sheets_not_checked']), ['rfid.kicad_sch'])
+    def two_top_level_sheets(self):
+        (self.project / 'test.kicad_sch').write_text(
+            '(kicad_sch\n\t(symbol\n\t\t(lib_id "Device:R")\n\t\t(uuid "s1")\n\t\t(path "/a"\n\t)\n)\n')
+        (self.project / 'b.kicad_sch').write_text('(kicad_sch)\n')
+        pro = dict(PROJECT, schematic={'top_level_sheets': [
+            {'filename': 'test.kicad_sch', 'name': 'A', 'uuid': 'a'},
+            {'filename': 'b.kicad_sch', 'name': 'B', 'uuid': 'b'}]})
+        (self.project / 'test.kicad_pro').write_text(json.dumps(pro))
+
+    def test_make_hierarchical_is_kept_only_when_the_netlist_is_unchanged(self):
+        """2026-11-13: proven by KiCad's netlist; any change puts the copy back."""
+        self.two_top_level_sheets()
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id'] / 'project'
+        before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+        self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '2')]]
+        result = self.call('make_hierarchical', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(result.failure['code'], 'verification_failed')
+        self.assertEqual(list(result.failure['recovery']['nets_differing']), ['N1'])
+        self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
+        self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
+        done = self.success('make_hierarchical', work_copy_id=checked['work_copy_id'])
+        self.assertTrue(done['converted'] and done['netlist_identical'])
+        self.assertTrue((root / 'A.kicad_sch').is_file())
+
+    def test_the_check_counts_top_level_sheets(self):
+        """An Altium import makes one top-level sheet per Altium sheet (KiCad 10)."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch)')
+        pro = dict(PROJECT, schematic={'top_level_sheets': [
+            {'filename': 'test.kicad_sch', 'name': 'A', 'uuid': 'a'},
+            {'filename': 'b.kicad_sch', 'name': 'B', 'uuid': 'b'}]})
+        (self.project / 'test.kicad_pro').write_text(json.dumps(pro))
+        self.assertEqual(self.check()['erc']['top_level_sheets'], 2)
 
     def test_the_check_runs_the_schematic_erc_errors_first(self):
         """Friedl, 13 Nov: errors and warnings both, aiming for a clean result."""
