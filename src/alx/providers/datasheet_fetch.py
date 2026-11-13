@@ -3,7 +3,8 @@
 During the FireFli library audit AL/X could not download ten Würth datasheets:
 Würth's site refuses automated downloads. Nexar (Octopart) keeps its own
 copy of most datasheets and returns its link for a part number; DigiKey's
-product service returns the manufacturer's link. Each link is fetched as a
+product service returns the manufacturer's link. DigiKey is asked first and
+Nexar only when that gives no PDF: Nexar's allowance is small. Each link is fetched as a
 plain request - never disguised as a browser - and kept only when it is a
 real PDF. The file goes to her own storage, so no approval is needed.
 """
@@ -113,8 +114,13 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
     if target.is_file() and target.read_bytes()[:5] == b"%PDF-":
         return {"path": str(target), "source": "already saved", "url": "", "tried": []}
     tried: list[dict[str, str]] = []
-    for source, links in (("nexar", _nexar_links(client, nexar, part, manufacturer, tried)),
-                          ("digikey", _digikey_links(client, digikey, part, tried))):
+    # DigiKey first: free and unlimited. Nexar's allowance is small and its
+    # paid plan is not an option (Friedl, 2026-11-13), so it is asked only
+    # when DigiKey's link gives no PDF (Würth refuses automated downloads).
+    sources = (("digikey", lambda: _digikey_links(client, digikey, part, tried)),
+               ("nexar", lambda: _nexar_links(client, nexar, part, manufacturer, tried)))
+    for source, find in sources:
+        links = find()
         for link in links:
             # Datasheet links point anywhere on the web: fetched only through
             # the one guarded path (web_fetch), never directly.

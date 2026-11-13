@@ -232,7 +232,8 @@ INSPECT = CapabilityDefinition('inspect',
 
 FETCH_DATASHEET = CapabilityDefinition('fetch_datasheet',
     "A part's datasheet as a PDF, by manufacturer part number (manufacturer narrows it). "
-    "Asks Nexar (Octopart keeps copies of most datasheets) and then DigiKey for links, "
+    "Asks DigiKey for its link first, and Nexar (Octopart keeps copies of most datasheets, "
+    "but its allowance is small) only when that gives no PDF, "
     'downloads each plainly and keeps the first real PDF, in ALX_Storage/Datasheets, where '
     'check_layout, look and read_reference can read it. Use it before saying a datasheet '
     'cannot be found; tried lists every source and why it failed.',

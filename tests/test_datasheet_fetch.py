@@ -70,14 +70,24 @@ class FetchDatasheetTests(unittest.TestCase):
                                     download=stand.download)
             self.assertEqual(again["source"], "already saved")
 
-    def test_a_page_that_is_not_a_pdf_is_refused_and_digikey_is_next(self) -> None:
-        stand = Stand([part("ABC", "https://example.com/abc.html")], digikey="//cdn.example.com/abc.pdf",
-                      files={"https://example.com/abc.html": b"<html>", "https://cdn.example.com/abc.pdf": PDF})
+    def test_a_page_that_is_not_a_pdf_is_refused_and_nexar_is_next(self) -> None:
+        stand = Stand([part("ABC", "https://datasheet.octopart.com/abc.pdf")], digikey="//www.maker.com/abc.html",
+                      files={"https://www.maker.com/abc.html": b"<html>", "https://datasheet.octopart.com/abc.pdf": PDF})
         with tempfile.TemporaryDirectory() as folder:
             result = fetch_datasheet("ABC", "", Path(folder), client=stand, nexar=[("k", "s")], digikey=("id", "s"),
                                      download=stand.download)
-            self.assertEqual((result["source"], result["url"]), ("digikey", "https://cdn.example.com/abc.pdf"))
+            self.assertEqual((result["source"], result["url"]), ("nexar", "https://datasheet.octopart.com/abc.pdf"))
             self.assertEqual(result["tried"][0]["result"], "not a PDF")
+
+    def test_digikey_comes_first_and_nexar_is_not_asked_when_it_works(self) -> None:
+        """Friedl, 13 Nov: Nexar's allowance is small and its paid plan is not an option."""
+        stand = Stand([], digikey="https://cdn.example.com/abc.pdf",
+                      files={"https://cdn.example.com/abc.pdf": PDF})
+        with tempfile.TemporaryDirectory() as folder:
+            result = fetch_datasheet("ABC", "", Path(folder), client=stand, nexar=[("k", "s")],
+                                     digikey=("id", "s"), download=stand.download)
+        self.assertEqual(result["source"], "digikey")
+        self.assertEqual(stand.nexar_answers, [])   # Nexar never asked
 
     def test_nothing_found_says_what_was_tried(self) -> None:
         stand = Stand([part("XYZ", "https://www.we-online.com/xyz.pdf")], digikey="https://www.we-online.com/xyz.pdf")
