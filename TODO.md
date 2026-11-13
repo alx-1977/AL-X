@@ -134,6 +134,18 @@ Not yet usable.
   change (review rule, long captions, footprint names). What remains:
   - Datasheet record (fetch_datasheet): write it atomically and treat an
     unreadable record as a cache miss (Greptile, #243; deferred).
+- [ ] **AL/X behaviour seen on 13 Nov, for the next batch** (Friedl: group
+  things together, then one review).
+  - One "go" per write-back she has announced and is waiting on. P0020 took
+    three: the first was used by the library write-back, and the second came
+    in while she was in a background round, so it did not count as his
+    latest message. Keep the safety intent: only the write she announced.
+  - She copied fetched datasheets to his Desktop out of habit; they are
+    readable in ALX_Storage now.
+  - Follow-up rounds of long work: she booked the next round ten minutes
+    out with no reason. Continue at once unless waiting on something.
+  - Times in her replies are his local time (done on this branch, with the
+    next batch).
   - For AL/X, not code: the one-time land-pattern audit of the 86
     footprints outside FireFli_Resistors and FireFli_Capacitors; drawing
     the sheet connections on P0020's top sheet; D4 (5V/GND) and J7 pad 8,
