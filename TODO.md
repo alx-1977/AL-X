@@ -141,6 +141,9 @@ Not yet usable.
   - Review rule in her tool instructions: correct on a copy, show Current
     and Amended, then one short line on intent; never ask him how to review.
   - Viewer: long captions can crowd the boards (Greptile, #234; deferred).
+  - Reply limit: #237 refuses any reply over 50 words, which Friedl did not
+    ask for (13 Nov). Change it to apply only when he has not asked for
+    detail; when he asks her to explain or list, she answers in full.
   - For AL/X now: AE1's 1.2 mm feed meets C61's 0.5 mm pad and the antenna
     pad with a hard step; redo with teardrops.
 - [ ] Thermal simulation of a PCB (layered board heat model from the KiCad
