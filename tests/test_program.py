@@ -142,3 +142,14 @@ def test_missing_program_reports_failure_evidence(tmp_path):
 
 def test_banking_configuration_is_external():
     assert ProgramSettings.from_environment({}).banking_targets
+
+
+def test_directory_and_time_limit_have_defaults(tmp_path):
+    """2026-11-13: about ten runs refused in one morning for a field left out."""
+    from alx.providers.program import DEFAULT_DIRECTORY
+    assert DEFINITION.input_schema.accepts({"argv": ["pwd"]})
+    result = ProgramRunner(tmp_path / "runs", (), 5).run({"argv": ["pwd"]})
+    if result["status"] == "running":
+        result = wait_result(Path(result["full_output_path"]))
+    assert result["stdout"].strip() == str(DEFAULT_DIRECTORY)
+    assert (DEFAULT_DIRECTORY / "governance" / "DECISIONS.md").is_file()

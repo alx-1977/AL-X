@@ -1348,7 +1348,7 @@ def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
 RESPONSE_FIELD: Mapping[str, Any] = {
     "type": "string",
     "description": (
-        "What you say to Friedl, spoken aloud: the outcome in a few words, and anything "
+        "What you say to Friedl, spoken aloud, at most 50 words (longer is refused): the outcome in a few words, and anything "
         "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
         "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one. "
         "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance."

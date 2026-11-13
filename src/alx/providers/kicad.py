@@ -118,6 +118,28 @@ def not_design(source):
     return {source / name for name in names}
 
 
+DESIGN_SUFFIXES = frozenset({'.kicad_pcb', '.kicad_pro', '.kicad_dru', '.kicad_sch', '.kicad_sym',
+                             '.kicad_mod', '.kicad_wks'})
+DESIGN_NAMES = frozenset({'fp-lib-table', 'sym-lib-table'})
+
+
+def is_design_file(name):
+    """A file KiCad keeps as part of a design: boards, schematics, libraries, rules."""
+    path = Path(name)
+    return path.suffix in DESIGN_SUFFIXES or path.name in DESIGN_NAMES
+
+
+def script_hint(stderr):
+    """What a common edit-script failure means, so she need not work it out (2026-11-13)."""
+    if any(mark in stderr for mark in ('WriteDRCReport', 'fork_exec', 'Operation not permitted')):
+        return ('A script cannot run DRC or start programs. Every edit report already gives '
+                'DRC totals; for the findings, use action check on this copy.')
+    if "has no attribute" in stderr:
+        return ("That pcbnew name does not exist in KiCad 10. Use the helpers (fields and "
+                "set_field for part fields), or print dir() of the object before guessing.")
+    return ''
+
+
 def design_inventory(source, *, exclude=frozenset()):
     """A design folder's inventory without what KiCad keeps beside the design."""
     return inventory(source, exclude={*exclude, *not_design(source)})
@@ -669,6 +691,9 @@ class KiCadProvider:
                             'a removed item) or an item removed with Remove; KiCad does not check. '
                             'Use the helpers (remove, remove_graphic, copper_shapes, zone_corners).'
                             % executed.returncode)
+                    hint = script_hint(stderr)
+                    if hint:
+                        detail['hint'] = hint
                     raise KiCadError('script_failed', detail)
                 inventory(project)
                 stage = 'after_drc'
@@ -1131,9 +1156,14 @@ class KiCadProvider:
         copied = design_inventory(root / 'project')
         changed = sorted((name for name, value in copied.items() if meta['hashes'].get(name) != value),
                          key=lambda name: (name not in meta['hashes'], name))
-        if (any(Path(name).suffix not in ('.kicad_pcb', '.kicad_pro', '.kicad_dru') for name in changed)
-                or set(meta['hashes']) - set(copied)):
-            raise KiCadError('unsupported_project')
+        # Any KiCad design file may be written back: a part change edits the
+        # schematic as well as the board (2026-11-13, C62 and C66). Anything
+        # else, or a file removed, is still refused, and named.
+        other = [name for name in changed if not is_design_file(name)]
+        missing = sorted(set(meta['hashes']) - set(copied))
+        if other or missing:
+            raise KiCadError('unsupported_project', {
+                'not_design_files': other[:20], 'removed_files': missing[:20]})
         backup = root / 'backups' / uuid.uuid4().hex
         backup.mkdir(parents=True)
 

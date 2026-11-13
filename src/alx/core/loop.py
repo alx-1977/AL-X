@@ -144,6 +144,20 @@ def _validate_raised_mail(
         raise DecisionValidationError("raised_mail_observation_not_in_context")
 
 
+# Her words to Friedl, enforced rather than asked for (2026-11-13: replies of
+# 71, 78, 116 and 129 words in one morning, after the same rule as text alone
+# had been strengthened several times). The rest belongs in detail.
+RESPONSE_WORD_LIMIT = 50
+
+
+def _validate_response_length(decision: AgentDecision) -> None:
+    """Refuse a reply longer than Friedl wants to hear; she shortens it."""
+    if decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT:
+        raise DecisionValidationError(
+            "response_over_%d_words: say the outcome and anything he must decide; "
+            "figures, checks and background go in detail" % RESPONSE_WORD_LIMIT)
+
+
 @dataclass(frozen=True, slots=True)
 class CoreOutcome:
     state: CoreState
@@ -791,6 +805,7 @@ class CoreAgent:
                 self._emit_reasoning(purpose, purpose_reference, conversation_id)
                 decision = self._reasoner.decide(reasoning_context)
                 _validate_raised_mail(decision, conversation.events)
+                _validate_response_length(decision)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
                 return CoreOutcome(

@@ -83,6 +83,25 @@ def set_pad(board, ref, number, size=None, at=None):
     return item
 
 
+def fields(board, ref):
+    """A part's fields (Value, MPN, LCSC...) by name."""
+    return {item.GetName(): item.GetText() for item in part(board, ref).GetFields()}
+
+
+def set_field(board, ref, name, value, visible=False):
+    """Set one field of a part, adding it (hidden, on the fab layer) when it is new."""
+    found = part(board, ref)
+    if found.HasField(name):
+        found.GetField(name).SetText(value)
+        return
+    item = _pcbnew.PCB_FIELD(found, _pcbnew.FIELD_T_USER, name)
+    item.SetText(value)
+    item.SetVisible(visible)
+    item.SetLayer(_pcbnew.F_Fab if not found.IsFlipped() else _pcbnew.B_Fab)
+    item.SetPosition(found.GetPosition())
+    found.Add(item)
+
+
 def describe(board, ref):
     """Position, rotation, side and every pad of a part, in board mm."""
     found = part(board, ref)
@@ -328,7 +347,7 @@ def script_runner(script):
 
 
 NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rotate_part", "pad",
-         "set_pad", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
+         "set_pad", "fields", "set_field", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
          "graphics", "set_graphic", "remove_graphic", "add_line",
          "zones", "zone_corners", "set_zone_corners",
          "copper_shapes", "set_copper_corners", "remove_copper", "add_copper", "add_taper", "refill")

@@ -94,7 +94,8 @@ _ACTION_DEFINITIONS = (
         'Tested helpers come before your script, in millimetres and degrees, layers as '
         "'F', 'B', 'In1': b = load(); describe(b, ref) gives position, rotation and every pad; "
         'part, move_part(b, ref, x, y), rotate_part(b, ref, deg), pad(b, ref, n), '
-        'set_pad(b, ref, n, size=(w, h), at=(x, y)), tracks(b, net), track_ends(t), '
+        'set_pad(b, ref, n, size=(w, h), at=(x, y)), fields(b, ref), set_field(b, ref, name, value), '
+        'tracks(b, net), track_ends(t), '
         'add_track(b, net, [(x, y), ...], width, on), vias(b, net), add_via(b, net, (x, y)), '
         'remove(b, item), zones(b, net, keepout), zone_corners(z), set_zone_corners(z, corners), '
         "a part's drawings by id: graphics(b, ref, on='F.Silk'), set_graphic(b, ref, id, start, "
@@ -142,7 +143,7 @@ _ACTION_DEFINITIONS = (
         'one named entry. iCloud placeholders return not_downloaded. Does not interpret content.',
         obj({'path': S, 'entry': S, 'offset': I}, ('path',)), REFERENCE, SideEffect.NONE, FAILURES),
     CapabilityDefinition('write_back_kicad_board',
-        'Write changed board/project/custom-rule files from the exact approved work-copy '
+        'Write changed KiCad design files (board, schematic, project, rules, libraries) from the exact approved work-copy '
         'revision to its recorded original project. Requires approval of this exact call. '
         'Refuses open boards and changed originals; verifies backups and staged files before '
         'replacement. On failure, already replaced files may remain; recovery depends on '

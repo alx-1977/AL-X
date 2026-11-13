@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Mapping
 
 from alx.contracts import (
@@ -61,6 +62,13 @@ _PAGE = StructuredSchema(
     {"page": StructuredSchema(ValueKind.INTEGER), "section": _POINT, "caption": _STRING,
      "boxes": StructuredSchema(ValueKind.ARRAY, items=_BOX)},
     ("page", "section"), extra_properties=False)
+_ROW = StructuredSchema(ValueKind.OBJECT, {"what": _STRING, "datasheet_mm": _NUMBER, "board_mm": _NUMBER},
+                        ("what", "datasheet_mm", "board_mm"), extra_properties=False)
+_CHECKED = StructuredSchema(
+    ValueKind.OBJECT,
+    {"document": _STRING, "page": StructuredSchema(ValueKind.INTEGER),
+     "rows": StructuredSchema(ValueKind.ARRAY, items=_ROW), "no_layout": _STRING},
+    (), extra_properties=False)
 _REFERENCE = StructuredSchema(
     ValueKind.OBJECT,
     {"label": _STRING, "sublabel": _STRING, "document": _STRING,
@@ -73,7 +81,7 @@ DEFINITION = CapabilityDefinition(
     "column of items and up to two board views side by side - his board on the left, your "
     "fix on a work copy on the right - so he can accept the change or not. Say one line and "
     "let the screen carry the detail. title is the part or subject only (e.g. AE1); context "
-    "names the project. Text limits, in characters: title and subtitle 24, context 80, "
+    "names the project. Text limits, in characters: title 24, subtitle 40, context 80, "
     "verdict 120, item title 80 and detail 200, note 400, said 300, view label 40 and "
     "sublabel 60. Tones: ok (green, correct), bad (red, needs attention), info (cyan). "
     "Lead the items with what is wrong; what is correct gets one quiet item. A view reads a "
@@ -97,13 +105,20 @@ DEFINITION = CapabilityDefinition(
     "say anything about it, and if something is missing or wrong on it, fix it and show "
     "again rather than describe the gap. Names not on the board are refused; every "
     "connection of a part you name is drawn, with its silkscreen marks. Two views are "
-    "headed Current (his board) and Amended (your copy), in that order.",
+    "headed Current (his board) and Amended (your copy), in that order. A view of your "
+    "copy needs checked, shown beside it: document and page of the datasheet layout the "
+    "parts follow, and rows of every dimension it gives (spacing, offsets, widths, gaps) "
+    "with the datasheet value and the value you measured on your copy, in mm. A row off "
+    "by more than 0.05 mm is shown red, and the verdict cannot then be ok. Measure before "
+    "you show; a clean DRC says nothing about the datasheet. Only where no datasheet gives "
+    "a layout for these parts, no_layout says so in a short reason, shown to him as not "
+    "checked.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"title": _STRING, "subtitle": _STRING, "context": _STRING, "verdict": _TONED,
          "items": StructuredSchema(ValueKind.ARRAY, items=_ITEM), "note": _STRING,
          "said": _STRING, "views": StructuredSchema(ValueKind.ARRAY, items=_VIEW),
-         "reference": _REFERENCE},
+         "reference": _REFERENCE, "checked": _CHECKED},
         ("title",), extra_properties=False),
     StructuredSchema(
         ValueKind.OBJECT, {"shown": StructuredSchema(ValueKind.BOOLEAN),
@@ -246,6 +261,41 @@ def _reference(value: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return {"label": label, "sublabel": sublabel, "pages": shown}, requests
 
 
+CHECK_TOLERANCE_MM = 0.05
+MAX_ROWS = 16
+
+
+def _checked(value: Any) -> dict[str, Any]:
+    """Her measurements of her copy against the datasheet layout (2026-11-13).
+
+    She twice showed Friedl a layout with a clean DRC that differed from the
+    manufacturer's drawing, after the rule to check it was already in her
+    instructions. A view of her copy now needs the comparison, shown to him.
+    """
+    no_layout = _text(value.get("no_layout"), 120, "checked.no_layout").strip()
+    rows = list(value.get("rows") or [])
+    if no_layout:
+        if rows:
+            raise ValueError("checked has rows or no_layout, not both")
+        return {"no_layout": no_layout, "rows": [], "differs": False}
+    document = value.get("document")
+    if not isinstance(document, str) or not document.strip():
+        raise ValueError("checked.document names the datasheet the layout follows")
+    page = value.get("page")
+    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+        raise ValueError("checked.page is the datasheet page of the layout")
+    if not 1 <= len(rows) <= MAX_ROWS:
+        raise ValueError(f"checked has 1 to {MAX_ROWS} rows, one per datasheet dimension")
+    shown = []
+    for row in rows:
+        datasheet, board = _number(row.get("datasheet_mm")), _number(row.get("board_mm"))
+        shown.append({"what": _text(row.get("what"), 40, "row.what"), "datasheet_mm": datasheet,
+                      "board_mm": board,
+                      "tone": "bad" if abs(datasheet - board) > CHECK_TOLERANCE_MM else "ok"})
+    return {"document": Path(document).name[:60], "page": page, "rows": shown,
+            "differs": any(row["tone"] == "bad" for row in shown)}
+
+
 def build_display_executors(
     board: DisplayBoard,
     read_section: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
@@ -263,7 +313,7 @@ def build_display_executors(
         try:
             display: dict[str, Any] = {
                 "title": _text(arguments.get("title"), 24, "title"),
-                "subtitle": _text(arguments.get("subtitle"), 24, "subtitle"),
+                "subtitle": _text(arguments.get("subtitle"), 40, "subtitle"),
                 "context": _text(arguments.get("context"), 80, "context"),
                 "note": _text(arguments.get("note"), 400, "note"),
                 "said": _text(arguments.get("said"), 300, "said"),
@@ -296,6 +346,17 @@ def build_display_executors(
                         raise ValueError("a dimension runs between two [x, y] points")
             reference, page_requests = (None, []) if not arguments.get("reference") \
                 else _reference(arguments["reference"])
+            checked = None
+            if any(view.get("work_copy_id") for view in views):
+                if not arguments.get("checked"):
+                    raise ValueError(
+                        "a view of your copy needs checked: the datasheet layout's dimensions "
+                        "beside the values you measured on your copy (or no_layout)")
+                checked = _checked(arguments["checked"])
+                if checked["differs"] and (display["verdict"] or {}).get("tone") == "ok":
+                    raise ValueError("a checked dimension differs from the datasheet, so the "
+                                     "verdict cannot be ok")
+            display["checked"] = checked
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             return failed("arguments_unusable", str(error))
         if views and read_section is None:

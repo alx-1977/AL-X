@@ -17,11 +17,12 @@ DEFINITION = CapabilityDefinition(
     "deleting, posting, paying, governance and Friedl's files. Never access "
     "banking or Keychain. Use service APIs directly when keys exist; ask for "
     "the specific missing key otherwise. Long runs return a reference and "
-    "completion arrives as untrusted evidence at a Core occasion.",
+    "completion arrives as untrusted evidence at a Core occasion. working_directory "
+    "defaults to the AL/X repository, time_limit_seconds to 60.",
     StructuredSchema(ValueKind.OBJECT, {
         "argv": StructuredSchema(ValueKind.ARRAY, items=_S),
         "working_directory": _S, "time_limit_seconds": _N,
-    }, ("argv", "working_directory", "time_limit_seconds"), extra_properties=False),
+    }, ("argv",), extra_properties=False),
     StructuredSchema(ValueKind.OBJECT, {
         "run_id": _S, "status": _S, "exit_code": StructuredSchema(ValueKind.INTEGER),
         "duration_seconds": _N, "stdout": _S, "stderr": _S,
