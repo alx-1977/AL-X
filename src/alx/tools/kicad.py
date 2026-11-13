@@ -82,7 +82,9 @@ _ACTION_DEFINITIONS = (
         'Run all-severity KiCad DRC with zone refill on a new isolated project copy. '
         'Requires exactly one top-level board. Returns grouped facts, configured noise flags '
         'and revision for exact write approval. custom_rule_citations counts rule names '
-        'cited in violations, not all loaded rules; does not interpret findings. erc is '
+        'cited in violations, not all loaded rules; does not interpret findings. A review of his '
+        'board ends in corrections on a copy shown as Current and Amended, not in questions to '
+        'him (Friedl, 2026-11-12). erc is '
         "KiCad's electrical rules check of the schematic, errors and warnings; Friedl wants "
         'both clean, like the DRC. When erc.top_level_sheets is more than 1 (an Altium import), '
         "KiCad's board-against-schematic check (schematic_parity) reads only the first sheet: "
@@ -287,15 +289,20 @@ MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
     'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
     'relinked; then a global label used on more than one sheet becomes pins on those '
     "sheets' blocks with wires (buses for bus labels) between them, as Altium showed "
-    "(connected lists them). Layout minimizes crossings among deterministic candidates; "
-    "top_sheet_crossings reports the produced layout's wire/bus crossings. "
+    "(connected lists them). The sheet that shares signals with the others stands in the "
+    "middle and each other block beside it, close in, pins level, so every connection is one "
+    "straight wire with its net name on a stub clear of the pins; other patterns are drawn in "
+    "two columns with tracks between. top_sheet_crossings counts any crossings. Net labels on "
+    "the top sheet are plain labels, as KiCad intends, so those nets take KiCad's hierarchical "
+    "name (HALO becomes /HALO); the board, its design rules and net classes are renamed to "
+    "match (renamed_nets), as Update PCB from Schematic would. "
     "Works on a design already hierarchical too. Proven by KiCad's "
     "netlist before and after; if any connection or net name "
     'changes, the copy is put back and verification_failed names the nets. Part of every '
     'import; write it back with his approval, and ask him to open it once in KiCad.',
     obj({'work_copy_id': S}),
     obj({'converted': B, 'reason': S, 'connected': array(S), 'sheets': array(S), 'renamed': MAP,
-         'footprints_relinked': I, 'top_sheet_crossings': I,
+         'footprints_relinked': I, 'top_sheet_crossings': I, 'renamed_nets': MAP, 'rename_counts': MAP,
          'footprints_not_found': array(S), 'nets': I, 'netlist_identical': B, 'work_copy_id': S,
          'work_copy_revision': S, 'schematic_parity': array(GROUP), 'erc': ERC},
         ('converted', 'reason', 'connected', 'sheets', 'renamed', 'footprints_relinked', 'footprints_not_found')),

@@ -181,6 +181,10 @@ class LibraryWorkTests(unittest.TestCase):
             self.assertFalse(list((root / "storage").rglob(".git")))
             where = {"work_copy_id": copy["work_copy_id"], "footprint": "Test/PAD1", "part": "FP",
                      "document": str(library / "sheet.pdf"), "page": 1, "section": [50, 50, 300, 200]}
+            # A wrong footprint name is a wrong name, not a broken tool (review of #240).
+            for wrong in ("Test/Missing", "Test"):
+                bad = kicad_call(runtime.executors, "check_layout", dict(where, footprint=wrong))
+                self.assertEqual(bad.failure["code"], "arguments_unusable", bad.failure)
             [number] = call("check_layout", **where)["numbers"]
             reading = [{"number": number["id"], "measures": {"pad_size": "FP.1", "axis": "x"}}]
             first = call("check_layout", **where, readings=reading)

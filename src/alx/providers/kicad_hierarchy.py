@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from alx.providers.kicad_top_layout import GRID, layout
+from alx.providers.kicad_top_layout import A3, GRID, MARGIN, TITLE_BLOCK, layout
 
 
 class HierarchyError(Exception):
@@ -46,7 +46,7 @@ def _file_name(name: str, taken: set[str]) -> str:
 
 def _top_sheet(root_uuid: str, project: str, sheets: list[dict[str, Any]], header: str) -> str:
     blocks = []
-    rectangles, _, _, _, _, extent = layout(len(sheets), {})
+    rectangles, _, _, _, _, extent, _ = layout(len(sheets), {}, A3)
     for index, sheet in enumerate(sheets):
         x, y, width, height = (v * GRID for v in rectangles[index])
         blocks.append(f"""	(sheet
@@ -76,7 +76,9 @@ def _top_sheet(root_uuid: str, project: str, sheets: list[dict[str, Any]], heade
 		)
 	)
 """)
-    paper = '(paper "A3")' if extent == (150, 96) else f'(paper "User" {(extent[0] + 12) * GRID:.2f} {(extent[1] + 20) * GRID:.2f})'
+    # A3 when the drawing fits above its title block; otherwise a page made to fit.
+    fits = extent[0] + MARGIN <= A3[0] and extent[1] + MARGIN <= A3[1] - TITLE_BLOCK
+    paper = '(paper "A3")' if fits else f'(paper "User" {(extent[0] + 12) * GRID:.2f} {(extent[1] + 20) * GRID:.2f})'
     return (f"""(kicad_sch
 	(version 20260306)
 	(generator "eeschema")
@@ -204,15 +206,32 @@ def _segment(kind: str, x1: float, y1: float, x2: float, y2: float) -> str:
             f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
 
 
+# KiCad's named papers, in landscape millimetres (User dimensions are explicit).
+_PAPER_SIZES = {"A0": (1189, 841), "A1": (841, 594), "A2": (594, 420),
+                "A3": (420, 297), "A4": (297, 210), "A5": (210, 148),
+                "A": (279.4, 215.9), "B": (431.8, 279.4), "C": (558.8, 431.8),
+                "D": (863.6, 558.8), "E": (1117.6, 863.6),
+                "USLetter": (279.4, 215.9), "USLegal": (355.6, 215.9), "USLedger": (431.8, 279.4)}
+
+
+def _page_grid(head):
+    """The top sheet's own page in grid units, so the drawing is centred on it (review of #242)."""
+    paper = re.search(r'\(paper "([^"]+)"([^)]*)\)', head)
+    if not paper:
+        return A3
+    if paper[1] == "User":
+        width, height = map(float, paper[2].split()[:2])
+    else:
+        width, height = _PAPER_SIZES.get(paper[1], (A3[0] * GRID, A3[1] * GRID))
+    if "portrait" in paper[2].split():
+        width, height = height, width
+    return (width / GRID, height / GRID)
+
+
 def _resize_paper(head, rectangles, routes, extent):
     """Keep existing page dimensions and enclose final blocks/wires plus margins."""
     paper = re.search(r'\(paper "([^"]+)"([^)]*)\)', head)
-    # KiCad's named papers, in landscape millimetres (User dimensions are explicit).
-    sizes = {"A0": (1189, 841), "A1": (841, 594), "A2": (594, 420),
-             "A3": (420, 297), "A4": (297, 210), "A5": (210, 148),
-             "A": (279.4, 215.9), "B": (431.8, 279.4), "C": (558.8, 431.8),
-             "D": (863.6, 558.8), "E": (1117.6, 863.6),
-             "USLetter": (279.4, 215.9), "USLegal": (355.6, 215.9), "USLedger": (431.8, 279.4)}
+    sizes = _PAPER_SIZES
     old_width, old_height = 0, 0
     if paper:
         if paper[1] == 'User':
@@ -294,8 +313,8 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
         return {"connected": [], "reason": "no global label is used on more than one sheet",
                 "top_sheet_crossings": 0}
     try:
-        rectangles, pin_positions, routes, junctions, crossings, extent = layout(
-            len(sheets), {label: uses[label] for label in shared})
+        rectangles, pin_positions, routes, junctions, crossings, extent, names = layout(
+            len(sheets), {label: uses[label] for label in shared}, _page_grid(top))
     except ValueError as error:
         raise HierarchyError("unsupported_project", str(error)) from error
     for sheet in sheets:
@@ -357,19 +376,16 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             drawing.append(f"\t(junction\n\t\t(at {jx * GRID:.2f} {jy * GRID:.2f})\n"
                            f"\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n"
                            f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
-        # Preserve one global label per connection, anchored at an actual pin.
-        (px, py), _, _ = pin_positions[uses[label][0], label]
-        x, top_y = px * GRID, py * GRID
-        drawing.append(f"""	(global_label {_quoted(label)}
-		(shape {shapes[label] if len({s["shapes"].get(label) for s in sheets} - {None}) == 1 else "bidirectional"})
-		(at {x:.2f} {top_y:.2f} 90)
-		(effects (font (size 1.27 1.27)) (justify left))
+        # A plain net label on the wire, as KiCad intends for a hierarchical
+        # design and as Altium drew it (Friedl, 2026-11-13). Its net takes
+        # KiCad's hierarchical name (/HALO); the caller renames the board's
+        # net to match, as KiCad's own Update PCB from Schematic would.
+        (nx, ny), angle = names[label]
+        x, y = nx * GRID, ny * GRID
+        drawing.append(f"""	(label {_quoted(label)}
+		(at {x:.2f} {y:.2f} {angle})
+		(effects (font (size 1.27 1.27)) (justify left bottom))
 		(uuid {_quoted(str(uuid.uuid4()))})
-		(property "Intersheetrefs" "${{INTERSHEET_REFS}}"
-			(at {x:.2f} {top_y:.2f} 0)
-			(hide yes)
-			(effects (font (size 1.27 1.27)))
-		)
 	)
 """)
     head = top[:blocks[0].start()] + "\n"
@@ -377,6 +393,51 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
     head = _resize_paper(head, rectangles, routes, extent)
     root_path.write_text(head + "".join(parts) + "".join(drawing) + tail.lstrip("\n"))
     return {"connected": shared, "reason": "", "top_sheet_crossings": crossings}
+
+
+def rename_nets(project: Path, renames: dict[str, str]) -> dict[str, int]:
+    """Give the board, its design rules and its net classes the schematic's new net names.
+
+    What KiCad's Update PCB from Schematic does for a renamed net, and nothing
+    else: a board names a net only as (net "NAME"); a design rule only inside
+    a NetName comparison; a net class only as an exact pattern.
+    """
+    counts = {"board": 0, "rules": 0, "net_classes": 0}
+    if not renames:
+        return counts
+    for board in project.glob("*.kicad_pcb"):
+        source = board.read_text()
+        for old, new in renames.items():
+            before = '(net %s)' % _quoted(old)
+            counts["board"] += source.count(before)
+            source = source.replace(before, '(net %s)' % _quoted(new))
+        board.write_text(source)
+    for rules in project.glob("*.kicad_dru"):
+        lines = rules.read_text().split("\n")
+        for number, line in enumerate(lines):
+            if line.lstrip().startswith("#"):
+                continue  # a comment is a note, not a rule (review of #242)
+            for old, new in renames.items():
+                for quote in ("'", '"'):
+                    pattern = re.compile(r"(NetName\s*[!=]=\s*)" + re.escape(quote + old + quote))
+                    line, found = pattern.subn(lambda m: m.group(1) + quote + new + quote, line)
+                    counts["rules"] += found
+            lines[number] = line
+        rules.write_text("\n".join(lines))
+    for pro in project.glob("*.kicad_pro"):
+        settings = json.loads(pro.read_text())
+        patterns = (settings.get("net_settings") or {}).get("netclass_patterns") or []
+        for item in patterns:
+            if item.get("pattern") in renames:
+                item["pattern"] = renames[item["pattern"]]
+                counts["net_classes"] += 1
+        assignments = (settings.get("net_settings") or {}).get("netclass_assignments") or {}
+        for old, new in renames.items():
+            if old in assignments:
+                assignments[new] = assignments.pop(old)
+                counts["net_classes"] += 1
+        pro.write_text(json.dumps(settings, indent=2) + "\n")
+    return counts
 
 
 def netlist_nets(netlist: str) -> dict[frozenset, str]:
@@ -391,4 +452,4 @@ def netlist_nets(netlist: str) -> dict[frozenset, str]:
     return nets
 
 
-__all__ = ["HierarchyError", "connect_with_sheet_pins", "make_hierarchical", "netlist_nets"]
+__all__ = ["HierarchyError", "connect_with_sheet_pins", "make_hierarchical", "netlist_nets", "rename_nets"]

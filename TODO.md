@@ -126,31 +126,16 @@ inadequate.
 
 Not yet usable.
 
-- [ ] **Board-design tool, next round (parked 2026-11-12 so the KiCad work
-  does not pull everything else in; build as one change, mockup first).**
-  - Layout check: list every dimension and value in the whole datasheet,
-    mechanically from the PDF text; she accounts for each (matches, differs
-    with his value, not applicable) and may set aside a page only with a
-    reason. Shown on Würth's own drawing, unchecked items amber; no green
-    verdict while any are open.
-  - Footprint against the datasheet land pattern (AE2's had two pads
-    missing and pads off-centre; the manufacturer's CAD file was wrong).
-  - Friedl's layout rules in her KiCad instructions, checked mechanically:
-    copper wider than the pad it leaves or meets joins through a teardrop,
-    never a step. A tested teardrop helper.
-  - Review rule in her tool instructions: correct on a copy, show Current
-    and Amended, then one short line on intent; never ask him how to review.
-  - Viewer: long captions can crowd the boards (Greptile, #234; deferred).
-  - Reply limit: #237 refuses any reply over 50 words, which Friedl did not
-    ask for (13 Nov). Change it to apply only when he has not asked for
-    detail; when he asks her to explain or list, she answers in full.
-  - Library work (FireFli-KiCad-Lib symbols and footprints) through the KiCad
-    tool: copy, tested helpers, his approval to write back. On 13 Nov she
-    edited the AE2 footprint and symbol with her own pcbnew scripts through
-    run_program; three crashed as Python closed (after saving), outside every
-    guard the tool has.
-  - For AL/X now: AE1's 1.2 mm feed meets C61's 0.5 mm pad and the antenna
-    pad with a hard step; redo with teardrops.
+- [ ] **Board-design tool: what is left** after #239 and #240 (13 Nov
+  2026), which built the layout check against the drawing, ERC and the
+  board-against-schematic check, the taper rule, one hierarchical design
+  with drawn sheet connections, library work through the tool and
+  land-pattern checks. The small items left then were done in the top-sheet
+  change (review rule, long captions, footprint names). What remains:
+  - For AL/X, not code: the one-time land-pattern audit of the 86
+    footprints outside FireFli_Resistors and FireFli_Capacitors; drawing
+    the sheet connections on P0020's top sheet; D4 (5V/GND) and J7 pad 8,
+    which the board-against-schematic check shows, for Friedl to decide.
 - [ ] Thermal simulation of a PCB (layered board heat model from the KiCad
   copper, part powers in, part temperatures and a heat map out). Needs a
   decision and a first test board with measured temperatures.

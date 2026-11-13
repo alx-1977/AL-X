@@ -1351,7 +1351,9 @@ RESPONSE_FIELD: Mapping[str, Any] = {
         "What you say to Friedl, spoken aloud, at most 50 words unless detail_asked (longer is refused): the outcome in a few words, and anything "
         "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
         "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one. "
-        "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance."
+        "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance. "
+        "Never ask him to do the work himself (tidy a sheet in KiCad, fix a file, run a tool): "
+        "if your tools cannot do it, say what is missing so it can be built."
     ),
 }
 DETAIL_FIELD: Mapping[str, Any] = {

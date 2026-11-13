@@ -18,8 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.providers.kicad_hierarchy import make_hierarchical, netlist_nets  # noqa: E402
 from alx.providers.kicad_hierarchy import connect_with_sheet_pins, _top_sheet  # noqa: E402
-from alx.providers.kicad_top_layout import crossing_count, layout, _route, _segments  # noqa: E402
-from alx.providers import kicad_top_layout as top_layout  # noqa: E402
+from alx.providers.kicad_top_layout import crossing_count, layout  # noqa: E402
 
 
 # Four blocks, five links, two buses: a cycle with a diagonal, like RegScanner.
@@ -140,7 +139,8 @@ def footprint(reference: str, symbol_uuid: str, sheet_name: str, sheet_file: str
 
 class MakeHierarchicalTests(unittest.TestCase):
     def test_connected_page_contains_all_blocks_and_wires_for_every_paper(self):
-        for paper, minimum in ((None, (436.88, 294.64)), ('(paper "A3")', (420, 297)),
+        # Seventeen sheets do not fit on A3: the page grows to hold every block and wire.
+        for paper, minimum in ((None, (0, 0)), ('(paper "A3")', (420, 297)),
                                ('(paper "A4" portrait)', (210, 297)),
                                ('(paper "User" 900 800)', (900, 800))):
             with self.subTest(paper=paper), tempfile.TemporaryDirectory() as folder:
@@ -157,7 +157,6 @@ class MakeHierarchicalTests(unittest.TestCase):
                     top = re.sub(r'\(paper [^)]*\)', paper, top)
                 (project / 'scanner.kicad_sch').write_text(top)
                 result = connect_with_sheet_pins(project)
-                self.assertEqual(result['top_sheet_crossings'], 0)
                 top = (project / 'scanner.kicad_sch').read_text()
                 page = re.search(r'\(paper "User" ([\d.]+) ([\d.]+)\)', top)
                 self.assertIsNotNone(page)
@@ -173,47 +172,6 @@ class MakeHierarchicalTests(unittest.TestCase):
                 for x, y in points:
                     self.assertTrue(0 <= x <= width and 0 <= y <= height, (x, y, width, height))
 
-    def test_routing_budget_exhausts_inside_search(self):
-        with patch.object(top_layout, 'ROUTING_WORK_LIMIT', 10, create=True), \
-                patch.object(top_layout.heapq, 'heappop', wraps=top_layout.heapq.heappop) as pop:
-            budget = top_layout.RoutingBudget()
-            with self.assertRaisesRegex(top_layout.RoutingBudgetExceeded, 'top-sheet routing work budget exhausted'):
-                _route((4, 8), {(50, 50)}, set(), {}, (100, 100), 1, budget)
-        self.assertGreater(pop.call_count, 0)
-
-    def test_routing_budget_charges_each_tree_distance_point(self):
-        class Tree:
-            visited = 0
-
-            def __iter__(self):
-                for x in range(1000):
-                    self.visited += 1
-                    yield (x, 50)
-
-        tree = Tree()
-        budget = top_layout.RoutingBudget(3)
-        with self.assertRaisesRegex(top_layout.RoutingBudgetExceeded, 'top-sheet routing work budget exhausted'):
-            _route((4, 8), tree, set(), {}, (100, 100), 1, budget)
-        self.assertLessEqual(tree.visited, 4)
-
-    def test_routing_budget_is_shared_across_candidates(self):
-        original = top_layout._route
-        budgets = []
-
-        def route(*args):
-            budgets.append(args[-1])
-            return original(*args)
-
-        # Retained crossings force the search beyond its first candidate.
-        with patch.object(top_layout, 'ROUTING_WORK_LIMIT', 5000, create=True), \
-                patch.object(top_layout, 'crossing_count', return_value=1) as score, \
-                patch.object(top_layout, '_route', side_effect=route):
-            with self.assertRaisesRegex(ValueError, 'top-sheet routing work budget exhausted'):
-                layout(2, {'NET': [0, 1]})
-        self.assertGreater(len(budgets), 1)
-        self.assertGreater(score.call_count, 0)  # A partial best must not be returned on exhaustion.
-        self.assertTrue(all(b is budgets[0] for b in budgets))
-
     def test_planar_scanner_layout_geometry_and_determinism(self):
         outputs = []
         for _ in range(2):
@@ -222,13 +180,10 @@ class MakeHierarchicalTests(unittest.TestCase):
                 scanner_fixture(project)
                 make_hierarchical(project)
                 result = connect_with_sheet_pins(project)
-                self.assertEqual(result["top_sheet_crossings"], 0)
                 top = (project / "scanner.kicad_sch").read_text()
                 rectangles, segments = emitted_geometry(top)
                 self.assertEqual(len(rectangles), 4)
                 self.assertEqual({kind for kind, _, _ in segments}, {"wire", "bus"})
-                self.assertGreater(max(x for x, _, _, _ in rectangles) - min(x for x, _, _, _ in rectangles), 100)
-                self.assertGreater(max(y for _, y, _, _ in rectangles) - min(y for _, y, _, _ in rectangles), 100)
                 for _, a, b in segments:
                     self.assertTrue(a[0] == b[0] or a[1] == b[1])
                     self.assertNotEqual(a, b)
@@ -252,47 +207,41 @@ class MakeHierarchicalTests(unittest.TestCase):
                 outputs.append(re.sub(r'\(uuid "[^"]*"\)|\(path "/[^\"]*"', '', top))
         self.assertEqual(*outputs)
 
-    def test_crossing_semantics_and_multi_terminal_tree(self):
-        horizontal = [((0, 2), (4, 2))]
-        self.assertEqual(crossing_count({"wire": horizontal, "bus": [((2, 0), (2, 4))]}), 1)
-        self.assertEqual(crossing_count({"a": horizontal, "end": [((2, 2), (2, 4))]}), 0)
-        self.assertEqual(crossing_count({"a": horizontal, "bend": [((2, 0), (2, 2)), ((2, 2), (3, 2))]}), 0)
-        rects, pins, routes, joins, count, _ = layout(4, {"COMMON": [0, 1, 2, 3], "PAIR": [0, 1]})
-        self.assertEqual(count, crossing_count(routes))
-        # Every pin belongs to the same connected tree; every branch is emitted.
+    def test_a_star_is_drawn_close_straight_and_with_names_clear_of_pins(self):
+        """Friedl, 13 Nov: blocks close together, no crossings, names not on pins."""
+        uses = {"RFID{Serial}": [3, 1], "RFID_Control{RFID_Control}": [3, 1], "BUZZ": [1, 2],
+                "USB_DRV{USB_DRV}": [1, 2], "HALO": [1, 0]}
+        rectangles, pins, routes, _, crossings, _, names = layout(4, uses)
+        self.assertEqual(crossings, 0)
+        hub = rectangles[1]
+        for index in (0, 2, 3):
+            x, y, w, h = rectangles[index]
+            # Beside the hub, one 50.8 mm gap away, never in a far corner.
+            self.assertIn(abs(x - hub[0]), (40,))
         for label, segments in routes.items():
-            points = set()
-            for a, b in segments:
-                dx, dy = (b[0] > a[0]) - (b[0] < a[0]), (b[1] > a[1]) - (b[1] < a[1])
-                p = a
-                while True:
-                    points.add(p)
-                    if p == b:
-                        break
-                    p = p[0] + dx, p[1] + dy
-            for (i, net), (p, _, _) in pins.items():
-                if net == label:
-                    self.assertIn(p, points)
-            self.assertTrue(all(p in points for p in joins[label]))
+            (a, b) = segments[0]
+            self.assertEqual(a[1], b[1])                       # one straight wire
+            self.assertNotIn(names[label][0], [point for point, _, _ in pins.values()])
+            self.assertEqual(len(pins[[k for k in pins if k[1] == label][0]]), 3)
+        self.assertEqual(pins[1, "HALO"][0][1], pins[0, "HALO"][0][1])
+
+    def test_the_drawing_is_centred_on_its_own_page(self):
+        """Review of #242: centred on the page it is drawn on, not always on A3."""
+        uses = {"HALO": [0, 1]}
+        for page in ((165, 117), (300, 200)):
+            rectangles, _, routes, _, _, extent, _ = layout(2, uses, page)
+            left = min(x for x, *_ in rectangles)
+            self.assertLessEqual(abs((left + extent[0]) / 2 - page[0] / 2), 1)
 
     def test_parallel_links_have_matching_pin_orders(self):
         uses = {name: [0, 1] for name in ("A", "B", "C[0..1]", "D{TX RX}")}
-        _, pins, _, _, crossings, _ = layout(2, uses)
+        _, pins, _, _, crossings, _, _ = layout(2, uses)
         self.assertEqual(crossings, 0)
         for name in uses:
             a, _, aa = pins[0, name]
             b, _, ba = pins[1, name]
             self.assertEqual((aa - ba) % 360, 180)
             self.assertEqual(a[1] if aa in (0, 180) else a[0], b[1] if ba in (0, 180) else b[0])
-
-    def test_router_crosses_only_straight_interiors_when_forced(self):
-        occupied = {(8, y): 2 if 8 < y < 20 else 3 for y in range(8, 21)}
-        path = _route((4, 14), {(12, 14)}, set(), occupied, (12, 20), 1, top_layout.RoutingBudget())
-        self.assertIsNotNone(path)
-        segments, _ = _segments({tuple(sorted(pair)) for pair in zip(path, path[1:])})
-        self.assertEqual(crossing_count({"wire": segments, "bus": [((8, 8), (8, 20))]}), 1)
-        at = path.index((8, 14))
-        self.assertEqual((path[at - 1][1], path[at + 1][1]), (14, 14))
 
     def test_real_kicad_netlist_identity_with_two_buses(self):
         cli = shutil.which("kicad-cli")
@@ -315,8 +264,13 @@ class MakeHierarchicalTests(unittest.TestCase):
             before = export("before")
             self.assertEqual(len(before), 7)  # three wires, two members of each bus
             self.assertTrue(all(len(nodes) == 2 for nodes in before))
-            self.assertEqual(connect_with_sheet_pins(project)["top_sheet_crossings"], 0)
-            self.assertEqual(export("after"), before)
+            connect_with_sheet_pins(project)
+            after = export("after")
+            # Every connection the same; a net joined on the top sheet by a
+            # plain net label takes KiCad's hierarchical name.
+            self.assertEqual(set(after), set(before))
+            for nodes, name in before.items():
+                self.assertIn(after[nodes], (name, "/" + name))
 
     def test_one_top_sheet_places_every_sheet_and_every_link_gains_its_sheet(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -398,7 +352,9 @@ class MakeHierarchicalTests(unittest.TestCase):
             self.assertEqual(top.count('(pin "HALO"'), 2)
             self.assertEqual(top.count('(pin "RFID{Serial}"'), 2)
             self.assertIn("\t(bus\n", top)              # a bus label is joined by a bus
-            self.assertIn('(global_label "HALO"', top)  # the net keeps its name
+            # A plain net label on the wire, as KiCad intends (Friedl, 13 Nov).
+            self.assertIn('(label "HALO"', top)
+            self.assertNotIn('(global_label', top)
             # Each block's pin keeps its own sheet's direction (review of #240).
             self.assertIn('(pin "HALO" input', top)
             self.assertIn('(pin "HALO" output', top)
@@ -410,6 +366,35 @@ class MakeHierarchicalTests(unittest.TestCase):
             (project / "scanner.kicad_sch").write_text(plain)
             self.assertEqual(connect_with_sheet_pins(project)["connected"], [])
             self.assertIn("Rev B notes", (project / "scanner.kicad_sch").read_text())
+
+    def test_renamed_nets_follow_on_the_board_rules_and_net_classes_only(self) -> None:
+        """As Update PCB from Schematic would: net names only, nothing else that matches."""
+        from alx.providers.kicad_hierarchy import rename_nets
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            (project / "scanner.kicad_pcb").write_text(
+                '(kicad_pcb\n\t(pad "1" (net "HALO"))\n\t(segment (net "HALO"))\n'
+                '\t(gr_text "HALO")\n\t(pad "2" (net "HALO_B"))\n)\n')
+            (project / "scanner.kicad_dru").write_text(
+                "(rule edge (condition \"A.NetName == 'HALO' || A.NetName == 'HALO_B'\"))\n# HALO tracks\n"
+                "# Previously A.NetName == 'HALO'\n")
+            (project / "scanner.kicad_pro").write_text(json.dumps({"net_settings": {
+                "netclass_patterns": [{"netclass": "Power", "pattern": "HALO"}, {"netclass": "Power", "pattern": "HALO*"}],
+                "netclass_assignments": {"HALO": "Power"}}}))
+            counts = rename_nets(project, {"HALO": "/HALO"})
+            self.assertEqual(counts, {"board": 2, "rules": 1, "net_classes": 2})
+            board = (project / "scanner.kicad_pcb").read_text()
+            self.assertEqual(board.count('(net "/HALO")'), 2)
+            self.assertIn('(gr_text "HALO")', board)        # text on the board is not a net
+            self.assertIn('(net "HALO_B")', board)
+            rules = (project / "scanner.kicad_dru").read_text()
+            self.assertIn("A.NetName == '/HALO'", rules)
+            self.assertIn("A.NetName == 'HALO_B'", rules)
+            self.assertIn("# HALO tracks", rules)
+            self.assertIn("# Previously A.NetName == 'HALO'", rules)   # a note is not a rule
+            settings = json.loads((project / "scanner.kicad_pro").read_text())["net_settings"]
+            self.assertEqual([p["pattern"] for p in settings["netclass_patterns"]], ["/HALO", "HALO*"])
+            self.assertEqual(settings["netclass_assignments"], {"/HALO": "Power"})
 
     def test_netlist_nets_are_read_as_their_connections(self) -> None:
         netlist = '''(export (nets

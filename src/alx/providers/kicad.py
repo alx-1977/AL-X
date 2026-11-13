@@ -699,15 +699,23 @@ class KiCadProvider:
         board = bounded(self._source(arguments['board']), self.design_roots)
         return board, str(board.parent)
 
-    def _footprint_board(self, root, footprint):
-        """A library footprint placed alone on a board, as part FP, for measuring."""
+    @staticmethod
+    def _footprint_file(root, footprint):
+        """A footprint's file in a library copy; a wrong name says so (review of #240)."""
         if not isinstance(footprint, str) or footprint.count('/') != 1:
             raise KiCadError('arguments_unusable', {'detail': 'footprint is LIBRARY/NAME, e.g. FireFli_Misc/7488912455'})
         library, name = footprint.split('/')
         found = [path for path in (root / 'project').rglob(library + '.pretty') if path.is_dir()]
         if len(found) != 1 or not (found[0] / (name + '.kicad_mod')).is_file():
             raise KiCadError('arguments_unusable', {'detail': f'no footprint {footprint} in this library copy'})
-        digest = hashlib.sha256((found[0] / (name + '.kicad_mod')).read_bytes()).hexdigest()[:24]
+        return found[0] / (name + '.kicad_mod')
+
+    def _footprint_board(self, root, footprint):
+        """A library footprint placed alone on a board, as part FP, for measuring."""
+        source = self._footprint_file(root, footprint)
+        library, name = footprint.split('/')
+        found = [source.parent]
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:24]
         holder = root / 'footprint-boards' / digest
         board = holder / 'footprint.kicad_pcb'
         if board.is_file():
@@ -770,7 +778,7 @@ class KiCadProvider:
         connection or net name differs, the copy is put back as it was.
         """
         from alx.providers.kicad_hierarchy import (HierarchyError, connect_with_sheet_pins, make_hierarchical,
-                                                   netlist_nets)
+                                                   netlist_nets, rename_nets)
         with self._locked(arguments['work_copy_id']):
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('taint'):
@@ -801,12 +809,23 @@ class KiCadProvider:
                 if 'top_sheet_crossings' in pins:
                     result['top_sheet_crossings'] = pins['top_sheet_crossings']
                 after = netlist() if result['converted'] or pins['connected'] else before
+                # Every connection must be the same. Only a net now joined on the
+                # top sheet by a plain net label may take KiCad's hierarchical
+                # name, and the board, its rules and net classes follow it.
                 differing = sorted({before.get(k, '') for k in set(before) - set(after)}
-                                   | {after.get(k, '') for k in set(after) - set(before)}
-                                   | {before[k] for k in set(before) & set(after) if before[k] != after[k]})
+                                   | {after.get(k, '') for k in set(after) - set(before)})
                 if differing:
                     raise KiCadError('verification_failed', {'detail': 'the netlist changed; the copy is back '
                                                              'as it was', 'nets_differing': differing[:20]})
+                renames = {before[k]: after[k] for k in before if before[k] != after[k]}
+                unexpected = sorted(old for old, new in renames.items()
+                                    if new != '/' + old or not pins['connected'])
+                if unexpected:
+                    raise KiCadError('verification_failed', {'detail': 'a net name changed other than to its '
+                                                             'hierarchical name; the copy is back as it was',
+                                                             'nets_differing': unexpected[:20]})
+                result['renamed_nets'] = renames
+                result['rename_counts'] = rename_nets(project, renames)
                 # What the joined design now shows: the board against its whole
                 # schematic, and the ERC of every sheet (review of #239). Inside
                 # the undo, so a failed check never leaves the change unreported.
@@ -926,9 +945,7 @@ class KiCadProvider:
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('library'):
                 # The footprint's own file, so a change to it makes a check stale.
-                library, _, name = str(arguments.get('footprint', '')).partition('/')
-                found = [path for path in (root / 'project').rglob(library + '.pretty') if path.is_dir()]
-                return sha(found[0] / (name + '.kicad_mod')) if len(found) == 1 else ''
+                return sha(self._footprint_file(root, arguments.get('footprint')))
             return self._revision(root)
         board, _ = self._layout_target(arguments)
         return sha(board)
