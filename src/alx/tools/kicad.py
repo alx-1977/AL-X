@@ -287,8 +287,10 @@ MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
     'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
     'relinked; then a global label used on more than one sheet becomes pins on those '
     "sheets' blocks with wires (buses for bus labels) between them, as Altium showed "
-    "(connected lists them). Layout minimizes crossings among deterministic candidates; "
-    "top_sheet_crossings reports the produced layout's wire/bus crossings. "
+    "(connected lists them). The sheet that shares signals with the others stands in the "
+    "middle and each other block beside it, close in, pins level, so every connection is one "
+    "straight wire with its net name on a stub clear of the pins; other patterns are drawn in "
+    "two columns with tracks between. top_sheet_crossings counts any crossings. "
     "Works on a design already hierarchical too. Proven by KiCad's "
     "netlist before and after; if any connection or net name "
     'changes, the copy is put back and verification_failed names the nets. Part of every '

@@ -1,257 +1,190 @@
-"""Deterministic, crossing-first hierarchical geometry in 2.54 mm units.
+"""Where a hierarchical top sheet's blocks, pins, wires and net names go (2026-11-13).
 
-Only geometry lives here. Label scope and electrical identity remain owned by
-kicad_hierarchy. The bounded search stops at zero, the crossing lower bound.
+Geometry only, in 2.54 mm grid units; label scope and the netlist proof stay
+in kicad_hierarchy. Friedl's rules for the drawing, after a first layout put
+the blocks in the page corners with names on top of the pins: blocks close
+together, nets that do not cross, names clear of pins and block titles.
+
+The usual import is a star: one sheet (the microcontroller) shares a signal
+with each of the others, and no other sheet pair shares one. The hub then
+stands in the middle and each other block beside it, its pins level with the
+hub's, so every connection is one short straight wire and none can cross.
+Any other pattern is drawn in two columns with a lane of vertical tracks
+between them, the same way every time.
 """
 from __future__ import annotations
 
-import heapq
-import itertools
-import math
-
 GRID = 2.54
-# One allowance for the entire layout, including candidates that are discarded.
-# Units count search nodes, neighbors and individual tree-point distance checks.
-ROUTING_WORK_LIMIT = 2_000_000
+WIDTH = 20          # 50.8 mm, room for the longest pin names inside a block
+GAP = 20            # 50.8 mm between facing blocks: room for a net name
+PITCH = 2           # 5.08 mm between pins
+PAD = 3             # 7.62 mm from a block's top to its first pin
+MIN_HEIGHT = 10     # 25.4 mm
+ROW_GAP = 5         # 12.7 mm between blocks on one side
+LEFT, TOP = 20, 20  # 50.8 mm from the page corner
+NAME_OFFSET = 3     # a net name stands 7.62 mm out from the hub on its own stub
 
 
-class RoutingBudgetExceeded(ValueError):
-    """No partial layout may be accepted when the shared allowance is spent."""
+def _height(pins: int) -> int:
+    return max(MIN_HEIGHT, 2 * PAD + max(0, pins - 1) * PITCH)
 
 
-class RoutingBudget:
-    def __init__(self, limit=None):
-        self.remaining = ROUTING_WORK_LIMIT if limit is None else limit
-
-    def consume(self, units=1):
-        if self.remaining < units:
-            raise RoutingBudgetExceeded('top-sheet routing work budget exhausted; no layout accepted')
-        self.remaining -= units
-
-
-def crossing_count(routes, budget=None):
-    """Proper crossings of maximal straight runs from distinct connections.
-
-    Bends and intentional shared endpoints do not count; wire/bus pairs do.
-    A location is counted once per pair of connections.
-    """
-    count = 0
-    for first, second in itertools.combinations(sorted(routes), 2):
-        hits = set()
-        for a, b in routes[first]:
-            for c, d in routes[second]:
-                if budget is not None:
-                    budget.consume()
-                if a[1] == b[1] and c[0] == d[0]:
-                    if min(a[0], b[0]) < c[0] < max(a[0], b[0]) and min(c[1], d[1]) < a[1] < max(c[1], d[1]):
-                        hits.add((c[0], a[1]))
-                elif a[0] == b[0] and c[1] == d[1]:
-                    if min(c[0], d[0]) < a[0] < max(c[0], d[0]) and min(a[1], b[1]) < c[1] < max(a[1], b[1]):
-                        hits.add((a[0], c[1]))
-        count += len(hits)
-    return count
+def _star(count: int, uses: dict[str, list[int]]):
+    """The hub and, per other sheet, the labels it shares with the hub; None if not a star."""
+    if not uses:
+        return None
+    share = [sum(index in members for members in uses.values()) for index in range(count)]
+    hub = max(range(count), key=lambda index: (share[index], -index))
+    if any(len(members) != 2 or hub not in members for members in uses.values()):
+        return None
+    spokes = {index: sorted(label for label, members in uses.items() if index in members)
+              for index in range(count) if index != hub}
+    return hub, spokes
 
 
-def _placements(count, uses):
-    weights = [[0] * count for _ in range(count)]
-    for members in uses.values():
-        for a, b in itertools.combinations(members, 2):
-            weights[a][b] += 1
-            weights[b][a] += 1
-    order, remaining = [], set(range(count))
-    while remaining:
-        node = min(remaining, key=lambda i: (-sum(weights[i][j] for j in order[-1:]), -sum(weights[i]), i))
-        order.append(node)
-        remaining.remove(node)
-    orders = [tuple(order), tuple(range(count)), tuple(reversed(order))]
-    if count <= 5:
-        orders.extend(itertools.islice(itertools.permutations(range(count)), 48))
-    else:
-        orders.extend(tuple(order[i:] + order[:i]) for i in range(min(count, 8)))
-    seen = set()
-    for cols in dict.fromkeys([math.ceil(math.sqrt(count)), count, 2, 1]):
-        for candidate in orders:
-            if (cols, candidate) not in seen:
-                seen.add((cols, candidate))
-                yield cols, candidate
-
-
-def _pins(rectangles, uses, reverse):
-    pins = {}
-    for i, (x, y, w, h) in enumerate(rectangles):
-        sides = {side: [] for side in ('left', 'right', 'top', 'bottom')}
-        for label, members in uses.items():
-            if i not in members:
-                continue
-            partners = [rectangles[j] for j in members if j != i]
-            px = sum(r[0] + r[2] / 2 for r in partners) / len(partners)
-            py = sum(r[1] + r[3] / 2 for r in partners) / len(partners)
-            dx, dy = px - x - w / 2, py - y - h / 2
-            side = ('right' if dx >= 0 else 'left') if abs(dx) >= abs(dy) else ('bottom' if dy >= 0 else 'top')
-            sides[side].append((py if side in ('left', 'right') else px, label))
-        for side, labels in sides.items():
-            # Coordinate order agrees at both ends of parallel connections.
-            # Reverse label ties together in the second candidate.
-            labels.sort(key=lambda item: (item[0], tuple(-ord(c) for c in item[1]) if reverse else tuple(map(ord, item[1]))))
-            for slot, (_, label) in enumerate(labels):
-                offset = 2 * (slot + 1)
-                pins[i, label] = {
-                    'left': ((x, y + offset), (-1, 0), 180),
-                    'right': ((x + w, y + offset), (1, 0), 0),
-                    'top': ((x + offset, y), (0, -1), 90),
-                    'bottom': ((x + offset, y + h), (0, 1), 270),
-                }[side]
-    return pins
-
-
-def _route(start, targets, blocked, occupied, bounds, initial_axis, budget):
-    """Grid A* minimizes (crossings, bends, length), with stable node ties.
-
-    Existing bends/endpoints and parallel overlap are obstacles. A route can
-    cross another only by continuing straight through its interior, preventing
-    accidental KiCad joins. Same-net tree targets are intentional junctions.
-    """
-    def distance(p):
-        nearest = math.inf
-        for q in targets:
-            budget.consume()
-            nearest = min(nearest, abs(p[0] - q[0]) + abs(p[1] - q[1]))
-        return nearest
-
-    state = start, initial_axis
-    best = {state: (0, 0, 0)}
-    queue = [(0, 0, distance(start), 0, start, initial_axis)]
-    previous = {}
-    while queue:
-        budget.consume()
-        cross, bends, _, length, p, axis = heapq.heappop(queue)
-        state = p, axis
-        if best.get(state) != (cross, bends, length):
-            continue
-        if p in targets:
-            path = [p]
-            while state in previous:
-                budget.consume()
-                state = previous[state]
-                path.append(state[0])
-            return list(reversed(path))
-        for dx, dy, direction in ((-1, 0, 1), (0, -1, 2), (0, 1, 2), (1, 0, 1)):
-            budget.consume()
-            q = p[0] + dx, p[1] + dy
-            if not (4 <= q[0] <= bounds[0] and 8 <= q[1] <= bounds[1]) or q in blocked:
-                continue
-            at, dest = occupied.get(p, 0), occupied.get(q, 0)
-            if (at and (at == 3 or at == direction or axis != direction)) or (dest and (dest == 3 or dest == direction)):
-                continue
-            cost = cross + bool(dest), bends + (axis != direction), length + 1
-            nxt = q, direction
-            if nxt not in best or cost < best[nxt]:
-                best[nxt] = cost
-                previous[nxt] = state
-                heapq.heappush(queue, (*cost[:2], cost[2] + distance(q), cost[2], q, direction))
-    return None
-
-
-def _segments(edges, budget=None):
-    """Merge unit edges into straight runs, stopping at branch junctions."""
-    neighbors = {}
-    for a, b in edges:
-        if budget is not None:
-            budget.consume()
-        neighbors.setdefault(a, set()).add(b)
-        neighbors.setdefault(b, set()).add(a)
-    remaining, result = set(edges), []
-    while remaining:
-        if budget is not None:
-            budget.consume(len(remaining))  # min() scans every remaining edge.
-        a, b = min(remaining)
-        remaining.remove((a, b))
-        ends = [a, b]
-        for end in range(2):
-            # Use the adjacent original endpoint to establish direction.
-            prev, p = (b, a) if end == 0 else (a, b)
-            while len(neighbors[p]) == 2:
-                if budget is not None:
-                    budget.consume()
-                q = next(v for v in neighbors[p] if v != prev)
-                if (q[0] - p[0], q[1] - p[1]) != (p[0] - prev[0], p[1] - prev[1]):
-                    break
-                edge = tuple(sorted((p, q)))
-                if edge not in remaining:
-                    break
-                remaining.remove(edge)
-                prev, p = p, q
-            ends[end] = p
-        result.append(tuple(ends))
-    return result, sorted(p for p, adjacent in neighbors.items() if len(adjacent) > 2)
-
-
-def layout(count, uses):
-    """Choose placement, facing pins and routes from a bounded stable search.
-
-    Vary connectivity orders, grid/row placements, parallel pin order and route
-    order. This minimizes crossings among evaluated candidates, not globally.
-    Expand the page for designs that cannot fit the standard A3 usable area.
-    """
-    budget = RoutingBudget()
-    degree = max((sum(i in members for members in uses.values()) for i in range(count)), default=0)
-    width, height = max(20, 2 * (degree + 1)), max(12, 2 * (degree + 1))
-    best, score = None, None
-    for cols, order in _placements(count, uses):
-        rows = math.ceil(count / cols)
-        extent_x, extent_y = max(150, cols * (width + 12)), max(96, rows * (height + 12))
-        rects = [None] * count
-        for slot, node in enumerate(order):
-            col, row = slot % cols, slot // cols
-            x = 10 + (col * (extent_x - width - 20) // (cols - 1) if cols > 1 else (extent_x - width - 20) // 2)
-            y = 16 + (row * (extent_y - height - 24) // (rows - 1) if rows > 1 else (extent_y - height - 24) // 2)
-            rects[node] = x, y, width, height
-        blocked = {(x + dx, y + dy) for x, y, w, h in rects for dx in range(w + 1) for dy in range(h + 1)}
-        for reverse in (False, True):
-            pins = _pins(rects, uses, reverse)
-            labels = sorted(uses)
-            for routing_order in (labels, list(reversed(labels))):
-                budget.consume()
-                occupied, routes, junctions = {}, {}, {}
-                for label in routing_order:
-                    terminals = []
-                    edges, tree = set(), set()
-                    for member in sorted(uses[label]):
-                        p, normal, _ = pins[member, label]
-                        q = p[0] + normal[0], p[1] + normal[1]
-                        terminals.append((p, q, 1 if normal[0] else 2))
-                    p, q, _ = terminals[0]
-                    edges.add(tuple(sorted((p, q))))
-                    tree.add(q)
-                    failed = q in occupied
-                    for p, q, axis in terminals[1:]:
-                        path = None if q in occupied else _route(q, tree, blocked, occupied, (extent_x, extent_y), axis, budget)
-                        if path is None:
-                            failed = True
-                            break
-                        edges.add(tuple(sorted((p, q))))
-                        edges.update(tuple(sorted(pair)) for pair in zip(path, path[1:]))
-                        tree.update(path)
-                    if failed:
-                        break
-                    segments, joins = _segments(edges, budget)
-                    routes[label], junctions[label] = segments, joins
-                    for a, b in segments:
-                        axis = 1 if a[1] == b[1] else 2
-                        dx, dy = (b[0] > a[0]) - (b[0] < a[0]), (b[1] > a[1]) - (b[1] < a[1])
-                        p = a
-                        while True:
-                            budget.consume()
-                            occupied[p] = occupied.get(p, 0) | (3 if p in (a, b) else axis)
-                            if p == b:
-                                break
-                            p = p[0] + dx, p[1] + dy
+def _star_layout(count, uses, hub, spokes):
+    order = sorted(spokes, key=lambda index: (-len(spokes[index]), index))
+    sides = {"right": [], "left": []}
+    load = {"right": 0, "left": 0}
+    for index in order:
+        side = "right" if load["right"] <= load["left"] else "left"
+        sides[side].append(index)
+        load[side] += _height(len(spokes[index])) + ROW_GAP
+    hub_x = LEFT + WIDTH + GAP if sides["left"] else LEFT
+    columns = {"left": LEFT, "right": hub_x + WIDTH + GAP}
+    rectangles = [None] * count
+    pins, routes, junctions, names = {}, {}, {}, {}
+    bottom = TOP + MIN_HEIGHT
+    for side, members in sides.items():
+        y = TOP
+        for index in members:
+            labels = spokes[index]
+            height = _height(len(labels))
+            x = columns[side]
+            rectangles[index] = (x, y, WIDTH, height)
+            for slot, label in enumerate(labels):
+                py = y + PAD + slot * PITCH
+                if side == "right":
+                    hub_pin, spoke_pin = (hub_x + WIDTH, py), (x, py)
+                    pins[hub, label] = (hub_pin, None, 0)
+                    pins[index, label] = (spoke_pin, None, 180)
+                    stub_x = hub_x + WIDTH + NAME_OFFSET
+                    names[label] = ((stub_x, py - 1), 0)
                 else:
-                    crossings = crossing_count(routes, budget)
-                    if score is None or crossings < score:
-                        best, score = (rects, pins, routes, junctions, crossings, (extent_x, extent_y)), crossings
-                    if score == 0:
-                        return best
-    if best is None:
-        raise ValueError('no block-avoiding top-sheet route within the page')
-    return best
+                    hub_pin, spoke_pin = (hub_x, py), (x + WIDTH, py)
+                    pins[hub, label] = (hub_pin, None, 180)
+                    pins[index, label] = (spoke_pin, None, 0)
+                    stub_x = hub_x - NAME_OFFSET
+                    names[label] = ((stub_x, py - 1), 180)
+                # One straight wire between the two pins, and a short stub up
+                # from it carrying the net's name, clear of the pins.
+                routes[label] = [(hub_pin, spoke_pin), ((stub_x, py), (stub_x, py - 1))]
+                junctions[label] = [(stub_x, py)]
+            y += height + ROW_GAP
+        bottom = max(bottom, y - ROW_GAP)
+    rectangles[hub] = (hub_x, TOP, WIDTH, bottom - TOP)
+    extent = (max(x + w for x, y, w, h in rectangles), max(y + h for x, y, w, h in rectangles))
+    return rectangles, pins, routes, junctions, 0, extent, names
+
+
+def _columns_layout(count, uses):
+    """Two columns facing each other and a lane of vertical tracks between them."""
+    labels = sorted(uses)
+    lane = 2 * (len(labels) + 3)
+    right_x = LEFT + WIDTH + lane
+    tracks = {label: LEFT + WIDTH + 2 * (slot + 2) for slot, label in enumerate(labels)}
+    rectangles, pins, routes, junctions, names = [None] * count, {}, {}, {}, {}
+    heights: dict[str, list[int]] = {label: [] for label in labels}
+    row_y, row_height = TOP + 4, 0
+    for index in range(count):
+        column = index % 2
+        if column == 0 and index:
+            row_y += row_height + 2 * ROW_GAP
+            row_height = 0
+        mine = [label for label in labels if index in uses[label]]
+        height = _height(len(mine))
+        row_height = max(row_height, height)
+        x = LEFT if column == 0 else right_x
+        rectangles[index] = (x, row_y, WIDTH, height)
+        edge = x + WIDTH if column == 0 else x
+        for slot, label in enumerate(mine):
+            # Right-hand pins sit half a step lower, so no two stubs share a height.
+            py = row_y + PAD + slot * PITCH + column
+            heights[label].append(py)
+            pins[index, label] = ((edge, py), None, 0 if column == 0 else 180)
+            routes.setdefault(label, []).append(((edge, py), (tracks[label], py)))
+    for label in labels:
+        x = tracks[label]
+        levels = sorted(heights[label])
+        # Tracks start above every block, where no stub runs.
+        routes[label].append(((x, TOP), (x, levels[0])))
+        routes[label].extend(((x, a), (x, b)) for a, b in zip(levels, levels[1:]))
+        junctions[label] = [(x, level) for level in levels[:-1]]
+        names[label] = ((x, TOP), 90)
+    extent = (max(x + w for x, y, w, h in rectangles), max(y + h for x, y, w, h in rectangles))
+    return rectangles, pins, routes, junctions, crossing_count(routes), extent, names
+
+
+def crossing_count(routes) -> int:
+    """Places where a straight run of one connection crosses through another's."""
+    hits = set()
+    labels = sorted(routes)
+    for i, first in enumerate(labels):
+        for second in labels[i + 1:]:
+            for a, b in routes[first]:
+                for c, d in routes[second]:
+                    for (p, q), (r, t) in (((a, b), (c, d)), ((c, d), (a, b))):
+                        if p[1] == q[1] and r[0] == t[0] and min(p[0], q[0]) < r[0] < max(p[0], q[0]) \
+                                and min(r[1], t[1]) < p[1] < max(r[1], t[1]):
+                            hits.add((first, second, r[0], p[1]))
+    return len(hits)
+
+
+def _blocks_only(count):
+    """Blocks with nothing to connect yet: two columns, close together."""
+    rectangles = []
+    for index in range(count):
+        column, row = index % 2, index // 2
+        rectangles.append((LEFT + column * (WIDTH + GAP), TOP + row * (MIN_HEIGHT + ROW_GAP), WIDTH, MIN_HEIGHT))
+    extent = (max(x + w for x, y, w, h in rectangles), max(y + h for x, y, w, h in rectangles))
+    return rectangles, {}, {}, {}, 0, extent, {}
+
+
+# A3 landscape in grid units, and the part of it above the title block.
+PAGE_WIDTH, PAGE_FREE_HEIGHT, MARGIN = 165, 85, 10
+
+
+def _centred(result):
+    """The whole drawing moved to the middle of the page above the title block."""
+    rectangles, pins, routes, junctions, crossings, extent, names = result
+    left = min(x for x, y, w, h in rectangles)
+    top = min([y for x, y, w, h in rectangles] + [p[1] for name in names.values() for p in [name[0]]])
+    width, height = extent[0] - left, extent[1] - top
+    dx = max(MARGIN, (PAGE_WIDTH - width) // 2) - left
+    dy = max(MARGIN, (PAGE_FREE_HEIGHT - height) // 2) - top
+
+    def move(point):
+        return (point[0] + dx, point[1] + dy)
+    return ([(x + dx, y + dy, w, h) for x, y, w, h in rectangles],
+            {key: (move(point), side, angle) for key, (point, side, angle) in pins.items()},
+            {label: [(move(a), move(b)) for a, b in segments] for label, segments in routes.items()},
+            {label: [move(point) for point in points] for label, points in junctions.items()},
+            crossings, (extent[0] + dx, extent[1] + dy),
+            {label: (move(point), angle) for label, (point, angle) in names.items()})
+
+
+def layout(count: int, uses: dict[str, list[int]]):
+    """Rectangles, pins, routes, junctions, crossings, extent and net-name places, in grid units.
+
+    pins[(sheet, label)] = ((x, y), None, angle); routes[label] = [((x1, y1), (x2, y2)), ...];
+    names[label] = ((x, y), angle) for the global label that keeps the net's name.
+    """
+    if not uses:
+        return _centred(_blocks_only(count))
+    star = _star(count, uses)
+    if star is not None:
+        return _centred(_star_layout(count, uses, *star))
+    return _centred(_columns_layout(count, uses))
+
+
+__all__ = ["GRID", "crossing_count", "layout"]

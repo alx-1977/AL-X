@@ -46,7 +46,7 @@ def _file_name(name: str, taken: set[str]) -> str:
 
 def _top_sheet(root_uuid: str, project: str, sheets: list[dict[str, Any]], header: str) -> str:
     blocks = []
-    rectangles, _, _, _, _, extent = layout(len(sheets), {})
+    rectangles, _, _, _, _, extent, _ = layout(len(sheets), {})
     for index, sheet in enumerate(sheets):
         x, y, width, height = (v * GRID for v in rectangles[index])
         blocks.append(f"""	(sheet
@@ -294,7 +294,7 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
         return {"connected": [], "reason": "no global label is used on more than one sheet",
                 "top_sheet_crossings": 0}
     try:
-        rectangles, pin_positions, routes, junctions, crossings, extent = layout(
+        rectangles, pin_positions, routes, junctions, crossings, extent, names = layout(
             len(sheets), {label: uses[label] for label in shared})
     except ValueError as error:
         raise HierarchyError("unsupported_project", str(error)) from error
@@ -357,13 +357,14 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             drawing.append(f"\t(junction\n\t\t(at {jx * GRID:.2f} {jy * GRID:.2f})\n"
                            f"\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n"
                            f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
-        # Preserve one global label per connection, anchored at an actual pin.
-        (px, py), _, _ = pin_positions[uses[label][0], label]
-        x, top_y = px * GRID, py * GRID
+        # One global label per connection keeps the net's name, on its own
+        # stub, clear of pins and block titles (Friedl, 2026-11-13).
+        (nx, ny), angle = names[label]
+        x, top_y = nx * GRID, ny * GRID
         drawing.append(f"""	(global_label {_quoted(label)}
 		(shape {shapes[label] if len({s["shapes"].get(label) for s in sheets} - {None}) == 1 else "bidirectional"})
-		(at {x:.2f} {top_y:.2f} 90)
-		(effects (font (size 1.27 1.27)) (justify left))
+		(at {x:.2f} {top_y:.2f} {angle})
+		(effects (font (size 1.27 1.27)) (justify {'right' if angle == 180 else 'left'}))
 		(uuid {_quoted(str(uuid.uuid4()))})
 		(property "Intersheetrefs" "${{INTERSHEET_REFS}}"
 			(at {x:.2f} {top_y:.2f} 0)
