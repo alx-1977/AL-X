@@ -150,17 +150,19 @@ def _blocks_only(count):
 
 
 # A3 landscape in grid units, and the part of it above the title block.
-PAGE_WIDTH, PAGE_FREE_HEIGHT, MARGIN = 165, 85, 10
+A3 = (165, 117)
+TITLE_BLOCK, MARGIN = 32, 10
 
 
-def _centred(result):
-    """The whole drawing moved to the middle of the page above the title block."""
+def _centred(result, page):
+    """The whole drawing moved to the middle of the page it is on, above the title block."""
     rectangles, pins, routes, junctions, crossings, extent, names = result
+    page_width, free_height = page[0], page[1] - TITLE_BLOCK
     left = min(x for x, y, w, h in rectangles)
     top = min([y for x, y, w, h in rectangles] + [p[1] for name in names.values() for p in [name[0]]])
     width, height = extent[0] - left, extent[1] - top
-    dx = max(MARGIN, (PAGE_WIDTH - width) // 2) - left
-    dy = max(MARGIN, (PAGE_FREE_HEIGHT - height) // 2) - top
+    dx = max(MARGIN, int(page_width - width) // 2) - left
+    dy = max(MARGIN, int(free_height - height) // 2) - top
 
     def move(point):
         return (point[0] + dx, point[1] + dy)
@@ -172,18 +174,18 @@ def _centred(result):
             {label: (move(point), angle) for label, (point, angle) in names.items()})
 
 
-def layout(count: int, uses: dict[str, list[int]]):
+def layout(count: int, uses: dict[str, list[int]], page: tuple[float, float] = A3):
     """Rectangles, pins, routes, junctions, crossings, extent and net-name places, in grid units.
 
     pins[(sheet, label)] = ((x, y), None, angle); routes[label] = [((x1, y1), (x2, y2)), ...];
     names[label] = ((x, y), angle) for the global label that keeps the net's name.
     """
     if not uses:
-        return _centred(_blocks_only(count))
+        return _centred(_blocks_only(count), page)
     star = _star(count, uses)
     if star is not None:
-        return _centred(_star_layout(count, uses, *star))
-    return _centred(_columns_layout(count, uses))
+        return _centred(_star_layout(count, uses, *star), page)
+    return _centred(_columns_layout(count, uses), page)
 
 
-__all__ = ["GRID", "crossing_count", "layout"]
+__all__ = ["A3", "GRID", "MARGIN", "TITLE_BLOCK", "crossing_count", "layout"]

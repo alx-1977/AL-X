@@ -225,6 +225,14 @@ class MakeHierarchicalTests(unittest.TestCase):
             self.assertEqual(len(pins[[k for k in pins if k[1] == label][0]]), 3)
         self.assertEqual(pins[1, "HALO"][0][1], pins[0, "HALO"][0][1])
 
+    def test_the_drawing_is_centred_on_its_own_page(self):
+        """Review of #242: centred on the page it is drawn on, not always on A3."""
+        uses = {"HALO": [0, 1]}
+        for page in ((165, 117), (300, 200)):
+            rectangles, _, routes, _, _, extent, _ = layout(2, uses, page)
+            left = min(x for x, *_ in rectangles)
+            self.assertLessEqual(abs((left + extent[0]) / 2 - page[0] / 2), 1)
+
     def test_parallel_links_have_matching_pin_orders(self):
         uses = {name: [0, 1] for name in ("A", "B", "C[0..1]", "D{TX RX}")}
         _, pins, _, _, crossings, _, _ = layout(2, uses)
@@ -368,7 +376,8 @@ class MakeHierarchicalTests(unittest.TestCase):
                 '(kicad_pcb\n\t(pad "1" (net "HALO"))\n\t(segment (net "HALO"))\n'
                 '\t(gr_text "HALO")\n\t(pad "2" (net "HALO_B"))\n)\n')
             (project / "scanner.kicad_dru").write_text(
-                "(rule edge (condition \"A.NetName == 'HALO' || A.NetName == 'HALO_B'\"))\n# HALO tracks\n")
+                "(rule edge (condition \"A.NetName == 'HALO' || A.NetName == 'HALO_B'\"))\n# HALO tracks\n"
+                "# Previously A.NetName == 'HALO'\n")
             (project / "scanner.kicad_pro").write_text(json.dumps({"net_settings": {
                 "netclass_patterns": [{"netclass": "Power", "pattern": "HALO"}, {"netclass": "Power", "pattern": "HALO*"}],
                 "netclass_assignments": {"HALO": "Power"}}}))
@@ -382,6 +391,7 @@ class MakeHierarchicalTests(unittest.TestCase):
             self.assertIn("A.NetName == '/HALO'", rules)
             self.assertIn("A.NetName == 'HALO_B'", rules)
             self.assertIn("# HALO tracks", rules)
+            self.assertIn("# Previously A.NetName == 'HALO'", rules)   # a note is not a rule
             settings = json.loads((project / "scanner.kicad_pro").read_text())["net_settings"]
             self.assertEqual([p["pattern"] for p in settings["netclass_patterns"]], ["/HALO", "HALO*"])
             self.assertEqual(settings["netclass_assignments"], {"/HALO": "Power"})
