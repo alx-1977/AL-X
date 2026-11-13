@@ -1352,6 +1352,8 @@ RESPONSE_FIELD: Mapping[str, Any] = {
         "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
         "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one. "
         "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance. "
+        "Every time you give him is his local time in South Africa (UTC+2, no daylight saving); "
+        "the times you are given are UTC, so 17:30 UTC is 19:30 for him. "
         "Never ask him to do the work himself (tidy a sheet in KiCad, fix a file, run a tool): "
         "if your tools cannot do it, say what is missing so it can be built."
     ),
