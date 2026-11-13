@@ -37,11 +37,20 @@ What she says each number measures is saved in the project folder, so it
 is worked out once per part and reused on every later review. **You check
 it once**, on screen against the drawing, the first time.
 
-### 2. Footprint against the land pattern
+### 2. Footprint against the land pattern: moved to library level (PR 2)
 
-This is the same method, applied to the land-pattern drawing (usually page
-1). The tool measures the footprint's own pads: sizes, pitch and pad
-count. This would have caught AE2's two missing pads.
+*Changed 13 Nov, Friedl:* footprints are checked in the library, once per
+component, not on every board. The AE2 fault got in on 2 Nov, when the
+scanner's parts were added "as imported" from Altium. Every check then
+compared KiCad with Altium, never with the datasheet.
+
+- **PR 2** runs the land-pattern check whenever a part is added to or
+  changed in the library, as part of library work through the tool.
+- **A one-time audit in one go.** It covers the 86 footprints in
+  Connectors, ICs, Inductors, Misc and Semiconductors. The resistors and
+  capacitors are left out because we built those ourselves.
+- **At board level,** KiCad's own DRC already reports a footprint that
+  differs from the library. No new check is needed.
 
 ### 3. Your taper rule
 
