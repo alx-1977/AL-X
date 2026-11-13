@@ -1355,6 +1355,15 @@ class CoreAgent:
                         snapshot,
                         reason="core_selected_silence",
                     )
+                if decision.go_requests and snapshot is None:
+                    # Kept only on a goal: without one his next go would cover
+                    # one call under the old rules though she asked for more
+                    # (review of #244). She selects the goal and replies again.
+                    if self._already_refused(refused_calls, "go_request_needs_goal", "asks_go_for"):
+                        return stopped(CoreState.CHECKPOINTED, "go_request_needs_goal")
+                    refused_calls = (*refused_calls, {"reason": "go_request_needs_goal",
+                                                      "subject": "asks_go_for"})
+                    continue
                 snapshot = self._record_go_requests(snapshot, conversation, decision, decision_provenance, now)
                 return CoreOutcome(
                     CoreState.RESPONDED,
@@ -2229,9 +2238,10 @@ class CoreAgent:
             if summary.goal_id == current:
                 continue
             other = self._store.load(summary.goal_id)
-            if other is not None and any(item.lifecycle is ApprovalLifecycle.REQUESTED
+            if other is not None and any(self._open_request_in(item, conversation.conversation_id)
                                          for item in other.state.approvals):
-                self._store.replace(replace(other.state, approvals=self._lapsed(other.state.approvals)),
+                self._store.replace(replace(other.state, approvals=self._lapsed(
+                    other.state.approvals, conversation.conversation_id)),
                                     other.retention_until, other.revision, provenance)
         if snapshot is None:
             return snapshot
@@ -2241,7 +2251,8 @@ class CoreAgent:
             if scope not in wanted and person_turns and self._call_turn_bound(
                     CapabilityCall("request", scope.capability_id, scope.arguments)):
                 wanted.append(scope)
-        open_requests = any(item.lifecycle is ApprovalLifecycle.REQUESTED for item in snapshot.state.approvals)
+        open_requests = any(self._open_request_in(item, conversation.conversation_id)
+                            for item in snapshot.state.approvals)
         if not wanted and not open_requests:
             return snapshot
         expires = now + timedelta(seconds=self._approval_ttl_seconds or 24 * 3600)
@@ -2252,13 +2263,22 @@ class CoreAgent:
         if requested:
             LOGGER.info("Go requested for %d exact calls", len(requested))
         return self._store.replace(
-            replace(snapshot.state, approvals=(*self._lapsed(snapshot.state.approvals), *requested)),
+            replace(snapshot.state, approvals=(
+                *self._lapsed(snapshot.state.approvals, conversation.conversation_id), *requested)),
             snapshot.retention_until, snapshot.revision, provenance)
 
     @staticmethod
-    def _lapsed(approvals):
+    def _open_request_in(item, conversation_id) -> bool:
+        """A request still waiting for his go in this conversation (review of #244:
+        the unfinished-goal listing orders by conversation, it does not filter)."""
+        parts = item.approval_id.split("|")
+        return (item.lifecycle is ApprovalLifecycle.REQUESTED and len(parts) == 5
+                and parts[0] == "request" and parts[1] == conversation_id)
+
+    @classmethod
+    def _lapsed(cls, approvals, conversation_id):
         return tuple(replace(item, lifecycle=ApprovalLifecycle.WITHDRAWN)
-                     if item.lifecycle is ApprovalLifecycle.REQUESTED else item for item in approvals)
+                     if cls._open_request_in(item, conversation_id) else item for item in approvals)
 
     def _call_turn_bound(self, call: CapabilityCall) -> bool:
         """Whether this exact call is authorised by Friedl's latest instruction."""

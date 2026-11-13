@@ -194,5 +194,27 @@ class GoRequestTests(unittest.TestCase):
         self.assertIsNone(CoreAgent._requested_scope(state, conversation(ASK, HER_ASK, GO), a, proposal,
                                                      request.expires_at + timedelta(seconds=1)))
 
+    def test_a_reply_in_another_conversation_leaves_these_requests(self) -> None:
+        """Review of #244: the unfinished-goal listing orders by conversation, it does not filter."""
+        a = review_call("call-a", "approve-a", 21)
+        self.ask_for_go(a)
+        from dataclasses import replace as moved
+        elsewhere = ConversationSnapshot("conversation-2", (moved(
+            _turn("turn-9", ConversationOrigin.TYPED, "hello", "friedl"), conversation_id="conversation-2"),),
+            1, RETENTION)
+        self.agent(Queued(AgentDecision(response="Hello."))).process(elsewhere, RETENTION, 4)
+        lifecycles = [item.lifecycle for item in self.store.load("goal-1").state.approvals]
+        self.assertEqual(lifecycles, [ApprovalLifecycle.REQUESTED])
+
+    def test_a_go_request_without_a_goal_is_refused_not_dropped(self) -> None:
+        """Review of #244: without a goal the list had nowhere to be kept."""
+        a = review_call("call-a", "approve-a", 21)
+        first = conversation(_turn("turn-1", ConversationOrigin.ALX_RESPONSE, "Ready.", None), ASK)
+        outcome = self.agent(Queued(
+            AgentDecision(response="Say go.", go_requests=(scope(a),)),
+            AgentDecision(response="I need to pick the job first."),
+        )).process(first, RETENTION, 4)
+        self.assertEqual(outcome.response, "I need to pick the job first.")
+
 if __name__ == "__main__":
     unittest.main()
