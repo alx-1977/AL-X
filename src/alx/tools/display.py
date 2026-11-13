@@ -26,7 +26,7 @@ from alx.contracts import (
 )
 
 SHOW_ON_SCREEN = "show_on_screen"
-TONES = ("ok", "bad", "info")
+TONES = ("ok", "bad", "info", "warn")
 MAX_ITEMS = 12
 MAX_VIEWS = 2
 MAX_PAGES = 2
@@ -62,13 +62,8 @@ _PAGE = StructuredSchema(
     {"page": StructuredSchema(ValueKind.INTEGER), "section": _POINT, "caption": _STRING,
      "boxes": StructuredSchema(ValueKind.ARRAY, items=_BOX)},
     ("page", "section"), extra_properties=False)
-_ROW = StructuredSchema(ValueKind.OBJECT, {"what": _STRING, "datasheet_mm": _NUMBER, "board_mm": _NUMBER},
-                        ("what", "datasheet_mm", "board_mm"), extra_properties=False)
-_CHECKED = StructuredSchema(
-    ValueKind.OBJECT,
-    {"document": _STRING, "page": StructuredSchema(ValueKind.INTEGER),
-     "rows": StructuredSchema(ValueKind.ARRAY, items=_ROW), "no_layout": _STRING},
-    (), extra_properties=False)
+_CHECKED = StructuredSchema(ValueKind.OBJECT, {"layout_check": _STRING, "no_layout": _STRING},
+                            (), extra_properties=False)
 _REFERENCE = StructuredSchema(
     ValueKind.OBJECT,
     {"label": _STRING, "sublabel": _STRING, "document": _STRING,
@@ -106,13 +101,12 @@ DEFINITION = CapabilityDefinition(
     "again rather than describe the gap. Names not on the board are refused; every "
     "connection of a part you name is drawn, with its silkscreen marks. Two views are "
     "headed Current (his board) and Amended (your copy), in that order. A view of your "
-    "copy needs checked, shown beside it: document and page of the datasheet layout the "
-    "parts follow, and rows of every dimension it gives (spacing, offsets, widths, gaps) "
-    "with the datasheet value and the value you measured on your copy, in mm. A row off "
-    "by more than 0.05 mm is shown red, and the verdict cannot then be ok. Measure before "
-    "you show; a clean DRC says nothing about the datasheet. Only where no datasheet gives "
-    "a layout for these parts, no_layout says so in a short reason, shown to him as not "
-    "checked.",
+    "copy needs checked: layout_check is the check_id of a kicad check_layout of that copy "
+    "against the manufacturer's drawing, made after its last edit. The screen shows what "
+    "KiCad measured against each number, red where it differs, amber where a number is not "
+    "yet accounted for, and boxes them on the datasheet page; the verdict cannot be ok "
+    "unless the check passed. Only where no datasheet gives a layout for these parts, "
+    "no_layout says so in a short reason, shown to him as not checked.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"title": _STRING, "subtitle": _STRING, "context": _STRING, "verdict": _TONED,
@@ -261,41 +255,66 @@ def _reference(value: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return {"label": label, "sublabel": sublabel, "pages": shown}, requests
 
 
-CHECK_TOLERANCE_MM = 0.05
 MAX_ROWS = 16
 
 
-def _checked(value: Any) -> dict[str, Any]:
-    """Her measurements of her copy against the datasheet layout (2026-11-13).
+def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | None] | None,
+             work_copies: set[str]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """What KiCad measured on her copy against the manufacturer's drawing (2026-11-13).
 
-    She twice showed Friedl a layout with a clean DRC that differed from the
-    manufacturer's drawing, after the rule to check it was already in her
-    instructions. A view of her copy now needs the comparison, shown to him.
+    She twice showed Friedl a layout with a clean DRC that differed from
+    Würth's drawing, after the rule to check it was already in her
+    instructions. A view of her copy now needs a layout check the tool made,
+    of that copy, since its last edit; nothing on it is typed by her. It
+    also gives the datasheet page, with the numbers that differ or are not
+    yet accounted for boxed on it.
     """
     no_layout = _text(value.get("no_layout"), 120, "checked.no_layout").strip()
-    rows = list(value.get("rows") or [])
+    check_id = value.get("layout_check")
     if no_layout:
-        if rows:
-            raise ValueError("checked has rows or no_layout, not both")
-        return {"no_layout": no_layout, "rows": [], "differs": False}
-    document = value.get("document")
-    if not isinstance(document, str) or not document.strip():
-        raise ValueError("checked.document names the datasheet the layout follows")
-    page = value.get("page")
-    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
-        raise ValueError("checked.page is the datasheet page of the layout")
-    if not 1 <= len(rows) <= MAX_ROWS:
-        raise ValueError(f"checked has 1 to {MAX_ROWS} rows, one per datasheet dimension")
-    shown = []
-    for row in rows:
-        datasheet, board = _number(row.get("datasheet_mm")), _number(row.get("board_mm"))
-        shown.append({"what": _text(row.get("what"), 40, "row.what"), "datasheet_mm": datasheet,
-                      "board_mm": board,
-                      # Rounded first: 1.05 - 1.0 is a hair over 0.05 in floating point
-                      # (review of #237), and exactly 0.05 mm is allowed.
-                      "tone": "bad" if round(abs(datasheet - board), 6) > CHECK_TOLERANCE_MM else "ok"})
-    return {"document": Path(document).name[:60], "page": page, "rows": shown,
-            "differs": any(row["tone"] == "bad" for row in shown)}
+        if check_id:
+            raise ValueError("checked has layout_check or no_layout, not both")
+        return {"no_layout": no_layout, "rows": [], "differs": False, "passed": False}, None
+    if not isinstance(check_id, str) or not check_id:
+        raise ValueError("checked.layout_check is the check_id from kicad check_layout")
+    if read_layout_check is None:
+        raise ValueError("layout checks cannot be read here")
+    result = read_layout_check(check_id)
+    if result is None:
+        raise ValueError("there is no layout check " + check_id)
+    if result.get("work_copy_id") not in work_copies:
+        raise ValueError("that layout check is not of the copy on screen; check this copy")
+    if not result.get("current"):
+        raise ValueError("the copy changed after that layout check; check it again")
+    numbers = [n for n in result.get("numbers", ()) if n.get("status") != "not_applicable"]
+    order = {"differs": 0, "unaccounted": 1, "matches": 2}
+    numbers.sort(key=lambda n: order.get(n.get("status"), 3))
+    tone = {"differs": "bad", "unaccounted": "warn", "matches": "ok"}
+    rows = [{"what": (("≈ " if n.get("basis") else "") + (n.get("measures") or "not accounted for"))[:40],
+             "datasheet_mm": n.get("value"),
+             "board_mm": n.get("board_mm"), "tone": tone.get(n.get("status"), "info")}
+            for n in numbers[:MAX_ROWS]]
+    counts = result.get("counts") or {}
+    summary = " · ".join(text for text in (
+        f"{counts.get('matches', 0)} match", f"{counts.get('differs', 0)} differ" if counts.get("differs") else "",
+        f"{counts.get('unaccounted', 0)} not accounted for" if counts.get("unaccounted") else "",
+        "readings not yet confirmed by Friedl" if result.get("rf") and not result.get("confirmed") else "")
+        if text)
+    checked = {"document": str(result.get("document", ""))[:60], "page": result.get("page"),
+               "rows": rows, "summary": summary, "differs": bool(counts.get("differs")),
+               "passed": bool(result.get("passed"))}
+    # The page as printed, with what is not yet right boxed on it.
+    x0, y0, x1, y1 = result["section"]
+    marks = [n for n in numbers if n.get("status") in ("differs", "unaccounted") and n.get("at")][:MAX_BOXES]
+    reference = {"label": str(result.get("part", ""))[:40], "sublabel": "Datasheet p.%s" % result.get("page"),
+                 "document": result["document_path"], "pages": [{
+                     "page": result["page"], "section": [x0, y0, x1, y1],
+                     "boxes": [{"at": [max(x0, n["at"][0] - 2), max(y0, n["at"][1] - 2),
+                                       min(x1, n["at"][2] + 2), min(y1, n["at"][3] + 2)],
+                                "label": ("board %.2f" % n["board_mm"]) if n.get("status") == "differs" else "?",
+                                "tone": "bad" if n.get("status") == "differs" else "warn"}
+                               for n in marks]}]}
+    return checked, reference
 
 
 def build_display_executors(
@@ -305,6 +324,7 @@ def build_display_executors(
     draw_wait_seconds: float = 12.0,
     read_page: Callable[[Mapping[str, Any]], bytes] | None = None,
     capture: Callable[[str, int], str | None] | None = None,
+    read_layout_check: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> Mapping[str, Callable[[Mapping[str, Any]], CapabilityResult]]:
     def failed(code: str, reason: str = "") -> CapabilityResult:
         failure = {"code": code, **({"reason": reason[:300]} if reason else {})}
@@ -346,19 +366,19 @@ def build_display_executors(
                     _tone(dim.get("tone"))
                     if len(dim["from"]) != 2 or len(dim["to"]) != 2:
                         raise ValueError("a dimension runs between two [x, y] points")
-            reference, page_requests = (None, []) if not arguments.get("reference") \
-                else _reference(arguments["reference"])
-            checked = None
-            if any(view.get("work_copy_id") for view in views):
+            checked, measured_reference = None, None
+            copies = {view["work_copy_id"] for view in views if view.get("work_copy_id")}
+            if copies:
                 if not arguments.get("checked"):
                     raise ValueError(
-                        "a view of your copy needs checked: the datasheet layout's dimensions "
-                        "beside the values you measured on your copy (or no_layout)")
-                checked = _checked(arguments["checked"])
-                if checked["differs"] and (display["verdict"] or {}).get("tone") == "ok":
-                    raise ValueError("a checked dimension differs from the datasheet, so the "
-                                     "verdict cannot be ok")
+                        "a view of your copy needs checked: the check_id of a kicad check_layout "
+                        "of that copy against the manufacturer's drawing (or no_layout)")
+                checked, measured_reference = _checked(arguments["checked"], read_layout_check, copies)
+                if not checked["passed"] and (display["verdict"] or {}).get("tone") == "ok":
+                    raise ValueError("the layout check did not pass, so the verdict cannot be ok")
             display["checked"] = checked
+            chosen = arguments.get("reference") or measured_reference
+            reference, page_requests = (None, []) if not chosen else _reference(chosen)
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             return failed("arguments_unusable", str(error))
         if views and read_section is None:

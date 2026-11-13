@@ -10,16 +10,19 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import time
 import uuid
 import zipfile
 import difflib
 import unicodedata
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import contextmanager, suppress
 import fcntl
 
 from alx.providers.credential_paths import denied
 from alx.providers.kicad_helpers import HELPERS, script_runner
+from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 from alx.providers.kicad_circuit import (
@@ -127,6 +130,20 @@ def is_design_file(name):
     """A file KiCad keeps as part of a design: boards, schematics, libraries, rules."""
     path = Path(name)
     return path.suffix in DESIGN_SUFFIXES or path.name in DESIGN_NAMES
+
+
+def top_level_sheets(project):
+    """How many top-level sheets the project's schematic has (KiCad 10 project file).
+
+    An Altium import makes one per Altium sheet. KiCad's command-line check
+    of the board against its schematic reads only the first of them
+    (2026-11-13: an AE2 pin swap went unseen); make_hierarchical joins them.
+    """
+    try:
+        settings = json.loads(next(iter(sorted(project.glob('*.kicad_pro')))).read_text())
+    except (StopIteration, OSError, ValueError):
+        return 0
+    return len((settings.get('schematic') or {}).get('top_level_sheets') or ()) or 1
 
 
 def script_hint(stderr):
@@ -627,6 +644,256 @@ class KiCadProvider:
         except PageError as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error
 
+    def _layout_target(self, arguments):
+        """The board a layout check measures, and the project its readings belong to."""
+        if bool(arguments.get('work_copy_id')) == bool(arguments.get('board')):
+            raise KiCadError('arguments_unusable', {'detail': 'name a work_copy_id or a board, not both'})
+        if arguments.get('work_copy_id'):
+            root, meta = self._load(arguments['work_copy_id'])
+            return root / 'project' / meta['board'], meta['source']
+        board = bounded(self._source(arguments['board']), self.design_roots)
+        return board, str(board.parent)
+
+    def _readings_path(self, project, digest, page, part):
+        key = hashlib.sha256(f'{project}|{digest}|{page}|{part}'.encode()).hexdigest()[:32]
+        return self.work_root / 'readings' / (key + '.json')
+
+    def _layout_basis(self, arguments):
+        from alx.providers.page_image import PageError, section_box
+        from alx.providers.layout_check import LayoutCheckError, document_digest, extract_words, read_numbers
+        if self.execute_page is None:
+            raise KiCadError('engine_unavailable')
+        board, project = self._layout_target(arguments)
+        part = arguments.get('part')
+        if not isinstance(part, str) or not part.strip():
+            raise KiCadError('arguments_unusable', {'detail': "part is the reference the drawing is for, e.g. AE2"})
+        document = arguments.get('document')
+        if not isinstance(document, str) or not document.strip():
+            raise KiCadError('arguments_unusable', {'detail': 'document is the path of a PDF'})
+        document = bounded(document, self.design_roots)
+        try:
+            page, section = section_box(arguments)
+            words = extract_words(document, page, scratch_root=self.work_root / 'sections',
+                                  extractor=self.engine_paths.get('pdftotext') or Path('/nonexistent'),
+                                  execute=self.execute_page)
+        except (PageError, LayoutCheckError) as error:
+            raise KiCadError(error.code, {'detail': error.detail}) from error
+        numbers = read_numbers(words, section)
+        path = self._readings_path(project, document_digest(document), page, part)
+        stored = json.loads(path.read_text()) if path.is_file() else {'entries': {}, 'rf': False,
+                                                                     'confirmed': None}
+        return board, document, page, section, part, numbers, path, stored
+
+    def make_hierarchical(self, arguments):
+        """Her copy's separate top-level sheets made into one hierarchical design.
+
+        Proven by KiCad's own netlist, before and after: if a single
+        connection or net name differs, the copy is put back as it was.
+        """
+        from alx.providers.kicad_hierarchy import HierarchyError, make_hierarchical, netlist_nets
+        with self._locked(arguments['work_copy_id']):
+            root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            project = root / 'project'
+            schematic = (project / meta['board']).with_suffix('.kicad_sch')
+            if not schematic.is_file():
+                raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
+
+            def netlist():
+                output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
+                output.parent.mkdir(exist_ok=True)
+                self._run('sch', 'export', 'netlist', '--output', output, schematic)
+                return netlist_nets(output.read_text(errors='replace'))
+            before = netlist()
+            snapshot = root / ('snapshot-' + uuid.uuid4().hex)
+            shutil.copytree(project, snapshot)
+            try:
+                try:
+                    result = make_hierarchical(project)
+                except HierarchyError as error:
+                    raise KiCadError(error.code, {'detail': error.detail}) from error
+                after = netlist() if result['converted'] else before
+                differing = sorted({before.get(k, '') for k in set(before) - set(after)}
+                                   | {after.get(k, '') for k in set(after) - set(before)}
+                                   | {before[k] for k in set(before) & set(after) if before[k] != after[k]})
+                if differing:
+                    raise KiCadError('verification_failed', {'detail': 'the netlist changed; the copy is back '
+                                                             'as it was', 'nets_differing': differing[:20]})
+                # What the joined design now shows: the board against its whole
+                # schematic, and the ERC of every sheet (review of #239). Inside
+                # the undo, so a failed check never leaves the change unreported.
+                checked = self._drc(root, meta)
+                erc = self._erc(root, meta)
+            except BaseException:
+                shutil.rmtree(project)
+                shutil.copytree(snapshot, project)
+                raise
+            finally:
+                shutil.rmtree(snapshot, ignore_errors=True)
+            return dict(result, nets=len(after), netlist_identical=True,
+                        schematic_parity=checked['schematic_parity'], erc=erc,
+                        work_copy_id=arguments['work_copy_id'], work_copy_revision=self._revision(root))
+
+    def check_layout(self, arguments):
+        """Her copy, or his board, measured against the manufacturer's drawing (2026-11-13)."""
+        from alx.providers.layout_check import MAX_NUMBERS, compare, label, measure_board, measurement
+        board, document, page, section, part, numbers, path, stored = self._layout_basis(arguments)
+        known = {number['id'] for number in numbers}
+        entries = dict(stored['entries'])
+        changed = False
+        for reading in arguments.get('readings') or ():
+            number = reading.get('number')
+            if reading.get('derived'):
+                # A position the drawing shows without printing a number (a
+                # shunt halfway between its series parts): her expected value
+                # and its basis, measured by KiCad and shown as derived.
+                derived = reading['derived']
+                value = derived.get('value_mm') if isinstance(derived, Mapping) else None
+                basis = derived.get('basis') if isinstance(derived, Mapping) else None
+                if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                        or not isinstance(basis, str) or not basis.strip()):
+                    raise KiCadError('arguments_unusable', {'detail': 'derived has value_mm and a basis'})
+                number = 'derived:' + str(number)[:40]
+                try:
+                    measurement(reading.get('measures'))
+                except ValueError as error:
+                    raise KiCadError('arguments_unusable', {'detail': f'{number}: {error}'}) from error
+                entry = {'measures': dict(reading['measures']), 'label': label(reading['measures']),
+                         'derived': {'value_mm': float(value), 'basis': basis.strip()[:120]}}
+                changed = changed or entries.get(number) != entry
+                entries[number] = entry
+                continue
+            if number not in known:
+                raise KiCadError('arguments_unusable', {'detail': f'no number {number} on this drawing'})
+            if reading.get('not_applicable'):
+                entry = {'not_applicable': str(reading['not_applicable'])[:120]}
+            else:
+                try:
+                    measurement(reading.get('measures'))
+                except ValueError as error:
+                    raise KiCadError('arguments_unusable', {'detail': f'{number}: {error}'}) from error
+                entry = {'measures': dict(reading['measures']), 'label': label(reading['measures'])}
+            changed = changed or entries.get(number) != entry
+            entries[number] = entry
+        if 'rf' in arguments:
+            changed = changed or bool(arguments['rf']) != bool(stored.get('rf'))
+            stored['rf'] = bool(arguments['rf'])
+        if changed:
+            # A changed reading needs his confirmation again.
+            stored['confirmed'] = None
+        stored['entries'] = entries
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(stored))
+        for key, entry in entries.items():
+            if key.startswith('derived:'):
+                numbers.append({'id': key, 'text': '%g' % entry['derived']['value_mm'],
+                                'value': entry['derived']['value_mm'], 'at': None, 'unit': '',
+                                'basis': entry['derived']['basis']})
+        known = {number['id'] for number in numbers}
+        to_measure = {key: measurement(entry['measures']) for key, entry in entries.items()
+                      if key in known and entry.get('measures') is not None}
+        measured = {}
+        state = self._board_state(arguments)
+        if to_measure:
+            from alx.providers.kicad_section import SectionError
+            try:
+                measured = measure_board(board, part, to_measure, scratch_root=self.work_root / 'sections',
+                                         kicad_python=self.settings.kicad_python,
+                                         execute_python=self.execute_python)
+            except SectionError as error:
+                raise KiCadError(error.code, {'detail': error.detail}) from error
+        if self._board_state(arguments) != state:
+            # Measured while the board changed (review of #239): never recorded as current.
+            raise KiCadError('work_copy_changed', {'detail': 'the board changed while it was measured; check again'})
+        # Every number is counted, not only those listed (review of #239).
+        rows = compare(numbers, entries, measured)
+        counts = {name: sum(row['status'] == name for row in rows)
+                  for name in ('matches', 'differs', 'unaccounted', 'not_applicable')}
+        digest = self._readings_digest(stored)
+        confirmed = stored.get('confirmed') == digest
+        printed = any(not row['id'].startswith('derived:') for row in rows)
+        reason = ('' if printed else 'no number could be read in this section: a drawing that is a '
+                  'picture, or a section that misses it; nothing was checked against it')
+        result = {'check_id': uuid.uuid4().hex, 'work_copy_id': arguments.get('work_copy_id') or '',
+                  'document': document.name, 'document_path': str(document),
+                  'page': page, 'section': list(section), 'part': part, 'rf': bool(stored.get('rf')),
+                  'confirmed': confirmed, 'counts': counts, 'reason': reason,
+                  'passed': printed and counts['differs'] == 0 and counts['unaccounted'] == 0
+                            and (confirmed or not stored.get('rf')),
+                  'numbers': rows[:MAX_NUMBERS], 'numbers_omitted': max(0, len(rows) - MAX_NUMBERS)}
+        checks = self.work_root / 'layout-checks'
+        checks.mkdir(parents=True, exist_ok=True)
+        # What was measured, and on which readings, so the screen can tell a
+        # check of an older board or of readings since changed.
+        (checks / (result['check_id'] + '.json')).write_text(json.dumps(
+            dict(result, measured_state=state, board=arguments.get('board') or '',
+                 readings_path=str(path), readings_digest=digest)))
+        return result
+
+    def _board_state(self, arguments):
+        if arguments.get('work_copy_id'):
+            root, _ = self._load(arguments['work_copy_id'])
+            return self._revision(root)
+        board, _ = self._layout_target(arguments)
+        return sha(board)
+
+    @staticmethod
+    def _readings_digest(stored):
+        return hashlib.sha256(json.dumps([stored.get('entries'), bool(stored.get('rf'))],
+                                         sort_keys=True).encode()).hexdigest()
+
+    def _stored_check(self, check_id):
+        if not isinstance(check_id, str) or not re.fullmatch(r'[0-9a-f]{32}', check_id):
+            return None
+        path = self.work_root / 'layout-checks' / (check_id + '.json')
+        return json.loads(path.read_text()) if path.is_file() else None
+
+    def _stored_readings(self, result):
+        path = Path(result.get('readings_path') or '')
+        if not path.is_file() or not path.resolve().is_relative_to((self.work_root / 'readings').resolve()):
+            return None, None
+        return path, json.loads(path.read_text())
+
+    def confirm_layout_readings(self, arguments):
+        """Friedl confirms the readings of the check he saw (RF and high-speed analog parts).
+
+        The approval names that check, and the readings it showed are the
+        ones confirmed: if they have changed since, nothing is (review of #239).
+        """
+        result = self._stored_check(arguments.get('check_id'))
+        if result is None:
+            raise KiCadError('arguments_unusable', {'detail': 'check_id is the layout check he saw'})
+        path, stored = self._stored_readings(result)
+        if stored is None or not stored.get('entries'):
+            raise KiCadError('arguments_unusable', {'detail': 'that check has no readings to confirm'})
+        if self._readings_digest(stored) != result.get('readings_digest'):
+            raise KiCadError('arguments_unusable', {'detail': 'the readings changed after that check; '
+                                                    'show him the new check and confirm that one'})
+        stored['confirmed'] = result['readings_digest']
+        path.write_text(json.dumps(stored))
+        return {'confirmed': True, 'readings': len(stored['entries'])}
+
+    def layout_check_result(self, check_id):
+        """A stored layout check, for the screen; None when there is no such check."""
+        result = self._stored_check(check_id)
+        if result is None:
+            return None
+        try:
+            target = ({'work_copy_id': result['work_copy_id']} if result.get('work_copy_id')
+                      else {'board': result.get('board', '')})
+            _, stored = self._stored_readings(result)
+            # Current only for the same board and the same readings, with the
+            # same confirmation (review of #239).
+            result['current'] = (self._board_state(target) == result.get('measured_state')
+                                 and stored is not None
+                                 and self._readings_digest(stored) == result.get('readings_digest')
+                                 and (stored.get('confirmed') == result.get('readings_digest'))
+                                 == bool(result.get('confirmed')))
+        except (KiCadError, OSError, ValueError):
+            result['current'] = False
+        return result
+
     def read_reference(self, arguments):
         raw = Path(arguments['path']).expanduser().absolute()
         if not raw.resolve().is_relative_to(self.work_root):
@@ -704,6 +971,12 @@ class KiCadProvider:
                                  if original.get(name) != current.get(name))
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
+                # Friedl's taper rule on the edited board, so she sees a step
+                # before she shows anything (2026-11-12, finished 2026-11-13).
+                report['layout_rules'] = self._layout_rules(board)
+                if any(name.endswith('.kicad_sch') for name in changed):
+                    # A schematic edit is checked like the first copy (review of #239).
+                    report['erc'] = self._erc(root, meta)
                 diffs, budget = [], 24000
                 for name in changed[:200]:
                     left = (snapshot / name).read_text(errors='replace') if name in original else ''
@@ -934,7 +1207,7 @@ class KiCadProvider:
             return {'files_written': written, 'comparison': comparison, 'staging_path': str(staging)}
 
     def _run(self, *args):
-        subcommand = ' '.join(args[:3]) if args[:2] == ('pcb', 'export') else 'pcb drc'
+        subcommand = ' '.join(args[:3]) if args[:2] == ('pcb', 'export') else ' '.join(args[:2])
         try:
             result = self.execute_cli(str(self.settings.kicad_cli), list(map(str, args)))
         except KICAD_CLI_TIMEOUT as error:
@@ -977,10 +1250,69 @@ class KiCadProvider:
         finally:
             target.unlink(missing_ok=True)
 
+    def _layout_rules(self, board):
+        """Friedl's layout rules on a board; a check that cannot run says so, never passes."""
+        try:
+            return check_layout_rules(board, scratch_root=self.work_root / 'sections',
+                                      kicad_python=self.settings.kicad_python,
+                                      execute_python=self.execute_python)
+        except Exception as error:  # noqa: BLE001 - a fact for her, not a failed step
+            return {'findings': [], 'omitted': 0, 'not_checked': str(error)[:200]}
+
+    def _erc(self, root, meta):
+        """KiCad's electrical rules check of the copy's schematic, grouped like the DRC."""
+        schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
+        if not schematic.is_file():
+            return {'checked': False, 'reason': 'no schematic beside the board', 'totals':
+                    {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}, 'groups': [],
+                    'top_level_sheets': 0}
+        output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
+        output.parent.mkdir(exist_ok=True)
+        self._run('sch', 'erc', '--format', 'json', '--severity-all', '--output', output, schematic)
+        try:
+            report = json.loads(output.read_text())
+            sheets = list(report['sheets'])
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            raise KiCadError('invalid_report') from error
+        totals = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
+        groups = {}
+        for sheet in sheets:
+            for finding in sheet.get('violations') or ():
+                kind, severity = finding.get('type'), finding.get('severity')
+                if not isinstance(kind, str) or severity not in ('error', 'warning', 'ignore'):
+                    raise KiCadError('invalid_report')
+                totals[severity] += 1
+                totals['total'] += 1
+                items = []
+                for item in (finding.get('items') or ())[:ITEMS_PER_FINDING]:
+                    description = str(item.get('description', ''))
+                    match = re.search(r'\bSymbol ([A-Za-z#]+[0-9?]+)', description)
+                    items.append({'description': description,
+                                  'designator': match.group(1) if match else '',
+                                  'position': item.get('pos', {})})
+                entry = groups.setdefault(kind, {'check_type': kind, 'count': 0, 'severity': severity,
+                                                 'findings': []})
+                entry['count'] += 1
+                if severity == 'error':
+                    entry['severity'] = 'error'
+                entry['findings'].append({'severity': severity, 'sheet': str(sheet.get('path', '')),
+                                          'description': str(finding.get('description', '')),
+                                          'items': items})
+        ordered = sorted(groups.values(), key=lambda entry: (entry['severity'] != 'error', -entry['count']))
+        for entry in ordered:
+            entry['omitted_findings'] = max(0, len(entry['findings']) - FINDINGS_PER_CHECK_TYPE)
+            entry['findings'] = entry['findings'][:FINDINGS_PER_CHECK_TYPE]
+        return {'checked': True, 'reason': '', 'totals': totals, 'groups': ordered,
+                'top_level_sheets': top_level_sheets(schematic.parent)}
+
     def _drc(self, root, meta):
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
         output.parent.mkdir(exist_ok=True)
+        # The board against its schematic too: without this option KiCad never
+        # compared them, and schematic_parity was always empty (2026-11-13).
+        schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
         self._run('pcb', 'drc', '--format', 'json', '--severity-all', '--refill-zones',
+                  *(('--schematic-parity',) if schematic.is_file() else ()),
                   '--output', output, root / 'project' / meta['board'])
         try:
             report = json.loads(output.read_text())
@@ -1114,22 +1446,62 @@ class KiCadProvider:
         meta = {'source': str(source), 'hashes': hashes, 'board': boards[0]}
         (root / 'metadata.json').write_text(json.dumps(meta))
         result = self._drc(root, meta)
+        # The schematic is checked too, errors and warnings, aiming for a
+        # clean result like the DRC (Friedl, 2026-11-13).
+        result['erc'] = self._erc(root, meta)
+        result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
 
     def write_back(self, arguments):
+        report = arguments.get('report')
+        if report is not None and (not isinstance(report, str) or not report.strip() or len(report) > 40000):
+            # Refused before anything is written, never after.
+            raise KiCadError('arguments_unusable', {'detail': 'report is Markdown of at most 40000 characters'})
         with self._locked(arguments['work_copy_id']):
             recovery = {'backed_up': [], 'written': [], 'rollback_status': 'not_needed',
                         'restorations': [], 'remaining_changed': [], 'cleanup_errors': [],
                         'write_digests': {}, 'conflicts': [],
                         'error': {'code': '', 'type': ''}}
             try:
-                return self._write_back(arguments, recovery)
+                written = self._write_back(arguments, recovery)
             except Exception as error:
                 code = str(error) if isinstance(error, KiCadError) else 'unavailable'
                 if isinstance(error, KiCadError) and error.recovery:
                     recovery.update(error.recovery)
                 recovery['error'] = {'code': code, 'type': type(error).__name__}
                 raise KiCadError(code, recovery) from error
+            if report:
+                # His review, kept with the project (Friedl, 2026-11-13), under
+                # the approval that wrote the board. The board is written by
+                # now: a report that cannot be saved is said, never a failure.
+                try:
+                    written['report_path'] = str(self._save_review(arguments['project_dir'], report))
+                except (KiCadError, OSError) as error:
+                    written['report_error'] = (str(getattr(error, 'recovery', None) or error))[:200]
+            return written
+
+    def _save_review(self, project_dir, report):
+        """A written review in the project's docs/reviews folder: new, never over another."""
+        if not isinstance(report, str) or not report.strip() or len(report) > 40000:
+            raise KiCadError('arguments_unusable', {'detail': 'report is Markdown of at most 40000 characters'})
+        folder = self._source(project_dir)
+        project = next((path for path in (folder, *folder.parents)
+                        if (path / 'project.json').is_file()), None)
+        if project is None or not any(project.is_relative_to(root) for root in self.design_roots):
+            project = folder
+        reviews = project / 'docs' / 'reviews'
+        reviews.mkdir(parents=True, exist_ok=True)
+        title = re.sub(r'[^A-Za-z0-9]+', '-', report.strip().splitlines()[0].lstrip('# '))[:60].strip('-')
+        stem = time.strftime('%Y-%m-%d') + '-' + (title or 'review')
+        for number in range(1, 100):
+            target = reviews / (stem + ('' if number == 1 else f'-{number}') + '.md')
+            try:
+                with open(target, 'x', encoding='utf-8') as handle:
+                    handle.write(report.rstrip() + '\n')
+                return target
+            except FileExistsError:
+                continue
+        raise KiCadError('unsupported_project', {'detail': 'too many reviews with this title today'})
 
     def _write_back(self, arguments, recovery):
         root, meta = self._load(arguments['work_copy_id'])

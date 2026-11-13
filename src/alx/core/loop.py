@@ -155,8 +155,9 @@ RESPONSE_WORD_LIMIT = 50
 
 
 def _validate_response_length(decision: AgentDecision) -> None:
-    """Refuse a reply longer than Friedl wants to hear; she shortens it."""
-    if decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT:
+    """Refuse a reply longer than Friedl wants to hear, unless she judged he asked for detail."""
+    if (decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT
+            and not decision.detail_asked):
         raise DecisionValidationError(
             "response_over_%d_words: say the outcome and anything he must decide; "
             "figures, checks and background go in detail" % RESPONSE_WORD_LIMIT)

@@ -31,6 +31,7 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
             ('fasthenry', 'ALX_KICAD_FASTHENRY', '~/.local/share/field-solvers/fasthenry-3.0wr/bin/fasthenry'),
             ('ngspice', 'ALX_KICAD_NGSPICE', '/opt/homebrew/bin/ngspice'),
             ('pdftoppm', 'ALX_PDFTOPPM', '/opt/homebrew/bin/pdftoppm'),
+            ('pdftotext', 'ALX_PDFTOTEXT', '/opt/homebrew/bin/pdftotext'),
         )
     }
     provider.execute_engine = partial(run_kicad_engine, runner=runner,

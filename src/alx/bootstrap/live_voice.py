@@ -567,6 +567,7 @@ async def run(repository_root: Path) -> None:
         None if kicad_runtime.provider is None else kicad_runtime.provider.section,
         current_call_id.get,
         read_page=None if kicad_runtime.provider is None else kicad_runtime.provider.datasheet_section,
+        read_layout_check=None if kicad_runtime.provider is None else kicad_runtime.provider.layout_check_result,
         # D-075: the screen as drawn comes back to her as a picture.
         capture=partial(
             capture_screen,

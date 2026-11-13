@@ -829,12 +829,32 @@ class ViewerAssetTests(unittest.TestCase):
 
 
 class CheckedAgainstDatasheetTests(unittest.TestCase):
-    """2026-11-13: a clean DRC was shown twice as a layout that matched Würth's."""
+    """2026-11-13: a clean DRC was shown twice as a layout that matched Würth's.
+
+    A view of her copy needs a layout check KiCad made of that copy; the
+    screen shows what was measured, never values she typed.
+    """
+
+    CHECK = {"check_id": "c" * 32, "work_copy_id": "5a61", "current": True, "passed": False,
+             "document": "7488912455.pdf", "document_path": "/designs/P0020/datasheets/7488912455.pdf",
+             "page": 2, "section": [200, 80, 600, 470], "part": "AE2", "rf": True, "confirmed": False,
+             "counts": {"matches": 1, "differs": 1, "unaccounted": 1, "not_applicable": 1},
+             "numbers": [
+                 {"id": "a", "value": 1.46, "status": "matches", "measures": "AE2.1 width",
+                  "board_mm": 1.46, "at": [280, 438, 290, 450]},
+                 {"id": "b", "value": 1.9, "status": "differs", "measures": "C62 → C64 (x)",
+                  "board_mm": 2.1, "at": [324, 224, 338, 236]},
+                 {"id": "c", "value": 4.9, "status": "unaccounted", "at": [524, 321, 538, 333]},
+                 {"id": "d", "value": 1.8, "status": "not_applicable", "reason": "part value (pF)",
+                  "at": [508, 189, 522, 201]}]}
 
     def setUp(self) -> None:
         self.board = DisplayBoard()
-        self.show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "c1",
-                                            draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
+        self.stored = {self.CHECK["check_id"]: dict(self.CHECK)}
+        self.show = build_display_executors(
+            self.board, lambda _: GEOMETRY, lambda: "c1", draw_wait_seconds=0.01,
+            read_page=lambda request: b"\x89PNG\r\n\x1a\n", read_layout_check=self.stored.get,
+        )[SHOW_ON_SCREEN]
         his = display()["views"][0]
         mine = {key: value for key, value in his.items() if key != "board"}
         self.views = [his, {**mine, "label": "Copy", "work_copy_id": "5a61"}]
@@ -844,39 +864,47 @@ class CheckedAgainstDatasheetTests(unittest.TestCase):
         self.assertEqual(result.state, CapabilityResultState.FAILED)
         return result.failure["reason"]
 
-    def test_her_copy_is_not_shown_without_the_datasheet_comparison(self) -> None:
+    def test_her_copy_is_not_shown_without_a_layout_check_of_it(self) -> None:
         self.assertIn("needs checked", self.reason(display(views=self.views)))
+        self.assertIn("no layout check", self.reason(display(views=self.views, checked={"layout_check": "x"})))
         # His board alone needs none.
         self.assertEqual(self.show(display()).state, CapabilityResultState.SUCCEEDED)
 
-    def test_rows_are_shown_red_where_they_differ_and_the_verdict_cannot_be_ok(self) -> None:
-        checked = {"document": "/designs/P0020/datasheets/7488912455.pdf", "page": 2, "rows": [
-            {"what": "C62 to C64 pitch", "datasheet_mm": 1.5, "board_mm": 2.1},
-            {"what": "Feed width", "datasheet_mm": 1.2, "board_mm": 1.22},
-            {"what": "Exactly at the tolerance", "datasheet_mm": 1.0, "board_mm": 1.05}]}
+    def test_a_check_of_another_copy_or_an_older_state_is_refused(self) -> None:
+        checked = {"layout_check": self.CHECK["check_id"]}
+        self.stored[self.CHECK["check_id"]]["work_copy_id"] = "other"
+        self.assertIn("not of the copy on screen", self.reason(display(views=self.views, checked=checked)))
+        self.stored[self.CHECK["check_id"]].update(work_copy_id="5a61", current=False)
+        self.assertIn("changed after", self.reason(display(views=self.views, checked=checked)))
+
+    def test_what_kicad_measured_is_shown_and_boxed_on_the_page(self) -> None:
+        checked = {"layout_check": self.CHECK["check_id"]}
         ok = {"text": "Matches Würth", "tone": "ok"}
-        self.assertIn("cannot be ok", self.reason(display(views=self.views, checked=checked, verdict=ok)))
+        self.assertIn("did not pass", self.reason(display(views=self.views, checked=checked, verdict=ok)))
         self.assertEqual(self.show(display(views=self.views, checked=checked)).state,
                          CapabilityResultState.SUCCEEDED)
-        shown = self.board.snapshot()["display"]["checked"]
-        self.assertEqual((shown["document"], shown["page"], shown["differs"]), ("7488912455.pdf", 2, True))
-        self.assertEqual([row["tone"] for row in shown["rows"]], ["bad", "ok", "ok"])
+        shown = self.board.snapshot()["display"]
+        rows = shown["checked"]["rows"]
+        # Differs first, then not accounted for, then matches; part values left out.
+        self.assertEqual([(row["tone"], row["board_mm"]) for row in rows],
+                         [("bad", 2.1), ("warn", None), ("ok", 1.46)])
+        self.assertIn("readings not yet confirmed by Friedl", shown["checked"]["summary"])
+        boxes = shown["reference"]["pages"][0]["boxes"]
+        self.assertEqual([(box["tone"], box["label"]) for box in boxes], [("bad", "board 2.10"), ("warn", "?")])
 
-    def test_no_layout_is_said_plainly_and_not_mixed_with_rows(self) -> None:
+    def test_no_layout_is_said_plainly(self) -> None:
         self.assertEqual(self.show(display(views=self.views, checked={
             "no_layout": "The datasheet gives no layout for C12"})).state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(self.board.snapshot()["display"]["checked"]["no_layout"],
                          "The datasheet gives no layout for C12")
         self.assertIn("not both", self.reason(display(views=self.views, checked={
-            "no_layout": "none", "document": "a.pdf", "page": 1,
-            "rows": [{"what": "x", "datasheet_mm": 1, "board_mm": 1}]})))
+            "no_layout": "none", "layout_check": self.CHECK["check_id"]})))
 
     def test_the_screen_draws_the_rows(self) -> None:
         script = (ASSETS / "show.js").read_text()
         self.assertIn("Checked against", script)
         self.assertIn("Not checked against a datasheet", script)
         self.assertIn('id="checked"', (ASSETS / "show.html").read_text())
-
 
 if __name__ == "__main__":
     unittest.main()

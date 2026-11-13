@@ -41,6 +41,13 @@ FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed')
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
 BOARD_ITEM = obj({'id': S, 'kind': S, 'layers': array(S)})
+ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, 'groups': array(obj({
+    'check_type': S, 'count': I, 'severity': S, 'omitted_findings': I, 'findings': array(obj({
+        'severity': S, 'sheet': S, 'description': S, 'items': array(obj({
+            'description': S, 'designator': S, 'position': obj({'x': N, 'y': N}, ())}))}))}))})
+
+LAYOUT_RULES = obj({'findings': array(StructuredSchema(ValueKind.OBJECT)), 'omitted': I,
+                    'not_checked': S}, ('findings', 'omitted'))
 CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'file_diffs': array(obj({'name': S, 'diff': S, 'truncated': B})), 'diffs_truncated': B, 'board': obj({
     'layers': SECTION, 'setup': SECTION, 'stackup': SECTION,
@@ -48,7 +55,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
-    'after_copy_path': S},
+    'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -75,11 +82,16 @@ _ACTION_DEFINITIONS = (
         'Run all-severity KiCad DRC with zone refill on a new isolated project copy. '
         'Requires exactly one top-level board. Returns grouped facts, configured noise flags '
         'and revision for exact write approval. custom_rule_citations counts rule names '
-        'cited in violations, not all loaded rules; does not interpret findings.',
+        'cited in violations, not all loaded rules; does not interpret findings. erc is '
+        "KiCad's electrical rules check of the schematic, errors and warnings; Friedl wants "
+        'both clean, like the DRC. When erc.top_level_sheets is more than 1 (an Altium import), '
+        "KiCad's board-against-schematic check (schematic_parity) reads only the first sheet: "
+        'run make_hierarchical on the copy first, and write it back with his approval.',
         obj({'project_dir': S}), obj({'work_copy_id': S, 'work_copy_revision': S,
             'custom_rule_citations': RULE_CITATIONS, 'work_copy_tainted': B, 'baseline_eligible': B,
             'totals': TOTALS, 'violations': array(GROUP), 'unconnected_items': array(GROUP),
-            'schematic_parity': array(GROUP)}), SideEffect.NONE, FAILURES),
+            'schematic_parity': array(GROUP), 'erc': ERC, 'layout_rules': LAYOUT_RULES}),
+        SideEffect.NONE, FAILURES),
     CapabilityDefinition('edit_kicad_work_copy',
         'Run bounded Python source with bundled KiCad pcbnew on a registered untainted work '
         'copy. argv[1] is the board. Kernel confines writes to its project folder, including '
@@ -109,8 +121,9 @@ _ACTION_DEFINITIONS = (
         'all crash KiCad. The script may write only inside the work copy. Friedl\'s layout rules: '
         'copper wider than the pad it leaves or meets joins it through a taper (add_taper), '
         'never a step; where the pad is the wider one, no taper; inside an antenna clearance '
-        "follow the manufacturer's geometry exactly. Check every edit against them before "
-        'showing it.',
+        "follow the manufacturer's geometry exactly. Every check and edit report lists "
+        'layout_rules findings (steps where copper meets a narrower pad); clear them, or say '
+        'why one stands, before showing a board.',
         obj({'work_copy_id': S, 'script': S}),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS}),
@@ -148,9 +161,15 @@ _ACTION_DEFINITIONS = (
         'Refuses open boards and changed originals; verifies backups and staged files before '
         'replacement. On failure, already replaced files may remain; recovery depends on '
         'the returned backups and evidence, with no automatic undo. '
-        'Generated reports and renders are excluded.',
-        obj({'work_copy_id': S, 'work_copy_revision': S, 'project_dir': S}),
-        RECOVERY, SideEffect.EFFECTFUL, FAILURES),
+        'Generated reports and renders are excluded. report, when given, is your written '
+        'review of this board in Markdown (findings, what you changed, what is still open, '
+        'first line its title): after the files are written it is saved, new and never over '
+        "an existing one, in the project's docs/reviews folder, under the same approval.",
+        obj({'work_copy_id': S, 'work_copy_revision': S, 'project_dir': S, 'report': S},
+            ('work_copy_id', 'work_copy_revision', 'project_dir')),
+        StructuredSchema(ValueKind.OBJECT, {**RECOVERY.properties, 'report_path': S, 'report_error': S},
+                         RECOVERY.required, extra_properties=False),
+        SideEffect.EFFECTFUL, FAILURES),
     CapabilityDefinition('analyse_kicad_copper',
         'Read a registered untainted work copy. Ports use two reference/pad endpoints or '
         'two x_mm/y_mm/layer endpoints; a point attaches to the track end whose copper '
@@ -208,6 +227,58 @@ INSPECT = CapabilityDefinition('inspect',
     obj({'board': MAP, 'parts': array(MAP), 'nets': array(MAP), 'zones': array(MAP),
          'truncated': MAP}), SideEffect.NONE, FAILURES)
 
+READING = obj({'number': S, 'measures': MAP, 'not_applicable': S,
+               'derived': obj({'value_mm': N, 'basis': S})}, ('number',))
+LAYOUT_TARGET = {'work_copy_id': S, 'board': S, 'document': S, 'page': I, 'section': array(N),
+                 'part': S}
+CHECK_LAYOUT = CapabilityDefinition('check_kicad_layout',
+    "Measure a board against the manufacturer's layout drawing; you never type a measured "
+    'value. Name the board (work_copy_id, or board for his), the datasheet document, page, '
+    'section [x0, y0, x1, y1] in points around the drawing, and part (the reference the '
+    'drawing is for, e.g. AE2). Every number printed in the section comes back with an id. '
+    'For each, give a reading once: measures says what it is on the board, in the part\'s own '
+    'directions - {distance: [from, to], axis: x|y|direct}, {pad_size: REF.PAD, axis}, '
+    '{copper_width: NET, at: [x, y] mm from the part centre, axis} or {keepout_size: true, '
+    'axis} - where a point is REF.PAD:centre|left|right|top|bottom or REF:centre; or '
+    'not_applicable with a short reason (a tolerance, a size of the part itself). Part values '
+    '(1.8 pF) are set aside by the tool. Where the drawing shows a position without printing '
+    'a number (a shunt halfway between its series parts), add a reading with number a short '
+    'name, derived {value_mm, basis} and measures; it is measured the same way and shown as '
+    'derived. Readings are kept per project and drawing and reused. '
+    'KiCad measures; within 0.05 mm matches. passed needs no differing and no unaccounted '
+    'number, and for an RF or high-speed analog part (rf true) his confirmation of the '
+    'readings (confirm_layout_readings). Show it with show_on_screen checked.layout_check = '
+    'check_id.',
+    obj({**LAYOUT_TARGET, 'readings': array(READING), 'rf': B},
+        ('document', 'page', 'section', 'part')),
+    obj({'check_id': S, 'work_copy_id': S, 'document': S, 'document_path': S, 'page': I,
+         'section': array(N), 'part': S,
+         'rf': B, 'confirmed': B, 'passed': B, 'reason': S, 'counts': MAP, 'numbers': array(MAP),
+         'numbers_omitted': I}),
+    SideEffect.NONE, FAILURES)
+CONFIRM_READINGS = CapabilityDefinition('confirm_layout_readings',
+    "Record that Friedl has confirmed the readings of the layout check he saw (what each "
+    'number measures), for an RF or high-speed analog part. check_id is that check. Needs '
+    'his approval of this exact call. If the readings changed after that check nothing is '
+    'confirmed; changing a reading later needs it again.',
+    obj({'check_id': S}),
+    obj({'confirmed': B, 'readings': I}), SideEffect.EFFECTFUL, FAILURES)
+
+
+MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
+    "Join a copy's separate top-level schematic sheets (an Altium import) into one "
+    'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
+    "relinked. Proven by KiCad's netlist before and after; if any connection or net name "
+    'changes, the copy is put back and verification_failed names the nets. Part of every '
+    'import; write it back with his approval, and ask him to open it once in KiCad.',
+    obj({'work_copy_id': S}),
+    obj({'converted': B, 'reason': S, 'sheets': array(S), 'renamed': MAP, 'footprints_relinked': I,
+         'footprints_not_found': array(S), 'nets': I, 'netlist_identical': B, 'work_copy_id': S,
+         'work_copy_revision': S, 'schematic_parity': array(GROUP), 'erc': ERC},
+        ('converted', 'reason', 'sheets', 'renamed', 'footprints_relinked', 'footprints_not_found')),
+    SideEffect.NONE, FAILURES)
+
+
 class KiCadAction(str, Enum):
     """Every KiCad job, a closed list like the repository operations (D-074)."""
 
@@ -219,6 +290,9 @@ class KiCadAction(str, Enum):
     WRITE_BACK = 'write_back'
     ANALYSE_COPPER = 'analyse_copper'
     SIMULATE = 'simulate'
+    CHECK_LAYOUT = 'check_layout'
+    CONFIRM_LAYOUT_READINGS = 'confirm_layout_readings'
+    MAKE_HIERARCHICAL = 'make_hierarchical'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -231,13 +305,18 @@ CONTRACTS = {
     KiCadAction.WRITE_BACK: _ACTION_DEFINITIONS[4],
     KiCadAction.ANALYSE_COPPER: _ACTION_DEFINITIONS[5],
     KiCadAction.SIMULATE: _ACTION_DEFINITIONS[6],
+    KiCadAction.CHECK_LAYOUT: CHECK_LAYOUT,
+    KiCadAction.CONFIRM_LAYOUT_READINGS: CONFIRM_READINGS,
+    KiCadAction.MAKE_HIERARCHICAL: MAKE_HIERARCHICAL,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
-    KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE))
+    KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
+    KiCadAction.MAKE_HIERARCHICAL))
 KICAD = 'kicad'
-FAILURES += ('board_unavailable', 'section_failed', 'section_too_large')
+FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
+             'page_failed')
 
 _FIELDS = {}
 for _definition in CONTRACTS.values():
@@ -250,7 +329,7 @@ DEFINITION = CapabilityDefinition(KICAD,
     'nets and keep-outs; read_reference reads PDFs page by page. Then edit a work copy, '
     'check it (DRC), analyse copper, simulate a circuit, export manufacturing files or apply '
     'an approved copy to his project. action names which; its fields are listed per action '
-    'below. export and write_back change his project and need his approval of the exact '
+    'below. export, write_back and confirm_layout_readings need his approval of the exact '
     'call; every other action is free. Each action below lists its fields and the ones it requires. ' + ' '.join(
         f'[{name.value}] fields: {", ".join(definition.input_schema.properties) or "none"}; '
         f'required: {", ".join(definition.input_schema.required) or "none"}. {definition.purpose}'
@@ -270,7 +349,10 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.READ_REFERENCE: provider.read_reference,
                KiCadAction.WRITE_BACK: provider.write_back,
                KiCadAction.ANALYSE_COPPER: provider.analyse_copper,
-               KiCadAction.SIMULATE: provider.simulate_circuit}
+               KiCadAction.SIMULATE: provider.simulate_circuit,
+               KiCadAction.CHECK_LAYOUT: provider.check_layout,
+               KiCadAction.CONFIRM_LAYOUT_READINGS: provider.confirm_layout_readings,
+               KiCadAction.MAKE_HIERARCHICAL: provider.make_hierarchical}
 
     def invoke(arguments):
         code = 'arguments_unusable'
