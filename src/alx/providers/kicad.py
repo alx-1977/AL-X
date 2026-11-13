@@ -673,9 +673,9 @@ class KiCadProvider:
                 inventory(project)
                 stage = 'after_drc'
                 after = self._drc(root, meta)['totals']
-                current = inventory(project)
+                current = design_inventory(project)
                 facts_after = board_facts(board.read_text())
-                changed = sorted(name for name in original.keys() | current.keys()
+                changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
                                  if original.get(name) != current.get(name))
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
@@ -934,7 +934,10 @@ class KiCadProvider:
         return root, meta
 
     def _revision(self, root, meta=None):
-        contents = inventory(root / 'project')
+        # KiCad writes its local settings file beside the board on every save,
+        # in her copy too; it is not the design, so it changes nothing here
+        # (2026-11-13: it refused a write-back as an unknown changed file).
+        contents = design_inventory(root / 'project')
         if meta is None:
             meta = json.loads((root / 'metadata.json').read_text())
         taint = meta.get('taint')
@@ -1125,7 +1128,7 @@ class KiCadProvider:
             if current != expected:
                 raise KiCadError('original_changed')
         validate()
-        copied = inventory(root / 'project')
+        copied = design_inventory(root / 'project')
         changed = sorted((name for name, value in copied.items() if meta['hashes'].get(name) != value),
                          key=lambda name: (name not in meta['hashes'], name))
         if (any(Path(name).suffix not in ('.kicad_pcb', '.kicad_pro', '.kicad_dru') for name in changed)

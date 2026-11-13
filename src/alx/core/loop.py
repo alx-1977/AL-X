@@ -43,6 +43,15 @@ from alx.core.plan_results import (
 
 LOGGER = logging.getLogger(__name__)
 
+# One instruction from Friedl allows one approved call of a kind. What she is
+# told when a call is refused for that, or repeats an approval already refused
+# (2026-11-13: a reused approval cost him a third "go").
+_FRESH_APPROVAL_NEEDED = (
+    "This approval cannot be used again. After Friedl's next instruction, propose a new "
+    "approval with a new approval_id whose source is that latest message, and send the "
+    "call with it."
+)
+
 def planned_call_id(prefix: str) -> str:
     """A fresh identity for one planned dispatch.
 
@@ -1433,6 +1442,7 @@ class CoreAgent:
                     False,
                     reason_code="approval_capability_already_dispatched",
                     recorded_at=now,
+                    reason_detail=_FRESH_APPROVAL_NEEDED,
                 )
                 snapshot = self._store.replace(
                     replace(
@@ -2969,6 +2979,12 @@ class CoreAgent:
         refusal = CapabilityAttempt(
             call, CapabilityAttemptDisposition.REJECTED, False,
             reason_code="repeated_rejected_call", recorded_at=now,
+            # An approval refusal is repaired only by a fresh approval; say so,
+            # rather than leave her to find it in the source (2026-11-13).
+            reason_detail=(_FRESH_APPROVAL_NEEDED
+                           if call.approval_id is not None
+                           and earlier.reason_code in self._CORRECTABLE_REJECTION_REASONS
+                           else None),
             repeated_call_id=earlier.call.call_id,
             repeated_recorded_at=earlier.recorded_at,
             repeated_reason_code=earlier.reason_code,
