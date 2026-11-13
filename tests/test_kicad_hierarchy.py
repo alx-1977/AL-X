@@ -107,6 +107,39 @@ class MakeHierarchicalTests(unittest.TestCase):
                     make_hierarchical(project)
             self.assertIn('(path "/cccc"', outside.read_text())
 
+    def test_shared_global_labels_become_sheet_pins_joined_on_the_top_sheet(self) -> None:
+        """Friedl, 13 Nov: Altium showed how the blocks connect; KiCad's global labels did not."""
+        from alx.providers.kicad_hierarchy import connect_with_sheet_pins
+
+        def label(name: str, shape: str) -> str:
+            return (f'\t(global_label "{name}"\n\t\t(shape {shape})\n\t\t(at 10 10 0)\n'
+                    f'\t\t(fields_autoplaced yes)\n\t\t(effects (font (size 1.27 1.27)))\n'
+                    f'\t\t(uuid "u-{name}-{shape}")\n\t\t(property "Intersheetrefs" "${{INTERSHEET_REFS}}"\n'
+                    f'\t\t\t(at 10 10 0)\n\t\t\t(hide yes)\n\t\t)\n\t)\n')
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            (project / "scanner.kicad_pro").write_text(json.dumps({"schematic": {"top_level_sheets": [
+                {"filename": "scanner.kicad_sch", "name": "Root", "uuid": "root"}]}}))
+            (project / "led.kicad_sch").write_text("(kicad_sch\n" + label("HALO", "input") + label("ONLY", "output") + ")\n")
+            (project / "mcu.kicad_sch").write_text("(kicad_sch\n" + label("HALO", "output") + label("RFID{Serial}", "passive") + ")\n")
+            (project / "rfid.kicad_sch").write_text("(kicad_sch\n" + label("RFID{Serial}", "passive") + ")\n")
+            sheets = [{"uuid": u, "name": n, "filename": f} for u, n, f in (
+                ("aa", "LED", "led.kicad_sch"), ("bb", "MCU", "mcu.kicad_sch"), ("cc", "RFID", "rfid.kicad_sch"))]
+            from alx.providers.kicad_hierarchy import _top_sheet
+            (project / "scanner.kicad_sch").write_text(_top_sheet("root", "scanner", sheets, ""))
+            result = connect_with_sheet_pins(project)
+            self.assertEqual(result["connected"], ["HALO", "RFID{Serial}"])
+            led = (project / "led.kicad_sch").read_text()
+            self.assertIn('(hierarchical_label "HALO"', led)
+            self.assertIn('(global_label "ONLY"', led)   # used on one sheet only: left as it was
+            top = (project / "scanner.kicad_sch").read_text()
+            self.assertEqual(top.count('(pin "HALO"'), 2)
+            self.assertEqual(top.count('(pin "RFID{Serial}"'), 2)
+            self.assertIn("\t(bus\n", top)              # a bus label is joined by a bus
+            self.assertIn('(global_label "HALO"', top)  # the net keeps its name
+            # Done once: a top sheet that already has its own content is left alone.
+            self.assertEqual(connect_with_sheet_pins(project)["connected"], [])
+
     def test_netlist_nets_are_read_as_their_connections(self) -> None:
         netlist = '''(export (nets
 		(net

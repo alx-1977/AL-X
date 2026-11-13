@@ -268,14 +268,18 @@ CONFIRM_READINGS = CapabilityDefinition('confirm_layout_readings',
 MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
     "Join a copy's separate top-level schematic sheets (an Altium import) into one "
     'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
-    "relinked. Proven by KiCad's netlist before and after; if any connection or net name "
+    'relinked; then a global label used on more than one sheet becomes pins on those '
+    "sheets' blocks with wires (buses for bus labels) between them, as Altium showed "
+    "(connected lists them). Works on a design already hierarchical too. Proven by KiCad's "
+    "netlist before and after; if any connection or net name "
     'changes, the copy is put back and verification_failed names the nets. Part of every '
     'import; write it back with his approval, and ask him to open it once in KiCad.',
     obj({'work_copy_id': S}),
-    obj({'converted': B, 'reason': S, 'sheets': array(S), 'renamed': MAP, 'footprints_relinked': I,
+    obj({'converted': B, 'reason': S, 'connected': array(S), 'sheets': array(S), 'renamed': MAP,
+         'footprints_relinked': I,
          'footprints_not_found': array(S), 'nets': I, 'netlist_identical': B, 'work_copy_id': S,
          'work_copy_revision': S, 'schematic_parity': array(GROUP), 'erc': ERC},
-        ('converted', 'reason', 'sheets', 'renamed', 'footprints_relinked', 'footprints_not_found')),
+        ('converted', 'reason', 'connected', 'sheets', 'renamed', 'footprints_relinked', 'footprints_not_found')),
     SideEffect.NONE, FAILURES)
 
 

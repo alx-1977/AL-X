@@ -181,6 +181,178 @@ def make_hierarchical(project: Path) -> dict[str, Any]:
             "footprints_relinked": relinked, "footprints_not_found": not_found[:40]}
 
 
+PIN_PITCH, TRACK_GAP, BLOCK_GAP = 2.54, 2.54, 12.7
+
+
+def _global_labels(schematic: str) -> list[tuple[str, str, str]]:
+    """Each global label on a sheet: its whole block, its name and its shape."""
+    found = []
+    for block in re.finditer(r'\n\t\(global_label "((?:[^"\\]|\\.)*)"\n\t\t\(shape ([a-z_]+)\).*?\n\t\)(?=\n)',
+                             schematic, re.S):
+        found.append((block.group(0), block.group(1), block.group(2)))
+    return found
+
+
+def _as_hierarchical(block: str) -> str:
+    """A global label as a hierarchical label: same name, shape, place and identifier."""
+    block = block.replace("\n\t(global_label ", "\n\t(hierarchical_label ", 1)
+    block = re.sub(r'\n\t\t\(property "Intersheetrefs".*?\n\t\t\)(?=\n)', "", block, flags=re.S)
+    return re.sub(r"\n\t\t\(fields_autoplaced [a-z]+\)", "", block)
+
+
+def _segment(kind: str, x1: float, y1: float, x2: float, y2: float) -> str:
+    return (f"\t({kind}\n\t\t(pts\n\t\t\t(xy {x1:.2f} {y1:.2f}) (xy {x2:.2f} {y2:.2f})\n\t\t)\n"
+            f"\t\t(stroke\n\t\t\t(width 0)\n\t\t\t(type default)\n\t\t)\n"
+            f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
+
+
+def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
+    """Show how the sheets connect, as Altium's sheet entries did (Friedl, 2026-11-13).
+
+    A global label used on more than one sheet becomes a hierarchical label
+    on each, a pin on each sheet's block on the top sheet, and a wire (or a
+    bus, for a bus label) joining those pins there, carrying one global label
+    of the same name so the net keeps its name. Only a top sheet that holds
+    nothing but its sheet blocks is changed. The caller compares netlists.
+    """
+    pro_files = sorted(project.glob("*.kicad_pro"))
+    if len(pro_files) != 1:
+        raise HierarchyError("unsupported_project", "the copy needs exactly one .kicad_pro")
+    root_path = project / (pro_files[0].stem + ".kicad_sch")
+    top = root_path.read_text() if root_path.is_file() else ""
+    blocks = list(re.finditer(r"\n\t\(sheet\n.*?\n\t\)(?=\n)", top, re.S))
+    body = re.sub(r"\n\t\(sheet\n.*?\n\t\)(?=\n)", "", top, flags=re.S)
+    if not blocks or re.search(r"\n\t\((symbol|wire|bus|label|global_label|hierarchical_label|junction)\b", body):
+        return {"connected": [], "reason": "the top sheet is not only sheet blocks; nothing changed"}
+    sheets = []
+    for block in blocks:
+        text_of = block.group(0)
+        name = re.search(r'\(property "Sheetname" "((?:[^"\\]|\\.)*)"', text_of)
+        file_name = re.search(r'\(property "Sheetfile" "((?:[^"\\]|\\.)*)"', text_of)
+        sheet_uuid = re.search(r'\n\t\t\(uuid "([^"]+)"\)', text_of)
+        page = re.search(r'\(page "([^"]+)"\)', text_of)
+        if not (name and file_name and sheet_uuid) or "\n\t\t(pin " in text_of:
+            return {"connected": [], "reason": "a sheet block already has pins or is incomplete; nothing changed"}
+        target = project / file_name.group(1)
+        if Path(file_name.group(1)).name != file_name.group(1) or not target.is_file():
+            raise HierarchyError("unsupported_project", f"sheet file {file_name.group(1)!r} is not in this folder")
+        sheets.append({"name": name.group(1), "filename": file_name.group(1), "uuid": sheet_uuid.group(1),
+                       "page": page.group(1) if page else str(len(sheets) + 2),
+                       "labels": _global_labels(target.read_text())})
+    uses: dict[str, list[int]] = {}
+    shapes: dict[str, str] = {}
+    for index, sheet in enumerate(sheets):
+        for _, label, shape in sheet["labels"]:
+            if index not in uses.setdefault(label, []):
+                uses[label].append(index)
+            shapes.setdefault(label, shape)
+    shared = sorted(label for label, where in uses.items() if len(where) > 1)
+    if not shared:
+        return {"connected": [], "reason": "no global label is used on more than one sheet"}
+    for sheet in sheets:
+        target = project / sheet["filename"]
+        schematic = target.read_text()
+        for whole, label, _ in sheet["labels"]:
+            if label in shared:
+                schematic = schematic.replace(whole, _as_hierarchical(whole), 1)
+        target.write_text(schematic)
+    # Two columns of blocks facing each other, as an Altium top sheet: pins
+    # on the facing edges, and between the columns one vertical track per
+    # connection, joined to each pin by a short stub. Right-hand pins sit
+    # half a step lower than left-hand ones, so no two stubs share a height:
+    # a stub crosses other tracks without touching their ends and connects
+    # only where it ends. Everything stays on KiCad's 2.54 mm grid.
+    pitch, width = 2 * PIN_PITCH, 50.8
+    lane = (len(shared) + 3) * 2 * TRACK_GAP
+    left_x = 50.8
+    right_x = left_x + width + lane
+    tracks = {label: left_x + width + 2 * TRACK_GAP * (index + 2) for index, label in enumerate(shared)}
+    pins: dict[str, list[float]] = {label: [] for label in shared}
+    stubs: list[tuple[str, float, float]] = []
+    parts, drawing = [], []
+    row_y, row_height = 38.1, 0.0
+    for index, sheet in enumerate(sheets):
+        column = index % 2
+        if column == 0 and index:
+            row_y += row_height + BLOCK_GAP * 2
+            row_height = 0.0
+        x0, y = (left_x, row_y) if column == 0 else (right_x, row_y)
+        mine = [label for label in shared if label in {item[1] for item in sheet["labels"]}]
+        height = max(SHEET_HEIGHT, pitch * (len(mine) + 1))
+        row_height = max(row_height, height)
+        edge = x0 + width if column == 0 else x0
+        pin_blocks = []
+        for slot, label in enumerate(mine):
+            py = y + pitch * (slot + 1) + (PIN_PITCH if column else 0)
+            pins[label].append(py)
+            stubs.append((label, edge, py))
+            pin_blocks.append(f"""		(pin {_quoted(label)} {shapes[label]}
+			(at {edge:.2f} {py:.2f} {0 if column == 0 else 180})
+			(uuid {_quoted(str(uuid.uuid4()))})
+			(effects (font (size 1.27 1.27)) (justify {'right' if column == 0 else 'left'}))
+		)
+""")
+        parts.append(f"""	(sheet
+		(at {x0:.2f} {y:.2f})
+		(size {width:.2f} {height:.2f})
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid {_quoted(sheet["uuid"])})
+		(property "Sheetname" {_quoted(sheet["name"])}
+			(at {x0:.2f} {y - 0.71:.2f} 0)
+			(effects (font (size 1.524 1.524) (bold yes)) (justify left bottom))
+		)
+		(property "Sheetfile" {_quoted(sheet["filename"])}
+			(at {x0:.2f} {y + height + 0.64:.2f} 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+""" + "".join(pin_blocks) + f"""		(instances
+			(project {_quoted(pro_files[0].stem)}
+				(path {_quoted("/" + re.search(r'\(uuid "([^"]+)"\)', top).group(1))}
+					(page {_quoted(sheet["page"])})
+				)
+			)
+		)
+	)
+""")
+    for label, edge, py in stubs:
+        kind = "bus" if "{" in label or "[" in label else "wire"
+        drawing.append(_segment(kind, edge, py, tracks[label], py))
+    for label in shared:
+        kind = "bus" if "{" in label or "[" in label else "wire"
+        x = tracks[label]
+        heights = sorted(pins[label])
+        # Every track starts above the first row of blocks, where no stub
+        # runs: a track's end on another connection's stub would join them.
+        top_y = 38.1 - 2 * pitch
+        drawing.append(_segment(kind, x, top_y, x, heights[0]))
+        for upper, lower in zip(heights, heights[1:]):
+            drawing.append(_segment(kind, x, upper, x, lower))
+        for py in heights[:-1]:
+            drawing.append(f"\t(junction\n\t\t(at {x:.2f} {py:.2f})\n\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n"
+                           f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
+        drawing.append(f"""	(global_label {_quoted(label)}
+		(shape {shapes[label]})
+		(at {x:.2f} {top_y:.2f} 90)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid {_quoted(str(uuid.uuid4()))})
+		(property "Intersheetrefs" "${{INTERSHEET_REFS}}"
+			(at {x:.2f} {top_y:.2f} 0)
+			(hide yes)
+			(effects (font (size 1.27 1.27)))
+		)
+	)
+""")
+    head = top[:blocks[0].start()] + "\n"
+    tail = top[blocks[-1].end():]
+    root_path.write_text(head + "".join(parts) + "".join(drawing) + tail.lstrip("\n"))
+    return {"connected": shared, "reason": ""}
+
+
 def netlist_nets(netlist: str) -> dict[frozenset, str]:
     """Each net of a KiCad netlist as its set of (reference, pin), with its name."""
     nets = {}
@@ -193,4 +365,4 @@ def netlist_nets(netlist: str) -> dict[frozenset, str]:
     return nets
 
 
-__all__ = ["HierarchyError", "make_hierarchical", "netlist_nets"]
+__all__ = ["HierarchyError", "connect_with_sheet_pins", "make_hierarchical", "netlist_nets"]

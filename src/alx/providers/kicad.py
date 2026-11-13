@@ -690,7 +690,8 @@ class KiCadProvider:
         Proven by KiCad's own netlist, before and after: if a single
         connection or net name differs, the copy is put back as it was.
         """
-        from alx.providers.kicad_hierarchy import HierarchyError, make_hierarchical, netlist_nets
+        from alx.providers.kicad_hierarchy import (HierarchyError, connect_with_sheet_pins, make_hierarchical,
+                                                   netlist_nets)
         with self._locked(arguments['work_copy_id']):
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('taint'):
@@ -711,9 +712,14 @@ class KiCadProvider:
             try:
                 try:
                     result = make_hierarchical(project)
+                    # Then the sheets' connections drawn as Altium showed them:
+                    # pins on the blocks, wires between (Friedl, 2026-11-13).
+                    pins = connect_with_sheet_pins(project)
                 except HierarchyError as error:
                     raise KiCadError(error.code, {'detail': error.detail}) from error
-                after = netlist() if result['converted'] else before
+                result = dict(result, connected=pins['connected'],
+                              reason=result['reason'] or pins['reason'])
+                after = netlist() if result['converted'] or pins['connected'] else before
                 differing = sorted({before.get(k, '') for k in set(before) - set(after)}
                                    | {after.get(k, '') for k in set(after) - set(before)}
                                    | {before[k] for k in set(before) & set(after) if before[k] != after[k]})
