@@ -100,11 +100,36 @@ class RealLayoutCheckTests(unittest.TestCase):
             self.assertFalse(checked["passed"])
             provider = runtime.provider
             self.assertTrue(provider.layout_check_result(checked["check_id"])["current"])
-            # His confirmation is recorded; changing a reading needs it again.
-            self.assertTrue(call("confirm_layout_readings", **where)["confirmed"])
-            self.assertTrue(call("check_layout", **where)["confirmed"])
+            # Every number counts, also beyond those listed (review of #239).
+            import alx.providers.layout_check as layout_check
+            original, layout_check.MAX_NUMBERS = layout_check.MAX_NUMBERS, 2
+            try:
+                few = call("check_layout", **where)
+            finally:
+                layout_check.MAX_NUMBERS = original
+            self.assertEqual((len(few["numbers"]), few["numbers_omitted"]), (2, 4))
+            self.assertEqual(dict(few["counts"]), dict(checked["counts"]))
+            # His confirmation names the check he saw; changing a reading needs it again.
+            self.assertTrue(call("confirm_layout_readings", check_id=few["check_id"])["confirmed"])
+            confirmed = call("check_layout", **where)
+            self.assertTrue(confirmed["confirmed"])
+            self.assertFalse(provider.layout_check_result(checked["check_id"])["current"])
             changed = call("check_layout", **where, readings=[{"number": ids["7.5"], "not_applicable": "a note"}])
             self.assertFalse(changed["confirmed"])
+            # A check made before the readings changed is no longer current, and
+            # confirming it confirms nothing (review of #239).
+            self.assertFalse(provider.layout_check_result(confirmed["check_id"])["current"])
+            refused = kicad_call(runtime.executors, "confirm_layout_readings", {"check_id": confirmed["check_id"]})
+            self.assertEqual(refused.state, CapabilityResultState.FAILED)
+            # A board that changes while it is measured is never recorded (review of #239).
+            from unittest.mock import patch
+            with patch.object(type(provider), "_board_state", side_effect=["before", "after"]):
+                moving = kicad_call(runtime.executors, "check_layout", where)
+            self.assertEqual(moving.failure["code"], "work_copy_changed")
+            # A section with no readable number is never a pass.
+            empty = call("check_layout", **dict(where, section=[600, 400, 800, 500], part="U2"))
+            self.assertFalse(empty["passed"])
+            self.assertIn("no number could be read", empty["reason"])
             # An edit of the copy makes an earlier check stale for the screen.
             call("edit_kicad_work_copy", work_copy_id=copy, script="b = load()\nmove_part(b, 'U2', 16, 5)\nsave(b)\n")
             self.assertFalse(provider.layout_check_result(checked["check_id"])["current"])

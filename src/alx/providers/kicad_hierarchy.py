@@ -120,8 +120,16 @@ def make_hierarchical(project: Path) -> dict[str, Any]:
     taken = {path.name for path in project.glob("*.kicad_sch")}
     renamed = {}
     for sheet in sheets:
-        if not (project / sheet["filename"]).is_file():
-            raise HierarchyError("unsupported_project", f"sheet file {sheet['filename']} is missing")
+        name = sheet.get("filename")
+        # Only a file of this folder: never a path that leads outside the copy (review of #239).
+        if (not isinstance(name, str) or Path(name).name != name or name in ("", ".", "..")
+                or not name.endswith(".kicad_sch")):
+            raise HierarchyError("unsupported_project", f"sheet file {name!r} is not a schematic in this folder")
+        target = project / name
+        if target.is_symlink() or not target.is_file() or target.resolve().parent != project.resolve():
+            raise HierarchyError("unsupported_project", f"sheet file {name} is missing")
+        if not isinstance(sheet.get("uuid"), str) or not re.fullmatch(r"[0-9A-Za-z-]{1,64}", sheet["uuid"]):
+            raise HierarchyError("unsupported_project", f"sheet {name} has no usable identifier")
     old_root = (project / root_file).read_text() if (project / root_file).is_file() else ""
     for sheet in sheets:
         if sheet["filename"] == root_file:

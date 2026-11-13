@@ -41,6 +41,11 @@ FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed')
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
 BOARD_ITEM = obj({'id': S, 'kind': S, 'layers': array(S)})
+ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, 'groups': array(obj({
+    'check_type': S, 'count': I, 'severity': S, 'omitted_findings': I, 'findings': array(obj({
+        'severity': S, 'sheet': S, 'description': S, 'items': array(obj({
+            'description': S, 'designator': S, 'position': obj({'x': N, 'y': N}, ())}))}))}))})
+
 LAYOUT_RULES = obj({'findings': array(StructuredSchema(ValueKind.OBJECT)), 'omitted': I,
                     'not_checked': S}, ('findings', 'omitted'))
 CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
@@ -50,7 +55,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
-    'after_copy_path': S, 'layout_rules': LAYOUT_RULES},
+    'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -71,11 +76,6 @@ TUNING = obj({'components': array(obj({'reference': S, 'values': array(N),
                                       'tolerance_fraction': N, 'tied_references': array(S)},
                                      ('reference', 'values', 'tolerance_fraction'))),
               'targets': array(TARGET), 'tie_margin': N})
-
-ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, 'groups': array(obj({
-    'check_type': S, 'count': I, 'severity': S, 'omitted_findings': I, 'findings': array(obj({
-        'severity': S, 'sheet': S, 'description': S, 'items': array(obj({
-            'description': S, 'designator': S, 'position': obj({'x': N, 'y': N}, ())}))}))}))})
 
 _ACTION_DEFINITIONS = (
     CapabilityDefinition('check_kicad_board',
@@ -253,13 +253,15 @@ CHECK_LAYOUT = CapabilityDefinition('check_kicad_layout',
         ('document', 'page', 'section', 'part')),
     obj({'check_id': S, 'work_copy_id': S, 'document': S, 'document_path': S, 'page': I,
          'section': array(N), 'part': S,
-         'rf': B, 'confirmed': B, 'passed': B, 'counts': MAP, 'numbers': array(MAP)}),
+         'rf': B, 'confirmed': B, 'passed': B, 'reason': S, 'counts': MAP, 'numbers': array(MAP),
+         'numbers_omitted': I}),
     SideEffect.NONE, FAILURES)
 CONFIRM_READINGS = CapabilityDefinition('confirm_layout_readings',
-    "Record that Friedl has confirmed your readings of a drawing (what each number "
-    'measures), for an RF or high-speed analog part. Needs his approval of this exact call, '
-    'after he has seen the readings on screen. Changing a reading later needs it again.',
-    obj(LAYOUT_TARGET, ('document', 'page', 'section', 'part')),
+    "Record that Friedl has confirmed the readings of the layout check he saw (what each "
+    'number measures), for an RF or high-speed analog part. check_id is that check. Needs '
+    'his approval of this exact call. If the readings changed after that check nothing is '
+    'confirmed; changing a reading later needs it again.',
+    obj({'check_id': S}),
     obj({'confirmed': B, 'readings': I}), SideEffect.EFFECTFUL, FAILURES)
 
 
@@ -272,7 +274,8 @@ MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
     obj({'work_copy_id': S}),
     obj({'converted': B, 'reason': S, 'sheets': array(S), 'renamed': MAP, 'footprints_relinked': I,
          'footprints_not_found': array(S), 'nets': I, 'netlist_identical': B, 'work_copy_id': S,
-         'work_copy_revision': S}),
+         'work_copy_revision': S, 'schematic_parity': array(GROUP), 'erc': ERC},
+        ('converted', 'reason', 'sheets', 'renamed', 'footprints_relinked', 'footprints_not_found')),
     SideEffect.NONE, FAILURES)
 
 

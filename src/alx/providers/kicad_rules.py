@@ -138,7 +138,7 @@ for footprint in board.GetFootprints():
                      "left": ((l - RING, t, l, b), (l - RING, t - REACH, l, b + REACH), (l - DEPTH, t, l, b), False),
                      "right": ((r, t, r + RING, b), (r, t - REACH, r + RING, b + REACH), (r, t, r + DEPTH, b), False)}
             for piece in pieces(touching):
-                steps, alongside = [], False
+                steps, partial, alongside, joint = [], [], False, False
                 for side, (own, strip, slab, horizontal) in edges.items():
                     edge = w if horizontal else h
                     crossing = cut(piece, box(*own))
@@ -150,7 +150,12 @@ for footprint in board.GetFootprints():
                             joined.BooleanAdd(part)
                     span = joined.BBox()
                     width = span.GetWidth() if horizontal else span.GetHeight()
+                    covered = crossing.BBox()
+                    cover = covered.GetWidth() if horizontal else covered.GetHeight()
                     if mm(width) <= mm(edge) + SLACK:
+                        # No wider than the edge, across all of it: a proper
+                        # joint, as where a taper starts.
+                        joint = joint or cover >= 0.95 * edge
                         continue
                     out = cut(piece, box(*slab)).BBox()
                     depth = out.GetHeight() if horizontal else out.GetWidth()
@@ -159,16 +164,22 @@ for footprint in board.GetFootprints():
                         # where it covers only part of the edge (review of #238).
                         steps.append(finding(footprint, pad, layer, side, edge, width))
                         continue
-                    covered = crossing.BBox()
-                    cover = covered.GetWidth() if horizontal else covered.GetHeight()
                     if cover >= 0.95 * edge:
                         # It runs along a whole edge further than it leaves:
                         # the pad sits on the side of this piece of copper,
                         # which is no joint. Only this piece is passed; another
                         # piece on another edge is still checked (review of #238).
                         alongside = True
+                    else:
+                        # Wider copper meeting part of an edge, as at a corner:
+                        # a step too (review of #239).
+                        partial.append(finding(footprint, pad, layer, side, edge, width))
                 if not alongside:
-                    findings.extend(steps)
+                    # One finding per piece of copper: where it leaves the pad,
+                    # or else where it meets part of an edge - unless it joins
+                    # the pad properly across a whole edge and only grazes the
+                    # others where it starts inside the pad (C61's taper).
+                    findings.extend(steps[:1] or ([] if joint else partial[:1]))
 (board_path.parent / "section.json").write_text(json.dumps({"findings": findings}))
 '''
 

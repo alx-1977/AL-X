@@ -31,7 +31,8 @@ class TaperRuleTests(unittest.TestCase):
         # Steps: U1 a 1.2 mm shape at a 0.5 mm pad; U5 a wide track at a pad
         # turned 45 degrees; U6 on an inner layer; U7 an arc. From the review
         # of #238: U8 a wide track starting just off the pad; U9 a step beside
-        # a separate side strip; U10 copper covering half an edge.
+        # a separate side strip; U10 copper covering half an edge. From the
+        # review of #239: U11 copper meeting the pad at its corner.
         # No steps: U2 tapers, U3 sits on the side of a wide strip, U4 bends.
         with tempfile.TemporaryDirectory() as scratch:
             result = check_layout_rules(FIXTURES / "copper_board.kicad_pcb", scratch_root=Path(scratch),
@@ -40,6 +41,7 @@ class TaperRuleTests(unittest.TestCase):
         found = sorted((f["pad"], f["layer"], f["where"], f["copper_mm"]) for f in result["findings"])
         self.assertEqual(found, [
             ("U1.1", "F.Cu", "bottom", 1.2), ("U10.1", "F.Cu", "bottom", 1.2),
+            ("U11.1", "F.Cu", "bottom", 1.2),
             ("U5.1", "F.Cu", "track", 1.2), ("U6.1", "In1.Cu", "track", 1.2),
             ("U7.1", "F.Cu", "track", 1.2), ("U8.1", "F.Cu", "track", 1.2),
             ("U9.1", "F.Cu", "bottom", 1.05)])

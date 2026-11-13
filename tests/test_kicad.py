@@ -652,6 +652,16 @@ class KiCadTests(unittest.TestCase):
         self.assertTrue(done['converted'] and done['netlist_identical'])
         self.assertTrue((root / 'A.kicad_sch').is_file())
 
+    def test_an_edited_schematic_gets_its_erc_again(self):
+        """Review of #239: ERC ran only on the first copy, never after a schematic edit."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        board_only = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertNotIn('erc', board_only['change_report'])
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
+            EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        self.assertEqual(edited['change_report']['erc']['totals']['error'], 1)
+
     def test_the_check_counts_top_level_sheets(self):
         """An Altium import makes one top-level sheet per Altium sheet (KiCad 10)."""
         (self.project / 'test.kicad_sch').write_text('(kicad_sch)')

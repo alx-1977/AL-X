@@ -90,6 +90,23 @@ class MakeHierarchicalTests(unittest.TestCase):
             # Run again: already one top sheet, nothing changes.
             self.assertFalse(make_hierarchical(project)["converted"])
 
+    def test_a_sheet_file_outside_the_copy_is_refused(self) -> None:
+        # Review of #239: a project file must never lead the conversion outside the copy.
+        from alx.providers.kicad_hierarchy import HierarchyError
+        with tempfile.TemporaryDirectory() as folder:
+            outside = Path(folder) / "outside.kicad_sch"
+            outside.write_text(sheet("cccc", "s3", "R3"))
+            project = Path(folder) / "copy"
+            project.mkdir()
+            (project / "scanner.kicad_sch").write_text(sheet("aaaa", "s1", "R1"))
+            for name in ("../outside.kicad_sch", str(outside)):
+                (project / "scanner.kicad_pro").write_text(json.dumps({"schematic": {"top_level_sheets": [
+                    {"filename": "scanner.kicad_sch", "name": "A", "uuid": "aaaa"},
+                    {"filename": name, "name": "B", "uuid": "cccc"}]}}))
+                with self.assertRaises(HierarchyError):
+                    make_hierarchical(project)
+            self.assertIn('(path "/cccc"', outside.read_text())
+
     def test_netlist_nets_are_read_as_their_connections(self) -> None:
         netlist = '''(export (nets
 		(net
