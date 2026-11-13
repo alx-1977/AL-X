@@ -357,20 +357,16 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             drawing.append(f"\t(junction\n\t\t(at {jx * GRID:.2f} {jy * GRID:.2f})\n"
                            f"\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n"
                            f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
-        # One global label per connection keeps the net's name, on its own
-        # stub, clear of pins and block titles (Friedl, 2026-11-13).
+        # A plain net label on the wire, as KiCad intends for a hierarchical
+        # design and as Altium drew it (Friedl, 2026-11-13). Its net takes
+        # KiCad's hierarchical name (/HALO); the caller renames the board's
+        # net to match, as KiCad's own Update PCB from Schematic would.
         (nx, ny), angle = names[label]
-        x, top_y = nx * GRID, ny * GRID
-        drawing.append(f"""	(global_label {_quoted(label)}
-		(shape {shapes[label] if len({s["shapes"].get(label) for s in sheets} - {None}) == 1 else "bidirectional"})
-		(at {x:.2f} {top_y:.2f} {angle})
-		(effects (font (size 1.27 1.27)) (justify {'right' if angle == 180 else 'left'}))
+        x, y = nx * GRID, ny * GRID
+        drawing.append(f"""	(label {_quoted(label)}
+		(at {x:.2f} {y:.2f} {angle})
+		(effects (font (size 1.27 1.27)) (justify left bottom))
 		(uuid {_quoted(str(uuid.uuid4()))})
-		(property "Intersheetrefs" "${{INTERSHEET_REFS}}"
-			(at {x:.2f} {top_y:.2f} 0)
-			(hide yes)
-			(effects (font (size 1.27 1.27)))
-		)
 	)
 """)
     head = top[:blocks[0].start()] + "\n"
@@ -378,6 +374,47 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
     head = _resize_paper(head, rectangles, routes, extent)
     root_path.write_text(head + "".join(parts) + "".join(drawing) + tail.lstrip("\n"))
     return {"connected": shared, "reason": "", "top_sheet_crossings": crossings}
+
+
+def rename_nets(project: Path, renames: dict[str, str]) -> dict[str, int]:
+    """Give the board, its design rules and its net classes the schematic's new net names.
+
+    What KiCad's Update PCB from Schematic does for a renamed net, and nothing
+    else: a board names a net only as (net "NAME"); a design rule only inside
+    a NetName comparison; a net class only as an exact pattern.
+    """
+    counts = {"board": 0, "rules": 0, "net_classes": 0}
+    if not renames:
+        return counts
+    for board in project.glob("*.kicad_pcb"):
+        source = board.read_text()
+        for old, new in renames.items():
+            before = '(net %s)' % _quoted(old)
+            counts["board"] += source.count(before)
+            source = source.replace(before, '(net %s)' % _quoted(new))
+        board.write_text(source)
+    for rules in project.glob("*.kicad_dru"):
+        source = rules.read_text()
+        for old, new in renames.items():
+            for quote in ("'", '"'):
+                pattern = re.compile(r"(NetName\s*[!=]=\s*)" + re.escape(quote + old + quote))
+                source, found = pattern.subn(lambda m: m.group(1) + quote + new + quote, source)
+                counts["rules"] += found
+        rules.write_text(source)
+    for pro in project.glob("*.kicad_pro"):
+        settings = json.loads(pro.read_text())
+        patterns = (settings.get("net_settings") or {}).get("netclass_patterns") or []
+        for item in patterns:
+            if item.get("pattern") in renames:
+                item["pattern"] = renames[item["pattern"]]
+                counts["net_classes"] += 1
+        assignments = (settings.get("net_settings") or {}).get("netclass_assignments") or {}
+        for old, new in renames.items():
+            if old in assignments:
+                assignments[new] = assignments.pop(old)
+                counts["net_classes"] += 1
+        pro.write_text(json.dumps(settings, indent=2) + "\n")
+    return counts
 
 
 def netlist_nets(netlist: str) -> dict[frozenset, str]:
@@ -392,4 +429,4 @@ def netlist_nets(netlist: str) -> dict[frozenset, str]:
     return nets
 
 
-__all__ = ["HierarchyError", "connect_with_sheet_pins", "make_hierarchical", "netlist_nets"]
+__all__ = ["HierarchyError", "connect_with_sheet_pins", "make_hierarchical", "netlist_nets", "rename_nets"]

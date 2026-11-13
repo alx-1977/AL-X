@@ -257,7 +257,12 @@ class MakeHierarchicalTests(unittest.TestCase):
             self.assertEqual(len(before), 7)  # three wires, two members of each bus
             self.assertTrue(all(len(nodes) == 2 for nodes in before))
             connect_with_sheet_pins(project)
-            self.assertEqual(export("after"), before)
+            after = export("after")
+            # Every connection the same; a net joined on the top sheet by a
+            # plain net label takes KiCad's hierarchical name.
+            self.assertEqual(set(after), set(before))
+            for nodes, name in before.items():
+                self.assertIn(after[nodes], (name, "/" + name))
 
     def test_one_top_sheet_places_every_sheet_and_every_link_gains_its_sheet(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -339,7 +344,9 @@ class MakeHierarchicalTests(unittest.TestCase):
             self.assertEqual(top.count('(pin "HALO"'), 2)
             self.assertEqual(top.count('(pin "RFID{Serial}"'), 2)
             self.assertIn("\t(bus\n", top)              # a bus label is joined by a bus
-            self.assertIn('(global_label "HALO"', top)  # the net keeps its name
+            # A plain net label on the wire, as KiCad intends (Friedl, 13 Nov).
+            self.assertIn('(label "HALO"', top)
+            self.assertNotIn('(global_label', top)
             # Each block's pin keeps its own sheet's direction (review of #240).
             self.assertIn('(pin "HALO" input', top)
             self.assertIn('(pin "HALO" output', top)
@@ -351,6 +358,33 @@ class MakeHierarchicalTests(unittest.TestCase):
             (project / "scanner.kicad_sch").write_text(plain)
             self.assertEqual(connect_with_sheet_pins(project)["connected"], [])
             self.assertIn("Rev B notes", (project / "scanner.kicad_sch").read_text())
+
+    def test_renamed_nets_follow_on_the_board_rules_and_net_classes_only(self) -> None:
+        """As Update PCB from Schematic would: net names only, nothing else that matches."""
+        from alx.providers.kicad_hierarchy import rename_nets
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            (project / "scanner.kicad_pcb").write_text(
+                '(kicad_pcb\n\t(pad "1" (net "HALO"))\n\t(segment (net "HALO"))\n'
+                '\t(gr_text "HALO")\n\t(pad "2" (net "HALO_B"))\n)\n')
+            (project / "scanner.kicad_dru").write_text(
+                "(rule edge (condition \"A.NetName == 'HALO' || A.NetName == 'HALO_B'\"))\n# HALO tracks\n")
+            (project / "scanner.kicad_pro").write_text(json.dumps({"net_settings": {
+                "netclass_patterns": [{"netclass": "Power", "pattern": "HALO"}, {"netclass": "Power", "pattern": "HALO*"}],
+                "netclass_assignments": {"HALO": "Power"}}}))
+            counts = rename_nets(project, {"HALO": "/HALO"})
+            self.assertEqual(counts, {"board": 2, "rules": 1, "net_classes": 2})
+            board = (project / "scanner.kicad_pcb").read_text()
+            self.assertEqual(board.count('(net "/HALO")'), 2)
+            self.assertIn('(gr_text "HALO")', board)        # text on the board is not a net
+            self.assertIn('(net "HALO_B")', board)
+            rules = (project / "scanner.kicad_dru").read_text()
+            self.assertIn("A.NetName == '/HALO'", rules)
+            self.assertIn("A.NetName == 'HALO_B'", rules)
+            self.assertIn("# HALO tracks", rules)
+            settings = json.loads((project / "scanner.kicad_pro").read_text())["net_settings"]
+            self.assertEqual([p["pattern"] for p in settings["netclass_patterns"]], ["/HALO", "HALO*"])
+            self.assertEqual(settings["netclass_assignments"], {"/HALO": "Power"})
 
     def test_netlist_nets_are_read_as_their_connections(self) -> None:
         netlist = '''(export (nets

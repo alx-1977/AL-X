@@ -22,7 +22,7 @@ PAD = 3             # 7.62 mm from a block's top to its first pin
 MIN_HEIGHT = 10     # 25.4 mm
 ROW_GAP = 5         # 12.7 mm between blocks on one side
 LEFT, TOP = 20, 20  # 50.8 mm from the page corner
-NAME_OFFSET = 3     # a net name stands 7.62 mm out from the hub on its own stub
+NAME_OFFSET = 3     # a net label sits on its wire 7.62 mm from the left-hand block
 
 
 def _height(pins: int) -> int:
@@ -69,17 +69,16 @@ def _star_layout(count, uses, hub, spokes):
                     pins[hub, label] = (hub_pin, None, 0)
                     pins[index, label] = (spoke_pin, None, 180)
                     stub_x = hub_x + WIDTH + NAME_OFFSET
-                    names[label] = ((stub_x, py - 1), 0)
                 else:
                     hub_pin, spoke_pin = (hub_x, py), (x + WIDTH, py)
                     pins[hub, label] = (hub_pin, None, 180)
                     pins[index, label] = (spoke_pin, None, 0)
-                    stub_x = hub_x - NAME_OFFSET
-                    names[label] = ((stub_x, py - 1), 180)
-                # One straight wire between the two pins, and a short stub up
-                # from it carrying the net's name, clear of the pins.
-                routes[label] = [(hub_pin, spoke_pin), ((stub_x, py), (stub_x, py - 1))]
-                junctions[label] = [(stub_x, py)]
+                    stub_x = x + WIDTH + NAME_OFFSET
+                # One straight wire between the two pins, its net label (plain
+                # text, as in Altium and as KiCad intends) on the wire itself.
+                routes[label] = [(hub_pin, spoke_pin)]
+                junctions[label] = []
+                names[label] = ((stub_x, py), 0)
             y += height + ROW_GAP
         bottom = max(bottom, y - ROW_GAP)
     rectangles[hub] = (hub_x, TOP, WIDTH, bottom - TOP)
