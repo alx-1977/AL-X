@@ -137,8 +137,17 @@ class MakeHierarchicalTests(unittest.TestCase):
             self.assertEqual(top.count('(pin "RFID{Serial}"'), 2)
             self.assertIn("\t(bus\n", top)              # a bus label is joined by a bus
             self.assertIn('(global_label "HALO"', top)  # the net keeps its name
+            # Each block's pin keeps its own sheet's direction (review of #240).
+            self.assertIn('(pin "HALO" input', top)
+            self.assertIn('(pin "HALO" output', top)
             # Done once: a top sheet that already has its own content is left alone.
             self.assertEqual(connect_with_sheet_pins(project)["connected"], [])
+            # A plain top sheet with a note of his on it is left alone too (review of #240).
+            plain = _top_sheet("root", "scanner", sheets, "").replace(
+                "\t(sheet_instances", '\t(text "Rev B notes"\n\t\t(at 10 10 0)\n\t)\n\t(sheet_instances', 1)
+            (project / "scanner.kicad_sch").write_text(plain)
+            self.assertEqual(connect_with_sheet_pins(project)["connected"], [])
+            self.assertIn("Rev B notes", (project / "scanner.kicad_sch").read_text())
 
     def test_netlist_nets_are_read_as_their_connections(self) -> None:
         netlist = '''(export (nets

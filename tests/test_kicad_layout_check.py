@@ -167,7 +167,16 @@ class LibraryWorkTests(unittest.TestCase):
                 self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
                 return result.values
 
+            # A link inside the library is never followed (review of #240).
+            elsewhere = root / "elsewhere" / "Big.pretty"
+            elsewhere.mkdir(parents=True)
+            (elsewhere / "BIG.kicad_mod").write_text("(footprint \"BIG\")\n")
+            (library / "footprints" / "Big.pretty").symlink_to(elsewhere, target_is_directory=True)
+            # A .pretty folder itself is not a library folder (review of #240).
+            refused = kicad_call(runtime.executors, "copy_library", {"library_dir": str(pretty)})
+            self.assertEqual(refused.state, CapabilityResultState.FAILED)
             copy = call("copy_library", library_dir=str(library))
+            self.assertFalse(list((root / "storage").rglob("BIG.kicad_mod")))
             self.assertEqual([lib["name"] for lib in copy["footprint_libraries"]], ["Test"])
             self.assertFalse(list((root / "storage").rglob(".git")))
             where = {"work_copy_id": copy["work_copy_id"], "footprint": "Test/PAD1", "part": "FP",

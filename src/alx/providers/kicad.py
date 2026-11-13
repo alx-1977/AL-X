@@ -194,7 +194,9 @@ def _library_files(source):
     """A copytree ignore keeping only a library's KiCad files and their folders."""
     def ignore(directory, names):
         here = Path(directory)
-        return [name for name in names if name in _LIBRARY_SKIPPED or (
+        # Links are never followed: they could lead to far more than the
+        # inventory counted (review of #240).
+        return [name for name in names if name in _LIBRARY_SKIPPED or (here / name).is_symlink() or (
             not (here / name).is_dir() and not is_design_file(name))]
     return ignore
 
@@ -821,6 +823,9 @@ class KiCadProvider:
     def check_layout(self, arguments):
         """Her copy, or his board, measured against the manufacturer's drawing (2026-11-13)."""
         from alx.providers.layout_check import MAX_NUMBERS, compare, label, measure_board, measurement
+        # The state is taken before anything is read or built from the board,
+        # so a change while it is measured is always seen (review of #240).
+        state = self._board_state(arguments)
         board, document, page, section, part, numbers, path, stored = self._layout_basis(arguments)
         known = {number['id'] for number in numbers}
         entries = dict(stored['entries'])
@@ -877,7 +882,6 @@ class KiCadProvider:
         to_measure = {key: measurement(entry['measures']) for key, entry in entries.items()
                       if key in known and entry.get('measures') is not None}
         measured = {}
-        state = self._board_state(arguments)
         if to_measure:
             from alx.providers.kicad_section import SectionError
             try:
@@ -1555,6 +1559,10 @@ class KiCadProvider:
         source = self._source(arguments['library_dir'])
         if source.is_relative_to(self.work_root) or self.work_root.is_relative_to(source) or not source.is_dir():
             raise KiCadError('path_denied' if source.is_dir() else 'unsupported_project')
+        if source.suffix == '.pretty':
+            # The library folder that holds it keeps the library's name (review of #240).
+            raise KiCadError('unsupported_project', {'detail': 'name the folder that holds '
+                                                     f'{source.name}, not the .pretty folder itself'})
         hashes = library_inventory(source)
         pretty = sorted({str(Path(name).parent) for name in hashes if name.endswith('.kicad_mod')})
         symbols = sorted(name for name in hashes if name.endswith('.kicad_sym'))
@@ -1563,9 +1571,14 @@ class KiCadProvider:
         work_id = uuid.uuid4().hex
         root = self.work_root / work_id
         root.mkdir(parents=True)
-        shutil.copytree(source, root / 'project', ignore=_library_files(source))
-        if library_inventory(source) != hashes or library_inventory(root / 'project') != hashes:
-            raise KiCadError('original_changed')
+        try:
+            shutil.copytree(source, root / 'project', ignore=_library_files(source))
+            if library_inventory(source) != hashes or library_inventory(root / 'project') != hashes:
+                raise KiCadError('original_changed')
+        except BaseException:
+            # A copy that did not complete is not kept (review of #240).
+            shutil.rmtree(root, ignore_errors=True)
+            raise
         meta = {'source': str(source), 'hashes': hashes, 'board': '', 'library': True}
         (root / 'metadata.json').write_text(json.dumps(meta))
         counts = Counter(str(Path(name).parent) for name in hashes if name.endswith('.kicad_mod'))

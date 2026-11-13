@@ -222,8 +222,19 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
     top = root_path.read_text() if root_path.is_file() else ""
     blocks = list(re.finditer(r"\n\t\(sheet\n.*?\n\t\)(?=\n)", top, re.S))
     body = re.sub(r"\n\t\(sheet\n.*?\n\t\)(?=\n)", "", top, flags=re.S)
-    if not blocks or re.search(r"\n\t\((symbol|wire|bus|label|global_label|hierarchical_label|junction)\b", body):
-        return {"connected": [], "reason": "the top sheet is not only sheet blocks; nothing changed"}
+    # Only a top sheet holding nothing but plain sheet blocks is rebuilt: notes,
+    # drawings, sheet settings or extra fields of his would be lost (review of #240).
+    elements = set(re.findall(r"\n\t\(([a-z_]+)", body))
+    plain = {"version", "generator", "generator_version", "uuid", "paper", "title_block", "lib_symbols",
+             "sheet_instances", "embedded_fonts"}
+    if not blocks or elements - plain:
+        return {"connected": [], "reason": "the top sheet holds more than its sheet blocks; nothing changed"}
+    for block in blocks:
+        fields = re.findall(r'\(property "([^"]+)"', block.group(0))
+        flags = re.findall(r"\n\t\t\((exclude_from_sim|in_bom|on_board|dnp) ([a-z]+)\)", block.group(0))
+        if sorted(fields) != ["Sheetfile", "Sheetname"] or dict(flags) != {
+                "exclude_from_sim": "no", "in_bom": "yes", "on_board": "yes", "dnp": "no"}:
+            return {"connected": [], "reason": "a sheet block has its own settings or fields; nothing changed"}
     sheets = []
     for block in blocks:
         text_of = block.group(0)
@@ -242,10 +253,13 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
     uses: dict[str, list[int]] = {}
     shapes: dict[str, str] = {}
     for index, sheet in enumerate(sheets):
+        sheet["shapes"] = {}
         for _, label, shape in sheet["labels"]:
             if index not in uses.setdefault(label, []):
                 uses[label].append(index)
             shapes.setdefault(label, shape)
+            # Each block's pin shows that sheet's own direction (review of #240).
+            sheet["shapes"].setdefault(label, shape)
     shared = sorted(label for label, where in uses.items() if len(where) > 1)
     if not shared:
         return {"connected": [], "reason": "no global label is used on more than one sheet"}
@@ -286,7 +300,7 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             py = y + pitch * (slot + 1) + (PIN_PITCH if column else 0)
             pins[label].append(py)
             stubs.append((label, edge, py))
-            pin_blocks.append(f"""		(pin {_quoted(label)} {shapes[label]}
+            pin_blocks.append(f"""		(pin {_quoted(label)} {sheet["shapes"][label]}
 			(at {edge:.2f} {py:.2f} {0 if column == 0 else 180})
 			(uuid {_quoted(str(uuid.uuid4()))})
 			(effects (font (size 1.27 1.27)) (justify {'right' if column == 0 else 'left'}))
@@ -336,7 +350,7 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             drawing.append(f"\t(junction\n\t\t(at {x:.2f} {py:.2f})\n\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n"
                            f"\t\t(uuid {_quoted(str(uuid.uuid4()))})\n\t)\n")
         drawing.append(f"""	(global_label {_quoted(label)}
-		(shape {shapes[label]})
+		(shape {shapes[label] if len({s["shapes"].get(label) for s in sheets} - {None}) == 1 else "bidirectional"})
 		(at {x:.2f} {top_y:.2f} 90)
 		(effects (font (size 1.27 1.27)) (justify left))
 		(uuid {_quoted(str(uuid.uuid4()))})
