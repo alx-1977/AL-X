@@ -146,6 +146,17 @@ Not yet usable.
     out with no reason. Continue at once unless waiting on something.
   - Times in her replies are his local time (done on this branch, with the
     next batch).
+  - A missing field in her decision is named ("missing required field
+    'evidence_refs'"); the bare "'evidence_refs'" was refused 18 times on 13
+    Nov (done on this branch).
+  - Trust (Friedl, 13 Nov: "how will I be able to trust her with things I do
+    not know the answer to?"): every finding carries its source (datasheet
+    page, measured value, tool result), enforced where the system can; when
+    he challenges something she re-checks the evidence and holds or corrects
+    with it, never folds; an independent second check of her conclusion on
+    decisions that matter. On 13 Nov she typed U.FL readings instead of using
+    check_layout, buried a missing keep-out under an "ok", and said the U.FL
+    part did not exist when asked about it.
   - For AL/X, not code: the one-time land-pattern audit of the 86
     footprints outside FireFli_Resistors and FireFli_Capacitors; drawing
     the sheet connections on P0020's top sheet; D4 (5V/GND) and J7 pad 8,

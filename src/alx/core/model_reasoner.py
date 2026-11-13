@@ -1934,7 +1934,13 @@ class ModelReasoner:
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
             return self._decide(context)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        except KeyError as error:
+            # A bare "'evidence_refs'" told her nothing, and she sent the same
+            # decision 18 times on 13 Nov. Name what is missing.
+            raise DecisionValidationError(
+                "missing required field %r (an empty list if there is nothing)" % (error.args[0] if error.args else "")
+            ) from error
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
             reason = str(error).strip() or type(error).__name__
             raise DecisionValidationError(reason) from error
 
