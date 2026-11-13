@@ -164,7 +164,7 @@ class KiCadDescriptionAndPathTests(unittest.TestCase):
     def test_each_action_lists_its_fields_and_required_ones(self) -> None:
         from alx.tools.kicad import DEFINITION
         self.assertIn("[check] fields: project_dir; required: project_dir.", DEFINITION.purpose)
-        self.assertIn("[write_back] fields: work_copy_id, work_copy_revision, project_dir; required:",
+        self.assertIn("[write_back] fields: work_copy_id, work_copy_revision, project_dir, report; required:",
                       DEFINITION.purpose)
 
     def test_a_linked_board_outside_the_design_folders_is_refused(self) -> None:

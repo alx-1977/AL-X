@@ -9,7 +9,7 @@
 (() => {
   'use strict';
   const NS = 'http://www.w3.org/2000/svg';
-  const TONE = { ok: '#3dffa8', bad: '#ff4d6d', info: '#7fe9ff' };
+  const TONE = { ok: '#3dffa8', bad: '#ff4d6d', info: '#7fe9ff', warn: '#ffb547' };
   const COPPER = '#2fa8ff';
   const SILK = 'rgba(236,244,248,.92)';
   const HEAD = 64;   // room above a view for its label and sub line
@@ -142,7 +142,8 @@
     box.hidden = !checked;
     if (!checked) return;
     const head = document.createElement('div');
-    head.className = 'checked-head ' + (checked.no_layout ? 'warn' : checked.differs ? 'bad' : 'ok');
+    head.className = 'checked-head ' + (checked.no_layout ? 'warn' : checked.differs ? 'bad'
+      : checked.passed ? 'ok' : 'warn');
     head.textContent = checked.no_layout ? 'Not checked against a datasheet'
       : `Checked against ${checked.document} p.${checked.page}`;
     box.append(head);
@@ -152,7 +153,12 @@
       box.append(why);
       return;
     }
-    const mm = (v) => Number(v).toFixed(2);
+    const mm = (v) => (v === null || v === undefined) ? '—' : Number(v).toFixed(2);
+    if (checked.summary) {
+      const summary = document.createElement('small');
+      summary.textContent = checked.summary;
+      box.append(summary);
+    }
     for (const row of checked.rows) {
       const line = document.createElement('div');
       line.className = 'checked-row ' + row.tone;

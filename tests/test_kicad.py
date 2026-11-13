@@ -124,6 +124,15 @@ class KiCadTests(unittest.TestCase):
                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 exec(compile(Path(argv[-2]).read_text(), argv[-2], 'exec'), {})
             return SimpleNamespace(returncode=0, stdout=out.getvalue(), stderr=err.getvalue())
+        if argv[1:3] == ['sch', 'erc']:
+            target = Path(argv[argv.index('--output') + 1])
+            target.write_text(json.dumps(getattr(self, 'erc_report', None) or {'sheets': [
+                {'path': '/', 'violations': [
+                    {'type': 'pin_not_connected', 'severity': 'error', 'description': 'Pin not connected',
+                     'items': [{'description': 'Symbol C62 Pin 2 [Passive, Line]', 'pos': {'x': 1, 'y': 2}}]},
+                    {'type': 'endpoint_off_grid', 'severity': 'warning', 'description': 'Off grid',
+                     'items': [{'description': 'Wire', 'pos': {'x': 3, 'y': 4}}]}]}]}))
+            return SimpleNamespace(returncode=0)
         board = Path(argv[-1])
         self.assertTrue(board.is_relative_to(self.storage))
         self.assertFalse(board.is_relative_to(self.project))
@@ -582,6 +591,51 @@ class KiCadTests(unittest.TestCase):
         backups = list(self.settings.work_root.rglob('backups/*/test.kicad_pcb'))
         self.assertTrue(backups)
         self.assertTrue(all(p.read_text() == BOARD for p in backups))
+
+    def test_a_written_review_is_saved_with_the_write_back(self):
+        """Friedl, 13 Nov: a review ends on screen and with a short report in the project."""
+        (self.design / 'project.json').write_text('{}')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.failure('arguments_unusable', 'write_back_kicad_board', **self.write_args(edited), report='  ')
+        written = self.success('write_back_kicad_board', **self.write_args(edited),
+                               report='# AE2 review\n\nC62 and C66 moved to Würth p.2.')
+        report = Path(written['report_path'])
+        self.assertEqual(report.parent, self.design / 'docs' / 'reviews')
+        self.assertTrue(report.name.endswith('-AE2-review.md'))
+        self.assertIn('C62 and C66', report.read_text())
+        # A second review with the same title never replaces the first.
+        self.assertEqual(self.provider_review('# AE2 review\nagain').name, report.stem + '-2.md')
+
+    def provider_review(self, text):
+        return KiCadProvider(self.settings, self.execute_cli)._save_review(str(self.project), text)
+
+    def test_drc_compares_the_board_with_its_schematic_when_there_is_one(self):
+        """2026-11-13: the option was never passed, so parity was always empty."""
+        self.check()
+        self.assertNotIn('--schematic-parity', [a for call in self.calls for a in call])
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        self.calls.clear()
+        self.check()
+        drc = [call for call in self.calls if call[1:3] == ['pcb', 'drc']]
+        self.assertIn('--schematic-parity', drc[0])
+
+    def test_sheets_the_root_never_places_are_named(self):
+        """P0020: the Altium import left three of four sheets outside the hierarchy."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (sheet (property "Sheetfile" "power.kicad_sch")))')
+        (self.project / 'power.kicad_sch').write_text('(kicad_sch)')
+        (self.project / 'rfid.kicad_sch').write_text('(kicad_sch)')
+        self.assertEqual(list(self.check()['erc']['sheets_not_checked']), ['rfid.kicad_sch'])
+
+    def test_the_check_runs_the_schematic_erc_errors_first(self):
+        """Friedl, 13 Nov: errors and warnings both, aiming for a clean result."""
+        self.assertFalse(self.check()['erc']['checked'])
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        erc = self.check()['erc']
+        self.assertEqual(erc['totals'], {'error': 1, 'warning': 1, 'ignore': 0, 'total': 2})
+        self.assertEqual([group['check_type'] for group in erc['groups']],
+                         ['pin_not_connected', 'endpoint_off_grid'])
+        self.assertEqual(erc['groups'][0]['findings'][0]['items'][0]['designator'], 'C62')
 
     def test_a_schematic_change_writes_back_and_a_stray_file_is_named(self):
         """2026-11-13: a part change on C62 and C66 edited two schematic sheets."""

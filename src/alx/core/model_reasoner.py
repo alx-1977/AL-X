@@ -1348,7 +1348,7 @@ def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
 RESPONSE_FIELD: Mapping[str, Any] = {
     "type": "string",
     "description": (
-        "What you say to Friedl, spoken aloud, at most 50 words (longer is refused): the outcome in a few words, and anything "
+        "What you say to Friedl, spoken aloud, at most 50 words unless detail_asked (longer is refused): the outcome in a few words, and anything "
         "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
         "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one. "
         "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance."
@@ -1481,6 +1481,10 @@ def _schema_parts() -> dict[str, Any]:
         {
             "type": {"type": "string", "const": "respond"},
             "response": RESPONSE_FIELD,
+            "detail_asked": {"type": "boolean", "description": (
+                "true only when Friedl's latest message asks for more than the outcome: to "
+                "explain, list, describe, compare or report. Then response may be longer than "
+                "50 words. false for everything else, including a plain question.")},
             "detail": DETAIL_FIELD,
             "raised_mail_observations": {
                 "type": "array",
@@ -2173,6 +2177,7 @@ class ModelReasoner:
                 raise ValueError("respond.response must be a nonblank string")
             return AgentDecision(
                 response=response,
+                detail_asked=action.get("detail_asked") is True,
                 raised_mail_observations=tuple(
                     MailReference(**item) for item in action.get("raised_mail_observations", ())
                 ),

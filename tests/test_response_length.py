@@ -60,6 +60,14 @@ class ResponseLengthTests(unittest.TestCase):
         # She is told why, so the next step can correct it.
         self.assertIn("response_over_%d_words" % RESPONSE_WORD_LIMIT, repr(reasoner.contexts[1]))
 
+    def test_when_she_judges_he_asked_for_detail_a_long_reply_is_spoken(self) -> None:
+        # Friedl, 13 Nov: no hard cap. Whether he asked for detail is her
+        # judgement, never a word list over his message (Law 1).
+        long = " ".join(["word"] * (RESPONSE_WORD_LIMIT + 30))
+        outcome = self.agent(Queued(AgentDecision(response=long, detail_asked=True))).process(
+            asked(), RETENTION, 4)
+        self.assertEqual(outcome.response, long)
+
     def test_a_reply_at_the_limit_is_spoken(self) -> None:
         exact = " ".join(["word"] * RESPONSE_WORD_LIMIT)
         outcome = self.agent(Queued(AgentDecision(response=exact))).process(asked(), RETENTION, 4)

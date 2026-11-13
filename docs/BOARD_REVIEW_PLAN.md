@@ -130,3 +130,29 @@ for. Nothing else is added.
 
 Library work through the tool (PR 2) and thermal simulation stay parked
 until this is done.
+
+## Built and tested (13 Nov)
+
+The four checks are built on the next-round branch. Results on the scanner
+board, using copies:
+
+- **C62 and C66 moved 0.6 mm toward the antenna:** caught. KiCad measured
+  1.71 against an expected 1.11. On your current board they match within
+  0.001 mm.
+- **The old AE1 step:** caught.
+- **AE2's footprint dimensions** (pad sizes and the 0.9 gap): all measured
+  and matching.
+- **The AE2 pin swap: not caught, and the reason matters for the imports.**
+  The Altium import left the schematic as four separate top-level sheets.
+  KiCad's checks read only the first one (the LEDs). The check now names
+  the sheets it can't reach. Fixing the hierarchy is part of each import.
+
+Three findings changed the plan:
+
+- **Unnumbered positions.** Würth prints no number for where the shunts
+  sit; the picture shows them halfway. Such positions become *derived*
+  checks: her expected value and its reason, measured by KiCad and marked
+  as derived on screen.
+- **The board-against-schematic check was never switched on.** It is now.
+- **Readings are kept in AL/X's storage, not the project folder.** Writing
+  to the project folder would need your approval every time.

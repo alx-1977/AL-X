@@ -399,6 +399,9 @@ class AgentDecision:
 
     call: CapabilityCall | None = None
     response: str | None = None
+    # Her judgement that Friedl's latest message asks for detail; the reply
+    # word limit then does not apply (2026-11-13).
+    detail_asked: bool = False
     finish_silently: bool = False
     goal_proposal: GoalProposal | None = None
     memory_proposals: tuple[MemoryProposal, ...] = ()

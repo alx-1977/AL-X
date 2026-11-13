@@ -28,7 +28,7 @@ svg text { font-family: "Courier New", monospace; }
 .tag { display: block; padding: 3px 0 3px 10px; border-left: 1px solid currentColor; margin-bottom: 16px; color: var(--info);
   font: 600 12px/1.3 "Courier New", monospace; letter-spacing: .12em; text-transform: uppercase; text-shadow: 0 0 3px #000, 0 0 8px #000; }
 .tag small { display: block; font-weight: 400; font-size: 11px; letter-spacing: .04em; color: #e8f6fa; text-transform: none; margin-top: 2px; white-space: pre-line; }
-.ok { color: var(--ok); } .bad { color: var(--bad); } .info { color: var(--info); }
+.ok { color: var(--ok); } .bad { color: var(--bad); } .info { color: var(--info); } .warn { color: #ffb547; }
 .verdict.ok { text-shadow: 0 0 12px rgba(61,255,168,.5); } .verdict.bad { text-shadow: 0 0 12px rgba(255,77,109,.5); }
 .note { margin-top: 18px; font: 12px/1.8 "Courier New", monospace; color: #c4e2ea; }
 
@@ -50,6 +50,6 @@ svg text { font-family: "Courier New", monospace; }
 .checked { margin-top: 4px; font: 12px/1.7 "Courier New", monospace; }
 .checked-head { letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
 .checked-head.ok, .checked-row.ok { color: var(--ok); } .checked-head.bad, .checked-row.bad { color: var(--bad); }
-.checked-head.warn { color: var(--warn, #ffb547); }
+.checked-head.warn, .checked-row.warn { color: #ffb547; }
 .checked-row { display: flex; justify-content: space-between; gap: 12px; }
 .checked small { display: block; color: #8fc4d4; font-size: 10px; margin-top: 2px; }
