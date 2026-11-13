@@ -29,8 +29,10 @@ class LookRuntime:
 def build_look_runtime(call_id_source, environment: Mapping[str, str], storage_root: Path,
                        design_roots: tuple[Path, ...], runner=None) -> LookRuntime:
     """`look` over his design folders and ALX_Storage; images kept in her storage."""
+    # The same storage folder the KiCad tool saves datasheets into (review of #243).
+    storage = Path(environment.get("ALX_STORAGE_ROOT", ALX_STORAGE))
     roots = tuple(dict.fromkeys(
-        root.expanduser().resolve() for root in (*design_roots, ALX_STORAGE)))
+        root.expanduser().resolve() for root in (*design_roots, storage)))
     store = storage_root / "looks"
     renderer = Path(environment.get("ALX_PDFTOPPM", "/opt/homebrew/bin/pdftoppm")).expanduser()
     converter = Path(environment.get("ALX_FFMPEG", "/opt/homebrew/bin/ffmpeg")).expanduser()
