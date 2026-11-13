@@ -1489,6 +1489,12 @@ def _schema_parts() -> dict[str, Any]:
         {
             "type": {"type": "string", "const": "respond"},
             "response": RESPONSE_FIELD,
+            "asks_go_for": {"type": "array", "items": _strict_object({
+                "capability_id": string, "arguments_json": string}), "description": (
+                "When this reply asks Friedl for his go, the exact calls it is for (capability_id "
+                "and the call's arguments as JSON), each named in your words. His next message "
+                "may then approve each of them once, even while you are working in the "
+                "background. Empty when you ask for nothing.")},
             "detail_asked": {"type": "boolean", "description": (
                 "true only when Friedl's latest message asks for more than the outcome: to "
                 "explain, list, describe, compare or report. Then response may be longer than "
@@ -2189,9 +2195,16 @@ class ModelReasoner:
             response = action["response"]
             if not isinstance(response, str) or not response.strip():
                 raise ValueError("respond.response must be a nonblank string")
+            requests = []
+            for item in action.get("asks_go_for") or ():
+                arguments = json.loads(item["arguments_json"])
+                if not isinstance(arguments, dict):
+                    raise ValueError("asks_go_for arguments_json must be a JSON object")
+                requests.append(ApprovalScope(item["capability_id"], arguments))
             return AgentDecision(
                 response=response,
                 detail_asked=action.get("detail_asked") is True,
+                go_requests=tuple(requests[:6]),
                 raised_mail_observations=tuple(
                     MailReference(**item) for item in action.get("raised_mail_observations", ())
                 ),

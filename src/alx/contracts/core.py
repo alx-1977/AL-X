@@ -13,6 +13,7 @@ from alx.contracts.continuity import CarriedThought, FutureCognitionRequest
 from alx.contracts.records import (
     PlanStopNote,
     ApprovalProposal,
+    ApprovalScope,
     BackgroundEvent,
     CapabilityAttempt,
     CapabilityAttemptDisposition,
@@ -412,6 +413,10 @@ class AgentDecision:
     goal_id: str | None = None
     plan_update: PlanUpdate | None = None
     raised_mail_observations: tuple[MailReference, ...] = ()
+    # The exact calls a reply asks Friedl's go for. His next message may then
+    # approve each of them once, even in a background round (2026-11-13: one
+    # write-back took three goes).
+    go_requests: tuple[ApprovalScope, ...] = ()
 
     def __post_init__(self) -> None:
         refs = tuple(self.raised_mail_observations)
@@ -419,6 +424,12 @@ class AgentDecision:
             raise TypeError("raised mail observations must be MailReference values")
         if refs and self.response is None:
             raise ValueError("only a response may raise mail observations")
+        requests = tuple(self.go_requests)
+        if any(not isinstance(item, ApprovalScope) for item in requests):
+            raise TypeError("go requests must be ApprovalScope values")
+        if requests and self.response is None:
+            raise ValueError("only a response may ask for a go")
+        object.__setattr__(self, "go_requests", requests)
         object.__setattr__(self, "raised_mail_observations", tuple(dict.fromkeys(refs)))
         if not isinstance(self.finish_silently, bool):
             raise TypeError("finish_silently must be a bool")

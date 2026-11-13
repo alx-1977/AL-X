@@ -676,6 +676,8 @@ class CoreAgent:
         # It is deliberately local: durable state outlives the instruction, and
         # a check against it would refuse the next turn's legitimate request.
         approved_dispatches: set[str] = set()
+        # Approvals granted this turn for writes she listed when asking his go.
+        requested_grants: set[str] = set()
         transient_attempts: tuple[CapabilityAttempt, ...] = plan_evidence
         memory_query_ids: set[str] = set()
         # Loading a goal's full state is one useful inspection this turn.
@@ -1155,6 +1157,15 @@ class CoreAgent:
                     continue
                 assert candidate is not None
                 proposed = decision.approval_proposal
+                used = self._requested_scope(candidate, conversation, decision.call, proposed)
+                if used is not None:
+                    # Each listed write once: the request is spent here, and
+                    # this approval may stand beside the others he gave.
+                    requested_grants.add(proposed.approval_id)
+                    candidate = replace(candidate, approvals=tuple(
+                        replace(item, lifecycle=ApprovalLifecycle.CONSUMED)
+                        if item.approval_id == used.approval_id else item
+                        for item in candidate.approvals))
                 candidate = replace(
                     candidate,
                     approvals=(
@@ -1341,6 +1352,7 @@ class CoreAgent:
                         snapshot,
                         reason="core_selected_silence",
                     )
+                snapshot = self._record_go_requests(snapshot, conversation, decision, decision_provenance)
                 return CoreOutcome(
                     CoreState.RESPONDED,
                     snapshot,
@@ -1447,6 +1459,7 @@ class CoreAgent:
             if (
                 self._call_turn_bound(decision.call)
                 and decision.call.capability_id in approved_dispatches
+                and decision.call.approval_id not in requested_grants
             ):
                 # The same invariant as the approval check above, enforced on
                 # the other route to a dispatch. A call may carry an approval
@@ -2167,6 +2180,55 @@ class CoreAgent:
             " ".join(item.split()) not in spoken for item in authored
         )
 
+    @staticmethod
+    def _requested_scope(state, conversation, call, proposal) -> Approval | None:
+        """The requested write this approval may use, if any (2026-11-13).
+
+        When she asks Friedl for his go she lists the exact calls; each is kept
+        as a requested approval naming the person turn that came before her
+        ask. Only the first person turn after that one, cited by the proposal
+        and still his latest, approves it. A request left behind by a later
+        instruction of his approves nothing.
+        """
+        person_turns = [item.turn_id for item in conversation.turns if item.person_id is not None]
+        if not person_turns or proposal.source_reference != f"turn:{person_turns[-1]}":
+            return None
+        for item in state.approvals:
+            if item.lifecycle is not ApprovalLifecycle.REQUESTED or not item.scope.matches(call):
+                continue
+            parts = item.approval_id.split("|")
+            if len(parts) != 3 or parts[0] != "request":
+                continue
+            before = parts[1]
+            if before == "-":
+                first_after = person_turns[0]
+            elif before in person_turns and person_turns.index(before) + 1 < len(person_turns):
+                first_after = person_turns[person_turns.index(before) + 1]
+            else:
+                continue
+            if first_after == person_turns[-1]:
+                return item
+        return None
+
+    def _record_go_requests(self, snapshot, conversation, decision, provenance):
+        """Keep the exact writes a reply asks his go for; any earlier request lapses."""
+        if snapshot is None or not decision.go_requests:
+            return snapshot
+        person_turns = [item.turn_id for item in conversation.turns if item.person_id is not None]
+        before = person_turns[-1] if person_turns else "-"
+        wanted = [scope for scope in decision.go_requests
+                  if self._call_turn_bound(CapabilityCall("request", scope.capability_id, scope.arguments))]
+        if not wanted:
+            return snapshot
+        kept = tuple(replace(item, lifecycle=ApprovalLifecycle.WITHDRAWN)
+                     if item.lifecycle is ApprovalLifecycle.REQUESTED else item
+                     for item in snapshot.state.approvals)
+        requested = tuple(Approval(f"request|{before}|{uuid4().hex}", scope, ApprovalLifecycle.REQUESTED)
+                          for scope in wanted)
+        LOGGER.info("Go requested for %d exact calls", len(requested))
+        return self._store.replace(replace(snapshot.state, approvals=(*kept, *requested)),
+                                   snapshot.retention_until, snapshot.revision, provenance)
+
     def _call_turn_bound(self, call: CapabilityCall) -> bool:
         """Whether this exact call is authorised by Friedl's latest instruction."""
         return (call.capability_id in self._turn_bound_capabilities
@@ -2191,14 +2253,22 @@ class CoreAgent:
             return "approval_id_reused"
         if not conversation.turns:
             return "approval_source_missing"
-        source = conversation.turns[-1]
+        if self._requested_scope(state, conversation, call, proposal) is not None:
+            # A write she listed when she asked for his go: his next message
+            # approves it once, even if her own words or a background round
+            # came after it, and beside the other writes she listed.
+            requested = True
+        else:
+            requested = False
+            source = conversation.turns[-1]
+            if (
+                source.person_id is None
+                or proposal.source_reference != f"turn:{source.turn_id}"
+            ):
+                return "approval_source_not_latest_person_turn"
         if (
-            source.person_id is None
-            or proposal.source_reference != f"turn:{source.turn_id}"
-        ):
-            return "approval_source_not_latest_person_turn"
-        if (
-            self._call_turn_bound(call)
+            not requested
+            and self._call_turn_bound(call)
             and call.capability_id in already_dispatched
         ):
             # Already done once on this instruction. A second needs a second
