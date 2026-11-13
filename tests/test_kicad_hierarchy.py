@@ -3,14 +3,97 @@
 from __future__ import annotations
 
 import json
+import itertools
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from alx.providers.kicad_hierarchy import make_hierarchical, netlist_nets  # noqa: E402
+from alx.providers.kicad_hierarchy import connect_with_sheet_pins, _top_sheet  # noqa: E402
+from alx.providers.kicad_top_layout import crossing_count, layout, _route, _segments  # noqa: E402
+from alx.providers import kicad_top_layout as top_layout  # noqa: E402
+
+
+# Four blocks, five links, two buses: a cycle with a diagonal, like RegScanner.
+LINKS = {"HALO": [0, 1], "ENABLE": [1, 2], "IRQ": [2, 3],
+         "DATA[0..1]": [3, 0], "RFID{TX RX}": [0, 2]}
+
+
+def scanner_fixture(project: Path):
+    """Real KiCad symbols and bus entries, with every bus member populated."""
+    sheets = [{"uuid": str(uuid.uuid4()), "name": name, "filename": name + ".kicad_sch"}
+              for name in ("MCU", "Halo", "RFID", "Power")]
+    library = '''(lib_symbols
+        (symbol "Test:Terminal"
+            (pin_names (offset 0)) (in_bom yes) (on_board yes)
+            (property "Reference" "J" (at 0 0 0) (effects (font (size 1.27 1.27))))
+            (property "Value" "Terminal" (at 0 0 0) (effects (font (size 1.27 1.27))))
+            (symbol "Terminal_1_1"
+                (pin passive line (at 0 0 0) (length 2.54)
+                    (name "P" (effects (font (size 1.27 1.27))))
+                    (number "1" (effects (font (size 1.27 1.27)))))
+            )
+        )
+    )'''
+    for index, info in enumerate(sheets):
+        parts = [f'(kicad_sch (version 20260306) (generator "eeschema")\n'
+                 f'(uuid "{info["uuid"]}") (paper "A3")\n', library]
+        for slot, (label, members) in enumerate(LINKS.items()):
+            if index not in members:
+                continue
+            y = 25.4 + slot * 30.48
+            bus = "[" in label or "{" in label
+            parts.append(f'\n\t(global_label "{label}"\n\t\t(shape passive)\n'
+                         f'\t\t(at 25.4 {y:.2f} 0)\n'
+                         f'\t\t(effects (font (size 1.27 1.27)))\n'
+                         f'\t\t(uuid "{uuid.uuid4()}")\n\t)\n')
+            names = ["DATA0", "DATA1"] if "[" in label else ["RFID.TX", "RFID.RX"] if bus else [label]
+            if bus:
+                parts.append(f'(bus (pts (xy 25.4 {y:.2f}) (xy 25.4 {y + 10.16:.2f}))'
+                             f' (stroke (width 0) (type default)) (uuid "{uuid.uuid4()}"))')
+            for member, net in enumerate(names):
+                sy = y + (member * 5.08 + 5.08 if bus else 0)
+                if bus:
+                    parts.append(f'(bus_entry (at 25.4 {sy - 2.54:.2f}) (size 2.54 2.54)'
+                                 f' (stroke (width 0) (type default)) (uuid "{uuid.uuid4()}"))'
+                                 f'\n(label "{net}" (at 40.64 {sy:.2f} 0)'
+                                 f' (effects (font (size 1.27 1.27))) (uuid "{uuid.uuid4()}"))')
+                parts.append(f'(wire (pts (xy {27.94 if bus else 25.4} {sy:.2f}) (xy 50.8 {sy:.2f}))'
+                             f' (stroke (width 0) (type default)) (uuid "{uuid.uuid4()}"))')
+                reference = f'J{index + 1}{slot}{member}'
+                parts.append(f'''\n\t(symbol
+\t\t(lib_id "Test:Terminal")
+\t\t(at 50.8 {sy:.2f} 0)
+\t\t(unit 1)
+\t\t(in_bom yes) (on_board yes) (dnp no)
+\t\t(uuid "{uuid.uuid4()}")
+\t\t(property "Reference" "{reference}" (at 50.8 {sy:.2f} 0) (effects (font (size 1.27 1.27))))
+\t\t(property "Value" "Terminal" (at 50.8 {sy:.2f} 0) (effects (font (size 1.27 1.27))))
+\t\t(pin "1" (uuid "{uuid.uuid4()}"))
+\t\t(instances (project "scanner" (path "/{info['uuid']}" (reference "{reference}") (unit 1))))
+\t)\n''')
+        (project / info["filename"]).write_text("\n".join(parts) + "\n)\n")
+    (project / "scanner.kicad_pro").write_text(json.dumps({"schematic": {"top_level_sheets": sheets}}))
+    return sheets
+
+
+def emitted_geometry(text):
+    """Inspect the serialized geometry, independently of the layout objects."""
+    segments = []
+    for kind, x1, y1, x2, y2 in re.findall(
+            r'\t\((wire|bus)\n\s*\(pts\s*\(xy ([\d.]+) ([\d.]+)\) \(xy ([\d.]+) ([\d.]+)\)', text):
+        segments.append((kind, tuple(map(float, (x1, y1))), tuple(map(float, (x2, y2)))))
+    rectangles = [tuple(map(float, values)) for values in re.findall(
+        r'\t\(sheet\n\s*\(at ([\d.]+) ([\d.]+)\)\n\s*\(size ([\d.]+) ([\d.]+)\)', text)]
+    return rectangles, segments
 
 
 def sheet(sheet_uuid: str, symbol_uuid: str, reference: str) -> str:
@@ -56,6 +139,185 @@ def footprint(reference: str, symbol_uuid: str, sheet_name: str, sheet_file: str
 
 
 class MakeHierarchicalTests(unittest.TestCase):
+    def test_connected_page_contains_all_blocks_and_wires_for_every_paper(self):
+        for paper, minimum in ((None, (436.88, 294.64)), ('(paper "A3")', (420, 297)),
+                               ('(paper "A4" portrait)', (210, 297)),
+                               ('(paper "User" 900 800)', (900, 800))):
+            with self.subTest(paper=paper), tempfile.TemporaryDirectory() as folder:
+                project = Path(folder)
+                sheets = [{"uuid": f"s{i}", "name": f"Sheet{i}", "filename": f"s{i}.kicad_sch"}
+                          for i in range(17)]
+                labels = ''.join(f'\n\t(global_label "N{j}"\n\t\t(shape passive)\n'
+                                 f'\t\t(at 10 10 0)\n\t\t(uuid "n{j}")\n\t)\n' for j in range(11))
+                for i, info in enumerate(sheets):
+                    (project / info['filename']).write_text('(kicad_sch\n' + (labels if i < 2 else '') + ')\n')
+                (project / 'scanner.kicad_pro').write_text('{}')
+                top = _top_sheet('root', 'scanner', sheets, '')
+                if paper:
+                    top = re.sub(r'\(paper [^)]*\)', paper, top)
+                (project / 'scanner.kicad_sch').write_text(top)
+                result = connect_with_sheet_pins(project)
+                self.assertEqual(result['top_sheet_crossings'], 0)
+                top = (project / 'scanner.kicad_sch').read_text()
+                page = re.search(r'\(paper "User" ([\d.]+) ([\d.]+)\)', top)
+                self.assertIsNotNone(page)
+                width, height = map(float, page.groups())
+                self.assertGreaterEqual(width, minimum[0])
+                self.assertGreaterEqual(height, minimum[1])
+                rectangles, segments = emitted_geometry(top)
+                self.assertEqual(len(rectangles), 17)
+                self.assertTrue(segments)
+                points = [(x, y) for x, y, _, _ in rectangles]
+                points += [(x + w, y + h) for x, y, w, h in rectangles]
+                points += [p for _, a, b in segments for p in (a, b)]
+                for x, y in points:
+                    self.assertTrue(0 <= x <= width and 0 <= y <= height, (x, y, width, height))
+
+    def test_routing_budget_exhausts_inside_search(self):
+        with patch.object(top_layout, 'ROUTING_WORK_LIMIT', 10, create=True), \
+                patch.object(top_layout.heapq, 'heappop', wraps=top_layout.heapq.heappop) as pop:
+            budget = top_layout.RoutingBudget()
+            with self.assertRaisesRegex(top_layout.RoutingBudgetExceeded, 'top-sheet routing work budget exhausted'):
+                _route((4, 8), {(50, 50)}, set(), {}, (100, 100), 1, budget)
+        self.assertGreater(pop.call_count, 0)
+
+    def test_routing_budget_charges_each_tree_distance_point(self):
+        class Tree:
+            visited = 0
+
+            def __iter__(self):
+                for x in range(1000):
+                    self.visited += 1
+                    yield (x, 50)
+
+        tree = Tree()
+        budget = top_layout.RoutingBudget(3)
+        with self.assertRaisesRegex(top_layout.RoutingBudgetExceeded, 'top-sheet routing work budget exhausted'):
+            _route((4, 8), tree, set(), {}, (100, 100), 1, budget)
+        self.assertLessEqual(tree.visited, 4)
+
+    def test_routing_budget_is_shared_across_candidates(self):
+        original = top_layout._route
+        budgets = []
+
+        def route(*args):
+            budgets.append(args[-1])
+            return original(*args)
+
+        # Retained crossings force the search beyond its first candidate.
+        with patch.object(top_layout, 'ROUTING_WORK_LIMIT', 5000, create=True), \
+                patch.object(top_layout, 'crossing_count', return_value=1) as score, \
+                patch.object(top_layout, '_route', side_effect=route):
+            with self.assertRaisesRegex(ValueError, 'top-sheet routing work budget exhausted'):
+                layout(2, {'NET': [0, 1]})
+        self.assertGreater(len(budgets), 1)
+        self.assertGreater(score.call_count, 0)  # A partial best must not be returned on exhaustion.
+        self.assertTrue(all(b is budgets[0] for b in budgets))
+
+    def test_planar_scanner_layout_geometry_and_determinism(self):
+        outputs = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as folder:
+                project = Path(folder)
+                scanner_fixture(project)
+                make_hierarchical(project)
+                result = connect_with_sheet_pins(project)
+                self.assertEqual(result["top_sheet_crossings"], 0)
+                top = (project / "scanner.kicad_sch").read_text()
+                rectangles, segments = emitted_geometry(top)
+                self.assertEqual(len(rectangles), 4)
+                self.assertEqual({kind for kind, _, _ in segments}, {"wire", "bus"})
+                self.assertGreater(max(x for x, _, _, _ in rectangles) - min(x for x, _, _, _ in rectangles), 100)
+                self.assertGreater(max(y for _, y, _, _ in rectangles) - min(y for _, y, _, _ in rectangles), 100)
+                for _, a, b in segments:
+                    self.assertTrue(a[0] == b[0] or a[1] == b[1])
+                    self.assertNotEqual(a, b)
+                    for coord in (*a, *b):
+                        self.assertAlmostEqual(coord / 2.54, round(coord / 2.54))
+                    for x, y, w, h in rectangles:
+                        if a[0] == b[0]:
+                            self.assertFalse(x < a[0] < x + w and max(min(a[1], b[1]), y) < min(max(a[1], b[1]), y + h))
+                        else:
+                            self.assertFalse(y < a[1] < y + h and max(min(a[0], b[0]), x) < min(max(a[0], b[0]), x + w))
+                # Count proper wire/bus crossings directly from emitted segments.
+                hits = []
+                for (_, a, b), (_, c, d) in itertools.combinations(segments, 2):
+                    if a[0] == b[0] and c[1] == d[1]:
+                        a, b, c, d = c, d, a, b
+                    if a[1] == b[1] and c[0] == d[0]:
+                        if min(a[0], b[0]) < c[0] < max(a[0], b[0]) and min(c[1], d[1]) < a[1] < max(c[1], d[1]):
+                            hits.append((c[0], a[1]))
+                self.assertEqual(len(hits), result["top_sheet_crossings"])
+                # Compare geometry including the chosen pin sides/order, ignoring IDs.
+                outputs.append(re.sub(r'\(uuid "[^"]*"\)|\(path "/[^\"]*"', '', top))
+        self.assertEqual(*outputs)
+
+    def test_crossing_semantics_and_multi_terminal_tree(self):
+        horizontal = [((0, 2), (4, 2))]
+        self.assertEqual(crossing_count({"wire": horizontal, "bus": [((2, 0), (2, 4))]}), 1)
+        self.assertEqual(crossing_count({"a": horizontal, "end": [((2, 2), (2, 4))]}), 0)
+        self.assertEqual(crossing_count({"a": horizontal, "bend": [((2, 0), (2, 2)), ((2, 2), (3, 2))]}), 0)
+        rects, pins, routes, joins, count, _ = layout(4, {"COMMON": [0, 1, 2, 3], "PAIR": [0, 1]})
+        self.assertEqual(count, crossing_count(routes))
+        # Every pin belongs to the same connected tree; every branch is emitted.
+        for label, segments in routes.items():
+            points = set()
+            for a, b in segments:
+                dx, dy = (b[0] > a[0]) - (b[0] < a[0]), (b[1] > a[1]) - (b[1] < a[1])
+                p = a
+                while True:
+                    points.add(p)
+                    if p == b:
+                        break
+                    p = p[0] + dx, p[1] + dy
+            for (i, net), (p, _, _) in pins.items():
+                if net == label:
+                    self.assertIn(p, points)
+            self.assertTrue(all(p in points for p in joins[label]))
+
+    def test_parallel_links_have_matching_pin_orders(self):
+        uses = {name: [0, 1] for name in ("A", "B", "C[0..1]", "D{TX RX}")}
+        _, pins, _, _, crossings, _ = layout(2, uses)
+        self.assertEqual(crossings, 0)
+        for name in uses:
+            a, _, aa = pins[0, name]
+            b, _, ba = pins[1, name]
+            self.assertEqual((aa - ba) % 360, 180)
+            self.assertEqual(a[1] if aa in (0, 180) else a[0], b[1] if ba in (0, 180) else b[0])
+
+    def test_router_crosses_only_straight_interiors_when_forced(self):
+        occupied = {(8, y): 2 if 8 < y < 20 else 3 for y in range(8, 21)}
+        path = _route((4, 14), {(12, 14)}, set(), occupied, (12, 20), 1, top_layout.RoutingBudget())
+        self.assertIsNotNone(path)
+        segments, _ = _segments({tuple(sorted(pair)) for pair in zip(path, path[1:])})
+        self.assertEqual(crossing_count({"wire": segments, "bus": [((8, 8), (8, 20))]}), 1)
+        at = path.index((8, 14))
+        self.assertEqual((path[at - 1][1], path[at + 1][1]), (14, 14))
+
+    def test_real_kicad_netlist_identity_with_two_buses(self):
+        cli = shutil.which("kicad-cli")
+        mac_cli = Path('/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli')
+        cli = cli or (str(mac_cli) if mac_cli.is_file() else None)
+        if not cli:
+            self.skipTest("kicad-cli required for canonical netlist comparison")
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            scanner_fixture(project)
+            make_hierarchical(project)
+
+            def export(name):
+                output = project / (name + ".net")
+                result = subprocess.run([cli, "sch", "export", "netlist", "--output", str(output),
+                                         str(project / "scanner.kicad_sch")], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return netlist_nets(output.read_text())
+
+            before = export("before")
+            self.assertEqual(len(before), 7)  # three wires, two members of each bus
+            self.assertTrue(all(len(nodes) == 2 for nodes in before))
+            self.assertEqual(connect_with_sheet_pins(project)["top_sheet_crossings"], 0)
+            self.assertEqual(export("after"), before)
+
     def test_one_top_sheet_places_every_sheet_and_every_link_gains_its_sheet(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             project = Path(folder)
