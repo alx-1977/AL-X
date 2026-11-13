@@ -47,6 +47,7 @@ def base_output(**changes):
         action = {
             "type": "respond",
             "response": changes.pop("response", "A normal response."),
+            "asks_go_for": changes.pop("asks_go_for", []),
             "detail_asked": changes.pop("detail_asked", False),
             "detail": changes.pop("detail", ""),
             "raised_mail_observations": changes.pop("raised_mail_observations", []),
@@ -183,6 +184,12 @@ class ModelReasonerTests(unittest.TestCase):
                                          "laws", "identity").decide(self.context())
                 self.assertEqual(decision.plan_update.operation.value, operation)
                 self.assertIsNone(decision.plan_update.plan)
+
+    def test_a_missing_field_is_named_in_the_rejection(self) -> None:
+        """13 Nov: a bare "'evidence_refs'" was rejected 18 times; she could not tell why."""
+        update = goal_update(new_progress=[{"id": "p1", "summary": "Connectors checked"}])
+        with self.assertRaisesRegex(DecisionValidationError, "missing required field 'evidence_refs'"):
+            ModelReasoner(FakeModel(tool("update_goal", **update)), "laws", "identity").decide(self.context())
 
     def test_a_plan_travels_exactly_with_an_install(self) -> None:
         for arguments in ({"operation": "install", "plan": None},

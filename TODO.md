@@ -132,10 +132,44 @@ Not yet usable.
   with drawn sheet connections, library work through the tool and
   land-pattern checks. The small items left then were done in the top-sheet
   change (review rule, long captions, footprint names). What remains:
-  - For AL/X, not code: the one-time land-pattern audit of the 86
-    footprints outside FireFli_Resistors and FireFli_Capacitors; drawing
-    the sheet connections on P0020's top sheet; D4 (5V/GND) and J7 pad 8,
-    which the board-against-schematic check shows, for Friedl to decide.
+  - Datasheet record (fetch_datasheet): write it atomically and treat an
+    unreadable record as a cache miss (Greptile, #243; deferred).
+- [ ] **AL/X behaviour seen on 13 Nov, for the next batch** (Friedl: group
+  things together, then one review).
+  - One "go" for the writes she listed when asking (D-080, done on this
+    branch).
+  - She copied fetched datasheets to his Desktop out of habit; they are
+    readable in ALX_Storage now.
+  - Follow-up rounds of long work: she booked the next round ten minutes
+    out with no reason. Continue at once unless waiting on something.
+  - Times in her replies are his local time (done on this branch, with the
+    next batch).
+  - Library saves: KiCad's FootprintSave renews every internal id, so a
+    one-hole change shows ~100 changed lines in the library history. A
+    quieter save (only the changed lines) would keep the history readable.
+  - A missing field in her decision is named ("missing required field
+    'evidence_refs'"); the bare "'evidence_refs'" was refused 18 times on 13
+    Nov (done on this branch).
+  - Trust (Friedl, 13 Nov: "how will I be able to trust her with things I do
+    not know the answer to?"): every finding carries its source (datasheet
+    page, measured value, tool result), enforced where the system can; when
+    he challenges something she re-checks the evidence and holds or corrects
+    with it, never folds; an independent second check of her conclusion on
+    decisions that matter. On 13 Nov she typed U.FL readings instead of using
+    check_layout, buried a missing keep-out under an "ok", and said the U.FL
+    part did not exist when asked about it.
+  - The independent check cannot see drawings: the worker gets only a
+    datasheet's text, never its pages as images (`look` is not in
+    WORKER_CAPABILITIES and the worker loop passes no tool_images). On 13
+    Nov her second check of five IC land patterns failed for that reason.
+    Next batch: give the worker `look` and pass its images to the model.
+- [ ] **AL/X's KiCad jobs (not code):** the land-pattern audit of the 86
+  footprints outside FireFli_Resistors and FireFli_Capacitors (Connectors
+  done 13 Nov; Friedl: match the datasheet without asking, one write-back
+  per library); the U.FL (636101111001) copper keep-out; the RoomReader V2
+  4-channel to 2-channel RF switch change; importing the remaining Altium
+  projects. For Friedl: D4 (5V/GND) on P0020. Done 13 Nov: P0020 top sheet
+  drawn, J7 pad 8 (the MSoM hole is now pad MP on GND).
 - [ ] Thermal simulation of a PCB (layered board heat model from the KiCad
   copper, part powers in, part temperatures and a heat map out). Needs a
   decision and a first test board with measured temperatures.

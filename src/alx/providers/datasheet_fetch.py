@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -138,8 +139,11 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
     target = folder / ("%s-%s.pdf" % (_SAFE.sub("_", part).strip("._")[:60] or "part", key))
     record = target.with_suffix(".json")
     if target.is_file() and record.is_file() and target.read_bytes()[:5] == b"%PDF-":
-        saved = json.loads(record.read_text())
-        if {k: saved.get(k) for k in identity} == identity:
+        try:
+            saved = json.loads(record.read_text())
+        except (OSError, ValueError):
+            saved = {}  # an unreadable record is a miss, never a failure (review of #243)
+        if isinstance(saved, dict) and {k: saved.get(k) for k in identity} == identity:
             return {"path": str(target), "source": "already saved", "url": saved.get("url", ""), "tried": []}
     tried: list[dict[str, str]] = []
     # DigiKey first: free and unlimited. Nexar's allowance is small and its
@@ -163,10 +167,13 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
                 tried.append({"source": source, "url": link, "result": "not a PDF"})
                 continue
             folder.mkdir(parents=True, exist_ok=True)
-            partial = target.with_suffix(".part")
+            partial = target.with_suffix(".%s.part" % uuid.uuid4().hex)
             partial.write_bytes(body)
             partial.replace(target)
-            record.write_text(json.dumps(dict(identity, source=source, url=link)))
+            # Written whole or not at all: a stop mid-write leaves no half record.
+            pending = record.with_suffix(".%s.part" % uuid.uuid4().hex)
+            pending.write_text(json.dumps(dict(identity, source=source, url=link)))
+            pending.replace(record)
             return {"path": str(target), "source": source, "url": link, "tried": tried}
     raise DatasheetError("not_found", "no source gave a PDF for %s: %s" % (
         part, "; ".join("%s %s" % (item["source"], item["result"]) for item in tried)[:400]))

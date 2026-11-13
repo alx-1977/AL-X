@@ -157,7 +157,8 @@ class TurnBoundByActionTests(unittest.TestCase):
         # Every turn-bound decision goes through the per-call test; the only
         # direct membership test left is inside it.
         self.assertEqual(loop.count(".capability_id in self._turn_bound_capabilities"), 1)
-        self.assertEqual(loop.count("self._call_turn_bound("), 5)
+        # Five decision sites, and the go request, which keeps only calls that need one.
+        self.assertEqual(loop.count("self._call_turn_bound("), 6)
 
 
 class KiCadDescriptionAndPathTests(unittest.TestCase):

@@ -1352,6 +1352,13 @@ RESPONSE_FIELD: Mapping[str, Any] = {
         "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
         "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one. "
         "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance. "
+        "Every time you give him is his local time in South Africa (UTC+2, no daylight saving). "
+        "Convert each timestamp from its stated offset (17:30 UTC is 19:30 for him); times "
+        "already at +02:00 need no change. "
+        "When he questions something you said, check the evidence again (the datasheet, the tool "
+        "result) before you answer, then hold your answer with that evidence or correct it with "
+        "that evidence; never agree only because he asked, and never say something does not "
+        "exist before searching by part number and datasheet. "
         "Never ask him to do the work himself (tidy a sheet in KiCad, fix a file, run a tool): "
         "if your tools cannot do it, say what is missing so it can be built."
     ),
@@ -1483,6 +1490,12 @@ def _schema_parts() -> dict[str, Any]:
         {
             "type": {"type": "string", "const": "respond"},
             "response": RESPONSE_FIELD,
+            "asks_go_for": {"type": "array", "items": _strict_object({
+                "capability_id": string, "arguments_json": string}), "description": (
+                "When this reply asks Friedl for his go, the exact calls it is for (capability_id "
+                "and the call's arguments as JSON), each named in your words. His next message "
+                "may then approve each of them once, even while you are working in the "
+                "background. Empty when you ask for nothing.")},
             "detail_asked": {"type": "boolean", "description": (
                 "true only when Friedl's latest message asks for more than the outcome: to "
                 "explain, list, describe, compare or report. Then response may be longer than "
@@ -1932,7 +1945,13 @@ class ModelReasoner:
     def decide(self, context: ReasoningContext) -> AgentDecision:
         try:
             return self._decide(context)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        except KeyError as error:
+            # A bare "'evidence_refs'" told her nothing, and she sent the same
+            # decision 18 times on 13 Nov. Name what is missing.
+            raise DecisionValidationError(
+                "missing required field %r (an empty list if there is nothing)" % (error.args[0] if error.args else "")
+            ) from error
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
             reason = str(error).strip() or type(error).__name__
             raise DecisionValidationError(reason) from error
 
@@ -2177,9 +2196,21 @@ class ModelReasoner:
             response = action["response"]
             if not isinstance(response, str) or not response.strip():
                 raise ValueError("respond.response must be a nonblank string")
+            requests = []
+            listed = list(action.get("asks_go_for") or ())
+            if len(listed) > 6:
+                raise ValueError("asks_go_for lists at most 6 calls")
+            for item in listed:
+                arguments = json.loads(item["arguments_json"])
+                if not isinstance(arguments, dict):
+                    raise ValueError("asks_go_for arguments_json must be a JSON object")
+                scope = ApprovalScope(item["capability_id"], arguments)
+                if scope not in requests:  # the same call listed twice is one call
+                    requests.append(scope)
             return AgentDecision(
                 response=response,
                 detail_asked=action.get("detail_asked") is True,
+                go_requests=tuple(requests),
                 raised_mail_observations=tuple(
                     MailReference(**item) for item in action.get("raised_mail_observations", ())
                 ),

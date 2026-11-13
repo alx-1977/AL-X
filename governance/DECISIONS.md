@@ -3030,3 +3030,18 @@ This grants no authority a single goal update lacks: completion still requires s
 - **`kicad` action `fetch_datasheet` (free).** By manufacturer part number, optionally narrowed by manufacturer (compared without accents: Würth = Wurth Elektronik). Asks DigiKey's product service first (free, unlimited) and Nexar (Octopart keeps copies of most datasheets; the main key first, then the evaluation key, since the main plan allows no part lookups) only when DigiKey's link gives no PDF. Friedl, 2026-11-13: upgrading Nexar is not an option (USD 500–700 a month), so its allowance is spent only where nothing else works. Each link is fetched through the one guarded web path (`web_fetch`, D-025), which gains `fetch_pdf`: the same validation of every address and redirect, a total deadline, a 60 MB bound, no compression, and only a response that is a PDF; the request says what it is and is never disguised as a browser. The Nexar and DigiKey API calls themselves go only to their fixed addresses. The file goes to `ALX_Storage/Datasheets`, her own storage, so no approval is needed; a part already there is not fetched again.
 - **Datasheets in her storage are readable.** `check_layout` and the viewer's datasheet pages read documents in ALX_Storage as well as his design folders, as `look` already did; she no longer copies them to his Desktop.
 - **Boundary.** Part numbers go to Nexar and DigiKey as lookups, like a web search; nothing of his is sent. No new Law exception.
+
+## D-080 — One go for the writes she listed
+
+- **Date:** 2026-11-13
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-13** ("yes", to: "when she asks for your go she lists the exact writes it covers, and your next go covers exactly those"). That evening one write-back took three goes. The first was spent on the library write-back shown beside it (one approved call per instruction). The second arrived while she was in a background round, where it was not the latest turn of the conversation.
+- **Decision.** A reply that asks for his go may list the exact calls it is for (`asks_go_for`: capability and arguments). Each call that needs approval is kept on the goal as a requested approval, naming the person turn that came before her ask; any earlier request lapses.
+- **Approval.** His next message, the first person turn after that one, approves each listed call once. This holds beside the other listed calls, and in a background round where her own words follow his message, as long as it is still his latest message. A request is spent when used. A later message of his does not revive it: from then on only the existing rules apply (the latest turn, one approved call per instruction). Calls she did not list keep the existing rules unchanged.
+- **Tightened after an independent review (2026-11-13).**
+  - Any reply of hers ends every open request in the conversation, on every goal, unless it lists them again.
+  - A request names its conversation and the time she asked. It counts only for his first message after it, in that conversation, spoken after she asked, and within the approval expiry (24 hours if none is set).
+  - None is recorded when he has not spoken in the conversation.
+  - The same call listed twice is one call, and at most six are listed.
+  - Requests are kept on every path by which a reply reaches him.
+- **Boundary.** Every write to his files still needs his approval of that exact call. The list only fixes, before he answers, which calls his go covers. No new Law exception.
