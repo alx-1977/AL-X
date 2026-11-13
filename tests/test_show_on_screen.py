@@ -32,6 +32,10 @@ GEOMETRY = {"window": [133, 113, 181, 138], "tracks": [], "vias": [], "planes": 
                                                 "rotation": -90, "side": "F"}]}
 
 
+# Page-rendering tests show a datasheet without a measured comparison.
+RENDERING_ONLY = {"no_layout": "a page-rendering test, nothing compared"}
+
+
 def display(**changes):
     values = {
         "title": "AE1", "subtitle": "Cellular", "context": "P0020 · Antenna layout",
@@ -621,7 +625,7 @@ class ReferencePageTests(unittest.TestCase):
         return values
 
     def test_boxes_become_places_on_the_image_and_the_page_is_read_once(self):
-        result = self.show(display(reference=self.reference()))
+        result = self.show(display(reference=self.reference(), checked=RENDERING_ONLY))
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         self.assertEqual(result.values["reference_pages"], 1)
         self.assertEqual(self.pages, [{"document": "/designs/P0020/datasheets/ae1.pdf", "page": 2,
@@ -640,7 +644,7 @@ class ReferencePageTests(unittest.TestCase):
         self.assertNotIn("PNG", json.dumps(self.board.snapshot()))
 
     def test_images_are_served_for_the_version_on_screen_only(self):
-        self.show(display(reference=self.reference()))
+        self.show(display(reference=self.reference(), checked=RENDERING_ONLY))
         board_id = self.board.snapshot()["id"]
         server = LiveVoiceServer(session=None, host="127.0.0.1", port=0, sample_rate_hz=16_000,
                                  asset_root=ASSETS, display=self.board.snapshot,
@@ -680,10 +684,10 @@ class ReferencePageTests(unittest.TestCase):
             raise PageError("page_failed", "renderer stopped")
         show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "call-1",
                                        draw_wait_seconds=0.01, read_page=broken)[SHOW_ON_SCREEN]
-        self.assertEqual(show(display(reference=self.reference())).failure["code"], "page_failed")
+        self.assertEqual(show(display(reference=self.reference(), checked=RENDERING_ONLY)).failure["code"], "page_failed")
         show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "call-1",
                                        draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
-        self.assertEqual(show(display(reference=self.reference())).failure["code"], "unavailable")
+        self.assertEqual(show(display(reference=self.reference(), checked=RENDERING_ONLY)).failure["code"], "unavailable")
         self.assertIsNone(self.board.snapshot()["display"])
 
     def test_titles_are_short(self):
@@ -899,6 +903,19 @@ class CheckedAgainstDatasheetTests(unittest.TestCase):
                          "The datasheet gives no layout for C12")
         self.assertIn("not both", self.reason(display(views=self.views, checked={
             "no_layout": "none", "layout_check": self.CHECK["check_id"]})))
+
+    def test_a_datasheet_beside_her_typed_comparison_is_refused(self) -> None:
+        """13 Nov: U.FL readings typed into items under a green verdict, no measurement."""
+        typed = display(views=[], reference={"label": "636101111001", "document": "/designs/umrf.pdf",
+                                              "pages": [{"page": 1, "section": [0, 0, 100, 100]}]},
+                        verdict={"text": "Footprint matches on every dimension", "tone": "ok"},
+                        items=[{"title": "Signal pad 1.0 x 1.05", "tone": "ok"}])
+        self.assertIn("never type readings", DEFINITIONS[0].purpose)
+        self.assertIn("needs checked", self.reason(typed))
+        # With KiCad's measurement of the footprint (no board view on screen) it is shown.
+        self.stored[self.CHECK["check_id"]].update(passed=True, counts={"matches": 1})
+        self.assertEqual(self.show(dict(typed, checked={"layout_check": self.CHECK["check_id"]})).state,
+                         CapabilityResultState.SUCCEEDED)
 
     def test_the_screen_draws_the_rows(self) -> None:
         script = (ASSETS / "show.js").read_text()

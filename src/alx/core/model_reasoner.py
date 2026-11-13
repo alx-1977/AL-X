@@ -1354,6 +1354,10 @@ RESPONSE_FIELD: Mapping[str, Any] = {
         "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance. "
         "Every time you give him is his local time in South Africa (UTC+2, no daylight saving); "
         "the times you are given are UTC, so 17:30 UTC is 19:30 for him. "
+        "When he questions something you said, check the evidence again (the datasheet, the tool "
+        "result) before you answer, then hold your answer with that evidence or correct it with "
+        "that evidence; never agree only because he asked, and never say something does not "
+        "exist before searching by part number and datasheet. "
         "Never ask him to do the work himself (tidy a sheet in KiCad, fix a file, run a tool): "
         "if your tools cannot do it, say what is missing so it can be built."
     ),

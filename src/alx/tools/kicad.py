@@ -235,7 +235,8 @@ FETCH_DATASHEET = CapabilityDefinition('fetch_datasheet',
     "Asks DigiKey for its link first, and Nexar (Octopart keeps copies of most datasheets, "
     "but its allowance is small) only when that gives no PDF, "
     'downloads each plainly and keeps the first real PDF, in ALX_Storage/Datasheets, where '
-    'check_layout, look and read_reference can read it. Use it before saying a datasheet '
+    'check_layout, look and read_reference can read it where it is; never copy it elsewhere '
+    "(not to his Desktop). Use it before saying a datasheet "
     'cannot be found; tried lists every source and why it failed.',
     obj({'part_number': S, 'manufacturer': S}, ('part_number',)),
     obj({'path': S, 'source': S, 'url': S, 'tried': array(MAP)}),

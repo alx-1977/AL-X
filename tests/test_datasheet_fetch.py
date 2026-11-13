@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -84,6 +85,19 @@ class FetchDatasheetTests(unittest.TestCase):
                                      download=stand.download)
             self.assertEqual((result["source"], result["url"]), ("nexar", "https://datasheet.octopart.com/abc.pdf"))
             self.assertEqual(result["tried"][0]["result"], "not a PDF")
+
+    def test_an_unreadable_record_is_a_miss_not_a_failure(self) -> None:
+        """Review of #243: a record cut short by a stop must not block the part for good."""
+        with tempfile.TemporaryDirectory() as folder:
+            stand = Stand([], digikey="https://cdn.example.com/a.pdf", files={"https://cdn.example.com/a.pdf": PDF})
+            first = fetch_datasheet("ABC", "", Path(folder), client=stand, nexar=[], digikey=("id", "s"),
+                                    download=stand.download)
+            Path(first["path"]).with_suffix(".json").write_text('{"part_num')
+            again = fetch_datasheet("ABC", "", Path(folder), client=stand, nexar=[], digikey=("id", "s"),
+                                    download=stand.download)
+            self.assertEqual(again["source"], "digikey")
+            self.assertEqual(json.loads(Path(again["path"]).with_suffix(".json").read_text())["part_number"], "ABC")
+            self.assertFalse(list(Path(folder).glob("*.part")))
 
     def test_digikey_comes_first_and_nexar_is_not_asked_when_it_works(self) -> None:
         """Friedl, 13 Nov: Nexar's allowance is small and its paid plan is not an option."""

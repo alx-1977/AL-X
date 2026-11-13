@@ -103,7 +103,9 @@ DEFINITION = CapabilityDefinition(
     "again rather than describe the gap. Names not on the board are refused; every "
     "connection of a part you name is drawn, with its silkscreen marks. Two views are "
     "headed Current (his board) and Amended (your copy), in that order. A view of your "
-    "copy needs checked: layout_check is the check_id of a kicad check_layout of that copy "
+    "copy, and a datasheet shown beside your own items or verdict (a footprint against its "
+    "land pattern), need checked: never type readings yourself. layout_check is the check_id "
+    "of a kicad check_layout of that copy or of the footprint in a library copy "
     "against the manufacturer's drawing, made after its last edit. The screen shows what "
     "KiCad measured against each number, red where it differs, amber where a number is not "
     "yet accounted for, and boxes them on the datasheet page; the verdict cannot be ok "
@@ -284,7 +286,7 @@ def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | 
     result = read_layout_check(check_id)
     if result is None:
         raise ValueError("there is no layout check " + check_id)
-    if result.get("work_copy_id") not in work_copies:
+    if work_copies and result.get("work_copy_id") not in work_copies:
         raise ValueError("that layout check is not of the copy on screen; check this copy")
     if not result.get("current"):
         raise ValueError("the copy changed after that layout check; check it again")
@@ -370,11 +372,16 @@ def build_display_executors(
                         raise ValueError("a dimension runs between two [x, y] points")
             checked, measured_reference = None, None
             copies = {view["work_copy_id"] for view in views if view.get("work_copy_id")}
-            if copies:
+            # A datasheet on screen beside her own comparison needs KiCad's
+            # measurement too: on 13 Nov she typed U.FL readings into items
+            # under a green "matches" and buried a missing keep-out.
+            compared = bool(arguments.get("reference")) and bool(display["items"] or display["verdict"])
+            if copies or compared:
                 if not arguments.get("checked"):
                     raise ValueError(
-                        "a view of your copy needs checked: the check_id of a kicad check_layout "
-                        "of that copy against the manufacturer's drawing (or no_layout)")
+                        "a view of your copy, or a datasheet shown with your comparison, needs checked: "
+                        "the check_id of a kicad check_layout (of that copy, or of the footprint in a "
+                        "library copy) against the manufacturer's drawing; or no_layout with the reason")
                 checked, measured_reference = _checked(arguments["checked"], read_layout_check, copies)
                 if not checked["passed"] and (display["verdict"] or {}).get("tone") == "ok":
                     raise ValueError("the layout check did not pass, so the verdict cannot be ok")

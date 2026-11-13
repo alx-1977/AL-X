@@ -157,10 +157,13 @@ Not yet usable.
     decisions that matter. On 13 Nov she typed U.FL readings instead of using
     check_layout, buried a missing keep-out under an "ok", and said the U.FL
     part did not exist when asked about it.
-  - For AL/X, not code: the one-time land-pattern audit of the 86
-    footprints outside FireFli_Resistors and FireFli_Capacitors; drawing
-    the sheet connections on P0020's top sheet; D4 (5V/GND) and J7 pad 8,
-    which the board-against-schematic check shows, for Friedl to decide.
+- [ ] **AL/X's KiCad jobs (not code):** the land-pattern audit of the 86
+  footprints outside FireFli_Resistors and FireFli_Capacitors (Connectors
+  done 13 Nov; Friedl: match the datasheet without asking, one write-back
+  per library); the U.FL (636101111001) copper keep-out; the RoomReader V2
+  4-channel to 2-channel RF switch change; importing the remaining Altium
+  projects. For Friedl: D4 (5V/GND) on P0020. Done 13 Nov: P0020 top sheet
+  drawn, J7 pad 8 (the MSoM hole is now pad MP on GND).
 - [ ] Thermal simulation of a PCB (layered board heat model from the KiCad
   copper, part powers in, part temperatures and a heat map out). Needs a
   decision and a first test board with measured temperatures.

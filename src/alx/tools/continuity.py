@@ -79,7 +79,9 @@ REQUEST_DEFINITION = CapabilityDefinition(
     "returned to you unread; nothing interprets it. autonomous_cognition says "
     "whether this runtime can give you that opportunity: when it is "
     "unavailable the request is kept, but no occasion arises until autonomous "
-    "cognition is enabled, so nothing will happen at that time by itself.",
+    "cognition is enabled, so nothing will happen at that time by itself. To carry on with "
+    "your own work, ask for the earliest time allowed (60 seconds from now); a later time only "
+    "when you are waiting for something, and say what.",
     StructuredSchema(
         ValueKind.OBJECT,
         {
