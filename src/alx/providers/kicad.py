@@ -1016,15 +1016,18 @@ class KiCadProvider:
         from alx.providers.datasheet_fetch import DatasheetError, fetch_datasheet
         if self.datasheet_sources is None or self.datasheet_folder is None:
             raise KiCadError('engine_unavailable', {'detail': 'no datasheet source is configured'})
-        client, nexar, digikey, download = self.datasheet_sources()
+        client, nexar, digikey, fetcher = self.datasheet_sources()
         try:
             with client:
                 return fetch_datasheet(arguments.get('part_number', ''), arguments.get('manufacturer') or '',
                                        self.datasheet_folder, client=client, nexar=nexar, digikey=digikey,
-                                       download=download)
+                                       download=fetcher.fetch_pdf)
         except DatasheetError as error:
             raise KiCadError(error.code if error.code != 'not_found' else 'document_unavailable',
                              {'detail': error.detail}) from error
+        finally:
+            # Both connections are closed, whatever happened (review of #243).
+            fetcher.close()
 
     def read_reference(self, arguments):
         raw = Path(arguments['path']).expanduser().absolute()

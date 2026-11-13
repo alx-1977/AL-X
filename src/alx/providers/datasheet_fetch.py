@@ -11,10 +11,13 @@ real PDF. The file goes to her own storage, so no approval is needed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote
 
 MAX_PDF_BYTES = 60_000_000
 _SAFE = re.compile(r"[^A-Za-z0-9._+-]+")
@@ -72,18 +75,25 @@ def _nexar_links(client: Any, credentials: list[tuple[str, str]], part: str,
             links += [best] if best else []
             for collection in found.get("documentCollections") or []:
                 links += [doc.get("url") for doc in collection.get("documents") or [] if doc.get("url")]
-        return list(dict.fromkeys(link for link in links if link))
+        links = list(dict.fromkeys(link for link in links if link))
+        if not links:
+            # An empty answer is a fact too (review of #243).
+            tried.append({"source": "nexar", "url": "", "result": "no matching part with a datasheet"})
+        return links
     return []
 
 
-def _digikey_links(client: Any, credentials: tuple[str, str] | None, part: str, tried: list) -> list[str]:
+def _digikey_links(client: Any, credentials: tuple[str, str] | None, part: str, manufacturer: str,
+                   tried: list) -> list[str]:
     if not credentials:
         return []
     client_id, secret = credentials
     try:
         token = client.post(DIGIKEY_TOKEN, data={"grant_type": "client_credentials", "client_id": client_id,
                                                  "client_secret": secret}).json().get("access_token", "")
-        response = client.get(DIGIKEY_DETAILS.format(part), headers={
+        # The whole part number as one path segment: /NOPB or #PBF must not
+        # become a path or a fragment (review of #243).
+        response = client.get(DIGIKEY_DETAILS.format(quote(part, safe="")), headers={
             "Authorization": "Bearer %s" % token, "X-DIGIKEY-Client-Id": client_id})
     except Exception as error:  # noqa: BLE001
         tried.append({"source": "digikey", "url": "", "result": type(error).__name__})
@@ -91,9 +101,20 @@ def _digikey_links(client: Any, credentials: tuple[str, str] | None, part: str, 
     if response.status_code != 200:
         tried.append({"source": "digikey", "url": "", "result": "HTTP %d" % response.status_code})
         return []
-    link = (response.json().get("Product") or {}).get("DatasheetUrl") or ""
+    product = response.json().get("Product") or {}
+    # The product DigiKey returns must be the part, and the maker, asked for
+    # (review of #243).
+    maker = str((product.get("Manufacturer") or {}).get("Name", ""))
+    if str(product.get("ManufacturerProductNumber", "")).upper() != part.upper() or (
+            manufacturer and not _same_maker(manufacturer, maker)):
+        tried.append({"source": "digikey", "url": "", "result": "no matching product (%s %s)" % (
+            maker, product.get("ManufacturerProductNumber", ""))[:120]})
+        return []
+    link = product.get("DatasheetUrl") or ""
     if link.startswith("//"):
         link = "https:" + link
+    if not link:
+        tried.append({"source": "digikey", "url": "", "result": "no datasheet link"})
     return [link] if link else []
 
 
@@ -110,14 +131,21 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
     part = (part or "").strip()
     if not part or len(part) > 80:
         raise DatasheetError("arguments_unusable", "part_number is the manufacturer part number")
-    target = folder / (_SAFE.sub("_", part).strip("._") + ".pdf")
-    if target.is_file() and target.read_bytes()[:5] == b"%PDF-":
-        return {"path": str(target), "source": "already saved", "url": "", "tried": []}
+    # One file per part and maker, never shared by look-alike numbers
+    # (ABC/1 and ABC_1), with a record of what it is (review of #243).
+    identity = {"part_number": part, "manufacturer": _plain(manufacturer)}
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:10]
+    target = folder / ("%s-%s.pdf" % (_SAFE.sub("_", part).strip("._")[:60] or "part", key))
+    record = target.with_suffix(".json")
+    if target.is_file() and record.is_file() and target.read_bytes()[:5] == b"%PDF-":
+        saved = json.loads(record.read_text())
+        if {k: saved.get(k) for k in identity} == identity:
+            return {"path": str(target), "source": "already saved", "url": saved.get("url", ""), "tried": []}
     tried: list[dict[str, str]] = []
     # DigiKey first: free and unlimited. Nexar's allowance is small and its
     # paid plan is not an option (Friedl, 2026-11-13), so it is asked only
     # when DigiKey's link gives no PDF (Würth refuses automated downloads).
-    sources = (("digikey", lambda: _digikey_links(client, digikey, part, tried)),
+    sources = (("digikey", lambda: _digikey_links(client, digikey, part, manufacturer, tried)),
                ("nexar", lambda: _nexar_links(client, nexar, part, manufacturer, tried)))
     for source, find in sources:
         links = find()
@@ -138,6 +166,7 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
             partial = target.with_suffix(".part")
             partial.write_bytes(body)
             partial.replace(target)
+            record.write_text(json.dumps(dict(identity, source=source, url=link)))
             return {"path": str(target), "source": source, "url": link, "tried": tried}
     raise DatasheetError("not_found", "no source gave a PDF for %s: %s" % (
         part, "; ".join("%s %s" % (item["source"], item["result"]) for item in tried)[:400]))

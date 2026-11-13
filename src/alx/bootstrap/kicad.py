@@ -19,7 +19,7 @@ class KiCadRuntime:
     provider: KiCadProvider | None = None
 
 
-ALX_STORAGE = Path('~/Library/Mobile Documents/com~apple~CloudDocs/ALX_Storage')
+from alx.bootstrap.look import ALX_STORAGE  # one storage folder for both tools
 
 
 def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
@@ -54,7 +54,7 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
     def datasheet_sources():
         from alx.providers.datasheet_fetch import api_client
         from alx.providers.web_fetch import HttpWebFetchProvider
-        return api_client(), nexar, digikey, HttpWebFetchProvider().fetch_pdf
+        return api_client(), nexar, digikey, HttpWebFetchProvider()
     provider.datasheet_sources = datasheet_sources if (nexar or digikey) else None
     permission = 'design.kicad'
     # D-074: one capability. export and write_back change his project and need
