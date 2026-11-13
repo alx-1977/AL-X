@@ -132,6 +132,8 @@ Not yet usable.
   with drawn sheet connections, library work through the tool and
   land-pattern checks. The small items left then were done in the top-sheet
   change (review rule, long captions, footprint names). What remains:
+  - Datasheet record (fetch_datasheet): write it atomically and treat an
+    unreadable record as a cache miss (Greptile, #243; deferred).
   - For AL/X, not code: the one-time land-pattern audit of the 86
     footprints outside FireFli_Resistors and FireFli_Capacitors; drawing
     the sheet connections on P0020's top sheet; D4 (5V/GND) and J7 pad 8,
