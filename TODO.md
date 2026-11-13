@@ -144,6 +144,9 @@ Not yet usable.
     out with no reason. Continue at once unless waiting on something.
   - Times in her replies are his local time (done on this branch, with the
     next batch).
+  - Library saves: KiCad's FootprintSave renews every internal id, so a
+    one-hole change shows ~100 changed lines in the library history. A
+    quieter save (only the changed lines) would keep the history readable.
   - A missing field in her decision is named ("missing required field
     'evidence_refs'"); the bare "'evidence_refs'" was refused 18 times on 13
     Nov (done on this branch).
