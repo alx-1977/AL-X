@@ -146,10 +146,13 @@ def test_banking_configuration_is_external():
 
 def test_directory_and_time_limit_have_defaults(tmp_path):
     """2026-11-13: about ten runs refused in one morning for a field left out."""
-    from alx.providers.program import DEFAULT_DIRECTORY
     assert DEFINITION.input_schema.accepts({"argv": ["pwd"]})
-    result = ProgramRunner(tmp_path / "runs", (), 5).run({"argv": ["pwd"]})
+    checkout = (tmp_path / "checkout")
+    checkout.mkdir()
+    result = ProgramRunner(tmp_path / "runs", (), 5, default_directory=checkout).run({"argv": ["pwd"]})
     if result["status"] == "running":
         result = wait_result(Path(result["full_output_path"]))
-    assert result["stdout"].strip() == str(DEFAULT_DIRECTORY)
-    assert (DEFAULT_DIRECTORY / "governance" / "DECISIONS.md").is_file()
+    assert result["stdout"].strip() == str(checkout.resolve())
+    # Without a checkout from the composition root, the field is still required.
+    with pytest.raises(ValueError):
+        ProgramRunner(tmp_path / "runs", (), 5).run({"argv": ["pwd"]})

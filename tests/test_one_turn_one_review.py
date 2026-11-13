@@ -520,7 +520,8 @@ class OneTurnOneReviewTests(unittest.TestCase):
                     if item.reason_code == "repeated_rejected_call"]
         # 2026-11-13: she reused the refused approval after his "go" and cost
         # him a third; the refusal now tells her what repairs it.
-        self.assertIn("propose a new approval", repeat.reason_detail)
+        # His "Try again." is already the source a new approval needs.
+        self.assertIn("latest message", repeat.reason_detail)
 
     def _executed(self, call):
         self.dispatched.append(_dispatched_as(call))

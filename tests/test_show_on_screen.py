@@ -852,14 +852,15 @@ class CheckedAgainstDatasheetTests(unittest.TestCase):
     def test_rows_are_shown_red_where_they_differ_and_the_verdict_cannot_be_ok(self) -> None:
         checked = {"document": "/designs/P0020/datasheets/7488912455.pdf", "page": 2, "rows": [
             {"what": "C62 to C64 pitch", "datasheet_mm": 1.5, "board_mm": 2.1},
-            {"what": "Feed width", "datasheet_mm": 1.2, "board_mm": 1.22}]}
+            {"what": "Feed width", "datasheet_mm": 1.2, "board_mm": 1.22},
+            {"what": "Exactly at the tolerance", "datasheet_mm": 1.0, "board_mm": 1.05}]}
         ok = {"text": "Matches Würth", "tone": "ok"}
         self.assertIn("cannot be ok", self.reason(display(views=self.views, checked=checked, verdict=ok)))
         self.assertEqual(self.show(display(views=self.views, checked=checked)).state,
                          CapabilityResultState.SUCCEEDED)
         shown = self.board.snapshot()["display"]["checked"]
         self.assertEqual((shown["document"], shown["page"], shown["differs"]), ("7488912455.pdf", 2, True))
-        self.assertEqual([row["tone"] for row in shown["rows"]], ["bad", "ok"])
+        self.assertEqual([row["tone"] for row in shown["rows"]], ["bad", "ok", "ok"])
 
     def test_no_layout_is_said_plainly_and_not_mixed_with_rows(self) -> None:
         self.assertEqual(self.show(display(views=self.views, checked={

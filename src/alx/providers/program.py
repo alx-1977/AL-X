@@ -349,14 +349,17 @@ def summary(path: Path, bound: int = 4096) -> str:
 # morning of KiCad scripts when this was one second (D-067).
 FOREGROUND_SECONDS = 120.0
 DEFAULT_SECONDS = 60
-# Where she runs most programs: her own repository.
-DEFAULT_DIRECTORY = Path(__file__).resolve().parents[3]
 
 
 class ProgramRunner:
     def __init__(self, root: Path, banking_targets: tuple[str, ...],
-                 foreground_seconds: float = FOREGROUND_SECONDS) -> None:
+                 foreground_seconds: float = FOREGROUND_SECONDS,
+                 default_directory: Path | None = None) -> None:
         self.root = root.resolve()
+        # Where she runs most programs: her repository checkout, passed in by
+        # the composition root. Never derived from this file, which runs from
+        # a snapshot of the code (review of #237).
+        self.default_directory = default_directory
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.targets = tuple(item.casefold() for item in banking_targets)
         if any(not item.strip() for item in self.targets):
@@ -374,7 +377,9 @@ class ProgramRunner:
                 or not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
                 or seconds <= 0):
             raise ValueError("invalid argv or time limit")
-        directory = Path(arguments.get("working_directory") or DEFAULT_DIRECTORY).resolve(strict=True)
+        if not arguments.get("working_directory") and self.default_directory is None:
+            raise ValueError("working_directory is required here")
+        directory = Path(arguments.get("working_directory") or self.default_directory).resolve(strict=True)
         if not directory.is_dir():
             raise ValueError("working directory must be a directory")
         # Check every argv element, including wrapper arguments and explicit

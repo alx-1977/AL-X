@@ -47,9 +47,13 @@ LOGGER = logging.getLogger(__name__)
 # told when a call is refused for that, or repeats an approval already refused
 # (2026-11-13: a reused approval cost him a third "go").
 _FRESH_APPROVAL_NEEDED = (
-    "This approval cannot be used again. After Friedl's next instruction, propose a new "
-    "approval with a new approval_id whose source is that latest message, and send the "
-    "call with it."
+    "One instruction from Friedl allows one approved call of this kind, and it was used "
+    "in this turn. Ask him; his next instruction is the source of a new approval."
+)
+# A refused approval reused: what repairs it may already be his latest message.
+_NEW_APPROVAL_ID_NEEDED = (
+    "This approval was refused and cannot be reused. Propose a new approval with a new "
+    "approval_id whose source is Friedl's latest message, and send the call with it."
 )
 
 def planned_call_id(prefix: str) -> str:
@@ -2996,7 +3000,7 @@ class CoreAgent:
             reason_code="repeated_rejected_call", recorded_at=now,
             # An approval refusal is repaired only by a fresh approval; say so,
             # rather than leave her to find it in the source (2026-11-13).
-            reason_detail=(_FRESH_APPROVAL_NEEDED
+            reason_detail=(_NEW_APPROVAL_ID_NEEDED
                            if call.approval_id is not None
                            and earlier.reason_code in self._CORRECTABLE_REJECTION_REASONS
                            else None),

@@ -291,7 +291,9 @@ def _checked(value: Any) -> dict[str, Any]:
         datasheet, board = _number(row.get("datasheet_mm")), _number(row.get("board_mm"))
         shown.append({"what": _text(row.get("what"), 40, "row.what"), "datasheet_mm": datasheet,
                       "board_mm": board,
-                      "tone": "bad" if abs(datasheet - board) > CHECK_TOLERANCE_MM else "ok"})
+                      # Rounded first: 1.05 - 1.0 is a hair over 0.05 in floating point
+                      # (review of #237), and exactly 0.05 mm is allowed.
+                      "tone": "bad" if round(abs(datasheet - board), 6) > CHECK_TOLERANCE_MM else "ok"})
     return {"document": Path(document).name[:60], "page": page, "rows": shown,
             "differs": any(row["tone"] == "bad" for row in shown)}
 
