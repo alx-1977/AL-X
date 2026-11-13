@@ -2196,15 +2196,20 @@ class ModelReasoner:
             if not isinstance(response, str) or not response.strip():
                 raise ValueError("respond.response must be a nonblank string")
             requests = []
-            for item in action.get("asks_go_for") or ():
+            listed = list(action.get("asks_go_for") or ())
+            if len(listed) > 6:
+                raise ValueError("asks_go_for lists at most 6 calls")
+            for item in listed:
                 arguments = json.loads(item["arguments_json"])
                 if not isinstance(arguments, dict):
                     raise ValueError("asks_go_for arguments_json must be a JSON object")
-                requests.append(ApprovalScope(item["capability_id"], arguments))
+                scope = ApprovalScope(item["capability_id"], arguments)
+                if scope not in requests:  # the same call listed twice is one call
+                    requests.append(scope)
             return AgentDecision(
                 response=response,
                 detail_asked=action.get("detail_asked") is True,
-                go_requests=tuple(requests[:6]),
+                go_requests=tuple(requests),
                 raised_mail_observations=tuple(
                     MailReference(**item) for item in action.get("raised_mail_observations", ())
                 ),

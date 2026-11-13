@@ -263,7 +263,7 @@ MAX_ROWS = 16
 
 
 def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | None] | None,
-             work_copies: set[str]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+             work_copies: set[str], shown_document: str | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """What KiCad measured on her copy against the manufacturer's drawing (2026-11-13).
 
     She twice showed Friedl a layout with a clean DRC that differed from
@@ -288,6 +288,10 @@ def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | 
         raise ValueError("there is no layout check " + check_id)
     if work_copies and result.get("work_copy_id") not in work_copies:
         raise ValueError("that layout check is not of the copy on screen; check this copy")
+    if shown_document and Path(str(shown_document)).expanduser().resolve() != Path(
+            str(result.get("document_path", ""))).expanduser().resolve():
+        # A measurement of one part never stands beside another part's datasheet (review of D-080 batch).
+        raise ValueError("that layout check is against another document than the datasheet shown")
     if not result.get("current"):
         raise ValueError("the copy changed after that layout check; check it again")
     numbers = [n for n in result.get("numbers", ()) if n.get("status") != "not_applicable"]
@@ -382,7 +386,9 @@ def build_display_executors(
                         "a view of your copy, or a datasheet shown with your comparison, needs checked: "
                         "the check_id of a kicad check_layout (of that copy, or of the footprint in a "
                         "library copy) against the manufacturer's drawing; or no_layout with the reason")
-                checked, measured_reference = _checked(arguments["checked"], read_layout_check, copies)
+                checked, measured_reference = _checked(
+                    arguments["checked"], read_layout_check, copies,
+                    (arguments.get("reference") or {}).get("document"))
                 if not checked["passed"] and (display["verdict"] or {}).get("tone") == "ok":
                     raise ValueError("the layout check did not pass, so the verdict cannot be ok")
             display["checked"] = checked

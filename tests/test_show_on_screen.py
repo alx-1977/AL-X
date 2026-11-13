@@ -912,8 +912,11 @@ class CheckedAgainstDatasheetTests(unittest.TestCase):
                         items=[{"title": "Signal pad 1.0 x 1.05", "tone": "ok"}])
         self.assertIn("never type readings", DEFINITIONS[0].purpose)
         self.assertIn("needs checked", self.reason(typed))
-        # With KiCad's measurement of the footprint (no board view on screen) it is shown.
+        # A measurement of another part's drawing does not stand beside this datasheet.
         self.stored[self.CHECK["check_id"]].update(passed=True, counts={"matches": 1})
+        self.assertIn("another document", self.reason(dict(typed, checked={"layout_check": self.CHECK["check_id"]})))
+        # With KiCad's measurement of this footprint (no board view on screen) it is shown.
+        self.stored[self.CHECK["check_id"]].update(document_path="/designs/umrf.pdf")
         self.assertEqual(self.show(dict(typed, checked={"layout_check": self.CHECK["check_id"]})).state,
                          CapabilityResultState.SUCCEEDED)
 

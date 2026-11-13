@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -166,11 +167,11 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
                 tried.append({"source": source, "url": link, "result": "not a PDF"})
                 continue
             folder.mkdir(parents=True, exist_ok=True)
-            partial = target.with_suffix(".part")
+            partial = target.with_suffix(".%s.part" % uuid.uuid4().hex)
             partial.write_bytes(body)
             partial.replace(target)
             # Written whole or not at all: a stop mid-write leaves no half record.
-            pending = record.with_suffix(".json.part")
+            pending = record.with_suffix(".%s.part" % uuid.uuid4().hex)
             pending.write_text(json.dumps(dict(identity, source=source, url=link)))
             pending.replace(record)
             return {"path": str(target), "source": source, "url": link, "tried": tried}

@@ -3038,4 +3038,10 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Status: APPROVED by Friedl, 2026-11-13** ("yes", to: "when she asks for your go she lists the exact writes it covers, and your next go covers exactly those"). That evening one write-back took three goes. The first was spent on the library write-back shown beside it (one approved call per instruction). The second arrived while she was in a background round, where it was not the latest turn of the conversation.
 - **Decision.** A reply that asks for his go may list the exact calls it is for (`asks_go_for`: capability and arguments). Each call that needs approval is kept on the goal as a requested approval, naming the person turn that came before her ask; any earlier request lapses.
 - **Approval.** His next message, the first person turn after that one, approves each listed call once. This holds beside the other listed calls, and in a background round where her own words follow his message, as long as it is still his latest message. A request is spent when used. A later message of his does not revive it: from then on only the existing rules apply (the latest turn, one approved call per instruction). Calls she did not list keep the existing rules unchanged.
+- **Tightened after an independent review (2026-11-13).**
+  - Any reply of hers ends every open request in the conversation, on every goal, unless it lists them again.
+  - A request names its conversation and the time she asked. It counts only for his first message after it, in that conversation, spoken after she asked, and within the approval expiry (24 hours if none is set).
+  - None is recorded when he has not spoken in the conversation.
+  - The same call listed twice is one call, and at most six are listed.
+  - Requests are kept on every path by which a reply reaches him.
 - **Boundary.** Every write to his files still needs his approval of that exact call. The list only fixes, before he answers, which calls his go covers. No new Law exception.
