@@ -335,6 +335,41 @@ def add_taper(board, net, on, narrow, narrow_width, wide, wide_width):
                                        (x1 - nx * b, y1 - ny * b), (x0 - nx * a, y0 - ny * a)])
 
 
+def _pretty(library):
+    """The folder of a footprint library in a library copy, by its name (FireFli_Misc)."""
+    import os as _os
+    root = _os.path.dirname(BOARD_PATH)
+    found = [_os.path.join(where, name) for where, names, _ in _os.walk(root)
+             for name in names if name == library + ".pretty"]
+    if len(found) != 1:
+        raise KeyError("no footprint library %s in this copy" % library)
+    return found[0]
+
+
+def footprints(library):
+    """The footprint names of a library in a library copy."""
+    return sorted(_pcbnew.FootprintEnumerate(_pretty(library)))
+
+
+def footprint(library, name):
+    """A library footprint, to read or change; save it with save_footprint."""
+    found = _pcbnew.FootprintLoad(_pretty(library), name)
+    if found is None:
+        raise KeyError("no footprint %s in %s" % (name, library))
+    return found
+
+
+def save_footprint(library, item):
+    """Save a footprint into its library in the copy (a new one is added under its own name)."""
+    import os as _os
+    folder = _pretty(library)
+    if not any(name.endswith(".kicad_mod") for name in _os.listdir(folder)):
+        # KiCad tells a library's format from the files already in it.
+        raise ValueError("KiCad cannot save into an empty library; write its first footprint "
+                         "as a .kicad_mod file, then use save_footprint")
+    _pcbnew.FootprintSave(folder, item)
+
+
 def refill(board):
     """Repour every zone; do this after any change."""
     _pcbnew.ZONE_FILLER(board).Fill(board.Zones())
@@ -350,6 +385,7 @@ NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rot
          "set_pad", "fields", "set_field", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
          "graphics", "set_graphic", "remove_graphic", "add_line",
          "zones", "zone_corners", "set_zone_corners",
-         "copper_shapes", "set_copper_corners", "remove_copper", "add_copper", "add_taper", "refill")
+         "copper_shapes", "set_copper_corners", "remove_copper", "add_copper", "add_taper",
+         "footprints", "footprint", "save_footprint", "refill")
 
 __all__ = ["HELPERS", "NAMES", "script_runner"]

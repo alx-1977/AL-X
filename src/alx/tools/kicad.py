@@ -115,7 +115,8 @@ _ACTION_DEFINITIONS = (
         'drawn as a shape: copper_shapes(b, net), set_copper_corners(b, id, corners), '
         'remove_copper(b, id), '
         'add_copper(b, net, on, corners), add_taper(b, net, on, narrow, narrow_width, wide, '
-        "wide_width); refill(b) and save(b). Use them rather than guessing pcbnew names; refill "
+        "wide_width); refill(b) and save(b); on a library copy (copy_library): footprints(lib), "
+        "footprint(lib, name), save_footprint(lib, fp). Use them rather than guessing pcbnew names; refill "
         "after every change. Never remove items while looping over pcbnew's own lists, never "
         "Remove a part's drawing through the board, never read an outline that is not there: "
         'all crash KiCad. The script may write only inside the work copy. Friedl\'s layout rules: '
@@ -227,13 +228,29 @@ INSPECT = CapabilityDefinition('inspect',
     obj({'board': MAP, 'parts': array(MAP), 'nets': array(MAP), 'zones': array(MAP),
          'truncated': MAP}), SideEffect.NONE, FAILURES)
 
+COPY_LIBRARY = CapabilityDefinition('copy_library',
+    'A work copy of a KiCad library folder (the FireFli library: footprints and symbols), for '
+    'adding or correcting parts. Edit it with edit (argv[1] is a file in the copy folder; '
+    'footprints(lib), footprint(lib, name) and save_footprint(lib, fp) read and save '
+    'footprints; symbol libraries are text, edit them as files), measure a footprint against '
+    "its datasheet land pattern with check_layout (footprint LIBRARY/NAME, part FP), and "
+    'write it back with write_back (project_dir is the library folder) on his approval; then '
+    'commit and push the library repository. Build a new part from the manufacturer\'s '
+    'datasheet land pattern, never by copying an imported Altium footprint; compare the '
+    'two and show him any difference rather than choosing.',
+    obj({'library_dir': S}),
+    obj({'work_copy_id': S, 'work_copy_revision': S, 'footprint_libraries': array(MAP),
+         'symbol_libraries': array(S)}),
+    SideEffect.NONE, FAILURES)
 READING = obj({'number': S, 'measures': MAP, 'not_applicable': S,
                'derived': obj({'value_mm': N, 'basis': S})}, ('number',))
-LAYOUT_TARGET = {'work_copy_id': S, 'board': S, 'document': S, 'page': I, 'section': array(N),
-                 'part': S}
+LAYOUT_TARGET = {'work_copy_id': S, 'board': S, 'footprint': S, 'document': S, 'page': I,
+                 'section': array(N), 'part': S}
 CHECK_LAYOUT = CapabilityDefinition('check_kicad_layout',
-    "Measure a board against the manufacturer's layout drawing; you never type a measured "
-    'value. Name the board (work_copy_id, or board for his), the datasheet document, page, '
+    "Measure a board, or a library footprint, against the manufacturer's drawing (layout or "
+    'land pattern); you never type a measured value. Name the board (work_copy_id, or board '
+    'for his; for a footprint, a copy_library work_copy_id with footprint LIBRARY/NAME and '
+    'part FP), the datasheet document, page, '
     'section [x0, y0, x1, y1] in points around the drawing, and part (the reference the '
     'drawing is for, e.g. AE2). Every number printed in the section comes back with an id. '
     'For each, give a reading once: measures says what it is on the board, in the part\'s own '
@@ -268,14 +285,18 @@ CONFIRM_READINGS = CapabilityDefinition('confirm_layout_readings',
 MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
     "Join a copy's separate top-level schematic sheets (an Altium import) into one "
     'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
-    "relinked. Proven by KiCad's netlist before and after; if any connection or net name "
+    'relinked; then a global label used on more than one sheet becomes pins on those '
+    "sheets' blocks with wires (buses for bus labels) between them, as Altium showed "
+    "(connected lists them). Works on a design already hierarchical too. Proven by KiCad's "
+    "netlist before and after; if any connection or net name "
     'changes, the copy is put back and verification_failed names the nets. Part of every '
     'import; write it back with his approval, and ask him to open it once in KiCad.',
     obj({'work_copy_id': S}),
-    obj({'converted': B, 'reason': S, 'sheets': array(S), 'renamed': MAP, 'footprints_relinked': I,
+    obj({'converted': B, 'reason': S, 'connected': array(S), 'sheets': array(S), 'renamed': MAP,
+         'footprints_relinked': I,
          'footprints_not_found': array(S), 'nets': I, 'netlist_identical': B, 'work_copy_id': S,
          'work_copy_revision': S, 'schematic_parity': array(GROUP), 'erc': ERC},
-        ('converted', 'reason', 'sheets', 'renamed', 'footprints_relinked', 'footprints_not_found')),
+        ('converted', 'reason', 'connected', 'sheets', 'renamed', 'footprints_relinked', 'footprints_not_found')),
     SideEffect.NONE, FAILURES)
 
 
@@ -293,6 +314,7 @@ class KiCadAction(str, Enum):
     CHECK_LAYOUT = 'check_layout'
     CONFIRM_LAYOUT_READINGS = 'confirm_layout_readings'
     MAKE_HIERARCHICAL = 'make_hierarchical'
+    COPY_LIBRARY = 'copy_library'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -308,12 +330,13 @@ CONTRACTS = {
     KiCadAction.CHECK_LAYOUT: CHECK_LAYOUT,
     KiCadAction.CONFIRM_LAYOUT_READINGS: CONFIRM_READINGS,
     KiCadAction.MAKE_HIERARCHICAL: MAKE_HIERARCHICAL,
+    KiCadAction.COPY_LIBRARY: COPY_LIBRARY,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
-    KiCadAction.MAKE_HIERARCHICAL))
+    KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -352,7 +375,8 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.SIMULATE: provider.simulate_circuit,
                KiCadAction.CHECK_LAYOUT: provider.check_layout,
                KiCadAction.CONFIRM_LAYOUT_READINGS: provider.confirm_layout_readings,
-               KiCadAction.MAKE_HIERARCHICAL: provider.make_hierarchical}
+               KiCadAction.MAKE_HIERARCHICAL: provider.make_hierarchical,
+               KiCadAction.COPY_LIBRARY: provider.copy_library}
 
     def invoke(arguments):
         code = 'arguments_unusable'
