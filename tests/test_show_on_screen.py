@@ -827,5 +827,56 @@ class ViewerAssetTests(unittest.TestCase):
             self.assertIn(route, source)
 
 
+
+class CheckedAgainstDatasheetTests(unittest.TestCase):
+    """2026-11-13: a clean DRC was shown twice as a layout that matched Würth's."""
+
+    def setUp(self) -> None:
+        self.board = DisplayBoard()
+        self.show = build_display_executors(self.board, lambda _: GEOMETRY, lambda: "c1",
+                                            draw_wait_seconds=0.01)[SHOW_ON_SCREEN]
+        his = display()["views"][0]
+        mine = {key: value for key, value in his.items() if key != "board"}
+        self.views = [his, {**mine, "label": "Copy", "work_copy_id": "5a61"}]
+
+    def reason(self, arguments):
+        result = self.show(arguments)
+        self.assertEqual(result.state, CapabilityResultState.FAILED)
+        return result.failure["reason"]
+
+    def test_her_copy_is_not_shown_without_the_datasheet_comparison(self) -> None:
+        self.assertIn("needs checked", self.reason(display(views=self.views)))
+        # His board alone needs none.
+        self.assertEqual(self.show(display()).state, CapabilityResultState.SUCCEEDED)
+
+    def test_rows_are_shown_red_where_they_differ_and_the_verdict_cannot_be_ok(self) -> None:
+        checked = {"document": "/designs/P0020/datasheets/7488912455.pdf", "page": 2, "rows": [
+            {"what": "C62 to C64 pitch", "datasheet_mm": 1.5, "board_mm": 2.1},
+            {"what": "Feed width", "datasheet_mm": 1.2, "board_mm": 1.22},
+            {"what": "Exactly at the tolerance", "datasheet_mm": 1.0, "board_mm": 1.05}]}
+        ok = {"text": "Matches Würth", "tone": "ok"}
+        self.assertIn("cannot be ok", self.reason(display(views=self.views, checked=checked, verdict=ok)))
+        self.assertEqual(self.show(display(views=self.views, checked=checked)).state,
+                         CapabilityResultState.SUCCEEDED)
+        shown = self.board.snapshot()["display"]["checked"]
+        self.assertEqual((shown["document"], shown["page"], shown["differs"]), ("7488912455.pdf", 2, True))
+        self.assertEqual([row["tone"] for row in shown["rows"]], ["bad", "ok", "ok"])
+
+    def test_no_layout_is_said_plainly_and_not_mixed_with_rows(self) -> None:
+        self.assertEqual(self.show(display(views=self.views, checked={
+            "no_layout": "The datasheet gives no layout for C12"})).state, CapabilityResultState.SUCCEEDED)
+        self.assertEqual(self.board.snapshot()["display"]["checked"]["no_layout"],
+                         "The datasheet gives no layout for C12")
+        self.assertIn("not both", self.reason(display(views=self.views, checked={
+            "no_layout": "none", "document": "a.pdf", "page": 1,
+            "rows": [{"what": "x", "datasheet_mm": 1, "board_mm": 1}]})))
+
+    def test_the_screen_draws_the_rows(self) -> None:
+        script = (ASSETS / "show.js").read_text()
+        self.assertIn("Checked against", script)
+        self.assertIn("Not checked against a datasheet", script)
+        self.assertIn('id="checked"', (ASSETS / "show.html").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

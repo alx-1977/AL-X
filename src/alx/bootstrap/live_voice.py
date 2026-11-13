@@ -757,6 +757,7 @@ async def run(repository_root: Path) -> None:
     program_definitions, program_policies, program_executors = build_program_runtime(
         program_root, ProgramSettings.from_environment(environment).banking_targets,
         current_call_id.get, current_conversation_id.get,
+        default_directory=repository_root,
     )
     register(program_definitions, TraceSubsystem.CAPABILITY)
     policies.update(program_policies)

@@ -348,12 +348,18 @@ def summary(path: Path, bound: int = 4096) -> str:
 # handed over wakes a fresh session when it ends, which was 41 sessions on one
 # morning of KiCad scripts when this was one second (D-067).
 FOREGROUND_SECONDS = 120.0
+DEFAULT_SECONDS = 60
 
 
 class ProgramRunner:
     def __init__(self, root: Path, banking_targets: tuple[str, ...],
-                 foreground_seconds: float = FOREGROUND_SECONDS) -> None:
+                 foreground_seconds: float = FOREGROUND_SECONDS,
+                 default_directory: Path | None = None) -> None:
         self.root = root.resolve()
+        # Where she runs most programs: her repository checkout, passed in by
+        # the composition root. Never derived from this file, which runs from
+        # a snapshot of the code (review of #237).
+        self.default_directory = default_directory
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.targets = tuple(item.casefold() for item in banking_targets)
         if any(not item.strip() for item in self.targets):
@@ -362,14 +368,18 @@ class ProgramRunner:
 
     def run(self, arguments, conversation_id: str = "") -> dict:
         argv = arguments["argv"]
-        seconds = arguments["time_limit_seconds"]
+        # Defaults, so a run never fails for a field left out (2026-11-13:
+        # about ten refusals in one morning, each costing her a step).
+        seconds = arguments.get("time_limit_seconds", DEFAULT_SECONDS)
         if (not isinstance(argv, (list, tuple)) or not argv
                 or any(not isinstance(item, str) or "\x00" in item for item in argv)
                 or not argv[0] or isinstance(seconds, bool)
                 or not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
                 or seconds <= 0):
             raise ValueError("invalid argv or time limit")
-        directory = Path(arguments["working_directory"]).resolve(strict=True)
+        if not arguments.get("working_directory") and self.default_directory is None:
+            raise ValueError("working_directory is required here")
+        directory = Path(arguments.get("working_directory") or self.default_directory).resolve(strict=True)
         if not directory.is_dir():
             raise ValueError("working directory must be a directory")
         # Check every argv element, including wrapper arguments and explicit

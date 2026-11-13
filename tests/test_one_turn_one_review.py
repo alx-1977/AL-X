@@ -516,8 +516,12 @@ class OneTurnOneReviewTests(unittest.TestCase):
             clock=lambda: later, turn_bound_capabilities=TURN_BOUND, approval_exempt_when=EXEMPT,
         ).process(conversation, RETENTION, 4)
         self.assertEqual(self.dispatched, [REQUEST_REVIEW_BEYOND_ALLOWANCE])
-        self.assertIn("repeated_rejected_call",
-                      [item.reason_code for item in outcome.snapshot.state.attempts])
+        [repeat] = [item for item in outcome.snapshot.state.attempts
+                    if item.reason_code == "repeated_rejected_call"]
+        # 2026-11-13: she reused the refused approval after his "go" and cost
+        # him a third; the refusal now tells her what repairs it.
+        # His "Try again." is already the source a new approval needs.
+        self.assertIn("latest message", repeat.reason_detail)
 
     def _executed(self, call):
         self.dispatched.append(_dispatched_as(call))

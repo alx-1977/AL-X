@@ -134,6 +134,40 @@
   // The wave page asks to close on its own Esc too.
   window.addEventListener('message', (event) => { if (event.data?.type === 'bhl-field-close') close(); });
 
+  // Her measurements of her copy against the datasheet layout, red where
+  // they differ, or plainly marked as not checked (2026-11-13).
+  function checkedBlock(checked) {
+    const box = $('checked');
+    box.replaceChildren();
+    box.hidden = !checked;
+    if (!checked) return;
+    const head = document.createElement('div');
+    head.className = 'checked-head ' + (checked.no_layout ? 'warn' : checked.differs ? 'bad' : 'ok');
+    head.textContent = checked.no_layout ? 'Not checked against a datasheet'
+      : `Checked against ${checked.document} p.${checked.page}`;
+    box.append(head);
+    if (checked.no_layout) {
+      const why = document.createElement('small');
+      why.textContent = checked.no_layout;
+      box.append(why);
+      return;
+    }
+    const mm = (v) => Number(v).toFixed(2);
+    for (const row of checked.rows) {
+      const line = document.createElement('div');
+      line.className = 'checked-row ' + row.tone;
+      const what = document.createElement('span');
+      what.textContent = row.what;
+      const values = document.createElement('span');
+      values.textContent = `${mm(row.datasheet_mm)} / ${mm(row.board_mm)}`;
+      line.append(what, values);
+      box.append(line);
+    }
+    const key = document.createElement('small');
+    key.textContent = 'datasheet / amended, mm';
+    box.append(key);
+  }
+
   function column(display) {
     $('context').textContent = display.context || '';
     $('title').textContent = display.title || '';
@@ -154,6 +188,7 @@
       }
       items.append(tag);
     }
+    checkedBlock(display.checked);
     $('note').textContent = display.note || '';
     $('said').textContent = display.said || '';
     $('saidBox').hidden = !display.said;

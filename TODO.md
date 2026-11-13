@@ -126,6 +126,26 @@ inadequate.
 
 Not yet usable.
 
+- [ ] **Board-design tool, next round (parked 2026-11-12 so the KiCad work
+  does not pull everything else in; build as one change, mockup first).**
+  - Layout check: list every dimension and value in the whole datasheet,
+    mechanically from the PDF text; she accounts for each (matches, differs
+    with his value, not applicable) and may set aside a page only with a
+    reason. Shown on Würth's own drawing, unchecked items amber; no green
+    verdict while any are open.
+  - Footprint against the datasheet land pattern (AE2's had two pads
+    missing and pads off-centre; the manufacturer's CAD file was wrong).
+  - Friedl's layout rules in her KiCad instructions, checked mechanically:
+    copper wider than the pad it leaves or meets joins through a teardrop,
+    never a step. A tested teardrop helper.
+  - Review rule in her tool instructions: correct on a copy, show Current
+    and Amended, then one short line on intent; never ask him how to review.
+  - Viewer: long captions can crowd the boards (Greptile, #234; deferred).
+  - For AL/X now: AE1's 1.2 mm feed meets C61's 0.5 mm pad and the antenna
+    pad with a hard step; redo with teardrops.
+- [ ] Thermal simulation of a PCB (layered board heat model from the KiCad
+  copper, part powers in, part temperatures and a heat map out). Needs a
+  decision and a first test board with measured temperatures.
 - [ ] Calendar / scheduling.
 - [ ] Altium / Nexar ECAD integration.
 - [ ] JLC/BOM matching and sourcing assistance.

@@ -41,8 +41,11 @@ except ValueError as error:
 extra = add_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])
 remove_copper(b, extra.m_Uuid.AsString())
 print("removed", len(copper_shapes(b, "SIDE")))
+set_field(b, "U1", "MPN", "CC0402FRNPO9BN820")
+set_field(b, "U1", "MPN", "GCM1555C1H820JA16D")
 save(b)
 print("result", len(before), mine["shape"], sorted(mine["corners"]))
+print("fields", fields(load(), "U1"))
 '''
         with tempfile.TemporaryDirectory() as folder:
             board = Path(folder) / "board.kicad_pcb"
@@ -53,6 +56,9 @@ print("result", len(before), mine["shape"], sorted(mine["corners"]))
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("guard this zone has no outline", done.stdout)
             self.assertIn("removed 1", done.stdout)
+            # A new field keeps its own name in KiCad 10, and setting it again changes it.
+            self.assertIn("'MPN': 'GCM1555C1H820JA16D'", done.stdout)
+            self.assertIn("'Datasheet': ''", done.stdout)
             self.assertIn("result 1 polygon [(14.4, 9.0), (14.7, 10.0), (15.3, 10.0), (15.6, 9.0)]", done.stdout)
 
 if __name__ == "__main__":

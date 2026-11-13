@@ -43,6 +43,19 @@ from alx.core.plan_results import (
 
 LOGGER = logging.getLogger(__name__)
 
+# One instruction from Friedl allows one approved call of a kind. What she is
+# told when a call is refused for that, or repeats an approval already refused
+# (2026-11-13: a reused approval cost him a third "go").
+_FRESH_APPROVAL_NEEDED = (
+    "One instruction from Friedl allows one approved call of this kind, and it was used "
+    "in this turn. Ask him; his next instruction is the source of a new approval."
+)
+# A refused approval reused: what repairs it may already be his latest message.
+_NEW_APPROVAL_ID_NEEDED = (
+    "This approval was refused and cannot be reused. Propose a new approval with a new "
+    "approval_id whose source is Friedl's latest message, and send the call with it."
+)
+
 def planned_call_id(prefix: str) -> str:
     """A fresh identity for one planned dispatch.
 
@@ -133,6 +146,20 @@ def _validate_raised_mail(
     """Refuse decisions naming observations absent from their mail context."""
     if len(_in_context_raised_mail(decision, events)) != len(decision.raised_mail_observations):
         raise DecisionValidationError("raised_mail_observation_not_in_context")
+
+
+# Her words to Friedl, enforced rather than asked for (2026-11-13: replies of
+# 71, 78, 116 and 129 words in one morning, after the same rule as text alone
+# had been strengthened several times). The rest belongs in detail.
+RESPONSE_WORD_LIMIT = 50
+
+
+def _validate_response_length(decision: AgentDecision) -> None:
+    """Refuse a reply longer than Friedl wants to hear; she shortens it."""
+    if decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT:
+        raise DecisionValidationError(
+            "response_over_%d_words: say the outcome and anything he must decide; "
+            "figures, checks and background go in detail" % RESPONSE_WORD_LIMIT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -782,6 +809,7 @@ class CoreAgent:
                 self._emit_reasoning(purpose, purpose_reference, conversation_id)
                 decision = self._reasoner.decide(reasoning_context)
                 _validate_raised_mail(decision, conversation.events)
+                _validate_response_length(decision)
             except AutonomousReasoningDisabled as error:
                 LOGGER.info("Autonomous reasoning is disabled: %s", error)
                 return CoreOutcome(
@@ -1433,6 +1461,7 @@ class CoreAgent:
                     False,
                     reason_code="approval_capability_already_dispatched",
                     recorded_at=now,
+                    reason_detail=_FRESH_APPROVAL_NEEDED,
                 )
                 snapshot = self._store.replace(
                     replace(
@@ -2969,6 +2998,12 @@ class CoreAgent:
         refusal = CapabilityAttempt(
             call, CapabilityAttemptDisposition.REJECTED, False,
             reason_code="repeated_rejected_call", recorded_at=now,
+            # An approval refusal is repaired only by a fresh approval; say so,
+            # rather than leave her to find it in the source (2026-11-13).
+            reason_detail=(_NEW_APPROVAL_ID_NEEDED
+                           if call.approval_id is not None
+                           and earlier.reason_code in self._CORRECTABLE_REJECTION_REASONS
+                           else None),
             repeated_call_id=earlier.call.call_id,
             repeated_recorded_at=earlier.recorded_at,
             repeated_reason_code=earlier.reason_code,

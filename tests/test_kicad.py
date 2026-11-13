@@ -354,6 +354,13 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual((self.project / 'test.kicad_prl').read_text(), '{"board": {"active_layer": 31}}')
         self.assertTrue((self.project / 'backups' / 'test-2026-11-12_110000.zip').exists())
 
+    def test_common_script_failures_say_what_they_mean(self):
+        """2026-11-13: DRC run from inside a script, and a guessed pcbnew name, five times."""
+        from alx.providers.kicad import script_hint
+        self.assertIn('action check', script_hint('PermissionError: [Errno 1] Operation not permitted'))
+        self.assertIn('set_field', script_hint("AttributeError: 'FOOTPRINT' object has no attribute 'GetFieldByName'"))
+        self.assertEqual(script_hint('ValueError: mine'), '')
+
     def test_a_kicad_crash_is_reported_as_a_crash_with_its_usual_cause(self):
         checked = self.check()
         original = self.run_cli
@@ -575,6 +582,23 @@ class KiCadTests(unittest.TestCase):
         backups = list(self.settings.work_root.rglob('backups/*/test.kicad_pcb'))
         self.assertTrue(backups)
         self.assertTrue(all(p.read_text() == BOARD for p in backups))
+
+    def test_a_schematic_change_writes_back_and_a_stray_file_is_named(self):
+        """2026-11-13: a part change on C62 and C66 edited two schematic sheets."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
+            EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        written = self.success('write_back_kicad_board', **self.write_args(edited))
+        self.assertIn(str(self.project / 'test.kicad_sch'), written['written'])
+        self.assertIn('version 2', (self.project / 'test.kicad_sch').read_text())
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
+            EDIT_SCRIPT + "p.with_name('notes.txt').write_text('mine')\n"))
+        result = self.call('write_back_kicad_board', **self.write_args(edited))
+        self.assertEqual(result.failure['code'], 'unsupported_project')
+        self.assertEqual(list(result.failure['recovery']['not_design_files']), ['notes.txt'])
+        self.assertFalse((self.project / 'notes.txt').exists())
 
     def two_file_write(self):
         checked = self.check()
