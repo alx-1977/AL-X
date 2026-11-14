@@ -158,11 +158,11 @@ Not yet usable.
     decisions that matter. On 13 Nov she typed U.FL readings instead of using
     check_layout, buried a missing keep-out under an "ok", and said the U.FL
     part did not exist when asked about it.
-  - The independent check cannot see drawings: the worker gets only a
-    datasheet's text, never its pages as images (`look` is not in
-    WORKER_CAPABILITIES and the worker loop passes no tool_images). On 13
-    Nov her second check of five IC land patterns failed for that reason.
-    Next batch: give the worker `look` and pass its images to the model.
+  - Done on this branch (D-081, 14 Nov): the worker looks at drawings
+    itself; check_layout reads words with `pdftotext -tsv` (`-bbox` crashed
+    on an onsemi datasheet); `look` names its page area `section` both ways;
+    a stop for steps, step limit or a repeated refused call opens with a
+    system-written line saying whether she waits for him.
 - [ ] **AL/X's KiCad jobs (not code):** the land-pattern audit of the 86
   footprints outside FireFli_Resistors and FireFli_Capacitors (Connectors
   done 13 Nov; Friedl: match the datasheet without asking, one write-back

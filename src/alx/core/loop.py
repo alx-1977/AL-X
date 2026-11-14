@@ -127,6 +127,32 @@ class CoreState(str, Enum):
     ERROR = "error"
 
 
+# Why a turn stopped, in his words. Her own account of a stop was wrong twice
+# on 14 Nov ("I'll carry on without needing you" when the goal was parked; a
+# refused argument told as a page that "failed to load"), so the line that
+# says whether she is waiting for him is written here, from her goal's state.
+STOP_CAUSES = {
+    "budget_exhausted": "this request used all my steps",
+    "budget_exceeded": "this task reached its step limit",
+    "repeated_rejected_call": "I repeated a request that had already been refused",
+}
+WAITING_LINE = "I've stopped: %s. Nothing more happens until you tell me to carry on."
+CONTINUING_LINE = "My planned work carries on by itself; you don't need to do anything."
+
+
+def stop_line(reason: str, state: GoalState | None, plan_executing: bool) -> str | None:
+    """The fact a stopped turn opens with: waiting for him, or carrying on."""
+    # Only these stops are known to wait for him; a blocker such as a review
+    # in progress may resume without him, so it gets no line.
+    if state is None or reason not in STOP_CAUSES:
+        return None
+    if state.status in (GoalStatus.AWAITING_INPUT, GoalStatus.BLOCKED):
+        return WAITING_LINE % STOP_CAUSES[reason]
+    if state.status is GoalStatus.ACTIVE and plan_executing:
+        return CONTINUING_LINE
+    return None
+
+
 def _in_context_raised_mail(
     decision: AgentDecision, events: Sequence[BackgroundEvent],
 ) -> tuple[MailReference, ...]:
@@ -1687,8 +1713,15 @@ class CoreAgent:
             LOGGER.info("Terminal checkpoint response rejected: not response only")
             return CoreOutcome(CoreState.CHECKPOINTED, snapshot, reason=reason)
         snapshot = self._record_go_requests(snapshot, conversation, decision, provenance, self._clock())
+        response = decision.response
+        if park or reason == "budget_exhausted":
+            # budget_exhausted parked its goal before coming here.
+            line = stop_line(reason, None if snapshot is None else snapshot.state,
+                             snapshot is not None and self._plan_is_executing(snapshot.state))
+            if line:
+                response = "%s %s" % (line, response)
         return CoreOutcome(
-            CoreState.RESPONDED, snapshot, response=decision.response,
+            CoreState.RESPONDED, snapshot, response=response,
             raised_mail_observations=decision.raised_mail_observations,
             reason=reason, response_provenance=provenance,
         )

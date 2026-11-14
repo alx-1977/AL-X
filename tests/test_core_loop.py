@@ -401,6 +401,39 @@ class CategoryARecoveryTests(unittest.TestCase):
         self.assertEqual(reasoner.contexts[-1].response_only_reason, "budget_exhausted")
         self.assertEqual(len(dispatched), 1)
 
+    def test_a_turn_that_runs_out_with_work_left_says_it_waits(self) -> None:
+        """14 Nov: she said "I'll carry on without needing you" while her goal
+        was parked waiting for Friedl. The line saying so is written for her."""
+        self.store.create(goal(outstanding_work=(WorkItem("work-1", "Semiconductors"),)),
+                          "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-2", "inspect", {})),
+            AgentDecision(response="Misc is done; Semiconductors remain."),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.reason, "budget_exhausted")
+        self.assertEqual(outcome.response,
+                         "I've stopped: this request used all my steps. Nothing more happens until "
+                         "you tell me to carry on. Misc is done; Semiconductors remain.")
+
+
+class StopLineTests(unittest.TestCase):
+    def test_the_line_follows_the_goal_not_her_words(self) -> None:
+        from alx.core.loop import CONTINUING_LINE, stop_line
+        waiting = goal(status=GoalStatus.AWAITING_INPUT, stop_reason=GoalStopReason.REQUIRED_INPUT,
+                       outstanding_work=(WorkItem("work-1", "Semiconductors"),))
+        self.assertIn("used all my steps", stop_line("budget_exhausted", waiting, False))
+        self.assertIn("already been refused", stop_line("repeated_rejected_call", waiting, False))
+        # Any other stop, such as a review in progress, may resume without him.
+        self.assertIsNone(stop_line("merge_blocked", waiting, False))
+        # A plan still running carries on; nothing is asked of him.
+        self.assertEqual(stop_line("budget_exhausted", goal(), True), CONTINUING_LINE)
+        self.assertIsNone(stop_line("budget_exhausted", goal(), False))
+        self.assertIsNone(stop_line("budget_exhausted", None, False))
+
 
 class CoreTests(unittest.TestCase):
     def setUp(self) -> None:

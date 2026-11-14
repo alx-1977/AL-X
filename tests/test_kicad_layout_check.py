@@ -21,7 +21,7 @@ from kicad_actions import kicad_call  # noqa: E402
 from alx.bootstrap.kicad import build_kicad_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.providers.coding_process import kicad_containment_available  # noqa: E402
-from alx.providers.layout_check import read_numbers  # noqa: E402
+from alx.providers.layout_check import extract_words, read_numbers  # noqa: E402
 
 KICAD = Path("/Applications/KiCad/KiCad.app")
 POPPLER = Path("/opt/homebrew/bin/pdftotext")
@@ -62,6 +62,30 @@ class NumberReadingTests(unittest.TestCase):
 
 @unittest.skipUnless(KICAD.is_dir() and POPPLER.is_file() and kicad_containment_available(),
                      "KiCad or poppler is not installed")
+class WordReaderTests(unittest.TestCase):
+    """Words are read from pdftotext's table output (-tsv): -bbox crashed on
+    every page of an onsemi datasheet on 14 Nov."""
+
+    def test_words_and_boxes_come_from_the_table_rows(self) -> None:
+        table = ("level\tpage_num\tpar_num\tblock_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+                 "1\t1\t0\t0\t0\t0\t0.00\t0.00\t842.00\t595.00\t-1\t###PAGE###\n"
+                 "5\t1\t0\t0\t0\t0\t100.00\t50.00\t12.50\t10.00\t100\t2.54\n"
+                 "5\t1\t0\t0\t0\t1\t120.00\t50.00\t8.00\t10.00\t100\tR&D\n")
+
+        def execute(program, arguments, folder):
+            self.assertIn("-tsv", arguments)
+            (Path(folder) / arguments[-1]).write_text(table)
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        with tempfile.TemporaryDirectory() as folder:
+            pdf = Path(folder) / "sheet.pdf"
+            pdf.write_bytes(b"%PDF-1.4")
+            program = Path(folder) / "pdftotext"
+            program.write_text("")
+            words = extract_words(pdf, 1, scratch_root=Path(folder) / "scratch", extractor=program,
+                                  execute=execute)
+        self.assertEqual(words, [(100.0, 50.0, 112.5, 60.0, "2.54"), (120.0, 50.0, 128.0, 60.0, "R&D")])
+
+
 class RealLayoutCheckTests(unittest.TestCase):
     def test_kicad_measures_and_an_edit_makes_the_check_stale(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

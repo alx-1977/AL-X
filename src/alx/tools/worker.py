@@ -22,8 +22,11 @@ MAX_CALLS = 80
 # Friedl's files or changes her own attention. run_program is not here: it
 # runs any command as Friedl's user, which no fixed limit here can bound
 # (review of #207).
+# look reads her own page images (datasheet drawings); it changes nothing
+# (14 Nov: the worker could not read a land-pattern drawing without it).
 WORKER_CAPABILITIES = (
     "kicad",
+    "look",
     "compile_particle_firmware",
     "read_own_goals",
     "read_mail_document",

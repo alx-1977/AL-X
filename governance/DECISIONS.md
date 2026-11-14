@@ -3045,3 +3045,14 @@ This grants no authority a single goal update lacks: completion still requires s
   - The same call listed twice is one call, and at most six are listed.
   - Requests are kept on every path by which a reply reaches him.
 - **Boundary.** Every write to his files still needs his approval of that exact call. The list only fixes, before he answers, which calls his go covers. No new Law exception.
+
+## D-081 — Cheaper reading, and her stop told as it is
+
+- **Date:** 2026-11-14
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-14** ("yeas seems good", to: give the worker the drawings so routine reading runs on its cheaper model, fix the PDF reader, and have the system write the line saying she has stopped; "IF we can get ALX to work reliably, I do not mind upgrading, but at this stage I am not yet convinced"). In the morning's library audit she ran out of her allowance by midday. She read every drawing herself on Core, because the worker could not see images. `check_layout`'s word reader crashed on every page of one onsemi datasheet, and her helper retried six times. Twice she told him the wrong thing about a stop: "I'll carry on without needing you" when her goal was parked waiting for him, and a refused argument told as a page that "failed to load".
+- **The worker may look (amends D-070).** `look` (no side effect) joins the worker's capabilities. The picture a succeeded look call names by digest goes with the worker's next step only, as Core's does (D-075). It is never written to a goal or a report.
+- **Datasheet words read as a table.** `check_layout` reads a page's words with `pdftotext -tsv`, the same boxes `-bbox` gave, which crashed (poppler 26.04).
+- **One name for a page area.** `look` returns the area it drew as `section`, the name it is called with. Before, it returned `section_points`; she copied that name back into her next call, and the call was refused.
+- **Her stop told as it is.** When a turn ends because its steps ran out, a task reached its step limit, or she repeated a refused call, her reply opens with a line written from her goal's state. If the goal is parked: "I've stopped: <why>. Nothing more happens until you tell me to carry on." If a plan is still carrying the work: "My planned work carries on by itself; you don't need to do anything." Other stops get no line, because one such as a review in progress may resume without him.
+- **Boundary.** No new Law exception; the worker gains no write.

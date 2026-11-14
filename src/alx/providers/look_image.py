@@ -183,7 +183,9 @@ def look(
         image = png(width, height, pixels)
         facts = {"kind": "pdf_page", "page": page, "page_count": count,
                  "page_size_points": [round(page_width, 2), round(page_height, 2)],
-                 "section_points": [round(v, 2) for v in box],
+                 # The name she passes it with (14 Nov: "section_points" was copied
+                 # back as an argument and refused).
+                 "section": [round(v, 2) for v in box],
                  "grid": {"step_points": step, "origin": "top left of the page",
                           "labels": "points, along the top and left edges"},
                  "points_per_pixel": round((box[2] - box[0]) / (width - LEFT_MARGIN), 4)}

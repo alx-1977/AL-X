@@ -13,7 +13,6 @@ only after Friedl has confirmed it.
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import re
 import shutil
@@ -31,7 +30,10 @@ ANCHORS = ("centre", "left", "right", "top", "bottom")
 UNITS = {"pf", "nf", "uf", "µf", "ph", "nh", "uh", "µh", "mh", "ω", "ohm", "kω", "mω", "hz", "khz",
          "mhz", "ghz", "db", "dbi", "dbm", "v", "mv", "a", "ma", "w", "mw", "%", "°c", "s", "ms"}
 _NUMBER = re.compile(r"^\d{1,4}(?:[.,]\d{1,4})?$")
-_WORD = re.compile(r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</word>')
+# pdftotext -tsv, one row per word: level 5, then left, top, width and height
+# in points and the word. -bbox crashed on every page of an onsemi datasheet
+# (poppler 26.04, 14 Nov) where -tsv reads the same boxes.
+_WORD_LEVEL = "5"
 
 
 class LayoutCheckError(Exception):
@@ -84,12 +86,23 @@ def extract_words(document: Path, page: int, *, scratch_root: Path, extractor: P
     run.mkdir(parents=True)
     try:
         shutil.copyfile(document, run / "document.pdf")
-        executed = execute(extractor, ["-f", page, "-l", page, "-bbox", "document.pdf", "words.html"], run)
-        output = run / "words.html"
+        executed = execute(extractor, ["-f", page, "-l", page, "-tsv", "document.pdf", "words.tsv"], run)
+        output = run / "words.tsv"
         if getattr(executed, "returncode", 1) or not output.is_file():
             raise LayoutCheckError("page_failed", (getattr(executed, "stderr", "") or "")[-1000:])
-        return [(float(a), float(b), float(c), float(d), html.unescape(text).strip())
-                for a, b, c, d, text in _WORD.findall(output.read_text(errors="replace"))]
+        words = []
+        for row in output.read_text(errors="replace").splitlines()[1:]:
+            cells = row.split("\t")
+            if len(cells) < 12 or cells[0] != _WORD_LEVEL:
+                continue
+            try:
+                left, top, width, height = (float(cell) for cell in cells[6:10])
+            except ValueError:
+                continue
+            text = "\t".join(cells[11:]).strip()
+            if text:
+                words.append((left, top, left + width, top + height, text))
+        return words
     finally:
         shutil.rmtree(run, ignore_errors=True)
 
