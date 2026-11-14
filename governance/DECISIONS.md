@@ -3065,4 +3065,5 @@ This grants no authority a single goal update lacks: completion still requires s
   - A check names the library footprint it measured, and the screen refuses it beside another footprint.
   - Numbers read from a picture are marked ◦ on his screen, with "read from a picture" in the summary.
   - A footprint names a library work copy, never a board path.
+- **A shaped pad measured arm by arm (2026-11-14).** Würth dimensions the L-shaped feed pad 4 of 7488918022 arm by arm (strip height 1.2; edges 0.6 and 14.0), and a pad could only be measured whole. A reading may now name one arm by a point on it, in mm from the part's centre: `{pad_size: REF.PAD, at: [x, y], axis}` is the width of the pad's copper on the line through that point, and `REF.PAD@x,y:left|right|top|bottom` is the edge of its copper there. Pads that share a number are measured as one pad; a custom pad is often drawn beside a tiny pad of the same number. Proven on P0020's AE1: all ten of Würth's numbers match. The FireFli library copy fails on pad 4, which there is only a 0.025 mm dot.
 - **Boundary.** No new Law exception; the worker gains no write.

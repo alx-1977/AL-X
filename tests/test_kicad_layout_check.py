@@ -62,6 +62,23 @@ class NumberReadingTests(unittest.TestCase):
 
 @unittest.skipUnless(KICAD.is_dir() and POPPLER.is_file() and kicad_containment_available(),
                      "KiCad or poppler is not installed")
+class ArmReadingTests(unittest.TestCase):
+    """14 Nov: Würth dimensions the L-shaped pad 4 of 7488918022 arm by arm."""
+
+    def test_an_arm_is_named_by_a_point_on_it(self) -> None:
+        from alx.providers.layout_check import label, measurement
+        self.assertEqual(measurement({"pad_size": "AE1.4", "at": [1, 7.5], "axis": "y"}),
+                         {"kind": "pad_size", "pad": ("AE1", "4"), "axis": "y", "at": [1.0, 7.5]})
+        edge = measurement({"distance": ["AE1.4@-2.25,7:bottom", "AE1.2:bottom"], "axis": "y"})
+        self.assertEqual(edge["from"], ("AE1", "4", "bottom", [-2.25, 7.0]))
+        self.assertEqual(label({"pad_size": "AE1.4", "at": [1, 7.5], "axis": "y"}), "AE1.4 at 1,7.5 height")
+        for wrong in ("AE1.4@x:bottom", "AE1.4@1,2:centre", "AE1@1,2:bottom"):
+            with self.assertRaises(ValueError):
+                measurement({"distance": [wrong, "AE1.2:bottom"], "axis": "y"})
+        with self.assertRaises(ValueError):
+            measurement({"pad_size": "AE1.4", "at": [1], "axis": "y"})
+
+
 class WordReaderTests(unittest.TestCase):
     """Words are read from pdftotext's table output (-tsv): -bbox crashed on
     every page of an onsemi datasheet on 14 Nov."""
