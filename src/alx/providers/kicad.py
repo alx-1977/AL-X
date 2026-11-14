@@ -67,6 +67,14 @@ def bounded(path, roots, *, protected=True):
     return resolved
 
 
+_LOCAL_HISTORY_DIRECTORIES = frozenset({'.git', '.history'})
+
+
+def _local_history_directory(path):
+    """Only real history directories are skipped; links still fail validation."""
+    return path.name in _LOCAL_HISTORY_DIRECTORIES and not path.is_symlink() and path.is_dir()
+
+
 def inventory(root, *, exclude=frozenset()):
     exclude = frozenset(exclude)
     result = {}
@@ -76,10 +84,12 @@ def inventory(root, *, exclude=frozenset()):
     def walk():
         # Excluded paths are pruned before they are entered, so an excluded
         # tree costs nothing and cannot hide work from the entry limit
-        # (review of #208). Only exact paths, never a filename pattern.
+        # (review of #208). KiCad's local git/history directories are not
+        # design content, at any depth; never enter or validate their contents.
         for directory, folders, files in os.walk(root):
             here = Path(directory)
-            folders[:] = [name for name in folders if here / name not in exclude]
+            folders[:] = [name for name in folders if here / name not in exclude
+                          and not _local_history_directory(here / name)]
             for name in (*folders, *files):
                 if here / name not in exclude:
                     yield here / name
@@ -101,25 +111,17 @@ def inventory(root, *, exclude=frozenset()):
     return result
 
 
-# KiCad keeps its own automatic save history in this folder at the top of a
-# project, as a git repository. It is KiCad's history, not the design, and its
-# `.git` made every saved project look like a credential path: on 2026-11-05
-# Friedl's Quad Coil project was refused outright. Exactly this one folder at
-# the top of a design is skipped; the credential check stays everywhere else.
-KICAD_LOCAL_HISTORY = '.history'
-
-
 def not_design(source):
     """What KiCad keeps beside a design that is not the design, by exact path.
 
-    Its save history, its backup folder (named `backups` in Friedl's layout,
+    Its backup folder (named `backups` in Friedl's layout,
     `<project>-backups` by default) and each project's local settings file,
     which KiCad rewrites on every open and close. On 2026-11-12 the backups
     were 31 of the 48 MB copied into every work copy and its evidence, and a
     rewritten settings file twice refused a write-back as a changed board.
     """
     stems = sorted(path.stem for path in source.glob('*.kicad_pro'))
-    names = {KICAD_LOCAL_HISTORY, 'backups', *(stem + '-backups' for stem in stems),
+    names = {'backups', *(stem + '-backups' for stem in stems),
              *(stem + '.kicad_prl' for stem in stems)}
     return {source / name for name in names}
 
@@ -209,7 +211,9 @@ def _without_local_history(source):
     skipped = {path.name for path in not_design(source)}
 
     def ignore(directory, names):
-        return [name for name in names if name in skipped] if Path(directory) == source else []
+        here = Path(directory)
+        return [name for name in names if _local_history_directory(here / name)
+                or (here == source and name in skipped)]
     return ignore
 
 
@@ -1251,6 +1255,7 @@ class KiCadProvider:
             relative = Path(arguments['output_dir'])
             if (relative.is_absolute() or not relative.parts
                     or any(p in ('.', '..') for p in relative.parts)
+                    or any(p in _LOCAL_HISTORY_DIRECTORIES for p in relative.parts)
                     # What KiCad keeps beside the design is never written to (review of #208).
                     or self._source(meta['source']) / relative.parts[0] in not_design(
                         self._source(meta['source']))):
@@ -1731,9 +1736,11 @@ class KiCadProvider:
 
         def validate():
             self._source(source)
-            if list(source.rglob('~*.lck')):
-                raise KiCadError('board_open')
             current = (library_inventory if meta.get('library') else design_inventory)(source, exclude=temporary)
+            locks = (source.rglob('~*.lck') if meta.get('library') else
+                     (name for name in current if Path(name).match('~*.lck')))
+            if any(locks):
+                raise KiCadError('board_open')
             if current != expected:
                 raise KiCadError('original_changed')
         validate()

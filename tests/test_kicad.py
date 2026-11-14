@@ -278,46 +278,88 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
-    def test_kicads_own_save_history_is_skipped_and_git_elsewhere_still_refused(self):
-        """2026-11-05: KiCad's `.history/.git` made Friedl's saved project look
-        like a credential path, and every check of it was refused."""
-        history = self.project / '.history' / '.git'
-        history.mkdir(parents=True)
-        (history / 'config').write_text('[core]')
-        checked = self.check()
-        copy = self.storage / 'kicad' / checked['work_copy_id'] / 'project'
-        self.assertTrue((copy / 'test.kicad_pcb').exists())
-        self.assertFalse((copy / '.history').exists())
-        # KiCad saving its history meanwhile does not block writing back.
-        fixed = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
-                             script=EDIT_SCRIPT)
-        (history / 'HEAD').write_text('ref: refs/heads/master')
-        self.success('write_back_kicad_board', **self.write_args(fixed))
-        # Exports cannot be put into it (review of #208), and it is never entered.
-        self.failure('path_denied', 'export_kicad_manufacturing',
-                     work_copy_id=checked['work_copy_id'], output_dir='.history/gerbers')
-        from unittest.mock import patch as patched
-        import os as os_module
+    def local_history(self):
+        paths = ('.git/HEAD', '.history/.git/HEAD', 'sub/.git/HEAD',
+                 'sub/.history/.git/HEAD', '.history-old/.git/HEAD')
+        for name in paths:
+            path = self.project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('ref: refs/heads/main')
+        return paths
+
+    def test_local_history_is_pruned_from_inventory_and_work_copies_at_every_depth(self):
+        original = inventory(self.project)
+        self.local_history()
+        # Even unsafe entries inside history are never inspected.
+        (self.project / '.git' / 'escape').symlink_to(self.root, target_is_directory=True)
         entered = []
-        real_walk = os_module.walk
+        real_walk = os.walk
 
         def watching(top, *args, **kwargs):
             for directory, folders, files in real_walk(top, *args, **kwargs):
                 entered.append(Path(directory).name)
                 yield directory, folders, files
-        with patched('alx.providers.kicad.os.walk', watching):
-            self.check()
+        with patch('alx.providers.kicad.os.walk', watching):
+            self.assertEqual(inventory(self.project), original)
+            checked = self.check()
         self.assertNotIn('.history', entered)
         self.assertNotIn('.git', entered)
-        # Only that one folder at the top of the design is skipped.
-        for name in ('.git/config', 'sub/.history/.git/config', '.history-old/.git/config'):
+        copy = self.storage / 'kicad' / checked['work_copy_id'] / 'project'
+        self.assertEqual(inventory(copy), original)
+        self.assertFalse(any(path.name in ('.git', '.history') for path in copy.rglob('*')))
+        self.assertTrue((copy / 'test.kicad_pcb').exists())
+        for output in ('.history/gerbers', '.git/gerbers', 'sub/.history/gerbers', 'sub/.git/gerbers'):
+            self.failure('path_denied', 'export_kicad_manufacturing',
+                         work_copy_id=checked['work_copy_id'], output_dir=output)
+
+    def test_write_back_preserves_original_history_and_ignores_work_copy_history(self):
+        paths = self.local_history()
+        fixed = self.fixed()
+        copy = self.storage / 'kicad' / fixed['work_copy_id'] / 'project'
+        for name in paths:
+            # History can change independently on both sides after copying.
+            (self.project / name).write_text('original history advanced')
+            path = copy / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('unrelated work-copy history')
+        lock = self.project / 'sub' / '.history' / '~saved.kicad_pcb.lck'
+        lock.write_text('historical lock')
+        history_entries = [path for path in self.project.rglob('*')
+                           if any(part in ('.git', '.history')
+                                  for part in path.relative_to(self.project).parts)]
+
+        def snapshot():
+            return {path.relative_to(self.project).as_posix(): (
+                path.stat().st_ino, path.stat().st_mode, path.stat().st_mtime_ns,
+                path.read_bytes() if path.is_file() else None) for path in history_entries}
+
+        before = snapshot()
+        written = self.success('write_back_kicad_board', **self.write_args(fixed))
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(list(written['written']), [str(self.project / 'test.kicad_pcb')])
+        self.assertEqual((self.project / 'test.kicad_pcb').read_bytes(),
+                         (copy / 'test.kicad_pcb').read_bytes())
+
+    def test_history_pruning_preserves_credential_and_symlink_refusals(self):
+        for name in ('.git', '.history', 'linked', 'nested/.git', 'nested/.history'):
             path = self.project / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('[core]')
+            path.symlink_to(self.project, target_is_directory=True)
             with self.subTest(name=name):
+                with self.assertRaisesRegex(KiCadError, 'path_denied'):
+                    inventory(self.project)
                 self.failure('path_denied', 'check_kicad_board', project_dir=str(self.project))
-            import shutil
-            shutil.rmtree(self.project / name.split('/')[0])
+            path.unlink()
+        self.local_history()
+        for name in ('nested/credentials.json', 'cert.key', '.git-file/.git'):
+            path = self.project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('private')
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(KiCadError, 'path_denied'):
+                    inventory(self.project)
+                self.failure('path_denied', 'check_kicad_board', project_dir=str(self.project))
+            path.unlink()
 
     def test_cli_failure_diagnostics_never_include_board_content(self):
         private = '(gr_text "private board text")'
@@ -359,7 +401,7 @@ class KiCadTests(unittest.TestCase):
         (self.project / 'backups' / 'test-2026-11-12_110000.zip').write_bytes(b'zip2')
         from alx.providers.kicad import design_inventory, not_design
         self.assertEqual({path.name for path in not_design(self.project)},
-                         {'.history', 'backups', 'test-backups', 'test.kicad_prl'})
+                         {'backups', 'test-backups', 'test.kicad_prl'})
         names = set(design_inventory(self.project))
         self.assertIn('test.kicad_pcb', names)
         self.assertFalse(any(name.startswith(('backups', 'test-backups')) or name == 'test.kicad_prl'
