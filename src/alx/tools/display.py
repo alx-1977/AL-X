@@ -264,7 +264,8 @@ MAX_ROWS = 16
 
 
 def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | None] | None,
-             work_copies: set[str], shown_document: str | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+             work_copies: set[str], shown_document: str | None = None,
+             footprints: set[str] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """What KiCad measured on her copy against the manufacturer's drawing (2026-11-13).
 
     She twice showed Friedl a layout with a clean DRC that differed from
@@ -289,6 +290,9 @@ def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | 
         raise ValueError("there is no layout check " + check_id)
     if work_copies and result.get("work_copy_id") not in work_copies:
         raise ValueError("that layout check is not of the copy on screen; check this copy")
+    if footprints and result.get("footprint") not in footprints:
+        # A check of one footprint never stands beside another (review of D-081).
+        raise ValueError("that layout check is of another footprint than the one on screen")
     if shown_document and Path(str(shown_document)).expanduser().resolve() != Path(
             str(result.get("document_path", ""))).expanduser().resolve():
         # A measurement of one part never stands beside another part's datasheet (review of D-080 batch).
@@ -299,7 +303,9 @@ def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | 
     order = {"differs": 0, "unaccounted": 1, "matches": 2}
     numbers.sort(key=lambda n: order.get(n.get("status"), 3))
     tone = {"differs": "bad", "unaccounted": "warn", "matches": "ok"}
-    rows = [{"what": (("≈ " if n.get("basis") else "") + (n.get("measures") or "not accounted for"))[:40],
+    # A number read off a picture by text recognition is marked so on his screen.
+    rows = [{"what": (("≈ " if n.get("basis") else "") + ("◦ " if n.get("read_from") == "picture" else "")
+                      + (n.get("measures") or "not accounted for"))[:40],
              "datasheet_mm": n.get("value"),
              "board_mm": n.get("board_mm"), "tone": tone.get(n.get("status"), "info")}
             for n in numbers[:MAX_ROWS]]
@@ -307,7 +313,8 @@ def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | 
     summary = " · ".join(text for text in (
         f"{counts.get('matches', 0)} match", f"{counts.get('differs', 0)} differ" if counts.get("differs") else "",
         f"{counts.get('unaccounted', 0)} not accounted for" if counts.get("unaccounted") else "",
-        "readings not yet confirmed by Friedl" if result.get("rf") and not result.get("confirmed") else "")
+        "readings not yet confirmed by Friedl" if result.get("rf") and not result.get("confirmed") else "",
+        "◦ read from a picture" if any(n.get("read_from") == "picture" for n in numbers) else "")
         if text)
     checked = {"document": str(result.get("document", ""))[:60], "page": result.get("page"),
                "rows": rows, "summary": summary, "differs": bool(counts.get("differs")),
@@ -369,6 +376,8 @@ def build_display_executors(
                 _text(view.get("sublabel"), 60, "sublabel")
                 if bool(view.get("board")) == bool(view.get("work_copy_id")):
                     raise ValueError("each view names a board or a work_copy_id, not both")
+                if view.get("footprint") and not view.get("work_copy_id"):
+                    raise ValueError("footprint is for a library work copy (work_copy_id)")
                 for key, value in dict(view.get("marks") or {}).items():
                     _tone(value)
                 for dim in view.get("dims") or ():
@@ -389,7 +398,8 @@ def build_display_executors(
                         "library copy) against the manufacturer's drawing; or no_layout with the reason")
                 checked, measured_reference = _checked(
                     arguments["checked"], read_layout_check, copies,
-                    (arguments.get("reference") or {}).get("document"))
+                    (arguments.get("reference") or {}).get("document"),
+                    {view["footprint"] for view in views if view.get("footprint")})
                 if not checked["passed"] and (display["verdict"] or {}).get("tone") == "ok":
                     raise ValueError("the layout check did not pass, so the verdict cannot be ok")
             display["checked"] = checked

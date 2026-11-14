@@ -786,9 +786,11 @@ class KiCadProvider:
             from alx.providers.picture_text import engine, picture_words
             try:
                 recognizer = engine(self.work_root / 'engines', self.build_program)
+                key = hashlib.sha256(json.dumps([document_digest(document), page, list(section)]).encode()).hexdigest()
                 words = picture_words(document, page, section, scratch_root=self.work_root / 'sections',
                                       renderer=self.engine_paths.get('pdftoppm') or Path('/nonexistent'),
-                                      recognizer=recognizer, execute=self.execute_page)
+                                      recognizer=recognizer, execute=self.execute_page,
+                                      cache=self.work_root / 'picture-words' / (key[:32] + '.json'))
             except LayoutCheckError as error:
                 raise KiCadError(error.code, {'detail': error.detail}) from error
             numbers = [dict(number, read_from='picture') for number in read_numbers(words, section)]
@@ -955,6 +957,9 @@ class KiCadProvider:
         result = {'check_id': uuid.uuid4().hex, 'work_copy_id': arguments.get('work_copy_id') or '',
                   'document': document.name, 'document_path': str(document),
                   'page': page, 'section': list(section), 'part': part, 'rf': bool(stored.get('rf')),
+                  # Which library footprint was measured, so the screen never shows
+                  # this check beside another one (review of D-081).
+                  'footprint': arguments.get('footprint') or '',
                   'confirmed': confirmed, 'counts': counts, 'reason': reason,
                   'passed': printed and counts['differs'] == 0 and counts['unaccounted'] == 0
                             and (confirmed or not stored.get('rf')),

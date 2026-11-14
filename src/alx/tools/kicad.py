@@ -282,7 +282,7 @@ CHECK_LAYOUT = CapabilityDefinition('check_kicad_layout',
     obj({**LAYOUT_TARGET, 'readings': array(READING), 'rf': B},
         ('document', 'page', 'section', 'part')),
     obj({'check_id': S, 'work_copy_id': S, 'document': S, 'document_path': S, 'page': I,
-         'section': array(N), 'part': S,
+         'section': array(N), 'part': S, 'footprint': S,
          'rf': B, 'confirmed': B, 'passed': B, 'reason': S, 'counts': MAP, 'numbers': array(MAP),
          'numbers_omitted': I}),
     SideEffect.NONE, FAILURES)
