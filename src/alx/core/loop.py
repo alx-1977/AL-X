@@ -136,11 +136,11 @@ STOP_CAUSES = {
     "budget_exceeded": "this task reached its step limit",
     "repeated_rejected_call": "I repeated a request that had already been refused",
 }
-WAITING_LINE = "I've stopped: %s. Nothing more happens until you tell me to carry on."
+WAITING_LINE = "I've stopped: %s. Tell me to carry on and I'll continue."
 CONTINUING_LINE = "My planned work carries on by itself; you don't need to do anything."
 
 
-def stop_line(reason: str, state: GoalState | None, plan_executing: bool) -> str | None:
+def stop_line(reason: str, state: GoalState | None) -> str | None:
     """The fact a stopped turn opens with: waiting for him, or carrying on."""
     # Only these stops are known to wait for him; a blocker such as a review
     # in progress may resume without him, so it gets no line.
@@ -148,7 +148,13 @@ def stop_line(reason: str, state: GoalState | None, plan_executing: bool) -> str
         return None
     if state.status in (GoalStatus.AWAITING_INPUT, GoalStatus.BLOCKED):
         return WAITING_LINE % STOP_CAUSES[reason]
-    if state.status is GoalStatus.ACTIVE and plan_executing:
+    plan = state.execution_plan
+    # Only a turn that ran out of steps keeps a plan close she gave as a step
+    # held; after any other stop that close is written as the turn ends, so
+    # a running plan may be about to finish (review of D-081). A pending
+    # dispatch alone is no plan carrying the work.
+    if (reason == "budget_exhausted" and state.status is GoalStatus.ACTIVE and plan is not None
+            and plan.status in (PlanStatus.RUNNING, PlanStatus.WAITING)):
         return CONTINUING_LINE
     return None
 
@@ -1716,8 +1722,7 @@ class CoreAgent:
         response = decision.response
         if park or reason == "budget_exhausted":
             # budget_exhausted parked its goal before coming here.
-            line = stop_line(reason, None if snapshot is None else snapshot.state,
-                             snapshot is not None and self._plan_is_executing(snapshot.state))
+            line = stop_line(reason, None if snapshot is None else snapshot.state)
             if line:
                 response = "%s %s" % (line, response)
         return CoreOutcome(

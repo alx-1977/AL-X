@@ -91,7 +91,8 @@ def extract_words(document: Path, page: int, *, scratch_root: Path, extractor: P
         if getattr(executed, "returncode", 1) or not output.is_file():
             raise LayoutCheckError("page_failed", (getattr(executed, "stderr", "") or "")[-1000:])
         words = []
-        for row in output.read_text(errors="replace").splitlines()[1:]:
+        # split on newlines only: splitlines would also cut a word at U+2028 or a form feed
+        for row in output.read_text(errors="replace").split("\n")[1:]:
             cells = row.split("\t")
             if len(cells) < 12 or cells[0] != _WORD_LEVEL:
                 continue
