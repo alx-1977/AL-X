@@ -317,6 +317,9 @@ def compare(numbers: list[dict[str, Any]], entries: Mapping[str, Mapping[str, An
         row = {"id": number["id"], "text": number["text"], "value": number["value"], "at": number["at"]}
         if number.get("basis"):
             row["basis"] = number["basis"]
+        if number.get("read_from"):
+            # Read off a picture by text recognition: she checks it against the drawing.
+            row["read_from"] = number["read_from"]
         if number["unit"]:
             row.update(status="not_applicable", reason="part value (%s)" % number["unit"])
         elif entry.get("not_applicable"):

@@ -50,7 +50,7 @@ _DIM = StructuredSchema(ValueKind.OBJECT, {"from": _POINT, "to": _POINT, "text":
 _VIEW = StructuredSchema(
     ValueKind.OBJECT,
     {"label": _STRING, "sublabel": _STRING, "tone": _STRING,
-     "board": _STRING, "work_copy_id": _STRING, "window": _POINT,
+     "board": _STRING, "work_copy_id": _STRING, "footprint": _STRING, "window": _POINT,
      "refs": _NAMES, "nets": _NAMES, "planes": _NAMES,
      "marks": StructuredSchema(ValueKind.OBJECT), "rotate": StructuredSchema(ValueKind.BOOLEAN),
      "dims": StructuredSchema(ValueKind.ARRAY, items=_DIM)},
@@ -83,7 +83,8 @@ DEFINITION = CapabilityDefinition(
     "sublabel 60. Tones: ok (green, correct), bad (red, needs attention), info (cyan). "
     "Lead the items with what is wrong; what is correct gets one quiet item. A view reads a "
     "window [x0, y0, x1, y1] in mm of a KiCad board - board is a path in his design folders "
-    "(read through a copy, never changed), work_copy_id one of your own copies. Leave window "
+    "(read through a copy, never changed), work_copy_id one of your own copies; for a library "
+    "copy add footprint LIBRARY/NAME, drawn alone as part FP, as check_layout measures it. Leave window "
     "out: the named parts are then framed with a fixed margin, both views in one frame, the "
     "same way every time. Include every "
     "part of the circuit, from its connector on. refs are the parts to draw, nets the tracks, "
@@ -411,6 +412,9 @@ def build_display_executors(
 
         def read(view, window):
             arguments = {key: view.get(key) for key in ("board", "work_copy_id", "refs", "nets", "planes")}
+            if view.get("footprint"):
+                # A library footprint stands alone on its own board, as part FP.
+                arguments.update(footprint=view["footprint"], refs=["FP"])
             return read_section({**arguments, "window": window})
 
         drawn = []

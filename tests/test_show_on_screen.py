@@ -74,6 +74,15 @@ class ShowOnScreenTests(unittest.TestCase):
         self.assertEqual(self.read[0]["board"], "/designs/P0020/board.kicad_pcb")
         self.assertEqual(self.read[0]["refs"], ["C61"])
 
+    def test_a_library_footprint_is_drawn_alone_as_fp(self) -> None:
+        """14 Nov: a library footprint could not be drawn, so she showed none."""
+        view = {"label": "Library", "work_copy_id": "lib1", "footprint": "FireFli_Misc/7488918022",
+                "refs": ["7488918022"]}
+        result = self.show(display(views=[view], checked={"no_layout": "drawing only"}))
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertEqual(self.read[0]["footprint"], "FireFli_Misc/7488918022")
+        self.assertEqual(self.read[0]["refs"], ["FP"])
+
     def test_each_show_is_a_new_version(self) -> None:
         self.show(display())
         self.assertEqual(self.show(display(views=[])).values["version"], 2)

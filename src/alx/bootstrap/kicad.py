@@ -4,7 +4,8 @@ from functools import partial
 from pathlib import Path
 
 from alx.config.settings import KiCadSettings
-from alx.providers.coding_process import run_kicad_cli, run_kicad_python, run_kicad_engine, run_confined_converter
+from alx.providers.coding_process import (build_swift_program, run_confined_converter, run_kicad_cli,
+                                         run_kicad_engine, run_kicad_python)
 from alx.providers.kicad import KiCadProvider
 from alx.safety import AuthorityPolicy
 from alx.tools.kicad import DEFINITIONS, FREE_ACTIONS, KICAD, build_kicad_executors
@@ -41,6 +42,7 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
                                       timeout_seconds=settings.cli_timeout_seconds)
     # D-073: datasheet sections for the viewer, rendered under the same confinement.
     provider.execute_page = partial(run_confined_converter, runner=runner, timeout_seconds=60)
+    provider.build_program = partial(build_swift_program, runner=runner)
     # Datasheets in her own storage are readable too, and fetched ones go there.
     storage = Path(environment.get('ALX_STORAGE_ROOT', ALX_STORAGE)).expanduser().resolve()
     provider.reference_roots = tuple(dict.fromkeys((*provider.design_roots, storage)))

@@ -209,6 +209,10 @@ class LibraryWorkTests(unittest.TestCase):
             for wrong in ("Test/Missing", "Test"):
                 bad = kicad_call(runtime.executors, "check_layout", dict(where, footprint=wrong))
                 self.assertEqual(bad.failure["code"], "arguments_unusable", bad.failure)
+            # The screen draws the footprint as the check measures it (14 Nov).
+            drawn = runtime.provider.section({"work_copy_id": copy["work_copy_id"], "footprint": "Test/PAD1",
+                                              "refs": ["FP"]})
+            self.assertEqual([part["ref"] for part in drawn["parts"]], ["FP"])
             [number] = call("check_layout", **where)["numbers"]
             reading = [{"number": number["id"], "measures": {"pad_size": "FP.1", "axis": "x"}}]
             first = call("check_layout", **where, readings=reading)
