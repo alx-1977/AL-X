@@ -163,11 +163,11 @@ Not yet usable.
     on an onsemi datasheet); `look` names its page area `section` both ways;
     a stop for steps, step limit or a repeated refused call opens with a
     system-written line saying whether she waits for him.
-- [ ] **Library fix rule (needs Friedl's OK):** when a library footprint
-  differs from the version placed on his boards in the field, the board's
-  version is the proven one: show both, and the fix is to copy it back. On
-  14 Nov 7488918022 in the library had lost its L-shaped custom pad 4, while
-  P0020's AE1 still has it; she was about to redraw it from the datasheet.
+- [ ] **7488918022 (FireFli_Misc):** the library's pad 4 is a 0.025 mm dot
+  where Würth's land pattern has an L-shaped pad (1.5x1.65 square + 4.5x1.2
+  strip). Fix it from the datasheet with check_layout, not from a board
+  (Friedl, 14 Nov: "you should not rely on the board if there is a
+  datasheet").
 - [ ] **AL/X's KiCad jobs (not code):** the land-pattern audit of the 86
   footprints outside FireFli_Resistors and FireFli_Capacitors (Connectors
   done 13 Nov; Friedl: match the datasheet without asking, one write-back
