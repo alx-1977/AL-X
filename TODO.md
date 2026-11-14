@@ -163,6 +163,9 @@ Not yet usable.
     on an onsemi datasheet); `look` names its page area `section` both ways;
     a stop for steps, step limit or a repeated refused call opens with a
     system-written line saying whether she waits for him.
+- [ ] **check_layout on a bottom-side part:** the part's frame is turned back
+  by its angle but not unflipped, so left/right (and @x points) are mirrored
+  against a top-view datasheet. Only parts on B.Cu; found in review, 14 Nov.
 - [ ] **7488918022 (FireFli_Misc):** the library's pad 4 is a 0.025 mm dot
   where Würth's land pattern has an L-shaped pad (1.5x1.65 square + 4.5x1.2
   strip). Fix it from the datasheet with check_layout, not from a board
