@@ -305,7 +305,7 @@ def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | 
     tone = {"differs": "bad", "unaccounted": "warn", "matches": "ok"}
     # A number read off a picture by text recognition is marked so on his screen.
     rows = [{"what": (("≈ " if n.get("basis") else "") + ("◦ " if n.get("read_from") == "picture" else "")
-                      + (n.get("measures") or "not accounted for"))[:40],
+                      + (n.get("measures") or "not accounted for"))[:60],
              "datasheet_mm": n.get("value"),
              "board_mm": n.get("board_mm"), "tone": tone.get(n.get("status"), "info")}
             for n in numbers[:MAX_ROWS]]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 import uuid
@@ -111,6 +112,8 @@ def extract_words(document: Path, page: int, *, scratch_root: Path, extractor: P
 def _at(text: str) -> list[float]:
     try:
         x, y = (float(value) for value in text.split(","))
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError
     except ValueError:
         raise ValueError("@x,y is a point in mm from the part's centre, e.g. AE1.4@1.5,6.4:bottom") from None
     return [x, y]
@@ -164,7 +167,8 @@ def measurement(spec: Any) -> dict[str, Any]:
             return {"kind": "pad_size", "pad": (ref, pad), "axis": axis}
         # The width of one arm of a shaped pad, on the line through `at`.
         if (not isinstance(at, (list, tuple)) or len(at) != 2
-                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in at)):
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                           for v in at)):
             raise ValueError("at is [x, y] in mm from the part's centre")
         return {"kind": "pad_size", "pad": (ref, pad), "axis": axis, "at": [float(v) for v in at]}
     if "copper_width" in spec:
@@ -216,14 +220,23 @@ def pad_shape(ref, number):
         raise ValueError("no part %s on this board" % ref)
     # Every pad of that number together: a shaped pad is often a custom pad
     # beside a tiny one of the same number (7488918022 pad 4).
-    shape, found = pcbnew.SHAPE_POLY_SET(), False
-    for pad in footprint.Pads():
-        if pad.GetNumber() == number:
-            layer = side if pad.IsOnLayer(side) else pad.GetLayerSet().CuStack()[0]
-            pad.TransformShapeToPolygon(shape, layer, 0, nm(0.001), pcbnew.ERROR_INSIDE)
-            found = True
-    if not found:
+    # Only copper on the part's own side; a paste-only aperture or a pad on
+    # the far side is not this pad (review of D-081). A pad on another copper
+    # layer only, as before, stands in when none is on this side.
+    pads = [pad for pad in footprint.Pads() if pad.GetNumber() == number]
+    if not pads:
         raise ValueError("%s has no pad %s" % (ref, number))
+    here = [pad for pad in pads if pad.IsOnLayer(side)]
+    shape = pcbnew.SHAPE_POLY_SET()
+    if here:
+        for pad in here:
+            pad.TransformShapeToPolygon(shape, side, 0, nm(0.001), pcbnew.ERROR_INSIDE)
+    else:
+        copper = [pad for pad in pads if len(pad.GetLayerSet().CuStack())]
+        if not copper:
+            raise ValueError("%s pad %s has no copper" % (ref, number))
+        copper[0].TransformShapeToPolygon(shape, copper[0].GetLayerSet().CuStack()[0], 0, nm(0.001),
+                                          pcbnew.ERROR_INSIDE)
     shape.Simplify()
     return shape
 

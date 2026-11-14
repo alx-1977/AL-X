@@ -21,6 +21,9 @@ from contextlib import contextmanager, suppress
 import fcntl
 
 from alx.providers.credential_paths import denied
+
+# How layout-check readings are measured; part of every confirmation (D-081).
+MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
@@ -986,7 +989,10 @@ class KiCadProvider:
 
     @staticmethod
     def _readings_digest(stored):
-        return hashlib.sha256(json.dumps([stored.get('entries'), bool(stored.get('rf'))],
+        # MEASURING names how readings are measured: a confirmation given
+        # before a change to that (pads sharing a number measured as one,
+        # 14 Nov) is not carried over to a reading that now means more.
+        return hashlib.sha256(json.dumps([stored.get('entries'), bool(stored.get('rf')), MEASURING],
                                          sort_keys=True).encode()).hexdigest()
 
     def _stored_check(self, check_id):
