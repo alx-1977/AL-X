@@ -22,8 +22,8 @@ from time import monotonic
 from typing import Any
 
 from alx.contracts import (
-    CapabilityAttempt, CapabilityCall, CapabilityDefinition, ModelMessage, ModelRequest,
-    ModelRole, ReasoningModel,
+    CapabilityAttempt, CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
+    ModelMessage, ModelRequest, ModelRole, ReasoningModel, ToolImage,
 )
 from alx.contracts.result_summary import bound_result
 
@@ -136,6 +136,7 @@ class MechanicalWorker:
         definitions: Sequence[CapabilityDefinition],
         *,
         max_seconds: float = 1200.0,
+        image_source: Callable[[str], bytes | None] | None = None,
     ) -> None:
         if not definitions:
             raise ValueError("a worker needs at least one capability")
@@ -143,6 +144,10 @@ class MechanicalWorker:
         self._dispatch = dispatch
         self._definitions = {item.capability_id: item for item in definitions}
         self._max_seconds = max_seconds
+        # The picture a look call made, by its digest, so the worker reads a
+        # datasheet drawing itself (14 Nov: its second check of five IC land
+        # patterns failed on text alone, and every drawing was read on Core).
+        self._image_source = image_source
         # One model session per worker; a second brief waits for none, it is refused.
         self._busy = Lock()
 
@@ -176,14 +181,14 @@ class MechanicalWorker:
             while completion.tool_use is not None:
                 if len(calls) >= max_calls:
                     return self._stop("call_limit", calls)
-                answer, summary = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
+                answer, summary, images = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
                 calls.append(summary)
                 returned.append({**summary, "returned": json.loads(answer)})
                 # Checked after every call, so a long one cannot carry the run
                 # past its bound into another model request (review of #207).
                 if monotonic() - started > self._max_seconds:
                     return self._stop("time_limit", calls)
-                completion = self._model.complete(replace(request, tool_result=answer))
+                completion = self._model.complete(replace(request, tool_result=answer, tool_images=images))
         except WorkerError:
             raise
         except Exception as error:  # noqa: BLE001 - reported with what was completed
@@ -201,7 +206,8 @@ class MechanicalWorker:
         self._abandon()
         return {"status": "stopped", "stop_reason": reason, "report": None, "calls": calls}
 
-    def _call(self, tool_use: Mapping[str, Any], call_id: str) -> tuple[str, dict[str, Any]]:
+    def _call(self, tool_use: Mapping[str, Any],
+              call_id: str) -> tuple[str, dict[str, Any], tuple[ToolImage, ...]]:
         arguments = tool_use.get("input")
         arguments = arguments if isinstance(arguments, Mapping) else {}
         capability_id = arguments.get("capability_id")
@@ -209,14 +215,14 @@ class MechanicalWorker:
         if tool_use.get("name") != CALL_TOOL or capability_id not in self._definitions:
             summary["outcome"] = "not_listed"
             return json.dumps({"refused": "capability_not_listed",
-                               "listed": list(self.capability_ids)}), summary
+                               "listed": list(self.capability_ids)}), summary, ()
         try:
             parsed = json.loads(arguments.get("arguments_json") or "{}")
             if not isinstance(parsed, dict):
                 raise ValueError
         except (TypeError, ValueError):
             summary["outcome"] = "arguments_unusable"
-            return json.dumps({"refused": "arguments_json must be a JSON object"}), summary
+            return json.dumps({"refused": "arguments_json must be a JSON object"}), summary, ()
         attempt = self._dispatch(CapabilityCall(call_id, capability_id, parsed))
         result = attempt.result
         summary["outcome"] = (attempt.reason_code if result is None
@@ -226,7 +232,15 @@ class MechanicalWorker:
             "reason_code": attempt.reason_code,
             "values": None if result is None else _plain(result.values),
             "failure": None if result is None or result.failure is None else _plain(result.failure),
-        }), ensure_ascii=False, default=str), summary
+        }), ensure_ascii=False, default=str), summary, self._images(result)
+
+    def _images(self, result: CapabilityResult | None) -> tuple[ToolImage, ...]:
+        """The picture a succeeded call names by digest, for the next step only (D-075)."""
+        if self._image_source is None or result is None or result.state is not CapabilityResultState.SUCCEEDED:
+            return ()
+        digest = (result.values or {}).get("image_sha256")
+        data = self._image_source(digest) if isinstance(digest, str) else None
+        return (ToolImage("image/png", data),) if data else ()
 
     def _abandon(self) -> None:
         abandon = getattr(self._model, "abandon_session", None)

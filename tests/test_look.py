@@ -65,7 +65,7 @@ class LookProviderTests(unittest.TestCase):
     def test_a_whole_page_is_rendered_with_a_labelled_grid_and_kept_by_digest(self) -> None:
         facts = self.look(self.pdf, {"page": 2})
         self.assertEqual((facts["kind"], facts["page"], facts["page_count"]), ("pdf_page", 2, 2))
-        self.assertEqual(facts["section_points"], [0, 0, 400, 300])
+        self.assertEqual(facts["section"], [0, 0, 400, 300])
         self.assertEqual(facts["grid"]["step_points"], 20)
         name, arguments, directory = self.runs[0]
         self.assertEqual((name, arguments[:4]), ("pdftoppm", ["-f", "2", "-l", "2"]))
@@ -92,7 +92,7 @@ class LookProviderTests(unittest.TestCase):
 
     def test_a_section_is_rendered_from_its_points(self) -> None:
         facts = self.look(self.pdf, {"page": 1, "section": [50, 40, 150, 90]})
-        self.assertEqual(facts["section_points"], [50, 40, 150, 90])
+        self.assertEqual(facts["section"], [50, 40, 150, 90])
         arguments = self.runs[0][1]
         self.assertEqual(arguments[arguments.index("-r") + 1], "600")
 

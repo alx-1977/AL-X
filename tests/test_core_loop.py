@@ -401,6 +401,47 @@ class CategoryARecoveryTests(unittest.TestCase):
         self.assertEqual(reasoner.contexts[-1].response_only_reason, "budget_exhausted")
         self.assertEqual(len(dispatched), 1)
 
+    def test_a_turn_that_runs_out_with_work_left_says_it_waits(self) -> None:
+        """14 Nov: she said "I'll carry on without needing you" while her goal
+        was parked waiting for Friedl. The line saying so is written for her."""
+        self.store.create(goal(outstanding_work=(WorkItem("work-1", "Semiconductors"),)),
+                          "conversation-1", RETENTION)
+        dispatch, _ = self._executes()
+        reasoner = Queued(
+            AgentDecision(call=CapabilityCall("call-1", "inspect", {})),
+            AgentDecision(call=CapabilityCall("call-2", "inspect", {})),
+            AgentDecision(response="Misc is done; Semiconductors remain."),
+            selects="goal-1",
+        )
+        outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 3)
+        self.assertEqual(outcome.reason, "budget_exhausted")
+        self.assertEqual(outcome.response,
+                         "I've stopped: this request used all my steps. Tell me to carry on and I'll continue. "
+                         "Misc is done; Semiconductors remain.")
+
+
+class StopLineTests(unittest.TestCase):
+    def test_the_line_follows_the_goal_not_her_words(self) -> None:
+        from alx.core.loop import CONTINUING_LINE, stop_line
+        waiting = goal(status=GoalStatus.AWAITING_INPUT, stop_reason=GoalStopReason.REQUIRED_INPUT,
+                       outstanding_work=(WorkItem("work-1", "Semiconductors"),))
+        self.assertIn("used all my steps", stop_line("budget_exhausted", waiting))
+        self.assertIn("already been refused", stop_line("repeated_rejected_call", waiting))
+        # Any other stop, such as a review in progress, may resume without him.
+        self.assertIsNone(stop_line("merge_blocked", waiting))
+        self.assertIsNone(stop_line("budget_exhausted", goal()))
+        self.assertIsNone(stop_line("budget_exhausted", None))
+        # A running plan carries the work on, but only a turn that ran out of
+        # steps keeps her held plan close from being written (review of D-081).
+        from alx.contracts import ExecutionPlan, ExecutionStep, PlanStatus
+        running = goal(execution_plan=ExecutionPlan(
+            "plan", "turn:turn-1", "Do the work", None,
+            (ExecutionStep(CapabilityCall("call-a", "inspect", {}), (), 0, 0, False),),
+            status=PlanStatus.RUNNING))
+        self.assertEqual(stop_line("budget_exhausted", running), CONTINUING_LINE)
+        self.assertIsNone(stop_line("repeated_rejected_call", running))
+        self.assertIsNone(stop_line("budget_exceeded", running))
+
 
 class CoreTests(unittest.TestCase):
     def setUp(self) -> None:

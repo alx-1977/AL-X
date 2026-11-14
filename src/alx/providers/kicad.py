@@ -21,6 +21,9 @@ from contextlib import contextmanager, suppress
 import fcntl
 
 from alx.providers.credential_paths import denied
+
+# How layout-check readings are measured; part of every confirmation (D-081).
+MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
@@ -411,6 +414,8 @@ class KiCadProvider:
         self.engine_paths = {}
         self.execute_engine = None
         self.execute_page = None
+        # Builds AL/X's own Swift sources (picture_text.swift); None where unavailable.
+        self.build_program = None
 
     def _engine(self, name, arguments, directory):
         executable = self.engine_paths.get(name)
@@ -626,6 +631,13 @@ class KiCadProvider:
         """The one board a read names: her work copy, a board path or a project folder."""
         if arguments.get('work_copy_id'):
             root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('library'):
+                # A library footprint is drawn as the land-pattern check
+                # measures it: alone on a board of its own, as part FP
+                # (14 Nov: the screen could not draw one, so she showed none).
+                return self._footprint_board(root, arguments.get('footprint'))
+            if arguments.get('footprint'):
+                raise KiCadError('arguments_unusable', {'detail': 'footprint is for a library copy'})
             return root / 'project' / meta['board']
         if arguments.get('board'):
             return bounded(self._source(arguments['board']), self.design_roots)
@@ -771,6 +783,20 @@ class KiCadProvider:
         except (PageError, LayoutCheckError) as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error
         numbers = read_numbers(words, section)
+        if not numbers and self.build_program is not None:
+            # A drawing that is a picture holds no text: its numbers are read
+            # by text recognition and marked so (14 Nov: TL3340, 830053099).
+            from alx.providers.picture_text import engine, picture_words
+            try:
+                recognizer = engine(self.work_root / 'engines', self.build_program)
+                key = hashlib.sha256(json.dumps([document_digest(document), page, list(section)]).encode()).hexdigest()
+                words = picture_words(document, page, section, scratch_root=self.work_root / 'sections',
+                                      renderer=self.engine_paths.get('pdftoppm') or Path('/nonexistent'),
+                                      recognizer=recognizer, execute=self.execute_page,
+                                      cache=self.work_root / 'picture-words' / (key[:32] + '.json'))
+            except LayoutCheckError as error:
+                raise KiCadError(error.code, {'detail': error.detail}) from error
+            numbers = [dict(number, read_from='picture') for number in read_numbers(words, section)]
         path = self._readings_path(project, document_digest(document), page, part)
         stored = json.loads(path.read_text()) if path.is_file() else {'entries': {}, 'rf': False,
                                                                      'confirmed': None}
@@ -926,11 +952,17 @@ class KiCadProvider:
         digest = self._readings_digest(stored)
         confirmed = stored.get('confirmed') == digest
         printed = any(not row['id'].startswith('derived:') for row in rows)
-        reason = ('' if printed else 'no number could be read in this section: a drawing that is a '
-                  'picture, or a section that misses it; nothing was checked against it')
+        reason = ('' if printed else 'no number could be read in this section, as text or from a picture: '
+                  'a section that misses the drawing; nothing was checked against it')
+        if any(row.get('read_from') == 'picture' for row in rows):
+            reason = ('the drawing is a picture: its numbers were read by text recognition; look at the '
+                      'section and say if any number is misread')
         result = {'check_id': uuid.uuid4().hex, 'work_copy_id': arguments.get('work_copy_id') or '',
                   'document': document.name, 'document_path': str(document),
                   'page': page, 'section': list(section), 'part': part, 'rf': bool(stored.get('rf')),
+                  # Which library footprint was measured, so the screen never shows
+                  # this check beside another one (review of D-081).
+                  'footprint': arguments.get('footprint') or '',
                   'confirmed': confirmed, 'counts': counts, 'reason': reason,
                   'passed': printed and counts['differs'] == 0 and counts['unaccounted'] == 0
                             and (confirmed or not stored.get('rf')),
@@ -957,7 +989,10 @@ class KiCadProvider:
 
     @staticmethod
     def _readings_digest(stored):
-        return hashlib.sha256(json.dumps([stored.get('entries'), bool(stored.get('rf'))],
+        # MEASURING names how readings are measured: a confirmation given
+        # before a change to that (pads sharing a number measured as one,
+        # 14 Nov) is not carried over to a reading that now means more.
+        return hashlib.sha256(json.dumps([stored.get('entries'), bool(stored.get('rf')), MEASURING],
                                          sort_keys=True).encode()).hexdigest()
 
     def _stored_check(self, check_id):

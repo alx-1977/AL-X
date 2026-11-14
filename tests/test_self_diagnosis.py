@@ -24,7 +24,9 @@ from alx.tools.self_diagnosis import (  # noqa: E402
     build_self_diagnosis_executors,
 )
 
-NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
+# Recent, not fixed: the record keeps 30 days counted from the real clock,
+# so a fixed date fell out of it on 2026-11-14 (and failed every test here).
+NOW = (datetime.now(UTC) - timedelta(hours=1)).replace(microsecond=0)
 
 
 def event(at, status="completed", label="Search research", reason=None, subsystem="notebook"):
@@ -58,11 +60,12 @@ class TraceRecordTests(unittest.TestCase):
         told Friedl it had not fired."""
         from datetime import timezone
         sast = timezone(timedelta(hours=2))
-        own_time = datetime(2026, 10, 17, 8, 9, 39, tzinfo=UTC)
+        own_time = NOW
         self.record.record(event(own_time, label="Own time", subsystem="core"))
         steps, _ = self.record.between(own_time - timedelta(minutes=1),
                                        own_time + timedelta(minutes=1), zone=sast)
-        self.assertEqual(steps[0]["at"], "2026-10-17T10:09:39+02:00")
+        self.assertEqual(steps[0]["at"], own_time.astimezone(sast).isoformat())
+        self.assertTrue(steps[0]["at"].endswith("+02:00"))
         self.assertEqual(datetime.fromisoformat(steps[0]["at"]), own_time)
 
     def test_a_subsystem_and_a_limit_narrow_it(self) -> None:

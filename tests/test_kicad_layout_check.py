@@ -21,7 +21,7 @@ from kicad_actions import kicad_call  # noqa: E402
 from alx.bootstrap.kicad import build_kicad_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.providers.coding_process import kicad_containment_available  # noqa: E402
-from alx.providers.layout_check import read_numbers  # noqa: E402
+from alx.providers.layout_check import extract_words, read_numbers  # noqa: E402
 
 KICAD = Path("/Applications/KiCad/KiCad.app")
 POPPLER = Path("/opt/homebrew/bin/pdftotext")
@@ -58,6 +58,47 @@ class NumberReadingTests(unittest.TestCase):
         numbers = read_numbers(words, (0, 0, 800, 800))
         self.assertEqual([(n["text"], n["value"], n["unit"]) for n in numbers],
                          [("0,51", 0.51, ""), ("1.8", 1.8, "pF"), ("2.7", 2.7, "nH")])
+
+
+class ArmReadingTests(unittest.TestCase):
+    """14 Nov: Würth dimensions the L-shaped pad 4 of 7488918022 arm by arm."""
+
+    def test_an_arm_is_named_by_a_point_on_it(self) -> None:
+        from alx.providers.layout_check import label, measurement
+        self.assertEqual(measurement({"pad_size": "AE1.4", "at": [1, 7.5], "axis": "y"}),
+                         {"kind": "pad_size", "pad": ("AE1", "4"), "axis": "y", "at": [1.0, 7.5]})
+        edge = measurement({"distance": ["AE1.4@-2.25,7:bottom", "AE1.2:bottom"], "axis": "y"})
+        self.assertEqual(edge["from"], ("AE1", "4", "bottom", [-2.25, 7.0]))
+        self.assertEqual(label({"pad_size": "AE1.4", "at": [1, 7.5], "axis": "y"}), "AE1.4 at 1,7.5 height")
+        for wrong in ("AE1.4@x:bottom", "AE1.4@1,2:centre", "AE1@1,2:bottom"):
+            with self.assertRaises(ValueError):
+                measurement({"distance": [wrong, "AE1.2:bottom"], "axis": "y"})
+        with self.assertRaises(ValueError):
+            measurement({"pad_size": "AE1.4", "at": [1], "axis": "y"})
+
+
+class WordReaderTests(unittest.TestCase):
+    """Words are read from pdftotext's table output (-tsv): -bbox crashed on
+    every page of an onsemi datasheet on 14 Nov."""
+
+    def test_words_and_boxes_come_from_the_table_rows(self) -> None:
+        table = ("level\tpage_num\tpar_num\tblock_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+                 "1\t1\t0\t0\t0\t0\t0.00\t0.00\t842.00\t595.00\t-1\t###PAGE###\n"
+                 "5\t1\t0\t0\t0\t0\t100.00\t50.00\t12.50\t10.00\t100\t2.54\n"
+                 "5\t1\t0\t0\t0\t1\t120.00\t50.00\t8.00\t10.00\t100\tR&D\n")
+
+        def execute(program, arguments, folder):
+            self.assertIn("-tsv", arguments)
+            (Path(folder) / arguments[-1]).write_text(table)
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        with tempfile.TemporaryDirectory() as folder:
+            pdf = Path(folder) / "sheet.pdf"
+            pdf.write_bytes(b"%PDF-1.4")
+            program = Path(folder) / "pdftotext"
+            program.write_text("")
+            words = extract_words(pdf, 1, scratch_root=Path(folder) / "scratch", extractor=program,
+                                  execute=execute)
+        self.assertEqual(words, [(100.0, 50.0, 112.5, 60.0, "2.54"), (120.0, 50.0, 128.0, 60.0, "R&D")])
 
 
 @unittest.skipUnless(KICAD.is_dir() and POPPLER.is_file() and kicad_containment_available(),
@@ -185,6 +226,10 @@ class LibraryWorkTests(unittest.TestCase):
             for wrong in ("Test/Missing", "Test"):
                 bad = kicad_call(runtime.executors, "check_layout", dict(where, footprint=wrong))
                 self.assertEqual(bad.failure["code"], "arguments_unusable", bad.failure)
+            # The screen draws the footprint as the check measures it (14 Nov).
+            drawn = runtime.provider.section({"work_copy_id": copy["work_copy_id"], "footprint": "Test/PAD1",
+                                              "refs": ["FP"]})
+            self.assertEqual([part["ref"] for part in drawn["parts"]], ["FP"])
             [number] = call("check_layout", **where)["numbers"]
             reading = [{"number": number["id"], "measures": {"pad_size": "FP.1", "axis": "x"}}]
             first = call("check_layout", **where, readings=reading)

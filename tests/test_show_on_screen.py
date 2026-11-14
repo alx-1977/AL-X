@@ -74,6 +74,19 @@ class ShowOnScreenTests(unittest.TestCase):
         self.assertEqual(self.read[0]["board"], "/designs/P0020/board.kicad_pcb")
         self.assertEqual(self.read[0]["refs"], ["C61"])
 
+    def test_a_library_footprint_is_drawn_alone_as_fp(self) -> None:
+        """14 Nov: a library footprint could not be drawn, so she showed none."""
+        view = {"label": "Library", "work_copy_id": "lib1", "footprint": "FireFli_Misc/7488918022",
+                "refs": ["7488918022"]}
+        result = self.show(display(views=[view], checked={"no_layout": "drawing only"}))
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertEqual(self.read[0]["footprint"], "FireFli_Misc/7488918022")
+        self.assertEqual(self.read[0]["refs"], ["FP"])
+        # A footprint names a library copy, never a board path.
+        bad = self.show(display(views=[{"label": "X", "board": "/designs/b.kicad_pcb",
+                                        "footprint": "FireFli_Misc/7488918022", "refs": ["X"]}]))
+        self.assertEqual(bad.failure["code"], "arguments_unusable")
+
     def test_each_show_is_a_new_version(self) -> None:
         self.show(display())
         self.assertEqual(self.show(display(views=[])).values["version"], 2)
@@ -873,6 +886,22 @@ class CheckedAgainstDatasheetTests(unittest.TestCase):
         self.assertIn("no layout check", self.reason(display(views=self.views, checked={"layout_check": "x"})))
         # His board alone needs none.
         self.assertEqual(self.show(display()).state, CapabilityResultState.SUCCEEDED)
+
+    def test_a_check_of_one_footprint_never_stands_beside_another(self) -> None:
+        """Review of D-081: a passing check of A must not turn B's verdict green."""
+        self.stored[self.CHECK["check_id"]].update(footprint="Lib/A", work_copy_id="lib1")
+        view = {"label": "Library", "work_copy_id": "lib1", "footprint": "Lib/B", "refs": ["FP"]}
+        checked = {"layout_check": self.CHECK["check_id"]}
+        self.assertIn("another footprint", self.reason(display(views=[view], checked=checked)))
+        # Copy and footprint are one pair: lib1's B beside lib2's A is not a check of either.
+        views = [dict(view, work_copy_id="lib2", footprint="Lib/A", label="Other"), view]
+        self.assertIn("another footprint", self.reason(display(views=views, checked=checked)))
+        self.stored[self.CHECK["check_id"]]["numbers"][0]["read_from"] = "picture"
+        shown = self.show(display(views=[dict(view, footprint="Lib/A")], checked=checked))
+        self.assertEqual(shown.state, CapabilityResultState.SUCCEEDED, shown.failure)
+        drawn = self.board.snapshot()["display"]["checked"]
+        self.assertIn("read from a picture", drawn["summary"])
+        self.assertTrue(any(row["what"].startswith("◦ ") for row in drawn["rows"]))
 
     def test_a_check_of_another_copy_or_an_older_state_is_refused(self) -> None:
         checked = {"layout_check": self.CHECK["check_id"]}

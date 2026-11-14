@@ -1115,7 +1115,8 @@ async def run(repository_root: Path) -> None:
         register((WORKER_DEFINITION,), TraceSubsystem.WORKER)
         policies[WORKER_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
         executors.update(build_worker_executors(
-            MechanicalWorker(providers.worker, worker_dispatch, worker_definitions),
+            MechanicalWorker(providers.worker, worker_dispatch, worker_definitions,
+                             image_source=partial(stored_image, look_runtime.store)),
             current_call_id.get,
         ))
 

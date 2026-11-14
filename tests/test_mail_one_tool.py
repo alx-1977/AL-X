@@ -290,7 +290,7 @@ class WorkerLimitTests(unittest.TestCase):
 
         worker = MechanicalWorker(object(), dispatch, DEFINITIONS)
         import json
-        answer, summary = worker._call({"name": "call_capability", "input": {
+        answer, summary, _ = worker._call({"name": "call_capability", "input": {
             "capability_id": MAIL, "arguments_json": json.dumps(mail_arguments(TRASH, REFERENCE))}},
             "job-1")
         self.assertEqual(json.loads(answer)["disposition"], "rejected")

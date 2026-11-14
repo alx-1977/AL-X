@@ -541,6 +541,24 @@ def run_confined_converter(executable, arguments, directory, *, runner=None, tim
     )
 
 
+def build_swift_program(source, target, *, runner=None, timeout_seconds=300):
+    """One of AL/X's own Swift sources compiled into a program (2026-11-14).
+
+    The compiler cannot run inside the converter confinement, so it runs
+    here, on a source committed in her repository only; the program it makes
+    always runs confined (run_confined_converter).
+    """
+    target = Path(target)
+    return run_coding_subprocess(
+        subprocess.run if runner is None else runner,
+        ['/usr/bin/swiftc', '-O', str(source), '-o', str(target)],
+        cwd=str(target.parent), env={'PATH': '/usr/bin:/bin', 'HOME': str(target.parent),
+                                     'TMPDIR': str(target.parent)},
+        shell=False, check=False, timeout=min(600, max(1, timeout_seconds)),
+        capture_output=True, text=True, stop_descendants=True,
+    )
+
+
 def run_kicad_python(executable, script, board, *, runner=None, timeout_seconds=120):
     """Kernel-confined KiCad script, through the managed process execution site.
 

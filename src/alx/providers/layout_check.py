@@ -13,8 +13,8 @@ only after Friedl has confirmed it.
 from __future__ import annotations
 
 import hashlib
-import html
 import json
+import math
 import re
 import shutil
 import uuid
@@ -31,7 +31,10 @@ ANCHORS = ("centre", "left", "right", "top", "bottom")
 UNITS = {"pf", "nf", "uf", "µf", "ph", "nh", "uh", "µh", "mh", "ω", "ohm", "kω", "mω", "hz", "khz",
          "mhz", "ghz", "db", "dbi", "dbm", "v", "mv", "a", "ma", "w", "mw", "%", "°c", "s", "ms"}
 _NUMBER = re.compile(r"^\d{1,4}(?:[.,]\d{1,4})?$")
-_WORD = re.compile(r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</word>')
+# pdftotext -tsv, one row per word: level 5, then left, top, width and height
+# in points and the word. -bbox crashed on every page of an onsemi datasheet
+# (poppler 26.04, 14 Nov) where -tsv reads the same boxes.
+_WORD_LEVEL = "5"
 
 
 class LayoutCheckError(Exception):
@@ -84,28 +87,60 @@ def extract_words(document: Path, page: int, *, scratch_root: Path, extractor: P
     run.mkdir(parents=True)
     try:
         shutil.copyfile(document, run / "document.pdf")
-        executed = execute(extractor, ["-f", page, "-l", page, "-bbox", "document.pdf", "words.html"], run)
-        output = run / "words.html"
+        executed = execute(extractor, ["-f", page, "-l", page, "-tsv", "document.pdf", "words.tsv"], run)
+        output = run / "words.tsv"
         if getattr(executed, "returncode", 1) or not output.is_file():
             raise LayoutCheckError("page_failed", (getattr(executed, "stderr", "") or "")[-1000:])
-        return [(float(a), float(b), float(c), float(d), html.unescape(text).strip())
-                for a, b, c, d, text in _WORD.findall(output.read_text(errors="replace"))]
+        words = []
+        # split on newlines only: splitlines would also cut a word at U+2028 or a form feed
+        for row in output.read_text(errors="replace").split("\n")[1:]:
+            cells = row.split("\t")
+            if len(cells) < 12 or cells[0] != _WORD_LEVEL:
+                continue
+            try:
+                left, top, width, height = (float(cell) for cell in cells[6:10])
+            except ValueError:
+                continue
+            text = "\t".join(cells[11:]).strip()
+            if text:
+                words.append((left, top, left + width, top + height, text))
+        return words
     finally:
         shutil.rmtree(run, ignore_errors=True)
 
 
-def _feature(point: Any) -> tuple[str, str, str]:
-    """REF.PAD:anchor or REF:centre, e.g. AE2.3:left or C64.1:centre."""
+def _at(text: str) -> list[float]:
+    try:
+        x, y = (float(value) for value in text.split(","))
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError
+    except ValueError:
+        raise ValueError("@x,y is a point in mm from the part's centre, e.g. AE1.4@1.5,6.4:bottom") from None
+    return [x, y]
+
+
+def _feature(point: Any) -> tuple:
+    """REF.PAD:anchor, REF.PAD@x,y:edge or REF:centre, e.g. AE2.3:left or AE1.4@1.5,6.4:bottom.
+
+    @x,y (mm from the part's centre) names one arm of a shaped pad: the edge
+    of the pad's copper on the line through that point (14 Nov: Würth's
+    L-shaped feed pad of 7488918022 is dimensioned arm by arm).
+    """
     if not isinstance(point, str) or ":" not in point:
-        raise ValueError("a point is REF.PAD:anchor (e.g. AE2.3:left) or REF:centre")
+        raise ValueError("a point is REF.PAD:anchor (e.g. AE2.3:left), REF.PAD@x,y:edge or REF:centre")
     name, anchor = point.rsplit(":", 1)
     if anchor not in ANCHORS:
         raise ValueError("an anchor is one of " + ", ".join(ANCHORS))
+    name, marker, at = name.partition("@")
     ref, _, pad = name.partition(".")
     if not ref:
         raise ValueError("a point names a part")
     if not pad and anchor != "centre":
         raise ValueError("a part without a pad has only its centre")
+    if marker:
+        if not pad or anchor == "centre":
+            raise ValueError("@x,y names an edge of a pad: left, right, top or bottom")
+        return ref, pad, anchor, _at(at)
     return ref, pad, anchor
 
 
@@ -127,7 +162,15 @@ def measurement(spec: Any) -> dict[str, Any]:
         ref, pad, _ = _feature(str(spec["pad_size"]) + ":centre")
         if not pad:
             raise ValueError("pad_size names a pad, e.g. AE2.3")
-        return {"kind": "pad_size", "pad": (ref, pad), "axis": axis}
+        at = spec.get("at")
+        if at is None:
+            return {"kind": "pad_size", "pad": (ref, pad), "axis": axis}
+        # The width of one arm of a shaped pad, on the line through `at`.
+        if (not isinstance(at, (list, tuple)) or len(at) != 2
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                           for v in at)):
+            raise ValueError("at is [x, y] in mm from the part's centre")
+        return {"kind": "pad_size", "pad": (ref, pad), "axis": axis, "at": [float(v) for v in at]}
     if "copper_width" in spec:
         at = spec.get("at")
         if (not isinstance(spec["copper_width"], str) or not isinstance(at, (list, tuple)) or len(at) != 2
@@ -175,17 +218,36 @@ def pad_shape(ref, number):
     footprint = board.FindFootprintByReference(ref)
     if footprint is None:
         raise ValueError("no part %s on this board" % ref)
-    for pad in footprint.Pads():
-        if pad.GetNumber() == number:
-            shape = pcbnew.SHAPE_POLY_SET()
-            layer = side if pad.IsOnLayer(side) else pad.GetLayerSet().CuStack()[0]
-            pad.TransformShapeToPolygon(shape, layer, 0, nm(0.001), pcbnew.ERROR_INSIDE)
-            return shape
-    raise ValueError("%s has no pad %s" % (ref, number))
+    # Every pad of that number together: a shaped pad is often a custom pad
+    # beside a tiny one of the same number (7488918022 pad 4).
+    # Only copper on the part's own side; a paste-only aperture or a pad on
+    # the far side is not this pad (review of D-081). A pad on another copper
+    # layer only, as before, stands in when none is on this side.
+    pads = [pad for pad in footprint.Pads() if pad.GetNumber() == number]
+    if not pads:
+        raise ValueError("%s has no pad %s" % (ref, number))
+    here = [pad for pad in pads if pad.IsOnLayer(side)]
+    shape = pcbnew.SHAPE_POLY_SET()
+    if here:
+        for pad in here:
+            pad.TransformShapeToPolygon(shape, side, 0, nm(0.001), pcbnew.ERROR_INSIDE)
+    else:
+        copper = [pad for pad in pads if len(pad.GetLayerSet().CuStack())]
+        if not copper:
+            raise ValueError("%s pad %s has no copper" % (ref, number))
+        copper[0].TransformShapeToPolygon(shape, copper[0].GetLayerSet().CuStack()[0], 0, nm(0.001),
+                                          pcbnew.ERROR_INSIDE)
+    shape.Simplify()
+    return shape
 
 
 def point(feature):
-    ref, number, where = feature
+    ref, number, where = feature[:3]
+    if len(feature) == 4:
+        # One arm of a shaped pad: its edge on the line through the point.
+        at = feature[3]
+        low, high = run_through(pad_shape(ref, number), at, "x" if where in ("left", "right") else "y")
+        return {"left": (low, at[1]), "right": (high, at[1]), "top": (at[0], low), "bottom": (at[0], high)}[where]
     if not number:
         footprint = board.FindFootprintByReference(ref)
         if footprint is None:
@@ -227,7 +289,13 @@ def net_copper(net):
 
 
 def copper_width(net, at, axis):
-    turned = in_frame(net_copper(net))
+    low, high = run_through(net_copper(net), at, axis, net)
+    return high - low
+
+
+def run_through(shape, at, axis, name="pad"):
+    """Where copper starts and ends on the line through `at` along the axis, in mm from the part's centre."""
+    turned = in_frame(shape)
     cx, cy = origin.x + nm(at[0]), origin.y + nm(at[1])
     probe = pcbnew.SHAPE_POLY_SET()
     chain = pcbnew.SHAPE_LINE_CHAIN()
@@ -244,8 +312,9 @@ def copper_width(net, at, axis):
         low, high = (piece.GetX(), piece.GetRight()) if axis == "x" else (piece.GetY(), piece.GetBottom())
         middle = cx if axis == "x" else cy
         if low <= middle <= high:
-            return mm(high - low)
-    raise ValueError("no %s copper at %s" % (net, at))
+            base = origin.x if axis == "x" else origin.y
+            return mm(low - base), mm(high - base)
+    raise ValueError("no %s copper at %s" % (name, at))
 
 
 def keepout_size(axis):
@@ -268,6 +337,9 @@ for key, spec in args["measures"].items():
         if spec["kind"] == "distance":
             (ax, ay), (bx, by) = point(spec["from"]), point(spec["to"])
             value = {"x": abs(bx - ax), "y": abs(by - ay), "direct": math.hypot(bx - ax, by - ay)}[spec["axis"]]
+        elif spec["kind"] == "pad_size" and spec.get("at") is not None:
+            low, high = run_through(pad_shape(*spec["pad"]), spec["at"], spec["axis"])
+            value = high - low
         elif spec["kind"] == "pad_size":
             x0, y0, x1, y1 = box_mm(pad_shape(*spec["pad"]))
             value = x1 - x0 if spec["axis"] == "x" else y1 - y0
@@ -303,6 +375,9 @@ def compare(numbers: list[dict[str, Any]], entries: Mapping[str, Mapping[str, An
         row = {"id": number["id"], "text": number["text"], "value": number["value"], "at": number["at"]}
         if number.get("basis"):
             row["basis"] = number["basis"]
+        if number.get("read_from"):
+            # Read off a picture by text recognition: she checks it against the drawing.
+            row["read_from"] = number["read_from"]
         if number["unit"]:
             row.update(status="not_applicable", reason="part value (%s)" % number["unit"])
         elif entry.get("not_applicable"):
@@ -328,7 +403,8 @@ def label(spec: Mapping[str, Any]) -> str:
         return "%s → %s%s" % (spec["distance"][0], spec["distance"][1],
                               "" if spec.get("axis", "direct") == "direct" else " (%s)" % spec["axis"])
     if "pad_size" in spec:
-        return "%s %s" % (spec["pad_size"], "width" if spec.get("axis") == "x" else "height")
+        where = "" if spec.get("at") is None else " at %g,%g" % tuple(spec["at"])
+        return "%s%s %s" % (spec["pad_size"], where, "width" if spec.get("axis") == "x" else "height")
     if "copper_width" in spec:
         return "%s width" % spec["copper_width"]
     return "keep-out %s" % spec.get("axis", "")

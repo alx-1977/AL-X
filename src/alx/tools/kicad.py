@@ -269,7 +269,10 @@ CHECK_LAYOUT = CapabilityDefinition('check_kicad_layout',
     'For each, give a reading once: measures says what it is on the board, in the part\'s own '
     'directions - {distance: [from, to], axis: x|y|direct}, {pad_size: REF.PAD, axis}, '
     '{copper_width: NET, at: [x, y] mm from the part centre, axis} or {keepout_size: true, '
-    'axis} - where a point is REF.PAD:centre|left|right|top|bottom or REF:centre; or '
+    'axis} - where a point is REF.PAD:centre|left|right|top|bottom or REF:centre. A shaped '
+    'pad dimensioned arm by arm (an L-shaped feed pad): {pad_size: REF.PAD, at: [x, y], axis} '
+    'is the width of its copper on the line through that point, and REF.PAD@x,y:left|right|'
+    'top|bottom the edge of its copper there; pads sharing a number are one pad; or '
     'not_applicable with a short reason (a tolerance, a size of the part itself). Part values '
     '(1.8 pF) are set aside by the tool. Where the drawing shows a position without printing '
     'a number (a shunt halfway between its series parts), add a reading with number a short '
@@ -282,7 +285,7 @@ CHECK_LAYOUT = CapabilityDefinition('check_kicad_layout',
     obj({**LAYOUT_TARGET, 'readings': array(READING), 'rf': B},
         ('document', 'page', 'section', 'part')),
     obj({'check_id': S, 'work_copy_id': S, 'document': S, 'document_path': S, 'page': I,
-         'section': array(N), 'part': S,
+         'section': array(N), 'part': S, 'footprint': S,
          'rf': B, 'confirmed': B, 'passed': B, 'reason': S, 'counts': MAP, 'numbers': array(MAP),
          'numbers_omitted': I}),
     SideEffect.NONE, FAILURES)

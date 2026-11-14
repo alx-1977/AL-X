@@ -93,6 +93,27 @@ class WorkerLoopTests(unittest.TestCase):
         self.assertIn('"id": "run_program"', first.messages[0].content)
         self.assertNotIn("send_mail_reply", first.messages[0].content)
 
+    def test_a_look_picture_goes_with_the_next_step_only(self) -> None:
+        """14 Nov: the worker read datasheet drawings as text alone; now the
+        picture a look call made reaches its next step, and only that one."""
+        look = CapabilityDefinition("look", "Look", OBJECT, OBJECT, SideEffect.NONE)
+        png = b"\x89PNG\r\n\x1a\nfake"
+
+        def dispatch(call):
+            values = {"image_sha256": "abc"} if call.capability_id == "look" else {"stdout": "ok"}
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.SUCCEEDED, values))
+        model = ScriptedModel([tool("look", {"path": "a.pdf"}), tool("run_program", {})])
+        held = {"abc": png}
+        MechanicalWorker(model, dispatch, (look, RUN), image_source=held.get).run("Read.", "job", 5)
+        self.assertEqual([len(r.tool_images) for r in model.requests], [0, 1, 0])
+        self.assertEqual(model.requests[1].tool_images[0].data, png)
+        # Without a source, or for an image no longer held, it answers with text alone.
+        model = ScriptedModel([tool("look", {"path": "a.pdf"})])
+        MechanicalWorker(model, dispatch, (look,), image_source={}.get).run("Read.", "job", 5)
+        self.assertEqual(model.requests[1].tool_images, ())
+
     def test_a_run_that_reaches_its_call_limit_stops_without_a_report(self) -> None:
         model = ScriptedModel([tool("run_program", {})] * 5)
         outcome = MechanicalWorker(model, self.dispatch, (RUN,)).run("Loop.", "job", 2)

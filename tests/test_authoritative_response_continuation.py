@@ -98,7 +98,9 @@ class SelectionContinuationTests(Fixture):
         result = self.core(reasoner).process(conversation(), RETENTION, 2)
         self.assertEqual(result.state, CoreState.RESPONDED)
         self.assertEqual(result.reason, "budget_exhausted")
-        self.assertEqual(result.response, "I ran out of steps; the goal is saved.")
+        # The line saying she waits is written for her (14 Nov).
+        self.assertEqual(result.response, "I've stopped: this request used all my steps. Tell me to carry on "
+                         "and I'll continue. I ran out of steps; the goal is saved.")
         self.assertEqual(len(reasoner.contexts), 3)
         self.assertEqual(reasoner.contexts[-1].response_only_reason, "budget_exhausted")
         self.assertEqual(len(self.memory.load("preference-1").revisions), 1)
@@ -135,7 +137,9 @@ class SelectionContinuationTests(Fixture):
         core._budget_check = check
         result = core.process(conversation(), RETENTION, 2)
         self.assertEqual(result.state, CoreState.RESPONDED)
-        self.assertEqual(result.response, "I ran out of steps; the goal is saved.")
+        # The line saying she waits is written for her (14 Nov).
+        self.assertEqual(result.response, "I've stopped: this request used all my steps. Tell me to carry on "
+                         "and I'll continue. I ran out of steps; the goal is saved.")
 
     def test_a_background_turn_stays_under_the_ceiling_at_its_last_step(self):
         from alx.contracts import CognitionOrigin
