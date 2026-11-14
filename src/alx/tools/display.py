@@ -265,7 +265,7 @@ MAX_ROWS = 16
 
 def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | None] | None,
              work_copies: set[str], shown_document: str | None = None,
-             footprints: set[str] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+             footprints: set[tuple[str, str]] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """What KiCad measured on her copy against the manufacturer's drawing (2026-11-13).
 
     She twice showed Friedl a layout with a clean DRC that differed from
@@ -290,8 +290,9 @@ def _checked(value: Any, read_layout_check: Callable[[str], Mapping[str, Any] | 
         raise ValueError("there is no layout check " + check_id)
     if work_copies and result.get("work_copy_id") not in work_copies:
         raise ValueError("that layout check is not of the copy on screen; check this copy")
-    if footprints and result.get("footprint") not in footprints:
-        # A check of one footprint never stands beside another (review of D-081).
+    if footprints and (result.get("work_copy_id"), result.get("footprint")) not in footprints:
+        # A check of one footprint never stands beside another: copy and
+        # footprint together name one view (reviews of D-081).
         raise ValueError("that layout check is of another footprint than the one on screen")
     if shown_document and Path(str(shown_document)).expanduser().resolve() != Path(
             str(result.get("document_path", ""))).expanduser().resolve():
@@ -399,7 +400,7 @@ def build_display_executors(
                 checked, measured_reference = _checked(
                     arguments["checked"], read_layout_check, copies,
                     (arguments.get("reference") or {}).get("document"),
-                    {view["footprint"] for view in views if view.get("footprint")})
+                    {(view["work_copy_id"], view["footprint"]) for view in views if view.get("footprint")})
                 if not checked["passed"] and (display["verdict"] or {}).get("tone") == "ok":
                     raise ValueError("the layout check did not pass, so the verdict cannot be ok")
             display["checked"] = checked

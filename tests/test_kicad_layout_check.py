@@ -60,8 +60,6 @@ class NumberReadingTests(unittest.TestCase):
                          [("0,51", 0.51, ""), ("1.8", 1.8, "pF"), ("2.7", 2.7, "nH")])
 
 
-@unittest.skipUnless(KICAD.is_dir() and POPPLER.is_file() and kicad_containment_available(),
-                     "KiCad or poppler is not installed")
 class ArmReadingTests(unittest.TestCase):
     """14 Nov: Würth dimensions the L-shaped pad 4 of 7488918022 arm by arm."""
 
@@ -103,6 +101,8 @@ class WordReaderTests(unittest.TestCase):
         self.assertEqual(words, [(100.0, 50.0, 112.5, 60.0, "2.54"), (120.0, 50.0, 128.0, 60.0, "R&D")])
 
 
+@unittest.skipUnless(KICAD.is_dir() and POPPLER.is_file() and kicad_containment_available(),
+                     "KiCad or poppler is not installed")
 class RealLayoutCheckTests(unittest.TestCase):
     def test_kicad_measures_and_an_edit_makes_the_check_stale(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

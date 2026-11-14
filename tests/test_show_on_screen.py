@@ -893,6 +893,9 @@ class CheckedAgainstDatasheetTests(unittest.TestCase):
         view = {"label": "Library", "work_copy_id": "lib1", "footprint": "Lib/B", "refs": ["FP"]}
         checked = {"layout_check": self.CHECK["check_id"]}
         self.assertIn("another footprint", self.reason(display(views=[view], checked=checked)))
+        # Copy and footprint are one pair: lib1's B beside lib2's A is not a check of either.
+        views = [dict(view, work_copy_id="lib2", footprint="Lib/A", label="Other"), view]
+        self.assertIn("another footprint", self.reason(display(views=views, checked=checked)))
         self.stored[self.CHECK["check_id"]]["numbers"][0]["read_from"] = "picture"
         shown = self.show(display(views=[dict(view, footprint="Lib/A")], checked=checked))
         self.assertEqual(shown.state, CapabilityResultState.SUCCEEDED, shown.failure)
