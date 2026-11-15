@@ -19,7 +19,9 @@ from alx.bootstrap.kicad import build_kicad_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.providers.kicad_change import ChangeError, unmet, validate_change  # noqa: E402
 from kicad_actions import kicad_call  # noqa: E402
-from test_kicad_schematic_helpers import CLI, DEVICE, PYTHON, schematic  # noqa: E402
+from test_kicad_schematic_helpers import APP, CLI, DEVICE, PYTHON, schematic  # noqa: E402
+
+APP_SYMBOLS = APP / "SharedSupport/symbols"
 
 FIXTURES = REPOSITORY_ROOT / "tests/fixtures"
 
@@ -118,6 +120,37 @@ class RealChangeTests(unittest.TestCase):
                                      {"op": "no_connect", "sheet": "board.kicad_sch", "pins": ["R1.2"]}])
             self.assertTrue(seen.values["change_report"]["unmet"])
             self.assertEqual(copy.read_text(), before)
+
+    def test_an_unannotated_imported_ground_symbol_is_copied_and_holds(self):
+        """15 Nov: P0009's imported GND symbols are all #PWR?; none could be found to copy."""
+        import uuid as _uuid
+        power = (APP_SYMBOLS / "power.kicad_sym").read_text()
+        start = power.index('(symbol "GND"')
+        depth = 0
+        for end in range(start, len(power)):
+            depth += {"(": 1, ")": -1}.get(power[end], 0)
+            if depth == 0:
+                break
+        gnd = power[start:end + 1].replace('(symbol "GND"', '(symbol "power:GND"', 1)
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            text = (project / "board.kicad_sch").read_text()
+            text = text.replace("\t(lib_symbols\n", "\t(lib_symbols\n\t\t" + gnd + "\n", 1)
+            root = text.split('(uuid "', 1)[1].split('"', 1)[0]
+            placed = ('\t(symbol\n\t\t(lib_id "power:GND")\n\t\t(at 200 150 0)\n\t\t(unit 1)\n'
+                      '\t\t(uuid "%s")\n\t\t(property "Reference" "#PWR?"\n\t\t\t(at 200 155 0)\n\t\t)\n'
+                      '\t\t(property "Value" "GND"\n\t\t\t(at 200 153 0)\n\t\t)\n'
+                      '\t\t(pin "1"\n\t\t\t(uuid "%s")\n\t\t)\n\t\t(instances\n\t\t\t(project "t"\n'
+                      '\t\t\t\t(path "/%s"\n\t\t\t\t\t(reference "#PWR?")\n\t\t\t\t\t(unit 1)\n'
+                      '\t\t\t\t)\n\t\t\t)\n\t\t)\n\t)\n' % (_uuid.uuid4(), _uuid.uuid4(), root))
+            text = text.replace("\t(sheet_instances", placed + "\t(sheet_instances", 1)
+            (project / "board.kicad_sch").write_text(text)
+            checked = self.call(runtime, "check_kicad_board", project_dir=str(project)).values
+            result = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+                {"op": "power", "sheet": "board.kicad_sch", "pin": "R1.2", "port": "power:GND"},
+                {"op": "power", "sheet": "board.kicad_sch", "pin": "R3.2", "port": "GND"}])
+            self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+            self.assertEqual(list(result.values["change_report"]["unmet"]), [])
 
     def test_a_missing_power_port_names_what_the_sheet_has(self):
         with tempfile.TemporaryDirectory() as folder:

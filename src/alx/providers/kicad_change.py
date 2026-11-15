@@ -110,7 +110,7 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
             problems.append('%s is not in the schematic' % op['from'])
         elif kind == 'label' and _short(after_names.get(op['pin'], '')) != _short(op['net']):
             problems.append('%s is on %s, not %s' % (op['pin'], after_names.get(op['pin'], 'no net'), op['net']))
-        elif kind == 'power' and _short(after_names.get(op['pin'], '')) != _short(op['port']):
+        elif kind == 'power' and _short(after_names.get(op['pin'], '')) != _short(op['port'].split(':', 1)[-1]):
             problems.append('%s is on %s, not %s' % (op['pin'], after_names.get(op['pin'], 'no net'), op['port']))
         elif kind == 'no_connect':
             for pin in op['pins']:
@@ -149,9 +149,11 @@ def _pin(text):
 
 
 def _power_template(s, port):
+    port = port.split(":", 1)[-1]
     for item in s.symbols():
         if item["ref"].startswith("#") and item["value"] == port:
-            return item["ref"]
+            # By uuid: imported power symbols often share #PWR? (15 Nov).
+            return item["uuid"] or item["ref"]
     ports = sorted({item["value"] for item in s.symbols() if item["ref"].startswith("#")})
     raise KeyError("no %s port on %s to copy; this sheet has %s" % (port, s.path.rsplit("/", 1)[-1],
                                                                        ", ".join(ports) or "none"))
@@ -188,7 +190,7 @@ def apply_change(change):
             elif kind == "power":
                 ref, number = _pin(op["pin"])
                 template = op.get("template") or _power_template(s, op["port"])
-                if "GND" in op["port"].upper():
+                if "GND" in op["port"].split(":", 1)[-1].upper():
                     s.ground_pin(ref, number, template)
                 else:
                     s.power_pin(ref, number, template)

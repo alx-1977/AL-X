@@ -381,12 +381,14 @@ INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
     "Read a work copy's schematic as facts, changing nothing: every part (reference, value, "
     'footprint, sheet, place and rotation) with each pin number, pin name and net; every net '
     "with the pins it joins, from KiCad's own netlist across every sheet; and each sheet's "
-    'labels. original true reads his project as your copy was made from it. refs, nets and '
+    'labels. library_symbols (LIBRARY:NAME, up to 10) gives each such symbol\'s pins (number, '
+    'name, type) before it is placed, for a swap. original true reads his project as your copy was made from it. refs, nets and '
     'contains (text in a reference, value or footprint) narrow it; limit (default 200) bounds '
     'each list. Read the schematic this way, never by printing sheet text from an edit script.',
-    obj({'work_copy_id': S, 'original': B, 'refs': array(S), 'nets': array(S), 'contains': S, 'limit': I},
-        ('work_copy_id',)),
-    obj({'sheets': array(MAP), 'parts': array(MAP), 'nets': array(MAP), 'truncated': MAP}), SideEffect.NONE, FAILURES)
+    obj({'work_copy_id': S, 'original': B, 'refs': array(S), 'nets': array(S), 'contains': S, 'limit': I,
+         'library_symbols': array(S)}, ('work_copy_id',)),
+    obj({'sheets': array(MAP), 'parts': array(MAP), 'nets': array(MAP), 'library_symbols': array(MAP),
+         'truncated': MAP}), SideEffect.NONE, FAILURES)
 RENDER = CapabilityDefinition('render',
     "KiCad's own drawing of a board work copy as a PDF in ALX_Storage, to read with look "
     '(whole page first, then a section for detail). what: schematic (every sheet, one page '

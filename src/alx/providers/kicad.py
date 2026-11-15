@@ -2101,8 +2101,30 @@ class KiCadProvider:
             parts.append(item)
         chosen = [net for net in nets if (not wanted_nets or net['name'] in wanted_nets)
                   and (not refs or any(node.split('.')[0] in refs for node in net['nodes']))]
-        return {'sheets': sheets, 'parts': parts[:limit], 'nets': chosen[:limit],
+        # A library symbol's pins, before it is placed: what a swap's pin map needs.
+        library = []
+        names = [n for n in (arguments.get('library_symbols') or ())][:10]
+        for name, block in (self._library_parts([n for n in names if not self._sheet_has_symbol(project, n)],
+                                                project, 'symbols') if names else {}).items():
+            library.append({'lib_id': name, 'pins': self._symbol_pins_from(block)})
+        for name in names:
+            cached = self._cached_symbol(project, name) if self._sheet_has_symbol(project, name) else None
+            if cached is not None:
+                library.append({'lib_id': name, 'pins': self._symbol_pins_from(cached)})
+        return {'sheets': sheets, 'parts': parts[:limit], 'nets': chosen[:limit], 'library_symbols': library,
                 'truncated': {'parts': len(parts) > limit, 'nets': len(chosen) > limit}}
+
+    @staticmethod
+    def _symbol_pins_from(block):
+        """Each pin of a library symbol: number, name and electrical type."""
+        pins = []
+        for node in descendants(sexpr(block)):
+            if node.name == 'pin' and len(node.children) > 1:
+                number, name = node.named('number'), node.named('name')
+                pins.append({'number': str(number[0].children[1]) if number else '',
+                             'name': str(name[0].children[1]) if name else '',
+                             'type': str(node.children[1])})
+        return sorted(pins, key=lambda p: (len(p['number']), p['number']))
 
     def render(self, arguments):
         """KiCad's own drawing of a work copy, or of his original, as a PDF to look at."""

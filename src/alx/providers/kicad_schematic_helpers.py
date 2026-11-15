@@ -194,6 +194,7 @@ class Sheet:
                           "value": props.get("Value", ""), "at": _r((at[1], at[2])),
                           "rotation": float(at[3]) if len(at) > 3 else 0.0,
                           "mirror": mirror[1] if mirror else None,
+                          "uuid": _unq(_child(symbol, "uuid")[1]) if _child(symbol, "uuid") else "",
                           "pins": self._symbol_pins(symbol, libs)})
         return found
 
@@ -496,14 +497,21 @@ class Sheet:
                      % (at[0], at[1], _uuid.uuid4()))
 
     def copy_symbol(self, ref, at, rotation=0):
-        """A copy of a symbol on this sheet (a power or ground symbol) at another place."""
+        """A copy of a power or ground symbol on this sheet at another place; ref may be its uuid.
+
+        Imported power symbols often share the reference #PWR? (15 Nov): a uuid
+        names exactly one.
+        """
         root, spans = self._tree()
-        found = [s for s in _children(root, "symbol") if self._ref(s) == ref]
+        found = [s for s in _children(root, "symbol")
+                 if (_child(s, "uuid") and _unq(_child(s, "uuid")[1]) == ref)] or \
+                [s for s in _children(root, "symbol") if self._ref(s) == ref]
         if not found:
             raise KeyError("no symbol %s on %s" % (ref, _os.path.basename(self.path)))
+        symbol = found[0]
+        ref = self._ref(symbol)
         if not ref.startswith("#"):
             raise ValueError("only power and ground symbols (#PWR...) are copied; a part needs its own reference")
-        symbol = found[0]
         start, end = spans[id(symbol)]
         block = self.text[start:end]
         old = _child(symbol, "at")
@@ -517,12 +525,14 @@ class Sheet:
         block = (block[:first] + "(at %g %g %g)" % (at[0], at[1], rotation) + block[close + 1:head_end]
                  + _re.sub(r'\(at ([-\d.]+) ([-\d.]+) ([-\d.]+)\)', shift, block[head_end:]))
         block = _re.sub(r'\(uuid "[^"]+"\)', lambda m: '(uuid "%s")' % _uuid.uuid4(), block)
-        # Power symbols are numbered by KiCad; a free number keeps the sheet valid.
-        taken = {self._ref(s) for s in _children(root, "symbol")}
-        number = 1
-        while "#PWR%04d" % number in taken or "#PWR0%d" % number in taken:
-            number += 1
-        block = block.replace('"%s"' % ref, '"#PWR%04d"' % number)
+        # Power symbols are numbered by KiCad; a free number keeps the sheet
+        # valid. One left unannotated (#PWR?) stays so, like its original.
+        if "?" not in ref:
+            taken = {self._ref(s) for s in _children(root, "symbol")}
+            number = 1
+            while "#PWR%04d" % number in taken or "#PWR0%d" % number in taken:
+                number += 1
+            block = block.replace('"%s"' % ref, '"#PWR%04d"' % number)
         self._append("\t" + block)
 
     def save(self):
