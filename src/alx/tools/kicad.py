@@ -124,7 +124,15 @@ _ACTION_DEFINITIONS = (
         "replace_part(b, ref, 'LIBRARY/NAME', pin_nets={pad: net}) swaps a part for a library "
         "footprint in its place, keeping reference, fields, side and schematic link, after "
         "naming it in footprints so the tool copies it in (pads with no net come back as "
-        "unconnected); refill(b) and save(b); on a library copy (copy_library): footprints(lib), "
+        "unconnected); the schematic, which KiCad cannot edit from Python, through "
+        "s = sheet('NAME.kicad_sch') (sheets() lists them): s.symbols(), s.symbol(ref) with its "
+        "pins {number: (x, y)}, s.wires(), s.labels(); s.swap_symbol(ref, 'LIBRARY:NAME', "
+        "value=, footprint=, at=, rotation=) after naming it in symbols (returns old pin points "
+        "no new pin lands on), s.remove_symbol(ref) (takes the wiring only it used), "
+        "s.tidy(points), s.add_wire(p, q, ...), s.add_label(name, at, angle, kind), "
+        "s.add_no_connect(at), s.add_junction(at), s.copy_symbol('#PWR..', at, rotation) for "
+        "power and ground, then s.save(); sheet points are in mm on KiCad's 1.27 grid; "
+        "refill(b) and save(b); on a library copy (copy_library): footprints(lib), "
         "footprint(lib, name), save_footprint(lib, fp). Use them rather than guessing pcbnew names; refill "
         "after every change. Never remove items while looping over pcbnew's own lists, never "
         "Remove a part's drawing through the board, never read an outline that is not there: "
@@ -143,7 +151,8 @@ _ACTION_DEFINITIONS = (
         'change_report.compared_to_original lists DRC findings his original did not have (new, '
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
-        obj({'work_copy_id': S, 'script': S, 'footprints': array(S)}, ('work_copy_id', 'script')),
+        obj({'work_copy_id': S, 'script': S, 'footprints': array(S), 'symbols': array(S)},
+            ('work_copy_id', 'script')),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP}),
         SideEffect.NONE, FAILURES),

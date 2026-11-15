@@ -1179,6 +1179,19 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
             self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
                          footprints=wrong, script='pass')
 
+    def test_an_edit_gets_the_library_symbols_it_names(self):
+        (self.project / 'local.kicad_sym').write_text(
+            '(kicad_symbol_lib\n\t(version 20251024)\n\t(symbol "Other"\n\t)\n\t(symbol "TwoPin"\n\t\t(pin_numbers)\n\t)\n)\n')
+        (self.project / 'sym-lib-table').write_text(
+            '(sym_lib_table\n\t(lib (name "Local") (type "KiCad") (uri "${KIPRJMOD}/local.kicad_sym") (options "") (descr ""))\n)\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], symbols=['Local:TwoPin'],
+                              script='print(_LIBRARY_SYMBOLS)')
+        self.assertIn("{'Local:TwoPin': '(symbol \"TwoPin\"\\n\\t\\t(pin_numbers)\\n\\t)'}", edited['stdout'])
+        for wrong in (['Local:Missing'], ['Nowhere:TwoPin'], ['Local/TwoPin']):
+            self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                         symbols=wrong, script='pass')
+
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()
         metadata = next(self.storage.rglob(checked['work_copy_id'] + '/metadata.json'))
