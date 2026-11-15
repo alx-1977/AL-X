@@ -583,7 +583,10 @@ def _records(value: Any, record_type: type, field_name: str) -> tuple[Any, ...]:
         if record_type is ProgressRecord:
             records.append(
                 ProgressRecord(
-                    item["id"], item["summary"], _strings(item["evidence_refs"], "evidence_refs")
+                    # Left out means none: the schema says empty when a record
+                    # rests on no evidence. Six of her steps were rejected for
+                    # leaving it out on 15 Nov, each a whole Opus round wasted.
+                    item["id"], item["summary"], _strings(item.get("evidence_refs", ()), "evidence_refs")
                 )
             )
         elif record_type is WorkItem:

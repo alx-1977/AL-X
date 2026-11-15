@@ -89,11 +89,14 @@ _ACTION_DEFINITIONS = (
         "KiCad's electrical rules check of the schematic, errors and warnings; Friedl wants "
         'both clean, like the DRC. When erc.top_level_sheets is more than 1 (an Altium import), '
         "KiCad's board-against-schematic check (schematic_parity) reads only the first sheet: "
-        'run make_hierarchical on the copy first, and write it back with his approval.',
-        obj({'project_dir': S}), obj({'work_copy_id': S, 'work_copy_revision': S,
+        'run make_hierarchical on the copy first, and write it back with his approval. '
+        'work_copy_id instead of project_dir checks one of your copies again as it is now; '
+        'compared_to_original says what is new against his original.',
+        obj({'project_dir': S, 'work_copy_id': S}, ()), obj({'work_copy_id': S, 'work_copy_revision': S,
             'custom_rule_citations': RULE_CITATIONS, 'work_copy_tainted': B, 'baseline_eligible': B,
             'totals': TOTALS, 'violations': array(GROUP), 'unconnected_items': array(GROUP),
-            'schematic_parity': array(GROUP), 'erc': ERC, 'layout_rules': LAYOUT_RULES}),
+            'schematic_parity': array(GROUP), 'erc': ERC, 'layout_rules': LAYOUT_RULES,
+            'compared_to_original': MAP}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('edit_kicad_work_copy',
         'Run bounded Python source with bundled KiCad pcbnew on a registered untainted work '

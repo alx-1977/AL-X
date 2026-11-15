@@ -147,6 +147,30 @@ function reasoningTokens(message) {
   return `Tokens · input ${count(message.input_tokens)} · cached ${count(message.cached_tokens)} · cache write ${count(message.cache_write_tokens)} · output ${count(message.output_tokens)} · reasoning ${count(message.reasoning_tokens)} · total ${count(message.total_tokens)}`;
 }
 
+// What a failure code means, in plain words beside the code (Friedl, 15 Nov:
+// "they are not clear as to what they are"). Fixed technical descriptions.
+const reasonMeanings = {
+  script_failed: "KiCad script crashed",
+  decision_rejected: "step rejected: malformed decision",
+  reasoner_error: "model call failed (limit or login)",
+  path_denied: "path outside allowed folders",
+  arguments_unusable: "call had wrong or missing fields",
+  work_copy_tainted: "work copy untrusted after an interrupted edit",
+  work_copy_changed: "work copy changed since that revision",
+  step_not_approved: "step not yet approved by Friedl",
+  schematic_board_differ: "board and schematic disagree",
+  unavailable: "tool or service unavailable",
+  worker_busy: "helper already busy",
+  worker_failed: "helper run failed",
+  dispatch_interrupted: "interrupted by a restart",
+  core_selected_silence: "nothing to say",
+  board_agent_action_not_allowed: "action not allowed to the board agent",
+  worker_action_not_allowed: "action not allowed to the helper",
+  input_invalid: "call did not match the tool's fields",
+  cli_failed: "KiCad command failed",
+  cli_timeout: "KiCad command timed out",
+};
+
 const traceTones = {
   started: "active", waiting: "active", completed: "ok", info: "info",
   refused: "error", failed: "error",
@@ -158,7 +182,10 @@ function showTrace(message) {
   if (message.reference && message.reference !== message.label) parts.push(message.reference);
   if (message.count !== undefined) parts.push(`${message.count} steps`);
   if (message.duration_ms !== undefined) parts.push(seconds(message.duration_ms));
-  if (message.reason_code) parts.push(message.reason_code);
+  if (message.reason_code) {
+    const meaning = reasonMeanings[message.reason_code];
+    parts.push(meaning ? `${message.reason_code} (${meaning})` : message.reason_code);
+  }
   const subsystem = String(message.subsystem ?? "").toUpperCase();
   diagnostic(parts.join(" · "), traceTones[message.status] ?? "info", "SYSTEM", {
     subsystem, at: message.at, background: message.background === true,

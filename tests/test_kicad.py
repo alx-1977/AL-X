@@ -1142,7 +1142,7 @@ p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
         (self.project / 'test.kicad_pcb').write_text(board)
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
         # Original and copy: U1 pins 1 and 2 on nets of their own in the schematic.
-        self.netlists = [[('A', 'U1', '1'), ('B', 'U1', '2')] for _ in range(3)]
+        self.netlists = [[('A', 'U1', '1'), ('B', 'U1', '2')] for _ in range(6)]
         checked = self.check()
         # Her copy joins them on the board.
         joined = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="""
@@ -1242,6 +1242,20 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         # The windows of an earlier call are closed first.
         self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
         self.assertEqual(len(closed), 2)
+
+    def test_her_copy_can_be_checked_again_against_his_original(self):
+        checked = self.check()
+        self.assertEqual(checked['compared_to_original']['new'], 0)
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.report = {'violations': [{'type': 'clearance', 'severity': 'error', 'description': 'Clearance',
+                                       'items': [{'description': 'Track [A] on F.Cu'}]}],
+                       'unconnected_items': [], 'schematic_parity': []}
+        again = self.success('check_kicad_board', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(again['work_copy_id'], checked['work_copy_id'])
+        self.assertEqual(again['compared_to_original']['new'], 1)
+        self.failure('arguments_unusable', 'check_kicad_board')
+        self.failure('arguments_unusable', 'check_kicad_board', work_copy_id=checked['work_copy_id'],
+                     project_dir=str(self.project))
 
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()

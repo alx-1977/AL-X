@@ -1638,6 +1638,11 @@ class KiCadProvider:
         return result
 
     def check(self, arguments):
+        if bool(arguments.get('work_copy_id')) == bool(arguments.get('project_dir')):
+            raise KiCadError('arguments_unusable', {'detail': 'name project_dir (his project, for a new copy) '
+                                                    'or work_copy_id (one of yours, checked again)'})
+        if arguments.get('work_copy_id'):
+            return self._check_copy(arguments['work_copy_id'])
         source = self._source(arguments['project_dir'])
         if source.is_relative_to(self.work_root) or self.work_root.is_relative_to(source):
             raise KiCadError('path_denied')
@@ -1669,7 +1674,24 @@ class KiCadProvider:
         # clean result like the DRC (Friedl, 2026-11-13).
         result['erc'] = self._erc(root, meta)
         result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
+        result['compared_to_original'] = self._compared(root, meta, signatures)
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
+
+    def _check_copy(self, work_copy_id):
+        """One of her copies checked again as it is now, against his original (15 Nov:
+        her helper tried the project check on a copy, four times refused)."""
+        with self._locked(work_copy_id):
+            root, meta = self._load(work_copy_id)
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            if meta.get('library'):
+                raise KiCadError('arguments_unusable', {'detail': 'a library copy has no board to check'})
+            signatures = []
+            result = self._drc(root, meta, signatures)
+            result['erc'] = self._erc(root, meta)
+            result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
+            result['compared_to_original'] = self._compared(root, meta, signatures)
+            return dict(result, work_copy_id=work_copy_id, work_copy_revision=self._revision(root))
 
     def copy_library(self, arguments):
         """A work copy of a KiCad library folder (the FireFli library), for footprint and symbol work.
