@@ -32,6 +32,11 @@ from alx.contracts import (
 from alx.specialists.worker import MechanicalWorker, WorkerError, _catalogue, _plain, worker_tools
 
 REPORT_TOOL = "report_step"
+RECEIPTS_KEPT = 40
+
+
+class BoardJobStopped(Exception):
+    """Raised where a model call would otherwise be retried after AL/X stopped the job."""
 
 AGENT_INSTRUCTIONS = """You are AL/X's board agent. AL/X works with Friedl, an electronics \
 engineer, and has handed you one KiCad board job: an edit of one of his boards, or a new board. \
@@ -117,9 +122,14 @@ class BoardJobAgent(MechanicalWorker):
     def run(self, brief: str, job_id: str, max_calls: int) -> dict[str, Any]:  # noqa: D102
         return self.work(job_id=None, brief=brief, message=None, max_calls=max_calls)
 
-    def stop(self, job_id: str) -> bool:
-        """Stop the running stretch of this job; True when one was running."""
-        if self._running != job_id:
+    def stop(self, job_id: str | None = None) -> bool:
+        """Stop the running stretch (of this job, when named); True when one was running.
+
+        The stop holds against the provider's retry: a model call ended by it
+        is never started again (15 Nov: a stopped agent came back as a retry,
+        from its first brief, and made a second copy).
+        """
+        if self._running is None or (job_id is not None and self._running != job_id):
             return False
         self._stop.set()
         # Ends the model session now, rather than after its current step.
@@ -158,20 +168,52 @@ class BoardJobAgent(MechanicalWorker):
             text = ""
         return text.strip() or "(none recorded yet)"
 
+    def _renewal(self, job_id: str, journal: Mapping[str, Any]):
+        """What a retried model call starts from: the journal as it is now, or nothing after a stop."""
+        def renew(_failure: Exception) -> ModelRequest:
+            if self._stop.is_set():
+                raise BoardJobStopped()
+            return self._request(job_id, journal)
+        return renew
+
+    def _receipt(self, job_id: str, journal: dict[str, Any], summary: Mapping[str, Any], answer: str) -> None:
+        """A compact record of one call, kept as it happens, so no session loses the work done."""
+        try:
+            values = (json.loads(answer).get("values") or {})
+        except (ValueError, AttributeError):
+            values = {}
+        result = values.get("result") if isinstance(values.get("result"), Mapping) else values
+        receipt = {"call": summary.get("capability_id"), "outcome": summary.get("outcome")}
+        for key in ("action",):
+            if isinstance(values.get(key), str):
+                receipt[key] = values[key]
+        for key in ("work_copy_id", "work_copy_revision", "previewed"):
+            if isinstance(result, Mapping) and result.get(key) is not None:
+                receipt[key] = result[key]
+        if receipt.get("work_copy_id"):
+            journal["work_copy"] = {"work_copy_id": receipt["work_copy_id"],
+                                    "work_copy_revision": receipt.get("work_copy_revision", "")}
+        journal["receipts"] = (journal.get("receipts", []) + [receipt])[-RECEIPTS_KEPT:]
+        self._save(job_id, journal)
+
     def _request(self, job_id: str, journal: Mapping[str, Any]) -> ModelRequest:
         system = (f"{AGENT_INSTRUCTIONS}\nHis preferences:\n{self._preferences_text()}\n\n"
                   f"Helper manual (edit scripts):\n{self._manual or '(see the edit action)'}\n\n"
                   f"Capabilities you may call:\n{_catalogue(tuple(self._definitions.values()))}")
         messages = [ModelMessage(ModelRole.SYSTEM, system), ModelMessage(ModelRole.USER, journal["brief"])]
-        if journal["events"]:
+        if journal["events"] or journal.get("receipts"):
             messages.append(ModelMessage(ModelRole.USER, json.dumps({
                 "transport_fact": "earlier_in_this_job",
-                "detail": "What you reported in earlier stretches and what AL/X answered, in order; the "
-                          "last entry is what to do now. Your work copy holds your work so far: check "
-                          "its current state before you change it.",
-                "events": journal["events"]}, ensure_ascii=False)))
+                "detail": "What you reported in earlier stretches and what AL/X answered, in order, and "
+                          "your latest calls; the last event is what to do now. Your work copy holds your "
+                          "work so far: carry on with it, never make another, and check its current "
+                          "state before you change it.",
+                "work_copy": journal.get("work_copy"),
+                "events": journal["events"],
+                "latest_calls": journal.get("receipts", [])}, ensure_ascii=False)))
         return ModelRequest(tuple(messages), "board_report", REPORT_SCHEMA, affinity_key=job_id,
-                            kind="board_agent", tools=agent_tools())
+                            kind="board_agent", tools=agent_tools(),
+                            on_retry=self._renewal(job_id, journal))
 
     def _finish(self, job_id: str, journal: dict[str, Any], calls: list, outcome: dict[str, Any]) -> dict[str, Any]:
         self._save(job_id, journal)
@@ -195,7 +237,8 @@ class BoardJobAgent(MechanicalWorker):
 
         def stopped(reason: str) -> dict[str, Any]:
             self._abandon()
-            journal["events"].append({"stopped": reason, "calls": len(calls)})
+            journal["events"].append({"stopped": reason, "calls": len(calls),
+                                      "work_copy": journal.get("work_copy")})
             return self._finish(job_id, journal, calls, {"status": "stopped", "stop_reason": reason})
         try:
             completion = self._model.complete(request)
@@ -217,9 +260,12 @@ class BoardJobAgent(MechanicalWorker):
                 answer, summary, images = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
                 calls.append(summary)
                 returned.append({**summary, "returned": json.loads(answer)})
+                self._receipt(job_id, journal, summary, answer)
                 if self._stop.is_set():
                     return stopped("stopped_by_alx")
                 completion = self._model.complete(replace(request, tool_result=answer, tool_images=images))
+        except BoardJobStopped:
+            return stopped("stopped_by_alx")
         except WorkerError:
             self._abandon()
             raise
@@ -236,4 +282,4 @@ class BoardJobAgent(MechanicalWorker):
         return self._finish(job_id, journal, calls, {"status": report["status"], "report": report})
 
 
-__all__ = ["AGENT_INSTRUCTIONS", "BoardJobAgent", "REPORT_SCHEMA", "REPORT_TOOL", "agent_tools"]
+__all__ = ["AGENT_INSTRUCTIONS", "BoardJobAgent", "BoardJobStopped", "REPORT_SCHEMA", "REPORT_TOOL", "agent_tools"]

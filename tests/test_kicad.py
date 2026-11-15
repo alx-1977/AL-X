@@ -1324,6 +1324,23 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         self.assertEqual(read['change_report']['files_changed'], ())
         self.assertEqual([call[1:4] for call in self.calls if call[0] != '/usr/bin/sandbox-exec'], [])
 
+    def test_symbols_are_found_in_kicads_own_libraries_and_among_the_projects_own(self):
+        """15 Nov: the agent guessed five library names for a GND symbol; every one was refused."""
+        shared = self.root / 'kicad-shared'
+        (shared / 'symbols').mkdir(parents=True)
+        (shared / 'symbols' / 'power.kicad_sym').write_text('(kicad_symbol_lib (symbol "GND" (power)))\n')
+        self.runtime.provider.kicad_shared = shared
+        (self.project / 'test.kicad_sch').write_text(
+            '(kicad_sch (lib_symbols (symbol "Import:GND_POWER_GROUND" (power))) (symbol (lib_id "Import:GND_POWER_GROUND")))\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              symbols=['power:GND', 'Import:GND_POWER_GROUND'], script='print(sorted(_LIBRARY_SYMBOLS.items()))')
+        self.assertIn("('Import:GND_POWER_GROUND', '(symbol \"GND_POWER_GROUND\" (power))')", edited['stdout'])
+        self.assertIn("('power:GND', '(symbol \"GND\" (power))')", edited['stdout'])
+        result = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], symbols=['Nowhere:GND'],
+                           script='pass')
+        self.assertIn('inspect_schematic', result.failure['recovery']['detail'])
+
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()
         metadata = next(self.storage.rglob(checked['work_copy_id'] + '/metadata.json'))

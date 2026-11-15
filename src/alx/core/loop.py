@@ -2652,6 +2652,19 @@ class CoreAgent:
         self._evidence_settled.intersection_update(current_evidence)
         return tuple(jobs)
 
+    def planned_dispatch_withdrawn(self, job: PlannedDispatch) -> bool:
+        """Whether a started planned call's plan is gone: cancelled, finished or replaced.
+
+        Read only. A running call cannot be undone by the plan, so its worker
+        is asked to stop through the capability's own cancel (15 Nov: she
+        cancelled a board job's plan and the agent ran on).
+        """
+        try:
+            plan = self._store.load(job.goal_id).state.execution_plan
+        except Exception:  # noqa: BLE001 - unknown is not withdrawn
+            return False
+        return plan is None or plan.plan_id != job.plan_id or plan.status in PLAN_TERMINAL
+
     def begin_planned_dispatch(self, job: PlannedDispatch) -> PlannedDispatch | None:
         """Cross the dispatch boundary, or decline to. Under the lock.
 

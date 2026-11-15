@@ -202,8 +202,12 @@ def content_facts(name, data, start=0):
         from alx.providers.pdf_limits import enforce_pdf_decode_limits
         enforce_pdf_decode_limits()
         reader = PdfReader(io.BytesIO(data))
-        pages, budget = [], MAX_TEXT
-        for index in range(min(len(reader.pages), MAX_PAGES)):
+        # start counts characters of page text already read, so a long datasheet
+        # is read on to its later pages (15 Nov: page 9 was out of reach).
+        pages, budget, skip = [], MAX_TEXT, start
+        last = min(len(reader.pages), MAX_PAGES)
+        stopped_early = len(reader.pages) > MAX_PAGES
+        for index in range(last):
             page = reader.pages[index]
             # Bound both stored and decompressed content before text extraction.
             stored = page.get('/Contents', [])
@@ -214,13 +218,18 @@ def content_facts(name, data, start=0):
             if contents is not None and len(contents.get_data()) > 4 * 1024 * 1024:
                 raise ReferenceError('project_too_large')
             text = page.extract_text() or ''
+            if skip >= len(text):
+                skip -= len(text)
+                continue
+            text, skip = text[skip:], 0
             pages.append({'page': index + 1, 'text': text[:min(4000, budget)],
                           'truncated': len(text) > min(4000, budget)})
             budget -= len(pages[-1]['text'])
             if budget <= 0:
+                stopped_early = stopped_early or index + 1 < last
                 break
         return dict(kind='pdf', pages=pages, page_count=len(reader.pages),
-                    truncated=len(pages) < len(reader.pages) or any(p['truncated'] for p in pages))
+                    truncated=stopped_early or any(p['truncated'] for p in pages))
     if suffix in ('.pcbdoc', '.schdoc'):
         return ole_stream_names(data)
     if b'\x00' in data[:1024] and not data.startswith((b'\xff\xfe', b'\xfe\xff')):
@@ -239,8 +248,8 @@ def read_reference(arguments, *, roots=None, protected=True):
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ReferenceError('arguments_unusable')
     facts = facts_at(arguments, offset, roots, protected)
-    # Only text continues from an offset; elsewhere it would silently be ignored.
-    if offset and facts['kind'] not in ('text', 'altium_project'):
+    # Only text and PDFs continue from an offset; elsewhere it would silently be ignored.
+    if offset and facts['kind'] not in ('text', 'altium_project', 'pdf'):
         raise ReferenceError('arguments_unusable')
     return facts
 

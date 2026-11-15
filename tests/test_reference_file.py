@@ -98,4 +98,10 @@ class ReferenceFileTests(unittest.TestCase):
         self.assertEqual(facts['page_count'], 1)
         self.assertEqual(facts['pages'][0]['page'], 1)
         self.assertIn('Coverlay', facts['pages'][0]['text'])
+        # 15 Nov: a later page of a long datasheet could not be reached; an
+        # offset continues PDF text as it does plain text.
+        later = self.read(pdf, offset=3)
+        self.assertEqual(later['pages'][0]['text'], 'erlay')
+        done = self.read(pdf, offset=len(facts['pages'][0]['text']))
+        self.assertEqual((done['pages'], done['truncated']), ([], False))
         self.assertFalse(facts['truncated'])

@@ -416,6 +416,7 @@ class KiCadProvider:
     render_folder = Path('/nonexistent')
     open_viewer = None
     capture_screen = None
+    kicad_shared = Path('/Applications/KiCad/KiCad.app/Contents/SharedSupport')
     viewer_settle_seconds = 8.0
 
     def __init__(self, settings, execute_cli, execute_python=None):
@@ -1687,7 +1688,7 @@ class KiCadProvider:
         (root / 'metadata.json').write_text(json.dumps(meta))
         signatures = []
         result = self._drc(root, meta, signatures)
-        self._remember_drc(root, meta, result['totals'], signatures)
+        self._remember_drc(root, meta, self._board_totals(result), signatures)
         # His original as it was copied: each step's fingerprint, every DRC
         # finding and every schematic/board disagreement, so later work is
         # judged against it (D-082).
@@ -1714,7 +1715,7 @@ class KiCadProvider:
                 raise KiCadError('arguments_unusable', {'detail': 'a library copy has no board to check'})
             signatures = []
             result = self._drc(root, meta, signatures)
-            self._remember_drc(root, meta, result['totals'], signatures)
+            self._remember_drc(root, meta, self._board_totals(result), signatures)
             result['erc'] = self._erc(root, meta)
             result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
             result['compared_to_original'] = self._compared(root, meta, signatures)
@@ -1792,11 +1793,26 @@ class KiCadProvider:
                 for name, uri in re.findall(r'\(lib \(name "((?:[^"\\]|\\.)*)"\)\s*\(type "KiCad"\)\s*'
                                             r'\(uri "((?:[^"\\]|\\.)*)"\)', table.read_text(errors='replace')):
                     tables[name] = re.sub(r'\$\{(\w+)\}', lambda m: variables.get(m[1], m[0]), uri)
+        # KiCad's own libraries (power, Device, ...) where his table does not list
+        # them (15 Nov: five guesses at a GND symbol, every one refused).
+        bundled = Path(variables.get('KICAD10_SYMBOL_DIR' if kind == 'symbols' else 'KICAD10_FOOTPRINT_DIR')
+                       or (self.kicad_shared / ('symbols' if kind == 'symbols' else 'footprints')))
+        for path in (bundled.glob('*.kicad_sym') if kind == 'symbols' else bundled.glob('*.pretty')):
+            tables.setdefault(path.stem, str(path))
         found = {}
         for item in names:
             library, name = item.split(separator, 1)
+            if kind == 'symbols' and (library not in tables or '${' in tables[library]):
+                # A symbol the project already uses, from its own sheets' cache
+                # (an Altium import's power symbols are in no library table).
+                cached = self._cached_symbol(project, item)
+                if cached is not None:
+                    found[item] = cached
+                    continue
             if library not in tables or '${' in tables[library]:
-                raise KiCadError('arguments_unusable', {'detail': 'no %s library %s in KiCad' % (kind[:-1], library)})
+                raise KiCadError('arguments_unusable', {'detail': 'no %s library %s in KiCad or this project; '
+                                                        'inspect_schematic lists what the project uses'
+                                                        % (kind[:-1], library)})
             path = Path(tables[library]) / (name + '.kicad_mod') if kind == 'footprints' else Path(tables[library])
             limit = 2_000_000 if kind == 'footprints' else 32_000_000
             if (not path.is_file() or path.is_symlink() or denied(path.as_posix()) or path.stat().st_size > limit
@@ -1826,9 +1842,30 @@ class KiCadProvider:
         if last.get('board') == self._drc_key(root, meta):
             return last['totals'], last['signatures']
         signatures = []
-        totals = self._drc(root, meta, signatures)['totals']
+        result = self._drc(root, meta, signatures)
+        totals = self._board_totals(result)
         self._remember_drc(root, meta, totals, signatures)
         return totals, signatures
+
+    @staticmethod
+    def _board_totals(result):
+        """DRC totals without KiCad's schematic-parity findings, which depend on the schematic,
+        not the board, and so cannot be reused with a board-only key (review, 15 Nov)."""
+        totals = dict(result['totals'])
+        for group in result.get('schematic_parity', ()):
+            count = group.get('count', 0)
+            severity_counts = {}
+            for finding in group.get('findings', ()):
+                severity_counts[finding.get('severity')] = severity_counts.get(finding.get('severity'), 0) + 1
+            omitted = group.get('omitted_findings', 0)
+            # Findings beyond the kept examples share the group's first severity.
+            first = next(iter(severity_counts), 'warning')
+            severity_counts[first] = severity_counts.get(first, 0) + omitted
+            for severity, n in severity_counts.items():
+                if severity in totals:
+                    totals[severity] = max(0, totals[severity] - n)
+            totals['total'] = max(0, totals['total'] - count)
+        return totals
 
     @staticmethod
     def _drc_key(root, meta):
@@ -1840,6 +1877,22 @@ class KiCadProvider:
     def _remember_drc(self, root, meta, totals, signatures):
         (root / 'drc-last.json').write_text(json.dumps({'board': self._drc_key(root, meta), 'totals': totals,
                                                         'signatures': signatures}))
+
+    @staticmethod
+    def _cached_symbol(project, lib_id):
+        """A library symbol as one of the project's sheets keeps it, named back to its own name."""
+        name = lib_id.split(':', 1)[1]
+        for path in sorted(project.glob('*.kicad_sch')):
+            text = path.read_text(errors='replace')
+            if lib_id not in text:
+                continue
+            tree = sexpr(text)
+            for cache in tree.named('lib_symbols'):
+                for node in cache.named('symbol'):
+                    if len(node.children) > 1 and node.children[1] == lib_id:
+                        block = text[node.start:node.end]
+                        return block.replace('(symbol %s' % json.dumps(lib_id), '(symbol %s' % json.dumps(name), 1)
+        return None
 
     def _original_steps(self, root, meta):
         # Copies made before D-082 have none recorded; their original is

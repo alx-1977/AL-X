@@ -121,6 +121,47 @@ class BoardAgentTests(unittest.TestCase):
         self.assertEqual(executor({"stop": True, "job_id": agent_box["job"]}).values["status"], "not_running")
         self.assertEqual(executor({"stop": True}).failure["code"], "arguments_unusable")
 
+    def test_every_call_is_journalled_and_a_retry_carries_on_from_it_unless_stopped(self) -> None:
+        """15 Nov: a retried session started again from the first brief and made a second copy."""
+        def dispatch(item):
+            return CapabilityAttempt(item, CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult(
+                item.call_id, item.capability_id, CapabilityResultState.SUCCEEDED,
+                {"action": "check", "result": {"work_copy_id": "c" * 32, "work_copy_revision": "r7"}}))
+        model = SessionModel([call({"action": "check", "project_dir": "/p"}), call({"action": "edit"}),
+                              report("step_ready", "schematic")])
+        agent = BoardJobAgent(model, dispatch, (KICAD,), Path(self.folder.name))
+        outcome = agent.work(job_id=None, brief="Swap U6.", message=None, max_calls=10)
+        journal = json.loads((Path(self.folder.name) / (outcome["job_id"] + ".json")).read_text())
+        self.assertEqual(journal["work_copy"], {"work_copy_id": "c" * 32, "work_copy_revision": "r7"})
+        self.assertEqual(len(journal["receipts"]), 2)
+        # A retry starts from the journal as it is, with the work done so far.
+        renewed = model.requests[-1].on_retry(RuntimeError("cli_failed"))
+        latest = json.loads(renewed.messages[-1].content)
+        self.assertEqual(latest["work_copy"]["work_copy_id"], "c" * 32)
+        self.assertEqual(len(latest["latest_calls"]), 2)
+        # After a stop, a retry is refused instead of starting the agent again.
+        agent._stop.set()
+        from alx.specialists.board_agent import BoardJobStopped
+        with self.assertRaises(BoardJobStopped):
+            model.requests[-1].on_retry(RuntimeError("cli_failed"))
+
+    def test_a_stop_that_meets_a_retry_ends_the_stretch_as_stopped(self) -> None:
+        from alx.specialists.board_agent import BoardJobStopped
+
+        class RetriedModel(SessionModel):
+            def complete(inner, request):
+                if len(inner.requests) == 1:
+                    inner.requests.append(request)
+                    agent.stop()
+                    request.on_retry(RuntimeError("cli_failed"))
+                return super().complete(request)
+        model = RetriedModel([call({"action": "edit"}), call({"action": "edit"})])
+        agent = self.agent(model)
+        agent._running = "x"
+        outcome = agent.work(job_id=None, brief="Route.", message=None, max_calls=10)
+        self.assertEqual((outcome["status"], outcome["stop_reason"]), ("stopped", "stopped_by_alx"))
+        self.assertIsNotNone(BoardJobStopped)
+
     def test_a_stretch_stops_at_its_bound_and_an_unknown_job_is_refused(self) -> None:
         model = SessionModel([call({"action": "edit"})] * 5)
         outcome = self.agent(model).work(job_id=None, brief="Route it.", message=None, max_calls=2)

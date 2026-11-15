@@ -132,7 +132,9 @@ _ACTION_DEFINITIONS = (
         "teardrop areas, which a moved part leaves behind as stray copper (remove them); "
         "replace_part(b, ref, 'LIBRARY/NAME', pin_nets={pad: net}) swaps a part for a library "
         "footprint in its place, keeping reference, fields, side and schematic link, after "
-        "naming it in footprints so the tool copies it in (pads with no net come back as "
+        "naming it in footprints so the tool copies it in; footprints and symbols are found in his "
+        "library tables, in KiCad's own libraries (power:GND, Device:R) and, for symbols, among those "
+        "the project already uses (inspect_schematic lists them) (pads with no net come back as "
         "unconnected); add_part(b, ref, 'LIBRARY/NAME', (x, y), rotation, side, value, pin_nets) "
         "places a part the approved schematic added, or every part of a new board (a net the "
         "board lacks is made); the schematic, which KiCad cannot edit from Python, through "
@@ -196,7 +198,8 @@ _ACTION_DEFINITIONS = (
         'Folders list entries; images give dimensions; PDFs give per-page text; Altium '
         'projects give contents and OLE documents give stream names when board records '
         'cannot be decoded; text/Gerber/KiCad give bounded text; offset (characters, default 0) '
-        'continues truncated text at offset plus the length already read. Also reads retained '
+        'continues truncated text at offset plus the length already read, PDFs too (offset counts '
+        'page text already read). Also reads retained '
         'KiCad edit evidence paths. Zip lists entries or reads '
         'one named entry. iCloud placeholders return not_downloaded. Does not interpret content.',
         obj({'path': S, 'entry': S, 'offset': I}, ('path',)), REFERENCE, SideEffect.NONE, FAILURES),

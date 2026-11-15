@@ -261,7 +261,7 @@ class Sheet:
         return end
 
     def ground_pin(self, ref, pin, template):
-        """A GND port, pointing down, on a short wire from the pin. template: a GND symbol's reference."""
+        """A GND port, pointing down, on a short wire from the pin. template: the reference (#PWR..) of a GND symbol already on this sheet, which is copied."""
         return self._port_pin(ref, pin, template, down=True)
 
     def power_pin(self, ref, pin, template):

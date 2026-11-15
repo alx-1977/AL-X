@@ -1136,6 +1136,7 @@ async def run(repository_root: Path) -> None:
         return refusal if refusal is not None else worker_dispatch(call)
 
     # Its kicad description lists only its own actions (D-083).
+    board_agent = None
     board_agent_definitions = tuple(
         kicad_definition_for(BOARD_AGENT_KICAD_ACTIONS) if item.capability_id == KICAD_CAPABILITY else item
         for item in registry.list_definitions()
@@ -1144,14 +1145,12 @@ async def run(repository_root: Path) -> None:
     if board_agent_definitions:
         register((BOARD_AGENT_DEFINITION,), TraceSubsystem.WORKER)
         policies[BOARD_AGENT_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
-        executors.update(build_board_agent_executors(
-            BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
-                          storage_root / "board-jobs",
-                          preferences=ALX_STORAGE.expanduser() / "Preferences" / "Schematic and layout.md",
-                          manual=helper_manual(),
-                          image_source=partial(stored_image, look_runtime.store)),
-            current_call_id.get,
-        ))
+        board_agent = BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
+                                    storage_root / "board-jobs",
+                                    preferences=ALX_STORAGE.expanduser() / "Preferences" / "Schematic and layout.md",
+                                    manual=helper_manual(),
+                                    image_source=partial(stored_image, look_runtime.store))
+        executors.update(build_board_agent_executors(board_agent, current_call_id.get))
 
     broker = CapabilityBroker(
         registry, SafetyGate(policies), executors,
@@ -1566,13 +1565,19 @@ async def run(repository_root: Path) -> None:
     )
     idle_goal_source.recover(autonomous_budget)
     occasion_sources.append(idle_goal_source)
+    def planned_cancel(job):
+        if job.call.capability_id == BOARD_AGENT_DEFINITION.capability_id and board_agent is not None:
+            board_agent.stop()
+        elif coding_runtime is not None:
+            coding_runtime.agent.cancel(job.call.call_id)
+
     plan_workers = PlanWorkers(
         core, core_turn_lock, plan_source,
-        # The one capability with its own cancel: a running coding job.
-        cancel_dispatch=(
-            None if coding_runtime is None
-            else lambda job: coding_runtime.agent.cancel(job.call.call_id)
-        ),
+        # The capabilities with their own cancel: a running coding job, and a
+        # running board job (D-083), which also stops when she withdraws its plan.
+        cancel_dispatch=planned_cancel,
+        cancel_withdrawn=lambda job: (board_agent.stop() if board_agent is not None and
+                                      job.call.capability_id == BOARD_AGENT_DEFINITION.capability_id else None),
         reconcile_replies=lambda: (
             gateway.reconcile_plan_announcements(),
             gateway.deliver_plan_stop_notes(lambda turn: server.deliver(
