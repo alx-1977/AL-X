@@ -52,6 +52,18 @@ Work in meaningful ways but not complete enough to call finished.
 Existing functionality whose architecture or behaviour is known to be
 inadequate.
 
+- [ ] **DHL freight invoices cannot be booked (D-022 gap).** D-022 (1 Sep)
+  recognises freight (a weight charge, no declaration) but left its
+  accounting open "until a real one is inspected". The first real one,
+  CPTR001032278, R6,561.25, no VAT, outbound Express 12:00, arrived 13 Nov
+  and was correctly held back. `capture_supplier_invoice` refuses DHL
+  documents (D-021), so she has no path at all. Fix: Friedl names the Xero
+  account (and confirms No VAT for export freight); record it as an
+  amendment to D-022; add a freight branch to `process_dhl_import` (each
+  charge its own line, components must sum to the total, tax never invented
+  or dropped, as for duty tax paid); test against CPTR001032278. Small:
+  goes in the next PR, not its own.
+
 - [ ] **Waiting replies are read out unchecked and all at once (D-044).**
   2026-10-13: with no session open since about 9 October, 30 mail replies
   were kept, then spoken back to back when Friedl opened AL/X, including
@@ -125,6 +137,17 @@ inadequate.
 ## Planned
 
 Not yet usable.
+
+- [ ] **What AL/X can do, and what she actually uses (Friedl, 15 Nov).**
+  A plain list of every tool and action, grouped the way Friedl thinks
+  of them (mail, Xero, DHL, KiCad, readers, coding, ...), each with when
+  she last used it, taken from her logs and goal records. Unused or
+  replaced ones go to Friedl for a keep/remove decision, with their code
+  and tests removed together (Law 0). Found during the test audit of the
+  same day: 5,558 tests, almost all real; the dead `alx.projects` store
+  (Stage 1, never wired in, about 45 tests) is the first candidate. Also
+  from that audit: run the tests in parallel (10 min locally, 7-8 min on
+  GitHub, mostly one test at a time) and remove 5 duplicated tests.
 
 - [ ] **Board-design tool: what is left** after #239 and #240 (13 Nov
   2026), which built the layout check against the drawing, ERC and the
