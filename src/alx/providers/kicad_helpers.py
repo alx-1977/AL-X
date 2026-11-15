@@ -32,14 +32,17 @@ def save(board):
 
 
 def mm(value):
+    """KiCad internal units to millimetres."""
     return _pcbnew.ToMM(value)
 
 
 def point(x, y):
+    """A KiCad point from millimetres."""
     return _pcbnew.VECTOR2I(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
 
 
 def xy(vector):
+    """A KiCad point as (x, y) in millimetres."""
     return (round(_pcbnew.ToMM(vector.x), 4), round(_pcbnew.ToMM(vector.y), 4))
 
 
@@ -51,6 +54,7 @@ def layer(name):
 
 
 def part(board, ref):
+    """The footprint with this reference; KeyError when there is none."""
     found = board.FindFootprintByReference(ref)
     if found is None:
         raise KeyError("no part %s on this board" % ref)
@@ -58,6 +62,7 @@ def part(board, ref):
 
 
 def move_part(board, ref, x, y):
+    """Move a part's origin to (x, y) in board mm."""
     part(board, ref).SetPosition(point(x, y))
 
 
@@ -67,6 +72,7 @@ def rotate_part(board, ref, degrees):
 
 
 def pad(board, ref, number):
+    """A part's pad by its number."""
     for item in part(board, ref).Pads():
         if item.GetNumber() == str(number):
             return item
@@ -118,11 +124,13 @@ def tracks(board, net=None):
 
 
 def vias(board, net=None):
+    """Vias, optionally of one net."""
     return [item for item in board.GetTracks()
             if item.GetClass() == "PCB_VIA" and (net is None or item.GetNetname() == net)]
 
 
 def track_ends(item):
+    """A track's two ends as ((x, y), (x, y)) in mm."""
     return (xy(item.GetStart()), xy(item.GetEnd()))
 
 
@@ -323,6 +331,7 @@ def replace_part(board, ref, footprint, pin_nets=None):
 
 
 def add_via(board, net, at, diameter=0.6, drill=0.3):
+    """A through via on a net at (x, y) mm."""
     code = board.FindNet(net)
     if code is None:
         raise KeyError("no net %s on this board" % net)
@@ -568,3 +577,35 @@ NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rot
          "footprints", "footprint", "save_footprint", "refill")
 
 __all__ = ["HELPERS", "NAMES", "script_runner"]
+
+
+def helper_manual():
+    """Every helper an edit script has, with its arguments and what it does, from the code itself.
+
+    15 Nov: the board agent read the helpers' source with dir() and inspect from
+    inside its edits, because the description named them without saying how.
+    """
+    import ast
+    from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
+
+    lines = []
+
+    def entry(node, prefix=""):
+        if node.name.startswith("_"):
+            return
+        arguments = [a.arg for a in node.args.args if a.arg != "self"]
+        defaults = node.args.defaults
+        shown = arguments[:len(arguments) - len(defaults)] + [
+            "%s=%s" % (name, ast.unparse(value)) for name, value in zip(arguments[len(arguments) - len(defaults):], defaults)]
+        doc = (ast.get_docstring(node) or "").split("\n\n")[0].replace("\n", " ")
+        lines.append("%s%s(%s): %s" % (prefix, node.name, ", ".join(shown), doc))
+    for source, title in ((HELPERS, "Board (pcbnew), b = load():"), (SCHEMATIC_HELPERS, "Schematic, s = sheet(NAME):")):
+        lines.append(title)
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.FunctionDef):
+                entry(node, "  ")
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        entry(item, "  s.")
+    return "\n".join(lines)

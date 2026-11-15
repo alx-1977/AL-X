@@ -127,7 +127,9 @@ class KiCadTests(unittest.TestCase):
         if argv[1:4] == ['sch', 'export', 'netlist']:
             target = Path(argv[argv.index('--output') + 1])
             nets = self.netlists.pop(0) if getattr(self, 'netlists', None) else [('N1', 'R1', '1')]
-            target.write_text('(export (nets ' + ' '.join(
+            target.write_text('(export (components ' + ' '.join(
+                f'(comp (ref "{ref}") (value "10k") (footprint "R_0603"))'
+                for ref in sorted({ref for _name, ref, _pin in nets})) + ') (nets ' + ' '.join(
                 f'(net\n(code "1") (name "{name}") (node (ref "{ref}") (pin "{pin}")))'
                 for name, ref, pin in nets) + '))')
             return SimpleNamespace(returncode=0)
@@ -1298,6 +1300,29 @@ from pathlib import Path
 Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
 """)
         self.assertEqual(len([call for call in self.calls if call[1:3] == ['pcb', 'drc']]), 1)
+
+    def test_the_schematic_is_read_as_parts_pins_and_nets_in_one_call(self):
+        """15 Nov: the board agent spent 26 previews reading its way around a schematic."""
+        (self.project / 'test.kicad_sch').write_text(
+            '(kicad_sch (symbol (lib_id "Device:R") (at 10 20 90) (property "Reference" "R1" (at 0 0 0)))'
+            ' (label "OUT" (at 1 2 0)))\n')
+        checked = self.check()
+        self.netlists = [[('OUT', 'R1', '1'), ('GND', 'R1', '2')]]
+        read = self.success('inspect_schematic', work_copy_id=checked['work_copy_id'], refs=['R1'])
+        part = read['parts'][0]
+        self.assertEqual((part['ref'], part['sheet'], tuple(part['at']), part['rotation']),
+                         ('R1', 'test.kicad_sch', (10.0, 20.0), 90.0))
+        self.assertEqual([(pin['number'], pin['net']) for pin in part['pins']], [('1', 'OUT'), ('2', 'GND')])
+        self.assertEqual(list(read['sheets'][0]['labels']), ['OUT'])
+
+    def test_a_script_that_only_reads_pays_for_no_checks(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        self.calls.clear()
+        read = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="print('look')",
+                            dry_run=True)
+        self.assertEqual(read['change_report']['files_changed'], ())
+        self.assertEqual([call[1:4] for call in self.calls if call[0] != '/usr/bin/sandbox-exec'], [])
 
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()

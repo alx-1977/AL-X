@@ -308,12 +308,14 @@ class Sheet:
         self.text = self.text[:start] + block + self.text[end:]
 
     def symbol(self, ref):
+        """One symbol by reference, as symbols() gives it."""
         for item in self.symbols():
             if item["ref"] == ref:
                 return item
         raise KeyError("no symbol %s on %s" % (ref, _os.path.basename(self.path)))
 
     def wires(self):
+        """Every wire as its list of points (x, y)."""
         root, _ = self._tree()
         return [[_r((p[1], p[2])) for p in _children(_child(w, "pts"), "xy")] for w in _children(root, "wire")]
 
@@ -485,9 +487,11 @@ class Sheet:
                         " bottom" if kind == "label" else "", _uuid.uuid4()))
 
     def add_no_connect(self, at):
+        """A no-connect mark on a pin end at (x, y)."""
         self._append('\t(no_connect\n\t\t(at %g %g)\n\t\t(uuid "%s")\n\t)' % (at[0], at[1], _uuid.uuid4()))
 
     def add_junction(self, at):
+        """A junction dot where three or more wires meet at (x, y)."""
         self._append('\t(junction\n\t\t(at %g %g)\n\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n\t\t(uuid "%s")\n\t)'
                      % (at[0], at[1], _uuid.uuid4()))
 
@@ -522,6 +526,7 @@ class Sheet:
         self._append("\t" + block)
 
     def save(self):
+        """Write the sheet back, after checking it still parses."""
         _sx(self.text)
         with open(self.path, "w") as handle:
             handle.write(self.text)

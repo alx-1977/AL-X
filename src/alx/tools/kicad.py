@@ -356,6 +356,16 @@ APPROVE_STEP = CapabilityDefinition('approve_step',
     SideEffect.EFFECTFUL, FAILURES)
 
 
+INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
+    "Read a work copy's schematic as facts, changing nothing: every part (reference, value, "
+    'footprint, sheet, place and rotation) with each pin number, pin name and net; every net '
+    "with the pins it joins, from KiCad's own netlist across every sheet; and each sheet's "
+    'labels. original true reads his project as your copy was made from it. refs, nets and '
+    'contains (text in a reference, value or footprint) narrow it; limit (default 200) bounds '
+    'each list. Read the schematic this way, never by printing sheet text from an edit script.',
+    obj({'work_copy_id': S, 'original': B, 'refs': array(S), 'nets': array(S), 'contains': S, 'limit': I},
+        ('work_copy_id',)),
+    obj({'sheets': array(MAP), 'parts': array(MAP), 'nets': array(MAP), 'truncated': MAP}), SideEffect.NONE, FAILURES)
 RENDER = CapabilityDefinition('render',
     "KiCad's own drawing of a board work copy as a PDF in ALX_Storage, to read with look "
     '(whole page first, then a section for detail). what: schematic (every sheet, one page '
@@ -420,6 +430,7 @@ class KiCadAction(str, Enum):
     FETCH_DATASHEET = 'fetch_datasheet'
     APPROVE_STEP = 'approve_step'
     RENDER = 'render'
+    INSPECT_SCHEMATIC = 'inspect_schematic'
     OPEN_IN_KICAD = 'open_in_kicad'
 
 
@@ -440,6 +451,7 @@ CONTRACTS = {
     KiCadAction.FETCH_DATASHEET: FETCH_DATASHEET,
     KiCadAction.APPROVE_STEP: APPROVE_STEP,
     KiCadAction.RENDER: RENDER,
+    KiCadAction.INSPECT_SCHEMATIC: INSPECT_SCHEMATIC,
     KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
@@ -447,7 +459,7 @@ FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
-    KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD))
+    KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -506,6 +518,7 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.FETCH_DATASHEET: provider.fetch_datasheet,
                KiCadAction.APPROVE_STEP: provider.approve_step,
                KiCadAction.RENDER: provider.render,
+               KiCadAction.INSPECT_SCHEMATIC: provider.inspect_schematic,
                KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad}
 
     def invoke(arguments):

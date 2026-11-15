@@ -77,7 +77,8 @@ class BoardAgentTests(unittest.TestCase):
         prefs.write_text("- GND ports face down.")
         model = SessionModel([call({"action": "edit"}), call({"action": "render"}), report("step_ready", "schematic"),
                               call({"action": "edit"}), report("step_ready", "placement")])
-        agent = BoardJobAgent(model, self.dispatch, (KICAD,), Path(self.folder.name), preferences=prefs)
+        agent = BoardJobAgent(model, self.dispatch, (KICAD,), Path(self.folder.name), preferences=prefs,
+                              manual="add_track(board, net, points, width): A track.")
         first = agent.work(job_id=None, brief="On P0009, replace the two RF switches.", message=None, max_calls=10)
         self.assertEqual((first["status"], first["report"]["step"], len(first["calls"])), ("step_ready", "schematic", 2))
         second = agent.work(job_id=first["job_id"], brief=None, message="Approved.", max_calls=10)
@@ -91,6 +92,7 @@ class BoardAgentTests(unittest.TestCase):
         self.assertEqual([list(event)[0] for event in history["events"]], ["report", "alx"])
         self.assertEqual(history["events"][-1], {"alx": "Approved."})
         self.assertIn("GND ports face down.", fresh.messages[0].content)
+        self.assertIn("add_track(board, net, points, width): A track.", fresh.messages[0].content)
         self.assertEqual(model.requests[0].kind, "board_agent")
 
     def test_alx_can_stop_a_running_stretch(self) -> None:

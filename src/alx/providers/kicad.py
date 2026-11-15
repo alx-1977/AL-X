@@ -1179,14 +1179,18 @@ class KiCadProvider:
                                  if original.get(name) != current.get(name))
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
-                if not library:
+                if not library and changed:
                     report['compared_to_original'] = self._compared(root, meta, signatures)
                     if dry_run and refusal:
                         report['step_refusal'] = refusal
                 # Friedl's taper rule on the edited board, so she sees a step
                 # before she shows anything (2026-11-12, finished 2026-11-13).
+                # A script that only read changed nothing to check (15 Nov: 26
+                # of the agent's 31 edits only read, each paying for every check).
                 report['layout_rules'] = ({'findings': [], 'omitted': 0, 'not_checked': 'a library has no board'}
-                                          if library else self._layout_rules(board))
+                                          if library else
+                                          {'findings': [], 'omitted': 0, 'not_checked': 'nothing changed'}
+                                          if not changed else self._layout_rules(board))
                 if not library and any(name.endswith('.kicad_sch') for name in changed):
                     # A schematic edit is checked like the first copy (review of #239).
                     report['erc'] = self._erc(root, meta)
@@ -1683,6 +1687,7 @@ class KiCadProvider:
         (root / 'metadata.json').write_text(json.dumps(meta))
         signatures = []
         result = self._drc(root, meta, signatures)
+        self._remember_drc(root, meta, result['totals'], signatures)
         # His original as it was copied: each step's fingerprint, every DRC
         # finding and every schematic/board disagreement, so later work is
         # judged against it (D-082).
@@ -1709,6 +1714,7 @@ class KiCadProvider:
                 raise KiCadError('arguments_unusable', {'detail': 'a library copy has no board to check'})
             signatures = []
             result = self._drc(root, meta, signatures)
+            self._remember_drc(root, meta, result['totals'], signatures)
             result['erc'] = self._erc(root, meta)
             result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
             result['compared_to_original'] = self._compared(root, meta, signatures)
@@ -1813,21 +1819,27 @@ class KiCadProvider:
         15 Nov: every schematic edit ran the whole-board DRC twice, about 25
         seconds an edit, on a board it never touched.
         """
-        board = root / 'project' / meta['board']
-        # The rules and the project's severities decide the result as much as the board.
-        digest = hashlib.sha256(json.dumps([sha(path) if path.is_file() else None for path in (
-            board, board.with_suffix('.kicad_dru'), board.with_suffix('.kicad_pro'))]).encode()).hexdigest()
-        cache = root / 'drc-last.json'
         try:
-            last = json.loads(cache.read_text())
+            last = json.loads((root / 'drc-last.json').read_text())
         except (OSError, ValueError):
             last = {}
-        if last.get('board') == digest:
+        if last.get('board') == self._drc_key(root, meta):
             return last['totals'], last['signatures']
         signatures = []
         totals = self._drc(root, meta, signatures)['totals']
-        cache.write_text(json.dumps({'board': digest, 'totals': totals, 'signatures': signatures}))
+        self._remember_drc(root, meta, totals, signatures)
         return totals, signatures
+
+    @staticmethod
+    def _drc_key(root, meta):
+        board = root / 'project' / meta['board']
+        # The rules and the project's severities decide the result as much as the board.
+        return hashlib.sha256(json.dumps([sha(path) if path.is_file() else None for path in (
+            board, board.with_suffix('.kicad_dru'), board.with_suffix('.kicad_pro'))]).encode()).hexdigest()
+
+    def _remember_drc(self, root, meta, totals, signatures):
+        (root / 'drc-last.json').write_text(json.dumps({'board': self._drc_key(root, meta), 'totals': totals,
+                                                        'signatures': signatures}))
 
     def _original_steps(self, root, meta):
         # Copies made before D-082 have none recorded; their original is
@@ -1890,6 +1902,75 @@ class KiCadProvider:
             shutil.rmtree(view, ignore_errors=True)
             raise KiCadError('original_changed')
         return view
+
+    def inspect_schematic(self, arguments):
+        """A copy's schematic as facts: every part with each pin's net, every net with what it joins.
+
+        From KiCad's own netlist, across every sheet, with each symbol's sheet
+        and place and each sheet's labels. One cheap read, where raw sheet text
+        is large and says nothing directly about connections (15 Nov: the board
+        agent spent 26 previews reading its way around a schematic).
+        """
+        root, meta = self._load(arguments['work_copy_id'])
+        if meta.get('library'):
+            raise KiCadError('arguments_unusable', {'detail': 'a library copy has no schematic'})
+        project = self._original_view(root, meta) if arguments.get('original') else root / 'project'
+        schematic = (project / meta['board']).with_suffix('.kicad_sch')
+        if not schematic.is_file():
+            raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
+        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
+        output.parent.mkdir(exist_ok=True)
+        self._run('sch', 'export', 'netlist', '--output', output, schematic)
+        tree = sexpr(output.read_text(errors='replace'))
+        output.unlink(missing_ok=True)
+
+        def text(node, name):
+            found = node.named(name)
+            return str(found[0].children[1]) if found and len(found[0].children) > 1 else ''
+        refs = set(arguments.get('refs') or ())
+        wanted_nets = set(arguments.get('nets') or ())
+        needle = str(arguments.get('contains') or '').lower()
+        limit = max(1, min(int(arguments.get('limit') or 200), 1000))
+        pins, nets = {}, []
+        for net in (tree.named('nets')[0].named('net') if tree.named('nets') else ()):
+            name = text(net, 'name')
+            nodes = []
+            for node in net.named('node'):
+                ref, number = text(node, 'ref'), text(node, 'pin')
+                pins.setdefault(ref, []).append({'number': number, 'name': text(node, 'pinfunction'), 'net': name})
+                nodes.append('%s.%s' % (ref, number))
+            nets.append({'name': name, 'nodes': nodes})
+        places = {}
+        sheets = []
+        for path in sorted(project.glob('*.kicad_sch')):
+            sheet = sexpr(path.read_text(errors='replace'))
+            labels = sorted({str(node.children[1]) for node in sheet.children
+                             if hasattr(node, 'children') and node.name in ('label', 'global_label', 'hierarchical_label')
+                             and len(node.children) > 1})
+            count = 0
+            for symbol in sheet.named('symbol'):
+                ref = next((str(p.children[2]) for p in symbol.named('property')
+                            if len(p.children) > 2 and p.children[1] == 'Reference'), '')
+                at = symbol.named('at')
+                if ref and at:
+                    count += 1
+                    places[ref] = {'sheet': path.name, 'at': [float(v) for v in at[0].children[1:3]],
+                                   'rotation': float(at[0].children[3]) if len(at[0].children) > 3 else 0.0}
+            sheets.append({'file': path.name, 'symbols': count, 'labels': labels[:200]})
+        parts = []
+        for comp in (tree.named('components')[0].named('comp') if tree.named('components') else ()):
+            ref = text(comp, 'ref')
+            item = {'ref': ref, 'value': text(comp, 'value'), 'footprint': text(comp, 'footprint'),
+                    **places.get(ref, {}), 'pins': sorted(pins.get(ref, []), key=lambda p: (len(p['number']), p['number']))}
+            haystack = ' '.join([ref, item['value'], item['footprint']]).lower()
+            if (refs and ref not in refs) or (needle and needle not in haystack) or (
+                    wanted_nets and not any(p['net'] in wanted_nets for p in item['pins'])):
+                continue
+            parts.append(item)
+        chosen = [net for net in nets if (not wanted_nets or net['name'] in wanted_nets)
+                  and (not refs or any(node.split('.')[0] in refs for node in net['nodes']))]
+        return {'sheets': sheets, 'parts': parts[:limit], 'nets': chosen[:limit],
+                'truncated': {'parts': len(parts) > limit, 'nets': len(chosen) > limit}}
 
     def render(self, arguments):
         """KiCad's own drawing of a work copy, or of his original, as a PDF to look at."""
