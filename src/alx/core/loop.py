@@ -190,9 +190,12 @@ def _validate_response_length(decision: AgentDecision) -> None:
     """Refuse a reply longer than Friedl wants to hear, unless she judged he asked for detail."""
     if (decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT
             and not decision.detail_asked):
+        # Her count with it, so one correction is enough (15 Nov: a board
+        # agent's report was refused twice and never reached him).
         raise DecisionValidationError(
-            "response_over_%d_words: say the outcome and anything he must decide; "
-            "figures, checks and background go in detail" % RESPONSE_WORD_LIMIT)
+            "response_over_%d_words: yours has %d; say the outcome and anything he must decide in "
+            "%d words or fewer; figures, checks and background go in detail"
+            % (RESPONSE_WORD_LIMIT, len(decision.response.split()), RESPONSE_WORD_LIMIT))
 
 
 @dataclass(frozen=True, slots=True)
