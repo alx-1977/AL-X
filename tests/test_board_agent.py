@@ -72,32 +72,52 @@ class BoardAgentTests(unittest.TestCase):
     def agent(self, model):
         return BoardJobAgent(model, self.dispatch, (KICAD,), Path(self.folder.name))
 
-    def test_a_job_pauses_at_each_step_and_carries_on_in_the_same_session(self) -> None:
+    def test_each_stretch_is_a_fresh_session_started_from_the_journal_and_his_preferences(self) -> None:
+        prefs = Path(self.folder.name) / "prefs.md"
+        prefs.write_text("- GND ports face down.")
         model = SessionModel([call({"action": "edit"}), call({"action": "render"}), report("step_ready", "schematic"),
                               call({"action": "edit"}), report("step_ready", "placement")])
-        agent = self.agent(model)
+        agent = BoardJobAgent(model, self.dispatch, (KICAD,), Path(self.folder.name), preferences=prefs)
         first = agent.work(job_id=None, brief="On P0009, replace the two RF switches.", message=None, max_calls=10)
         self.assertEqual((first["status"], first["report"]["step"], len(first["calls"])), ("step_ready", "schematic", 2))
         second = agent.work(job_id=first["job_id"], brief=None, message="Approved.", max_calls=10)
-        self.assertEqual((second["status"], second["report"]["step"], second["session"]),
-                         ("step_ready", "placement", "continued"))
-        # One session for both steps: his answer went in as the paused call's result.
-        self.assertEqual(model.sessions, 1)
-        self.assertEqual(json.loads(model.requests[3].tool_result), {"from_alx": "Approved."})
+        self.assertEqual((second["status"], second["report"]["step"]), ("step_ready", "placement"))
+        # A new session for the second stretch, from the journal: the old pictures and results stay behind.
+        self.assertEqual(model.sessions, 2)
+        self.assertGreaterEqual(model.abandoned, 2)
+        fresh = model.requests[3]
+        self.assertIsNone(fresh.tool_result)
+        history = json.loads(fresh.messages[-1].content)
+        self.assertEqual([list(event)[0] for event in history["events"]], ["report", "alx"])
+        self.assertEqual(history["events"][-1], {"alx": "Approved."})
+        self.assertIn("GND ports face down.", fresh.messages[0].content)
         self.assertEqual(model.requests[0].kind, "board_agent")
 
-    def test_a_job_whose_session_ended_carries_on_from_its_journal(self) -> None:
-        first_model = SessionModel([report("question", "schematic")])
-        first = self.agent(first_model).work(job_id=None, brief="Swap U6 and U7.", message=None, max_calls=5)
-        # A restarted runtime has a new agent and no paused session.
-        model = SessionModel([report("step_ready", "schematic")])
-        second = self.agent(model).work(job_id=first["job_id"], brief=None,
-                                        message="RFC2 and RFC4 are used.", max_calls=5)
-        self.assertEqual(second["session"], "new")
-        history = json.loads(model.requests[0].messages[-1].content)
-        self.assertEqual(history["transport_fact"], "earlier_in_this_job")
-        self.assertEqual(history["events"][-1], {"alx": "RFC2 and RFC4 are used."})
-        self.assertEqual(history["events"][0]["report"]["status"], "question")
+    def test_alx_can_stop_a_running_stretch(self) -> None:
+        agent_box = {}
+
+        class StoppingModel(SessionModel):
+            def complete(inner, request):
+                result = super().complete(request)
+                if len(inner.requests) == 2:
+                    self.assertTrue(agent_box["agent"].stop(agent_box["job"]))
+                return result
+        model = StoppingModel([call({"action": "edit"}), call({"action": "edit"}), call({"action": "edit"})])
+        agent = self.agent(model)
+        agent_box["agent"] = agent
+        original = agent._save
+
+        def save(job_id, journal):
+            agent_box["job"] = job_id
+            original(job_id, journal)
+        agent._save = save
+        outcome = agent.work(job_id=None, brief="Route it.", message=None, max_calls=10)
+        self.assertEqual((outcome["status"], outcome["stop_reason"]), ("stopped", "stopped_by_alx"))
+        self.assertEqual(len(outcome["calls"]), 1)
+        self.assertFalse(agent.stop(agent_box["job"]))
+        executor = build_board_agent_executors(agent, lambda: "c")["delegate_board_job"]
+        self.assertEqual(executor({"stop": True, "job_id": agent_box["job"]}).values["status"], "not_running")
+        self.assertEqual(executor({"stop": True}).failure["code"], "arguments_unusable")
 
     def test_a_stretch_stops_at_its_bound_and_an_unknown_job_is_refused(self) -> None:
         model = SessionModel([call({"action": "edit"})] * 5)

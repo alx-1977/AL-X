@@ -42,25 +42,27 @@ _STRING = StructuredSchema(ValueKind.STRING)
 DEFINITION = CapabilityDefinition(
     DELEGATE_BOARD_JOB,
     "Hand a whole KiCad board job (an edit of one of his boards, or a new board) to your board "
-    "agent, which does it in one continuous session, making the layout choices itself, in big "
-    "steps, in his order: schematic, placement, routing (D-082). Run it as a planned step so you "
-    "stay free for him. brief starts a job: what he asked in his words, the project, what done "
-    "means (docs/BOARD_EDIT_DONE.md) and anything he has already decided. The agent stops at the "
-    "end of each step (status step_ready), with a question it cannot settle from his drawings or "
-    "datasheets (question), at the end (done) or when it cannot go on (blocked); report names the "
-    "work copy and the revision. Then you show him that step with kicad open_in_kicad, look at "
-    "the screenshot, and tell him plainly; record his yes with kicad approve_step; and pass on "
-    "what he said with job_id and message, in his words, and the agent carries on where it was. "
-    "It cannot approve steps, open windows on his screen or write back: those stay with you. "
-    "Its calls go through the same gate as yours, with no approvals. calls lists every call it "
-    "made. max_calls bounds each stretch of work (default %d, at most %d), as do 30 minutes; a "
-    "stretch that reaches either stops with stop_reason, and the next message starts a new "
-    "session from the job's journal. One job runs at a time." % (DEFAULT_CALLS, MAX_CALLS),
+    "agent, which does it making the layout choices itself, in big steps, in his order: "
+    "schematic, placement, routing (D-082), following his preferences (ALX_Storage/Preferences), "
+    "which it is always given. Run it as a planned step so you stay free for him. brief starts a "
+    "job: what he asked in his words, the project, what done means (docs/BOARD_EDIT_DONE.md) and "
+    "anything he has already decided. Each stretch of its work ends with a report: the end of a "
+    "step (step_ready), a question it cannot settle from his drawings or datasheets (question), "
+    "the end (done) or a dead end (blocked); report names the work copy and the revision. Then "
+    "show him that step with kicad open_in_kicad (his original beside it only when he wants to compare), look at the screenshot, and tell him plainly; "
+    "record his yes with kicad approve_step; and pass on what he said with job_id and message, in "
+    "his words: the next stretch starts from the job's journal. stop true with job_id stops a "
+    "running stretch at once (stopped says whether one was running); only that stops it. It "
+    "cannot approve steps, open windows on his screen or write back: those stay with you. Its "
+    "calls go through the same gate as yours, with no approvals. calls lists every call it made. "
+    "max_calls bounds each stretch (default %d, at most %d), as do 30 minutes. One job runs at a "
+    "time." % (DEFAULT_CALLS, MAX_CALLS),
     StructuredSchema(ValueKind.OBJECT, {
         "brief": _STRING,
         "job_id": _STRING,
         "message": _STRING,
         "max_calls": StructuredSchema(ValueKind.INTEGER),
+        "stop": StructuredSchema(ValueKind.BOOLEAN),
     }, (), extra_properties=False),
     StructuredSchema(ValueKind.OBJECT, {
         "job_id": _STRING,
@@ -68,8 +70,8 @@ DEFINITION = CapabilityDefinition(
         "stop_reason": _STRING,
         "report": StructuredSchema(ValueKind.OBJECT),
         "calls": StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.OBJECT)),
-        "session": _STRING,
-    }, ("job_id", "status", "calls", "session"), extra_properties=False),
+        "stopped": StructuredSchema(ValueKind.BOOLEAN),
+    }, ("job_id", "status"), extra_properties=False),
     # It edits her work copies through the agent.
     SideEffect.EFFECTFUL,
     ("arguments_unusable", "worker_busy", "worker_failed", "job_unknown"),
@@ -89,6 +91,14 @@ def build_board_agent_executors(
             return CapabilityResult(call_id, DELEGATE_BOARD_JOB, CapabilityResultState.FAILED, failure=failure)
 
         brief, job_id, message = arguments.get("brief"), arguments.get("job_id"), arguments.get("message")
+        if arguments.get("stop") is True:
+            # Never waits for the running stretch: it is the way to end one.
+            if not isinstance(job_id, str) or brief is not None or message is not None:
+                return failed("arguments_unusable")
+            stopped = agent.stop(job_id)
+            return CapabilityResult(call_id, DELEGATE_BOARD_JOB, CapabilityResultState.SUCCEEDED,
+                                    {"job_id": job_id, "status": "stopping" if stopped else "not_running",
+                                     "stopped": stopped})
         max_calls = arguments.get("max_calls", DEFAULT_CALLS)
         starting = isinstance(brief, str) and bool(brief.strip()) and job_id is None and message is None
         resuming = (brief is None and isinstance(job_id, str) and bool(job_id.strip())

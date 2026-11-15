@@ -1235,13 +1235,18 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
             return Viewer(path)
         provider.open_viewer = open_viewer
         provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
-        shown = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        alone = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertEqual(opened, [('board', 'amended')])
+        self.assertEqual(list(alone['windows']), ['amended (your copy)'])
+        opened.clear()
+        shown = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board',
+                             beside_original=True)
         self.assertEqual(opened, [('board', 'current'), ('board', 'amended')])
         self.assertTrue(Path(shown['screenshot']).is_file())
         self.assertEqual(Path(shown['opened'][0]).read_text(), BOARD)
         # The windows of an earlier call are closed first.
         self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
-        self.assertEqual(len(closed), 2)
+        self.assertEqual(len(closed), 3)
 
     def test_her_copy_can_be_checked_again_against_his_original(self):
         checked = self.check()

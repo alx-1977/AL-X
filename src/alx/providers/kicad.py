@@ -1929,12 +1929,15 @@ class KiCadProvider:
             shutil.rmtree(earlier, ignore_errors=True)
         stamp = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6]
         views = root / 'views' / stamp
-        current = views / 'current'
-        shutil.copytree(self._original_view(root, meta), current)
-        amended = views / 'amended'
-        shutil.copytree(root / 'project', amended)
+        folders = []
+        # His original only when he wants to compare (Friedl, 15 Nov: "not sure this is needed").
+        if arguments.get('beside_original'):
+            shutil.copytree(self._original_view(root, meta), views / 'current')
+            folders.append(views / 'current')
+        shutil.copytree(root / 'project', views / 'amended')
+        folders.append(views / 'amended')
         suffix = '.kicad_sch' if what == 'schematic' else '.kicad_pcb'
-        files = [folder / Path(meta['board']).with_suffix(suffix).name for folder in (current, amended)]
+        files = [folder / Path(meta['board']).with_suffix(suffix).name for folder in folders]
         if not all(path.is_file() for path in files):
             raise KiCadError('unsupported_project', {'detail': 'no %s to open' % what})
         for index, path in enumerate(files):
@@ -1944,8 +1947,9 @@ class KiCadProvider:
         folder.mkdir(parents=True, exist_ok=True)
         shot = folder / ('screen-%s-%s.png' % (what, stamp))
         self.capture_screen(shot)
-        return {'opened': [str(path) for path in files], 'left': 'current (his design)',
-                'right': 'amended (your copy)', 'screenshot': str(shot) if shot.is_file() else ''}
+        return {'opened': [str(path) for path in files],
+                'windows': (['current (his design)'] if len(files) == 2 else []) + ['amended (your copy)'],
+                'screenshot': str(shot) if shot.is_file() else ''}
 
     def approve_step(self, arguments):
         """Friedl approved one step of her copy as he saw it (D-082)."""

@@ -1,4 +1,5 @@
 """One KiCad capability with an action per job (D-074); structured evidence returns to Core."""
+from dataclasses import replace
 from enum import Enum
 
 from alx.contracts import (
@@ -360,14 +361,15 @@ RENDER = CapabilityDefinition('render',
     obj({'work_copy_id': S, 'what': S, 'original': B}, ('work_copy_id', 'what')),
     obj({'path': S, 'pages': I, 'what': S, 'original': B}), SideEffect.NONE, FAILURES)
 OPEN_IN_KICAD = CapabilityDefinition('open_in_kicad',
-    "Show Friedl his design beside your copy in KiCad's own windows on his screen: what is "
-    'schematic or board; the first window is his design as it is (current), the second your '
-    'copy (amended). Both are fresh copies made for looking, so nothing done in those windows '
-    'changes his project or your copy; windows from an earlier call are closed first. A '
-    'screenshot of his screen comes back as a path: look at it before you say anything about '
-    'it. This is how each step of a board job (schematic, placement, routing) is shown to him.',
-    obj({'work_copy_id': S, 'what': S}),
-    obj({'opened': array(S), 'left': S, 'right': S, 'screenshot': S}), SideEffect.NONE, FAILURES)
+    "Show Friedl your copy in KiCad's own window on his screen, in front: what is schematic or "
+    'board. beside_original true also opens his design as it is, for when he wants to compare '
+    '(windows lists them in order). Each is a fresh copy made for looking, so nothing done in '
+    'those windows changes his project or your copy; windows from an earlier call are closed '
+    'first. A screenshot of his screen comes back as a path: look at it before you say anything '
+    'about it. This is how each step of a board job (schematic, placement, routing) is shown to '
+    'him.',
+    obj({'work_copy_id': S, 'what': S, 'beside_original': B}, ('work_copy_id', 'what')),
+    obj({'opened': array(S), 'windows': array(S), 'screenshot': S}), SideEffect.NONE, FAILURES)
 
 
 MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
@@ -468,6 +470,21 @@ DEFINITION = CapabilityDefinition(KICAD,
     read_only_when=tuple((('action', name),) for name in FREE_ACTIONS),
 )
 DEFINITIONS = (DEFINITION,)
+
+
+def definition_for(actions):
+    """The kicad capability as an agent holding only these actions reads it (D-083).
+
+    The same capability and dispatch; only the description lists less, so an
+    agent re-reads its own actions at every step and not all of hers.
+    """
+    chosen = {name: definition for name, definition in CONTRACTS.items() if name.value in actions}
+    return replace(DEFINITION, purpose=(
+        "KiCad PCB or schematic, on your work copies. action names which; each action below lists "
+        "its fields and the ones it requires. " + ' '.join(
+            f'[{name.value}] fields: {", ".join(definition.input_schema.properties) or "none"}; '
+            f'required: {", ".join(definition.input_schema.required) or "none"}. {definition.purpose}'
+            for name, definition in chosen.items())))
 
 
 def build_kicad_executors(provider, call_id_source):

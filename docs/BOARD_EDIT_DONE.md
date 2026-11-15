@@ -26,17 +26,9 @@ Confirmed by Friedl, 14 Nov ("Aside from that it looks ok"), with the note on ne
 - RF: straight and short where possible, curved bends, P and N matched.
 - Placement is decided before routing, from where the pins point.
 
-## How I draw a schematic
+## How I draw
 
-Friedl, 15 Nov, from his review of the P0009 schematic:
-
-- Connect a local circuit by drawing the wire, not with net labels.
-- GND ports face down; power ports face up.
-- Designators and values sit consistently relative to their part, never over another part, the part itself or other text.
-- A wire leaves a pin or a power port straight, in the pin's own direction, for at least one grid step before it turns.
-- A GND port sits on a short wire from its part, never directly against the part.
-- Bus labels sit clearly above or below the bus line, never over it.
-- On the root sheet, connections between sheets go as buses (Altium's harnesses), not as many single lines.
+My schematic and layout preferences are kept in one file, `ALX_Storage/Preferences/Schematic and layout.md`, and grow as I give them. Every board job follows them without being told.
 
 ## Not only edits
 

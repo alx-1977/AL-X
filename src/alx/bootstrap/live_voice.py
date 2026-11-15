@@ -145,10 +145,12 @@ from alx.tools.self_diagnosis import (
 )
 from alx.specialists.worker import MechanicalWorker
 from alx.specialists.board_agent import BoardJobAgent
+from alx.bootstrap.look import ALX_STORAGE
 from alx.tools.board_agent import (
-    BOARD_AGENT_CAPABILITIES, DEFINITION as BOARD_AGENT_DEFINITION, board_agent_call_refusal,
-    build_board_agent_executors,
+    BOARD_AGENT_CAPABILITIES, BOARD_AGENT_KICAD_ACTIONS, DEFINITION as BOARD_AGENT_DEFINITION,
+    board_agent_call_refusal, build_board_agent_executors,
 )
+from alx.tools.kicad import KICAD as KICAD_CAPABILITY, definition_for as kicad_definition_for
 from alx.tools.worker import (
     DEFINITION as WORKER_DEFINITION, WORKER_CAPABILITIES, build_worker_executors,
     worker_call_refusal,
@@ -1132,8 +1134,10 @@ async def run(repository_root: Path) -> None:
         refusal = board_agent_call_refusal(call)
         return refusal if refusal is not None else worker_dispatch(call)
 
+    # Its kicad description lists only its own actions (D-083).
     board_agent_definitions = tuple(
-        item for item in registry.list_definitions()
+        kicad_definition_for(BOARD_AGENT_KICAD_ACTIONS) if item.capability_id == KICAD_CAPABILITY else item
+        for item in registry.list_definitions()
         if item.capability_id in BOARD_AGENT_CAPABILITIES
     )
     if board_agent_definitions:
@@ -1142,6 +1146,7 @@ async def run(repository_root: Path) -> None:
         executors.update(build_board_agent_executors(
             BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
                           storage_root / "board-jobs",
+                          preferences=ALX_STORAGE.expanduser() / "Preferences" / "Schematic and layout.md",
                           image_source=partial(stored_image, look_runtime.store)),
             current_call_id.get,
         ))
