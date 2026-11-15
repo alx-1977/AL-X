@@ -223,6 +223,60 @@ def teardrops(board, area=None):
 _LIBRARY_FOOTPRINTS = {}
 
 
+def _net(board, name):
+    """A net by name, made when the board does not have it yet (a new net from the schematic)."""
+    code = board.FindNet(name)
+    if code is None:
+        code = _pcbnew.NETINFO_ITEM(board, name)
+        board.Add(code)
+    return code
+
+
+def _library_footprint(footprint):
+    import os as _os, tempfile as _tempfile
+    if footprint not in _LIBRARY_FOOTPRINTS:
+        raise KeyError("name %s in the edit's footprints so the tool copies it in" % footprint)
+    library, name = footprint.split("/", 1)
+    folder = _tempfile.mkdtemp(prefix=".alx-fp-", dir=_os.path.dirname(BOARD_PATH))
+    try:
+        with open(_os.path.join(folder, name + ".kicad_mod"), "w") as handle:
+            handle.write(_LIBRARY_FOOTPRINTS[footprint])
+        made = _pcbnew.FootprintLoad(folder, name)
+    finally:
+        for item in _os.listdir(folder):
+            _os.remove(_os.path.join(folder, item))
+        _os.rmdir(folder)
+    if made is None:
+        raise ValueError("KiCad could not read %s" % footprint)
+    made.SetFPID(_pcbnew.LIB_ID(library, name))
+    return made
+
+
+def add_part(board, ref, footprint, at, rotation=0, side="F", value=None, pin_nets=None):
+    """Place a new part from a library footprint named in the edit's footprints.
+
+    For a part the approved schematic added, or a new board. pin_nets
+    {pad number: net} connects its pads; a net the board lacks is made.
+    """
+    if board.FindFootprintByReference(ref) is not None:
+        raise ValueError("%s is already on the board; use replace_part" % ref)
+    new = _library_footprint(footprint)
+    board.Add(new)
+    if side == "B":
+        new.Flip(new.GetPosition(), _pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
+    new.SetPosition(point(*at))
+    new.SetOrientationDegrees(rotation)
+    new.SetReference(ref)
+    if value is not None:
+        new.SetValue(value)
+    wanted = {str(k): v for k, v in (pin_nets or {}).items()}
+    for item in new.Pads():
+        if wanted.get(item.GetNumber()):
+            item.SetNet(_net(board, wanted[item.GetNumber()]))
+    return dict(describe(board, ref), unconnected=sorted({item.GetNumber() for item in new.Pads()
+                                                         if not wanted.get(item.GetNumber())}))
+
+
 def replace_part(board, ref, footprint, pin_nets=None):
     """Swap a part for a library footprint named in the edit's footprints, in its place.
 
@@ -231,23 +285,8 @@ def replace_part(board, ref, footprint, pin_nets=None):
     without it a pad keeps the net of the old pad with the same number, and a
     pad with no match is left unconnected (listed in the result).
     """
-    import os as _os, tempfile as _tempfile
-    if footprint not in _LIBRARY_FOOTPRINTS:
-        raise KeyError("name %s in the edit's footprints so the tool copies it in" % footprint)
-    library, name = footprint.split("/", 1)
     old = part(board, ref)
-    folder = _tempfile.mkdtemp(prefix=".alx-fp-", dir=_os.path.dirname(BOARD_PATH))
-    try:
-        with open(_os.path.join(folder, name + ".kicad_mod"), "w") as handle:
-            handle.write(_LIBRARY_FOOTPRINTS[footprint])
-        new = _pcbnew.FootprintLoad(folder, name)
-    finally:
-        for item in _os.listdir(folder):
-            _os.remove(_os.path.join(folder, item))
-        _os.rmdir(folder)
-    if new is None:
-        raise ValueError("KiCad could not read %s" % footprint)
-    new.SetFPID(_pcbnew.LIB_ID(library, name))
+    new = _library_footprint(footprint)
     old_nets = {item.GetNumber(): item.GetNetname() for item in old.Pads()}
     keep = {field.GetName(): (field.GetText(), field.IsVisible()) for field in old.GetFields()
             if field.GetName() not in ("Footprint",)}
@@ -276,10 +315,7 @@ def replace_part(board, ref, footprint, pin_nets=None):
     for item in new.Pads():
         net_name = wanted.get(item.GetNumber(), None if wanted else old_nets.get(item.GetNumber()))
         if net_name:
-            code = board.FindNet(net_name)
-            if code is None:
-                raise KeyError("no net %s on this board" % net_name)
-            item.SetNet(code)
+            item.SetNet(_net(board, net_name))
         else:
             unconnected.append(item.GetNumber())
     board.Delete(old)
@@ -526,7 +562,7 @@ def script_runner(script):
 NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rotate_part", "pad",
          "set_pad", "fields", "set_field", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
          "graphics", "set_graphic", "remove_graphic", "add_line",
-         "track_length", "teardrops", "replace_part",
+         "track_length", "teardrops", "replace_part", "add_part",
          "zones", "zone_corners", "set_zone_corners",
          "copper_shapes", "set_copper_corners", "remove_copper", "add_copper", "add_taper",
          "footprints", "footprint", "save_footprint", "refill")

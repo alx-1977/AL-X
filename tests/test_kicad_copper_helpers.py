@@ -78,6 +78,8 @@ try:
     add_track(b, "ARC", [(0, 0), (0.5, 0), (0.5, 5)], 0.3, radius=1.0)
 except ValueError as error:
     print("tight", "does not fit" in str(error))
+added = add_part(b, "U99", "Test/TwoPad", (40, 40), 90, "B", "NEW", {"1": "BRAND_NEW", "2": "ARC"})
+print("added", added["side"], added["rotation"], added["at"], sorted(p["net"] for p in added["pads"]))
 save(b)
 t = _pcbnew.LoadBoard(BOARD_PATH.replace("board.kicad_pcb", "teardrops.kicad_pcb"))
 print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))))
@@ -97,6 +99,7 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
             # Two 4 mm runs and a quarter circle of 1 mm: 8 + pi/2.
             self.assertIn("length 9.571", done.stdout)
             self.assertIn("tight True", done.stdout)
+            self.assertIn("added B 90.0 (40.0, 40.0) ['ARC', 'BRAND_NEW']", done.stdout)
             self.assertNotIn(".alx-fp-", " ".join(p.name for p in Path(folder).iterdir()))
             self.assertRegex(done.stdout, r"teardrops [1-9]\d* 0")
 
