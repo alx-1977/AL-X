@@ -27,6 +27,7 @@ import pcbnew
 board_path = Path(sys.argv[-1])
 args = json.loads((board_path.parent / "section-args.json").read_text())
 refs, nets, planes = set(args["refs"]), set(args["nets"]), set(args["planes"])
+placement = bool(args.get("placement"))
 named_nets = set(nets)
 mm, nm = pcbnew.ToMM, pcbnew.FromMM
 board = pcbnew.LoadBoard(str(board_path))
@@ -87,7 +88,7 @@ def points(track):
                 for k in range(9)]
     return [[mm(track.GetStart().x), mm(track.GetStart().y)], [mm(track.GetEnd().x), mm(track.GetEnd().y)]]
 
-out = {"window": [x0, y0, x1, y1], "tracks": [], "vias": [], "pads": [], "parts": [],
+out = {"window": [x0, y0, x1, y1], "placement": placement, "tracks": [], "vias": [], "pads": [], "parts": [],
        "planes": [], "keepouts": [], "edges": [], "shapes": [], "board": [], "silk": []}
 # Names that are not on this board are reported, never silently drawn as
 # nothing (2026-11-12: a guessed feed net name left both feeds off screen).
@@ -108,6 +109,9 @@ for fp in footprints:
     if fp.GetReference() in refs:
         nets |= {pad.GetNetname() for pad in fp.Pads()
                  if pad.GetNetname() and not pad.GetNetname().startswith("unconnected-")}
+# A placement view draws the parts alone, no copper (D-082).
+if placement:
+    nets, named_nets, planes = set(), set(), set()
 out["nets_drawn"] = sorted(nets)
 for track in board.GetTracks():
     net = track.GetNetname()
@@ -144,8 +148,8 @@ for footprint in footprints:
     for pad in footprint.Pads():
         shape = pcbnew.SHAPE_POLY_SET()
         pad.TransformShapeToPolygon(shape, side, 0, nm(0.005), pcbnew.ERROR_INSIDE)
-        out["pads"].append({"ref": ref, "number": pad.GetNumber(), "net": pad.GetNetname(),
-                            "polygons": polys(shape)})
+        out["pads"].append({"ref": ref, "number": pad.GetNumber(), "name": pad.GetPinFunction(),
+                            "net": pad.GetNetname(), "polygons": polys(shape)})
 for zone in board.Zones():
     for layer, name in COPPER.items():
         if not zone.IsOnLayer(layer):
@@ -350,7 +354,8 @@ def read_section(
                 or not all(isinstance(v, str) and v for v in value)):
             raise SectionError("arguments_unusable", f"{key} is a list of up to {MAX_NAMES} names")
         names[key] = list(value)
-    return _run(board, {"window": None if window is None else list(window), **names}, SECTION_SCRIPT, scratch_root,
+    return _run(board, {"window": None if window is None else list(window), **names,
+                        "placement": bool(arguments.get("placement"))}, SECTION_SCRIPT, scratch_root,
                 kicad_python, execute_python)
 
 

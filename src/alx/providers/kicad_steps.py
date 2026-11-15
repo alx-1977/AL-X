@@ -129,7 +129,8 @@ def board_groups(board_text: str, with_parts: bool = False):
     groups = {}
     for footprint in tree.named('footprint'):
         refs = references(footprint)
-        if not refs:
+        # A board item with no reference (a logo, a graphic) is not a part.
+        if not refs or not refs[0] or refs[0].startswith('#'):
             continue
         for pad in footprint.named('pad'):
             nets = pad.named('net')

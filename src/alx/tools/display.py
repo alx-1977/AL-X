@@ -53,6 +53,7 @@ _VIEW = StructuredSchema(
      "board": _STRING, "work_copy_id": _STRING, "footprint": _STRING, "window": _POINT,
      "refs": _NAMES, "nets": _NAMES, "planes": _NAMES,
      "marks": StructuredSchema(ValueKind.OBJECT), "rotate": StructuredSchema(ValueKind.BOOLEAN),
+     "placement": StructuredSchema(ValueKind.BOOLEAN),
      "dims": StructuredSchema(ValueKind.ARRAY, items=_DIM)},
     ("label",), extra_properties=False)
 _BOX = StructuredSchema(ValueKind.OBJECT, {"at": _POINT, "label": _STRING, "tone": _STRING,
@@ -91,7 +92,9 @@ DEFINITION = CapabilityDefinition(
     "vias and copper shapes, planes the ground or power pours to show faintly; a signal pour "
     "named in nets and not in planes is drawn as copper. marks colours a part, "
     "'net:<name>' or 'keepout' by tone; mark what differs red on his board and green on your "
-    "copy; unmarked copper is blue. rotate turns the view 90 degrees. dims draws dimension "
+    "copy; unmarked copper is blue. placement true draws the named parts alone, no copper, "
+    "with pin 1 ringed and pin numbers on the pads: the placement step (D-082) is shown so, "
+    "both views alike. rotate turns the view 90 degrees. dims draws dimension "
     "lines between two points in mm. reference is the datasheet section the layout follows, "
     "shown as printed behind a link, never redrawn: document is the PDF in his design "
     "folders, each page a page number and a section [x0, y0, x1, y1] in points from the top "
@@ -422,7 +425,8 @@ def build_display_executors(
                 f"{kind} {', '.join(names)}" for kind, names in sorted(missing.items())))
 
         def read(view, window):
-            arguments = {key: view.get(key) for key in ("board", "work_copy_id", "refs", "nets", "planes")}
+            arguments = {key: view.get(key) for key in ("board", "work_copy_id", "refs", "nets", "planes",
+                                                         "placement")}
             if view.get("footprint"):
                 # A library footprint stands alone on its own board, as part FP.
                 arguments.update(footprint=view["footprint"], refs=["FP"])

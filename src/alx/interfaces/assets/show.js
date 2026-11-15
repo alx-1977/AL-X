@@ -294,6 +294,22 @@
       el('path', { d: path(pad.polygons), fill: tone(marks[pad.ref] ?? marks['net:' + pad.net], COPPER) }, c);
       taken.push(bounds(pad.polygons.flatMap((poly) => poly.outer.map((p) => P(...p)))));
     }
+    // A placement view (D-082): pin 1 ringed, pin numbers where they fit, so
+    // where each pin points can be judged before anything is routed.
+    if (geo.placement) {
+      for (const pad of geo.pads || []) {
+        const b = bounds(pad.polygons.flatMap((poly) => poly.outer.map((p) => P(...p))));
+        if (pad.number === '1' || pad.number === 'A1') {
+          el('rect', { x: b.x - 2, y: b.y - 2, width: b.w + 4, height: b.h + 4, fill: 'none',
+            stroke: TONE.warn, 'stroke-width': 1.6 }, c);
+        }
+        const size = Math.min(b.w, b.h) * 0.8;
+        if (size >= 7 && pad.number) {
+          write(c, pad.number, { x: b.x + b.w / 2, y: b.y + b.h / 2 + size * 0.35, fill: '#e8f6fa',
+            'font-size': Math.min(size, 14), 'font-weight': 700, 'text-anchor': 'middle' });
+        }
+      }
+    }
     // A part's own silkscreen stands for its outline; a drawn outline is
     // added only for a part without one, or a large part.
     const silked = new Set((geo.silk || []).map((mark) => mark.ref));
