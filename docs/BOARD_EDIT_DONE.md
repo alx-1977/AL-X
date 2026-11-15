@@ -33,6 +33,10 @@ Friedl, 15 Nov, from his review of the P0009 schematic:
 - Connect a local circuit by drawing the wire, not with net labels.
 - GND ports face down; power ports face up.
 - Designators and values sit consistently relative to their part, never over another part, the part itself or other text.
+- A wire leaves a pin or a power port straight, in the pin's own direction, for at least one grid step before it turns.
+- A GND port sits on a short wire from its part, never directly against the part.
+- Bus labels sit clearly above or below the bus line, never over it.
+- On the root sheet, connections between sheets go as buses (Altium's harnesses), not as many single lines.
 
 ## Not only edits
 
