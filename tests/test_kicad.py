@@ -1165,6 +1165,20 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         self.assertEqual(compared['resolved'], 2)
         self.assertEqual(compared['new_findings'][0]['type'], 'clearance')
 
+    def test_an_edit_gets_the_library_footprints_it_names(self):
+        """Her script cannot read his library; the footprints it names go in with it."""
+        (self.project / 'local.pretty').mkdir()
+        (self.project / 'local.pretty' / 'TwoPad.kicad_mod').write_text('(footprint "TwoPad")\n')
+        (self.project / 'fp-lib-table').write_text(
+            '(fp_lib_table\n\t(lib (name "Local") (type "KiCad") (uri "${KIPRJMOD}/local.pretty") (options "") (descr ""))\n)\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              footprints=['Local/TwoPad'], script='print(sorted(_LIBRARY_FOOTPRINTS))')
+        self.assertIn("['Local/TwoPad']", edited['stdout'])
+        for wrong in (['Nowhere/TwoPad'], ['Local/Missing'], ['Local/../x'], ['no-slash']):
+            self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                         footprints=wrong, script='pass')
+
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()
         metadata = next(self.storage.rglob(checked['work_copy_id'] + '/metadata.json'))

@@ -118,7 +118,13 @@ _ACTION_DEFINITIONS = (
         'drawn as a shape: copper_shapes(b, net), set_copper_corners(b, id, corners), '
         'remove_copper(b, id), '
         'add_copper(b, net, on, corners), add_taper(b, net, on, narrow, narrow_width, wide, '
-        "wide_width); refill(b) and save(b); on a library copy (copy_library): footprints(lib), "
+        "wide_width); add_track(..., radius=1.0) makes every bend a tangent arc (RF traces, "
+        "Friedl 14 Nov); track_length(b, net) in mm, to match P and N; teardrops(b, area) lists "
+        "teardrop areas, which a moved part leaves behind as stray copper (remove them); "
+        "replace_part(b, ref, 'LIBRARY/NAME', pin_nets={pad: net}) swaps a part for a library "
+        "footprint in its place, keeping reference, fields, side and schematic link, after "
+        "naming it in footprints so the tool copies it in (pads with no net come back as "
+        "unconnected); refill(b) and save(b); on a library copy (copy_library): footprints(lib), "
         "footprint(lib, name), save_footprint(lib, fp). Use them rather than guessing pcbnew names; refill "
         "after every change. Never remove items while looping over pcbnew's own lists, never "
         "Remove a part's drawing through the board, never read an outline that is not there: "
@@ -137,7 +143,7 @@ _ACTION_DEFINITIONS = (
         'change_report.compared_to_original lists DRC findings his original did not have (new, '
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
-        obj({'work_copy_id': S, 'script': S}),
+        obj({'work_copy_id': S, 'script': S, 'footprints': array(S)}, ('work_copy_id', 'script')),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP}),
         SideEffect.NONE, FAILURES),

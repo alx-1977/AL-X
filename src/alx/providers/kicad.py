@@ -1098,6 +1098,7 @@ class KiCadProvider:
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
             project = root / 'project'
+            footprints = self._library_footprints(arguments.get('footprints'), project)
             library = bool(meta.get('library'))
             # A library copy has no board: the script's argument is its folder.
             board = project / ('.library' if library else meta['board'])
@@ -1118,7 +1119,8 @@ class KiCadProvider:
                 # Tested helpers first, then her script compiled on its own, so
                 # its own first lines (a __future__ import) and line numbers
                 # stay as she wrote them (2026-11-12).
-                script_path.write_text(HELPERS + script_runner(script))
+                script_path.write_text(HELPERS + '_LIBRARY_FOOTPRINTS.update(%r)\n' % footprints
+                                       + script_runner(script))
                 stage = 'script'
                 executed = self.execute_python(str(self.settings.kicad_python), script_path, board)
                 stdout, stderr = (getattr(executed, key, '') or '' for key in ('stdout', 'stderr'))
@@ -1694,6 +1696,47 @@ class KiCadProvider:
                 'footprint_libraries': [{'path': name, 'name': Path(name).stem, 'footprints': counts[name]}
                                         for name in pretty],
                 'symbol_libraries': symbols}
+
+    def _library_footprints(self, names, project):
+        """Library footprints an edit names, read from KiCad's own library tables.
+
+        Her script is confined to the copy and cannot read his library, so the
+        footprints it needs go in with it, by LIBRARY/NAME as KiCad names them.
+        """
+        if not names:
+            return {}
+        if (not isinstance(names, (list, tuple)) or len(names) > 20
+                or not all(isinstance(n, str) and re.fullmatch(r'[^/\\]+/[^/\\]+', n) for n in names)):
+            raise KiCadError('arguments_unusable', {'detail': 'footprints is a list of up to 20 LIBRARY/NAME'})
+        import pwd
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        versions = sorted((p for p in (home / 'Library/Preferences/kicad').glob('*') if p.is_dir()),
+                          key=lambda p: [int(x) for x in re.findall(r'\d+', p.name)] or [0])
+        config = versions[-1] if versions else None
+        variables = {'KIPRJMOD': str(project)}
+        if config and (config / 'kicad_common.json').is_file():
+            try:
+                variables.update(json.loads((config / 'kicad_common.json').read_text())
+                                 .get('environment', {}).get('vars') or {})
+            except ValueError:
+                pass
+        tables = {}
+        for table in ([config / 'fp-lib-table'] if config else []) + [project / 'fp-lib-table']:
+            if table.is_file():
+                for name, uri in re.findall(r'\(lib \(name "((?:[^"\\]|\\.)*)"\)\s*\(type "KiCad"\)\s*'
+                                            r'\(uri "((?:[^"\\]|\\.)*)"\)', table.read_text(errors='replace')):
+                    tables[name] = re.sub(r'\$\{(\w+)\}', lambda m: variables.get(m[1], m[0]), uri)
+        found = {}
+        for item in names:
+            library, name = item.split('/', 1)
+            if library not in tables or '${' in tables[library]:
+                raise KiCadError('arguments_unusable', {'detail': 'no footprint library %s in KiCad' % library})
+            path = Path(tables[library]) / (name + '.kicad_mod')
+            if (not path.is_file() or path.is_symlink() or denied(path.as_posix()) or path.stat().st_size > 2_000_000
+                    or path.resolve().parent != Path(tables[library]).resolve()):
+                raise KiCadError('arguments_unusable', {'detail': 'no footprint %s' % item})
+            found[item] = path.read_text(errors='replace')
+        return found
 
     def _original_steps(self, root, meta):
         # Copies made before D-082 have none recorded; their original is

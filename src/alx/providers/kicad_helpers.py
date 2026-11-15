@@ -126,13 +126,55 @@ def track_ends(item):
     return (xy(item.GetStart()), xy(item.GetEnd()))
 
 
-def add_track(board, net, points, width, on="F"):
-    """A track through points [(x, y), ...] on copper layer `on`, of `width` mm."""
+def _bends(points, radius):
+    """Straight runs and tangent arcs through the corners of a polyline, radius in mm."""
+    import math as _math
+    points = [tuple(map(float, p)) for p in points]
+    runs, arcs, start = [], [], points[0]
+    for before, corner, after in zip(points, points[1:], points[2:]):
+        ux, uy = corner[0] - before[0], corner[1] - before[1]
+        vx, vy = after[0] - corner[0], after[1] - corner[1]
+        lu, lv = _math.hypot(ux, uy), _math.hypot(vx, vy)
+        if lu < 1e-9 or lv < 1e-9:
+            raise ValueError("two points at the same place at %s" % (corner,))
+        ux, uy, vx, vy = ux / lu, uy / lu, vx / lv, vy / lv
+        turn = _math.acos(max(-1.0, min(1.0, ux * vx + uy * vy)))
+        if turn < 1e-6:
+            continue
+        cut = radius * _math.tan(turn / 2)
+        if cut > min(lu, lv) + 1e-6:
+            raise ValueError("a %.2f mm bend does not fit at %s: shorten the radius or move the corner"
+                             % (radius, corner))
+        t1 = (corner[0] - ux * cut, corner[1] - uy * cut)
+        t2 = (corner[0] + vx * cut, corner[1] + vy * cut)
+        nx, ny = -uy, ux
+        if nx * vx + ny * vy < 0:
+            nx, ny = -nx, -ny
+        cx, cy = t1[0] + nx * radius, t1[1] + ny * radius
+        hx, hy = (t1[0] + t2[0]) / 2 - cx, (t1[1] + t2[1]) / 2 - cy
+        length = _math.hypot(hx, hy)
+        runs.append((start, t1))
+        arcs.append((t1, (cx + hx / length * radius, cy + hy / length * radius), t2))
+        start = t2
+    runs.append((start, points[-1]))
+    return [r for r in runs if _math.hypot(r[1][0] - r[0][0], r[1][1] - r[0][1]) > 1e-6], arcs
+
+
+def add_track(board, net, points, width, on="F", radius=None):
+    """A track through points [(x, y), ...] on copper layer `on`, of `width` mm.
+
+    radius (mm) makes every bend a tangent arc of that radius, as Friedl wants
+    RF traces (14 Nov); a bend too tight for the radius is refused.
+    """
     code = board.FindNet(net)
     if code is None:
         raise KeyError("no net %s on this board" % net)
+    if radius:
+        runs, arcs = _bends(points, radius)
+    else:
+        runs, arcs = list(zip(points, points[1:])), []
     made = []
-    for start, end in zip(points, points[1:]):
+    for start, end in runs:
         segment = _pcbnew.PCB_TRACK(board)
         segment.SetStart(point(*start))
         segment.SetEnd(point(*end))
@@ -141,7 +183,107 @@ def add_track(board, net, points, width, on="F"):
         segment.SetNet(code)
         board.Add(segment)
         made.append(segment)
+    for start, middle, end in arcs:
+        arc = _pcbnew.PCB_ARC(board)
+        arc.SetStart(point(*start))
+        arc.SetMid(point(*middle))
+        arc.SetEnd(point(*end))
+        arc.SetWidth(_pcbnew.FromMM(width))
+        arc.SetLayer(layer(on))
+        arc.SetNet(code)
+        board.Add(arc)
+        made.append(arc)
     return made
+
+
+def track_length(board, net):
+    """Total length in mm of a net's tracks and arcs (vias not counted)."""
+    return round(sum(_pcbnew.ToMM(item.GetLength()) for item in board.GetTracks()
+                     if item.GetClass() in ("PCB_TRACK", "PCB_ARC") and item.GetNetname() == net), 4)
+
+
+def teardrops(board, area=None):
+    """Teardrop areas, optionally only those centred inside area (x0, y0, x1, y1) in mm.
+
+    Moving a part leaves its old teardrops behind as stray copper; remove them
+    with remove() and let KiCad make new ones.
+    """
+    found = []
+    for zone in board.Zones():
+        if not zone.IsTeardropArea():
+            continue
+        x, y = xy(zone.GetBoundingBox().Centre())
+        if area is None or (area[0] <= x <= area[2] and area[1] <= y <= area[3]):
+            found.append(zone)
+    return found
+
+
+# Library footprints the edit named (footprints: ["FireFli_ICs/RFSW6024TR13"]),
+# copied in by the tool: the script cannot read his library itself.
+_LIBRARY_FOOTPRINTS = {}
+
+
+def replace_part(board, ref, footprint, pin_nets=None):
+    """Swap a part for a library footprint named in the edit's footprints, in its place.
+
+    The new part keeps the reference, value, fields, position, rotation, side
+    and schematic link. pin_nets {pad number: net} sets the new pads' nets;
+    without it a pad keeps the net of the old pad with the same number, and a
+    pad with no match is left unconnected (listed in the result).
+    """
+    import os as _os, tempfile as _tempfile
+    if footprint not in _LIBRARY_FOOTPRINTS:
+        raise KeyError("name %s in the edit's footprints so the tool copies it in" % footprint)
+    library, name = footprint.split("/", 1)
+    old = part(board, ref)
+    folder = _tempfile.mkdtemp(prefix=".alx-fp-", dir=_os.path.dirname(BOARD_PATH))
+    try:
+        with open(_os.path.join(folder, name + ".kicad_mod"), "w") as handle:
+            handle.write(_LIBRARY_FOOTPRINTS[footprint])
+        new = _pcbnew.FootprintLoad(folder, name)
+    finally:
+        for item in _os.listdir(folder):
+            _os.remove(_os.path.join(folder, item))
+        _os.rmdir(folder)
+    if new is None:
+        raise ValueError("KiCad could not read %s" % footprint)
+    new.SetFPID(_pcbnew.LIB_ID(library, name))
+    old_nets = {item.GetNumber(): item.GetNetname() for item in old.Pads()}
+    keep = {field.GetName(): (field.GetText(), field.IsVisible()) for field in old.GetFields()
+            if field.GetName() not in ("Footprint",)}
+    board.Add(new)
+    if old.IsFlipped():
+        new.Flip(new.GetPosition(), _pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
+    new.SetPosition(old.GetPosition())
+    new.SetOrientationDegrees(old.GetOrientationDegrees())
+    new.SetPath(old.GetPath())
+    new.SetReference(ref)
+    for field_name, (text, visible) in keep.items():
+        if field_name in ("Reference",):
+            continue
+        if new.HasField(field_name):
+            new.GetField(field_name).SetText(text)
+        else:
+            # Directly on the new part: the old one still has this reference.
+            item = _pcbnew.PCB_FIELD(new, _pcbnew.FIELD_T_USER, field_name)
+            item.SetText(text)
+            item.SetVisible(visible)
+            item.SetLayer(_pcbnew.F_Fab if not new.IsFlipped() else _pcbnew.B_Fab)
+            item.SetPosition(new.GetPosition())
+            new.Add(item)
+    wanted = {str(k): v for k, v in (pin_nets or {}).items()}
+    unconnected = []
+    for item in new.Pads():
+        net_name = wanted.get(item.GetNumber(), None if wanted else old_nets.get(item.GetNumber()))
+        if net_name:
+            code = board.FindNet(net_name)
+            if code is None:
+                raise KeyError("no net %s on this board" % net_name)
+            item.SetNet(code)
+        else:
+            unconnected.append(item.GetNumber())
+    board.Delete(old)
+    return dict(describe(board, ref), unconnected=sorted(set(unconnected)))
 
 
 def add_via(board, net, at, diameter=0.6, drill=0.3):
@@ -384,6 +526,7 @@ def script_runner(script):
 NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rotate_part", "pad",
          "set_pad", "fields", "set_field", "describe", "tracks", "vias", "track_ends", "add_track", "add_via", "remove",
          "graphics", "set_graphic", "remove_graphic", "add_line",
+         "track_length", "teardrops", "replace_part",
          "zones", "zone_corners", "set_zone_corners",
          "copper_shapes", "set_copper_corners", "remove_copper", "add_copper", "add_taper",
          "footprints", "footprint", "save_footprint", "refill")
