@@ -1132,7 +1132,7 @@ class KiCadProvider:
             stage = 'before_drc'
             evidence, kept = None, False
             try:
-                before = empty if library else self._drc(root, meta)['totals']
+                before = empty if library else self._board_drc(root, meta)[0]
                 facts_before = board_facts('(kicad_pcb)' if library else board.read_text())
                 steps_before = None if library else fingerprints(project, meta['board'])
                 # Tested helpers first, then her script compiled on its own, so
@@ -1162,8 +1162,7 @@ class KiCadProvider:
                     raise KiCadError('script_failed', detail)
                 inventory(project)
                 stage = 'after_drc'
-                signatures = []
-                after = empty if library else self._drc(root, meta, signatures)['totals']
+                after, signatures = (empty, []) if library else self._board_drc(root, meta)
                 steps = {}
                 if not library:
                     # Friedl's order (D-082): an edit that gets ahead of his
@@ -1606,7 +1605,7 @@ class KiCadProvider:
                     finding['items'] = finding['items'][:ITEMS_PER_FINDING]
             return groups
 
-        def group(entries):
+        def group(entries, compared=True):
             groups = {}
             for finding in entries:
                 kind, severity = finding['type'], finding['severity']
@@ -1614,7 +1613,7 @@ class KiCadProvider:
                     raise KiCadError('invalid_report')
                 totals[severity] += 1
                 totals['total'] += 1
-                if signatures is not None:
+                if signatures is not None and compared:
                     # Every finding, before the limits, so a later check can say
                     # exactly what is new against his original (D-082).
                     signatures.append({'type': kind, 'severity': severity,
@@ -1645,7 +1644,10 @@ class KiCadProvider:
                     'description': finding.get('description', ''), 'items': items})
             return list(groups.values())
         try:
-            result = {key: bounded_groups(group(report[key])) for key in
+            # KiCad's own board-against-schematic check reads only the first
+            # sheet; the comparison with his original uses the pin-by-pin one
+            # across every sheet, so a DRC result depends on the board alone.
+            result = {key: bounded_groups(group(report[key], key != 'schematic_parity')) for key in
                       ('violations', 'unconnected_items', 'schematic_parity')}
         except (KeyError, TypeError, AttributeError) as error:
             raise KiCadError('invalid_report') from error
@@ -1804,6 +1806,28 @@ class KiCadProvider:
                 text = text[block[0].start:block[0].end]
             found[item] = text
         return found
+
+    def _board_drc(self, root, meta):
+        """DRC totals and findings of the copy's board, run again only when the board changed.
+
+        15 Nov: every schematic edit ran the whole-board DRC twice, about 25
+        seconds an edit, on a board it never touched.
+        """
+        board = root / 'project' / meta['board']
+        # The rules and the project's severities decide the result as much as the board.
+        digest = hashlib.sha256(json.dumps([sha(path) if path.is_file() else None for path in (
+            board, board.with_suffix('.kicad_dru'), board.with_suffix('.kicad_pro'))]).encode()).hexdigest()
+        cache = root / 'drc-last.json'
+        try:
+            last = json.loads(cache.read_text())
+        except (OSError, ValueError):
+            last = {}
+        if last.get('board') == digest:
+            return last['totals'], last['signatures']
+        signatures = []
+        totals = self._drc(root, meta, signatures)['totals']
+        cache.write_text(json.dumps({'board': digest, 'totals': totals, 'signatures': signatures}))
+        return totals, signatures
 
     def _original_steps(self, root, meta):
         # Copies made before D-082 have none recorded; their original is

@@ -1281,6 +1281,24 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         kept = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
         self.assertFalse(kept['previewed'])
 
+    def test_an_edit_that_leaves_the_board_alone_runs_no_drc(self):
+        """15 Nov: each schematic edit ran the whole-board DRC twice, 25 s an edit."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.calls.clear()
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC,
+                     dry_run=True)
+        self.assertEqual([call for call in self.calls if call[1:3] == ['pcb', 'drc']], [])
+        self.calls.clear()
+        # A change to the rules is a change to the result.
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="""
+import sys
+from pathlib import Path
+Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
+""")
+        self.assertEqual(len([call for call in self.calls if call[1:3] == ['pcb', 'drc']]), 1)
+
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()
         metadata = next(self.storage.rglob(checked['work_copy_id'] + '/metadata.json'))
