@@ -26,6 +26,14 @@ Confirmed by Friedl, 14 Nov ("Aside from that it looks ok"), with the note on ne
 - RF: straight and short where possible, curved bends, P and N matched.
 - Placement is decided before routing, from where the pins point.
 
+## How I draw a schematic
+
+Friedl, 15 Nov, from his review of the P0009 schematic:
+
+- Connect a local circuit by drawing the wire, not with net labels.
+- GND ports face down; power ports face up.
+- Designators and values sit consistently relative to their part, never over another part, the part itself or other text.
+
 ## Not only edits
 
 Not every job will be an edit to an existing board. New boards start from the schematic: she draws it with me first, then places and routes, with the same "show me, I say yes" steps. This first build covers editing an existing board. It should be built so the same steps work for new boards later, without a second, separate tool.
