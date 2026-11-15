@@ -18,11 +18,13 @@ For the job in BOARD_EDIT_DONE.md. Draft, 14 Nov, for Friedl to agree before I b
 
 ## What I'll build (one PR)
 
-1. **The steps, enforced in code, not left to instructions.**
-   - While you haven't approved the placement, her copy refuses any new track or via. She can move, turn, add and remove parts only.
-   - Routing opens only after you say yes to the placement. The schematic step opens only after you say yes to the routing.
-   - Write-back is refused until you've seen all three: placement, routing and schematic.
-   - If she changes something you already approved, that step goes back to "not approved".
+1. **The steps, in a fixed order, enforced in code, not left to instructions** (agreed 15 Nov):
+   1. Schematic. Nothing on the board changes until you approve it.
+   2. Placement. Parts only: her copy refuses any new track or via until you approve it.
+   3. Routing, until you approve it.
+   4. Write-back, only after your yes, and only if the board matches the approved schematic pin for pin.
+   - If she changes something you already approved, that step and every step after it go back to "not approved".
+   - A new board takes the same steps, starting from an empty board.
 2. **The placement view.** Parts only, no copper, pin 1 and the pin names visible, so you both judge from where the pins point.
 3. **DRC compared to your original.** Every check reports only what is new against your board: new problems, anything unconnected. Not just a total.
 4. **The editing tools I used yesterday:**
@@ -30,10 +32,10 @@ For the job in BOARD_EDIT_DONE.md. Draft, 14 Nov, for Friedl to agree before I b
    - curved tracks (bend radius in mm);
    - track length per net, with P/N match for RF pairs;
    - clearing stale teardrops, and finding vias by their real net.
-5. **The schematic step.**
-   - Swap or remove symbols on her copy.
+5. **Schematic tools.**
+   - Swap, add or remove symbols on her copy.
    - A pin-by-pin comparison of the schematic against the board, across all sheets. This replaces KiCad's own check, which only reads the first sheet.
-6. **The same steps for a new board.** Schematic first, then placement, then routing, with nothing separate to build later.
+6. **The DHL freight option** (Freight & Courier, no VAT), added to her DHL importer. It's small, so it rides along in this PR.
 
 ## How I'll test it
 

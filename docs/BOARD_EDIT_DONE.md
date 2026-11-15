@@ -6,12 +6,12 @@ Confirmed by Friedl, 14 Nov ("Aside from that it looks ok"), with the note on ne
 
 1. I tell AL/X the change in plain words, for example "On P0009, replace the two 4ch RF switches with the 2ch ones from P0020."
 2. She reads both boards and the datasheets, then asks me only what she can't settle herself (for example which antenna pins are used, or whether a firmware change is OK). She doesn't ask what the datasheet already answers.
-3. She makes the change on her own copy and shows me the **placement only** on her screen: current on the left, her copy on the right. Nothing is routed yet.
-4. I say what to change ("turn them 90° CCW", "move them closer", "remove the parts no longer needed"). She does it and shows me again, as often as needed.
-5. When I approve the placement, she routes it and shows me the result on her screen, with DRC compared to my original and the RF lengths.
-6. I can ask for changes to the routing too ("curved RF traces", "remove the redundant vias"). She does them and shows me again.
-7. She updates the schematic to match, and shows me it matches the board.
-8. When I say yes, she writes it back to my project. Nothing is written before that.
+3. She changes the **schematic** first, on her own copy, and shows it to me: current on the left, her copy on the right. Nothing goes on the board until I approve it. (Friedl, 15 Nov: the schematic always comes first, even on a board edit.)
+4. She then places the parts on her copy of the board to match, and shows me the **placement only**. Nothing is routed yet.
+5. I say what to change ("turn them 90° CCW", "move them closer", "remove the parts no longer needed"). She does it and shows me again, as often as needed.
+6. When I approve the placement, she routes it and shows me the result on her screen, with DRC compared to my original and the RF lengths.
+7. I can ask for changes to the routing too ("curved RF traces", "remove the redundant vias"). She does them and shows me again.
+8. When I say yes, and the board matches the approved schematic pin for pin, she writes it back to my project. Nothing is written before that.
 
 ## What I never have to do
 
