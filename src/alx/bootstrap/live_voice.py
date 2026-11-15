@@ -1062,6 +1062,7 @@ async def run(repository_root: Path) -> None:
                 xero_settings.dhl_supplier_name,
                 xero_settings.unattended_bill_writes,
                 processed_mailbox=mail_settings.processed_mailbox,
+                freight_account=xero_settings.freight_account,
             ),
         )
         register(xero_runtime.definitions, TraceSubsystem.XERO)

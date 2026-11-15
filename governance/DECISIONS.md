@@ -346,6 +346,16 @@ This file records approved product and architecture decisions that guide impleme
 - **Unproven at approval.** No duty-tax-paid invoice had been posted to the live organisation when this was recorded. Account 426, its No VAT default and the DHL contact were each confirmed read-only against the live FireFli organisation.
 - **Review condition.** Revisit if a duty-tax-paid invoice posts against the wrong account, if a freight or customs invoice is misclassified as duty tax paid, if an invoice carrying tax reaches a NoTax posting, or before freight handling is added.
 
+## D-022a — DHL freight invoices post to Freight & Courier, No VAT
+
+- **Date:** 2026-11-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-15** ("You can use the freight/courier account in xero. there is NO VAT yes as it is export"). The first real freight invoice, CPTR001032278 (R6,561.25, outbound Express 12:00, no VAT), arrived on 13 Nov. D-022 recognised it and returned it unposted, as it said it would until a real one was inspected; `capture_supplier_invoice` refuses DHL documents (D-021), so nothing could book it.
+- **Freight accounting.** A freight invoice (D-022's discriminator: a weight charge) posts like duty tax paid: one line for the weight charge, then each extra charge (the fuel surcharge) at its net amount after discount, every line to `ALX_XERO_FREIGHT_ACCOUNT` (425, Freight & Courier) with `NoTax`. Account 425 defaults to a VAT rate in Xero, so the lines are posted NoTax and the draft's total is read back and compared before it is authorised, as for every DHL bill.
+- **Reconciliation is self-consistency only**, as for duty tax paid: the weight charge and the charges must add up to the invoice total, and an invoice stating any tax is refused. The CSV is the evidence; the PDF is attached.
+- **One capability.** A branch of `process_dhl_import` sharing the duty-tax-paid stage, not a new path. The freight account is checked live only when a freight invoice is posted.
+- **Boundary.** No new Law exception. Authority unchanged (D-018).
+
 ## D-023 — Self-directed research authority
 
 - **Date:** 2026-09-01

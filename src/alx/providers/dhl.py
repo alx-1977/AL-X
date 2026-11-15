@@ -481,6 +481,10 @@ def parse_mybill_invoice(payload: bytes) -> dict[str, Any]:
         )
     ]
     charges = tuple(line for row in rows for line in _charge_lines(row))
+    if kind == "dhl_freight_invoice":
+        # D-022a: the carriage itself is a line of its own, ahead of the extras.
+        charges = tuple(("WEIGHT", "Weight charge", _csv_money(row.get("Weight Charge")))
+                        for row in rows if _csv_money(row.get("Weight Charge"))) + charges
     components = sum((amount for _code, _name, amount in charges), Decimal("0"))
     problems: list[str] = []
     if total <= 0:

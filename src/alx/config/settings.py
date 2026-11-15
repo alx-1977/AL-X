@@ -307,6 +307,8 @@ class XeroSettings:
     # supplied to the import capability. It is a name, not a Xero identifier:
     # the contact is resolved by exact name at run time, as V1 did.
     dhl_supplier_name: str
+    # D-022a: DHL freight (export carriage) posts to Freight & Courier, No VAT.
+    freight_account: str = "425"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
@@ -345,6 +347,9 @@ class XeroSettings:
             ).strip(),
             clearance_account=environment.get(
                 "ALX_XERO_CLEARANCE_ACCOUNT", "425"
+            ).strip(),
+            freight_account=environment.get(
+                "ALX_XERO_FREIGHT_ACCOUNT", "425"
             ).strip(),
             dhl_supplier_name=environment.get(
                 "ALX_XERO_DHL_SUPPLIER_NAME", "DHL International (Pty) Ltd"

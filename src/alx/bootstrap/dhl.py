@@ -37,6 +37,7 @@ def build_dhl_import(
     supplier_name: str = "",
     unattended: bool = False,
     processed_mailbox: str = "",
+    freight_account: str = "",
 ) -> DhlImport:
     """Build the single DHL import action.
 
@@ -56,6 +57,7 @@ def build_dhl_import(
             clearance_account,
             supplier_name,
             processed_mailbox=processed_mailbox,
+            freight_account=freight_account,
         )[XeroAction.IMPORT_DHL]
 
     return DhlImport(executor_for, DHL_IMPORT_PERMISSION, not unattended)

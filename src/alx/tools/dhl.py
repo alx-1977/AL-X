@@ -8,7 +8,7 @@ and completes that same bill in place.
 Those are two stages of one capability and one evolving Xero bill, not two
 capabilities or alternative routes. Which branch runs is decided by the
 documents themselves: customs evidence begins, its invoice completes; a
-duty-tax-paid invoice posts on its own; freight returns to AL/X unposted.
+duty-tax-paid or freight invoice posts on its own (D-022, D-022a).
 
 The accounting treatment is V1's, proven in production: import VAT is claimable
 and duty is not, so they never merge; DHL charges no VAT of its own, so every
@@ -89,7 +89,7 @@ _CLASSIFIED = StructuredSchema(
 # The `xero` import_dhl action's own contract (D-074); nothing registers it.
 DEFINITION = CapabilityDefinition(
     XeroAction.IMPORT_DHL.value,
-    "Process the exact DHL documents supplied: customs evidence and its invoice form one two-stage import; a reconciled duty-tax-paid invoice posts directly; freight returns unposted. The branch follows from document evidence. A whole DHL notification may be supplied: documents that are not DHL evidence, such as the air waybill, the shipper's commercial invoice or a release notice, are left unused, and documents lists what each was read as. A completed stage names in source_mail the emails it processed, which may then be filed; after a provisional draft each is first flagged orange, and once the bill is authorised customs_mail names the documents emails whose orange flag may be cleared.",
+    "Process the exact DHL documents supplied: customs evidence and its invoice form one two-stage import; a reconciled duty-tax-paid invoice posts directly to Import/Export Fees, and a reconciled freight invoice (a weight charge) directly to Freight & Courier, both No VAT, each charge its own line. The branch follows from document evidence. A whole DHL notification may be supplied: documents that are not DHL evidence, such as the air waybill, the shipper's commercial invoice or a release notice, are left unused, and documents lists what each was read as. A completed stage names in source_mail the emails it processed, which may then be filed; after a provisional draft each is first flagged orange, and once the bill is authorised customs_mail names the documents emails whose orange flag may be cleared.",
     StructuredSchema(
         ValueKind.OBJECT,
         {"documents": StructuredSchema(ValueKind.ARRAY, items=_SOURCE)},
@@ -185,6 +185,7 @@ def build_dhl_executors(
     supplier_name: str = "",
     clock: Callable[[], datetime] | None = None,
     processed_mailbox: str = "",
+    freight_account: str = "",
 ) -> Mapping[str, Callable[[StructuredData], CapabilityResult]]:
     """The one DHL import path.
 
@@ -1024,13 +1025,22 @@ def build_dhl_executors(
             provenance=RetentionPolicy().direct_mail(now(), tuple(references)),
         )
 
-    def duty_tax_stage(
+    def self_reconciled_stage(
+        kind: str,
+        line_account: str,
         contact_id: str,
         structured: tuple[MailReference, Any, bytes],
         invoice: tuple[MailReference, Any, bytes],
         references: Sequence[MailReference],
     ) -> CapabilityResult:
-        """Post one self-reconciled duty-tax-paid invoice under D-022."""
+        """Post one self-reconciled invoice: duty tax paid (D-022) or freight (D-022a).
+
+        Neither has a second document behind it: every charge posts as its own
+        line to the one account its shape names, and the charges must add up to
+        the invoice total.
+        """
+        shape = {"dhl_duty_tax_invoice": "duty-tax-paid", "dhl_freight_invoice": "freight"}[kind]
+        short = {"dhl_duty_tax_invoice": "duty_tax", "dhl_freight_invoice": "freight"}[kind]
         steps = ["read_documents"]
         _csv_reference, _csv_attachment, csv_payload = structured
         _pdf_reference, pdf_attachment, pdf_payload = invoice
@@ -1039,18 +1049,18 @@ def build_dhl_executors(
         steps.append("read_structured_invoice_and_pdf")
         waybill = str(evidence.get("waybill") or "")
 
-        if evidence.get("kind") != "dhl_duty_tax_invoice":
+        if evidence.get("kind") != kind:
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "documents_ambiguous",
-                "the structured invoice is not duty-tax-paid evidence",
+                f"the structured invoice is not {shape} evidence",
                 waybill,
                 steps=steps,
                 references=references,
             )
         if not evidence.get("verified"):
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "invoice_does_not_reconcile",
                 "; ".join(str(item) for item in evidence.get("problems") or ()),
                 waybill,
@@ -1059,7 +1069,7 @@ def build_dhl_executors(
             )
         if evidence.get("tax_present"):
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "invoice_tax_present",
                 "the structured invoice states tax in one or more tax fields",
                 waybill,
@@ -1085,7 +1095,7 @@ def build_dhl_executors(
         # than sending an empty or invented date.
         if not xero_date(csv_invoice_date):
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "invoice_date_missing",
                 "the structured invoice states no usable invoice date",
                 waybill,
@@ -1099,7 +1109,7 @@ def build_dhl_executors(
             ("waybill", waybill, fields.get("waybill")),
         ):
             if str(csv_value or "") != str(pdf_value or ""):
-                mismatches.append(f"{label} differs between CSV and PDF")
+                mismatches.append(f"{shape} differs between CSV and PDF")
         if not _agrees(_money(evidence.get("total")), _money(fields.get("total"))):
             mismatches.append("total differs between CSV and PDF")
         if csv_invoice_date and pdf_invoice_date and csv_invoice_date != pdf_invoice_date:
@@ -1110,7 +1120,7 @@ def build_dhl_executors(
             mismatches.append("due date differs between CSV and PDF")
         if mismatches:
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "supporting_document_mismatch",
                 "; ".join(mismatches),
                 waybill,
@@ -1119,7 +1129,7 @@ def build_dhl_executors(
             )
         if str(evidence.get("currency") or "") != "ZAR":
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "invoice_currency_invalid",
                 f"the structured invoice is in {evidence.get('currency') or 'no currency'}",
                 waybill,
@@ -1135,15 +1145,15 @@ def build_dhl_executors(
             _line(
                 f"{item['description']} ({item['code']}) — waybill {waybill}",
                 _money(item["amount"]),
-                customs_duty_account,
+                line_account,
             )
             for item in evidence.get("lines") or ()
         ]
         if not lines:
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "invoice_does_not_reconcile",
-                "the structured invoice states no duty or regulatory lines",
+                f"the structured invoice states no {shape} charges",
                 waybill,
                 steps=steps,
                 references=references,
@@ -1155,7 +1165,7 @@ def build_dhl_executors(
             "Date": invoice_date,
             "DueDate": due_date,
             "CurrencyCode": "ZAR",
-            "Reference": f"DHL duty tax paid; waybill {waybill}",
+            "Reference": f"DHL {shape.replace('-', ' ')}; waybill {waybill}",
             "LineAmountTypes": "NoTax",
             "LineItems": lines,
             "Status": "DRAFT",
@@ -1165,12 +1175,12 @@ def build_dhl_executors(
         if existing is None:
             created = account.create_draft_bill(sent)
             invoice_id = str(created.get("InvoiceID") or "")
-            steps.append("created_duty_tax_draft")
+            steps.append(f"created_{short}_draft")
         else:
             invoice_id = str(existing.get("InvoiceID") or "")
             if str(existing.get("Status") or "") != "DRAFT":
                 return returned(
-                    "dhl_duty_tax_invoice",
+                    kind,
                     "duplicate_bill",
                     f"a {existing.get('Status') or 'non-draft'} bill already exists",
                     waybill,
@@ -1178,7 +1188,7 @@ def build_dhl_executors(
                     steps,
                     references,
                 )
-            steps.append("resumed_duty_tax_draft")
+            steps.append(f"resumed_{short}_draft")
         if not invoice_id:
             raise XeroAccessError("response_invalid")
 
@@ -1192,15 +1202,15 @@ def build_dhl_executors(
             mismatch = f"it totals {before.get('Total')}, not {total}"
         if mismatch:
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "draft_changed",
-                f"the duty-tax-paid draft differs from the invoice: {mismatch}",
+                f"the {shape} draft differs from the invoice: {mismatch}",
                 waybill,
                 before,
                 steps,
                 references,
             )
-        steps.append("verified_duty_tax_draft")
+        steps.append(f"verified_{short}_draft")
 
         # D-022 names the PDF as the human-readable source stored with the bill.
         uploaded = _attach(invoice_id, pdf_attachment, pdf_payload)
@@ -1221,9 +1231,9 @@ def build_dhl_executors(
             mismatch = f"it totals {before_authorisation.get('Total')}, not {total}"
         if mismatch:
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "draft_changed",
-                f"the duty-tax-paid draft changed before authorisation: {mismatch}",
+                f"the {shape} draft changed before authorisation: {mismatch}",
                 waybill,
                 before_authorisation,
                 steps,
@@ -1236,9 +1246,9 @@ def build_dhl_executors(
             pdf_attachment.sha256,
         ):
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "supporting_document_missing",
-                "the duty-tax invoice is no longer stored on the bill being authorised",
+                f"the {shape} invoice is no longer stored on the bill being authorised",
                 waybill,
                 before_authorisation,
                 steps,
@@ -1258,9 +1268,9 @@ def build_dhl_executors(
             or not final.get("HasAttachments", False)
         ):
             return returned(
-                "dhl_duty_tax_invoice",
+                kind,
                 "read_back_mismatch",
-                "the authorised duty-tax-paid bill does not match its evidence",
+                f"the authorised {shape} bill does not match its evidence",
                 waybill,
                 final,
                 steps,
@@ -1273,7 +1283,7 @@ def build_dhl_executors(
             CapabilityResultState.SUCCEEDED,
             {
                 "completed": True,
-                "stage": "dhl_duty_tax_invoice",
+                "stage": kind,
                 "returned_for": "",
                 "detail": f"bill {invoice_number} authorised for {total}",
                 "waybill": waybill,
@@ -1364,16 +1374,9 @@ def build_dhl_executors(
             for item, kind in zip(read, kinds)
             if kind in ("customs_worksheet", "sad_500")
         ]
-        if freight:
-            return returned(
-                "dhl_freight_invoice",
-                "freight_not_authorised",
-                "the documents describe DHL freight, whose accounting treatment is not approved",
-                references=references,
-            )
         # Nothing to post is a document outcome, decided before any Xero
         # prerequisite so it is never reported as a configuration failure.
-        if not (invoices or duty_tax or structured_customs or customs):
+        if not (invoices or duty_tax or freight or structured_customs or customs):
             return returned(
                 "",
                 "documents_ambiguous",
@@ -1381,8 +1384,6 @@ def build_dhl_executors(
                 references=references,
             )
         # Only branches that can reach Xero require Xero configuration.
-        # Freight is deliberately returned unposted and must not depend on
-        # an accounting connection merely to be recognised.
         if not supplier_name:
             return failed("dhl_supplier_not_configured")
         unusable = _validate_configuration()
@@ -1391,6 +1392,22 @@ def build_dhl_executors(
         contact_id, unresolved = _resolve_contact()
         if unresolved:
             return failed(unresolved)
+        if freight:
+            # D-022a: carriage DHL billed, posted like duty tax paid, to Freight & Courier.
+            if len(freight) != 1 or len(invoices) != 1 or customs or structured_customs or duty_tax:
+                return returned(
+                    "dhl_freight_invoice",
+                    "documents_ambiguous",
+                    "freight processing requires exactly one MyBill CSV and one PDF invoice",
+                    references=references,
+                )
+            # Only a freight invoice needs the freight account, checked live like the others.
+            if not any(str(item.get("Code") or "") == freight_account
+                       and str(item.get("Status") or "").upper() == "ACTIVE"
+                       for item in account.list_accounts()):
+                return failed("account_mapping_invalid")
+            return self_reconciled_stage("dhl_freight_invoice", freight_account, contact_id,
+                                         freight[0], invoices[0], references)
         if duty_tax:
             if len(duty_tax) != 1 or len(invoices) != 1 or customs or structured_customs:
                 return returned(
@@ -1399,7 +1416,8 @@ def build_dhl_executors(
                     "duty-tax-paid processing requires exactly one MyBill CSV and one PDF invoice",
                     references=references,
                 )
-            return duty_tax_stage(contact_id, duty_tax[0], invoices[0], references)
+            return self_reconciled_stage("dhl_duty_tax_invoice", customs_duty_account, contact_id,
+                                         duty_tax[0], invoices[0], references)
         if structured_customs:
             if len(structured_customs) != 1 or len(invoices) != 1 or customs:
                 return returned(

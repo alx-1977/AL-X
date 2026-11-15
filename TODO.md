@@ -52,18 +52,6 @@ Work in meaningful ways but not complete enough to call finished.
 Existing functionality whose architecture or behaviour is known to be
 inadequate.
 
-- [ ] **DHL freight invoices cannot be booked (D-022 gap).** D-022 (1 Sep)
-  recognises freight (a weight charge, no declaration) but left its
-  accounting open "until a real one is inspected". The first real one,
-  CPTR001032278, R6,561.25, no VAT, outbound Express 12:00, arrived 13 Nov
-  and was correctly held back. `capture_supplier_invoice` refuses DHL
-  documents (D-021), so she has no path at all. Fix: Friedl names the Xero
-  account (and confirms No VAT for export freight); record it as an
-  amendment to D-022; add a freight branch to `process_dhl_import` (each
-  charge its own line, components must sum to the total, tax never invented
-  or dropped, as for duty tax paid); test against CPTR001032278. Small:
-  goes in the next PR, not its own.
-
 - [ ] **Waiting replies are read out unchecked and all at once (D-044).**
   2026-10-13: with no session open since about 9 October, 30 mail replies
   were kept, then spoken back to back when Friedl opened AL/X, including
