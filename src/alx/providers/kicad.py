@@ -1929,6 +1929,17 @@ class KiCadProvider:
         return {'new': sorted(set(now) - set(base)), 'fixed': len(set(base) - set(now)),
                 'schematic': now is not None}
 
+    def _new_faults(self, root, signatures):
+        """DRC errors and unconnected items found now that his original did not have."""
+        base = self._baseline(root)
+        if base is None:
+            return []
+        key = lambda f: json.dumps([f['type'], f['severity'], f['description'], f['items']])  # noqa: E731
+        new = Counter(map(key, signatures)) - Counter(map(key, base['drc']))
+        faults = [dict(zip(('type', 'severity', 'description', 'items'), json.loads(item)))
+                  for item in new.elements()]
+        return [f for f in faults if f['severity'] == 'error' or f['type'] == 'unconnected_items']
+
     def _compared(self, root, meta, signatures):
         """What the DRC finds now that it did not find on his original, and what it no longer finds."""
         base = self._baseline(root)
@@ -2209,6 +2220,12 @@ class KiCadProvider:
             differing = self._compared_parity(root, meta)['new']
             if differing:
                 raise KiCadError('schematic_board_differ', {'new_mismatches': differing[:20]})
+            # Nor with a DRC error or an unconnected item his original did not
+            # have (his done-lines; review, 15 Nov: approvals alone were checked).
+            _totals, signatures = self._board_drc(root, meta)
+            new = self._new_faults(root, signatures)
+            if new:
+                raise KiCadError('board_not_clean', {'new_faults': new[:20], 'count': len(new)})
 
         temporary = set()
         expected = dict(meta['hashes'])

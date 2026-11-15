@@ -45,9 +45,23 @@ class RealRoundTripTests(unittest.TestCase):
                 self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
                 return result.values
 
+            # Copper left floating is a new unconnected item his original did not
+            # have: approved or not, it is not written (review, 15 Nov).
+            floating = success("check_kicad_board", project_dir=str(project))
+            loose = success("edit_kicad_work_copy", work_copy_id=floating["work_copy_id"], script=(
+                'b = load()\nadd_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])\n'
+                'refill(b)\nsave(b)\n'))
+            success("approve_step", step="routing", work_copy_id=loose["work_copy_id"],
+                    work_copy_revision=loose["work_copy_revision"])
+            refused = kicad_call(runtime.executors, "write_back_kicad_board", {
+                "work_copy_id": loose["work_copy_id"], "work_copy_revision": loose["work_copy_revision"],
+                "project_dir": str(project)})
+            self.assertEqual(refused.failure["code"], "board_not_clean")
+            self.assertNotIn("(xy 30 2)", (project / "board.kicad_pcb").read_text())
+            # Copper joined to the net's own copper is written.
             checked = success("check_kicad_board", project_dir=str(project))
             edited = success("edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], script=(
-                'b = load()\nadd_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])\n'
+                'b = load()\nadd_copper(b, "SIDE", "F", [(26, 2), (28, 2), (28, 3), (26, 3)])\n'
                 'refill(b)\nsave(b)\n'))
             # KiCad completes this minimal project file on save; the settings
             # file it also writes is not reported as a design change.
@@ -56,6 +70,10 @@ class RealRoundTripTests(unittest.TestCase):
             # KiCad's settings file appeared in her copy on save, and is not the design.
             work = root / "storage"
             self.assertTrue(list(work.rglob(checked["work_copy_id"] + "/project/board.kicad_prl")))
+            # Copper drawn as a shape is routing, which he approves before it is written (D-082).
+            self.assertEqual(edited["steps"]["routing"], "needs_approval")
+            success("approve_step", step="routing", work_copy_id=edited["work_copy_id"],
+                    work_copy_revision=edited["work_copy_revision"])
             written = success("write_back_kicad_board", work_copy_id=edited["work_copy_id"],
                               work_copy_revision=edited["work_copy_revision"], project_dir=str(project))
             self.assertIn("board.kicad_pcb", [Path(path).name for path in written["written"]])

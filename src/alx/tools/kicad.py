@@ -38,7 +38,7 @@ FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid
             'script_failed', 'export_would_overwrite', 'rename_ambiguous', 'unsupported_file',
             'project_too_large', 'evidence_full', 'verification_failed', 'unavailable')
 FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed', 'step_not_approved',
-             'schematic_board_differ')
+             'schematic_board_differ', 'board_not_clean')
 
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
@@ -209,7 +209,9 @@ _ACTION_DEFINITIONS = (
         'Refuses open boards and changed originals; verifies backups and staged files before '
         'replacement. A board copy is written only when every changed step is approved '
         '(step_not_approved names the one still needed) and the board disagrees with the '
-        'schematic nowhere his original did not (schematic_board_differ lists where). On failure, already replaced files may remain; recovery depends on '
+        'schematic nowhere his original did not (schematic_board_differ lists where), and the DRC '
+        'finds no error and nothing unconnected that his original did not have (board_not_clean '
+        'lists them). On failure, already replaced files may remain; recovery depends on '
         'the returned backups and evidence, with no automatic undo. '
         'Generated reports and renders are excluded. report, when given, is your written '
         'review of this board in Markdown (findings, what you changed, what is still open, '

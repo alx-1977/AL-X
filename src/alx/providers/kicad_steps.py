@@ -15,6 +15,9 @@ from pathlib import Path
 
 STEPS = ('schematic', 'placement', 'routing')
 COPPER = ('segment', 'arc', 'via', 'zone')
+# Board drawings are copper when they sit on a copper layer: a taper or a feed
+# drawn as a shape (review, 15 Nov: such copper slipped past the step lock).
+DRAWINGS = ('gr_poly', 'gr_rect', 'gr_line', 'gr_arc', 'gr_circle', 'gr_curve')
 # What KiCad rewrites without anyone changing the design: identifiers, the
 # fill it recomputes on every refill, and net names a rename touches (a
 # wrong connection is caught by the pin-by-pin comparison, not here).
@@ -41,9 +44,12 @@ def _footprint_place(footprint, references) -> list:
     at = footprint.named('at')
     layer = footprint.named('layer')
     name = footprint.children[1] if len(footprint.children) > 1 and isinstance(footprint.children[1], str) else ''
+    # Its pads too: a pad made larger or moved is a change to the placement
+    # Friedl approved, not something to slip past it (review, 15 Nov).
+    pads = sorted(_canonical(pad) for pad in footprint.named('pad'))
     return [refs[0] if refs else '', name.split(':', 1)[-1],
             layer[0].children[1] if layer and len(layer[0].children) > 1 else '',
-            [str(v) for v in at[0].children[1:]] if at else []]
+            [str(v) for v in at[0].children[1:]] if at else [], pads]
 
 
 def board_steps(board_text: str):
@@ -51,8 +57,12 @@ def board_steps(board_text: str):
     from alx.providers.kicad import references, sexpr
     tree = sexpr(board_text)
     places = sorted(_footprint_place(f, references) for f in tree.named('footprint'))
+    def on_copper(node):
+        layers = node.named('layer') + node.named('layers')
+        return any(isinstance(v, str) and v.endswith('.Cu') for item in layers for v in item.children[1:])
     copper = Counter(_canonical(node) for node in tree.children
-                     if hasattr(node, 'children') and node.name in COPPER)
+                     if hasattr(node, 'children') and (node.name in COPPER
+                                                       or (node.name in DRAWINGS and on_copper(node))))
     return _digest(places), copper
 
 
