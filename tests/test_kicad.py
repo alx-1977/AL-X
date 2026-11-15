@@ -1257,6 +1257,25 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         self.failure('arguments_unusable', 'check_kicad_board', work_copy_id=checked['work_copy_id'],
                      project_dir=str(self.project))
 
+    def test_a_dry_run_shows_the_change_and_puts_the_copy_back(self):
+        """15 Nov: the board agent crashed six scripts on purpose to see a change undone."""
+        checked = self.check()
+        copy = next(self.storage.rglob(checked['work_copy_id'] + '/project/test.kicad_pcb'))
+        seen = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                            script=EDIT_SCRIPT + "print('would move')", dry_run=True)
+        self.assertTrue(seen['previewed'])
+        self.assertIn('would move', seen['stdout'])
+        self.assertEqual(seen['change_report']['files_changed'], ('test.kicad_pcb',))
+        self.assertEqual(seen['work_copy_revision'], checked['work_copy_revision'])
+        self.assertEqual(copy.read_text(), BOARD)
+        # Copper before the placement is approved: shown as refused, nothing kept, no error.
+        refused = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                               script=self.MOVE_U1 + self.ADD_TRACK.split('\n', 3)[3], dry_run=True)
+        self.assertEqual(refused['change_report']['step_refusal']['needs'], 'placement')
+        self.assertEqual(copy.read_text(), BOARD)
+        kept = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertFalse(kept['previewed'])
+
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()
         metadata = next(self.storage.rglob(checked['work_copy_id'] + '/metadata.json'))

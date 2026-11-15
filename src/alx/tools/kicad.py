@@ -56,7 +56,8 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
-    'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP},
+    'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
+    'step_refusal': MAP},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -100,7 +101,11 @@ _ACTION_DEFINITIONS = (
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('edit_kicad_work_copy',
         'Run bounded Python source with bundled KiCad pcbnew on a registered untainted work '
-        'copy. argv[1] is the board. Kernel confines writes to its project folder, including '
+        'copy. argv[1] is the board. dry_run true runs it, reports everything it would change '
+        '(printed output, change report, DRC, comparison with his original, and step_refusal if '
+        'his order would refuse it) and puts the copy back as it was: look before you change, '
+        'never raise an error to undo. A script cannot start programs: check a copy with check '
+        'work_copy_id. Kernel confines writes to its project folder, including '
         'child processes. May edit board, project and rules freely. Returns a bounded plain '
         'change report, structural board diff and DRC totals before/after. Failed edits '
         'restore the copy; uncertain restoration taints it durably. When diffs_truncated, '
@@ -156,10 +161,11 @@ _ACTION_DEFINITIONS = (
         'change_report.compared_to_original lists DRC findings his original did not have (new, '
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
-        obj({'work_copy_id': S, 'script': S, 'footprints': array(S), 'symbols': array(S)},
+        obj({'work_copy_id': S, 'script': S, 'footprints': array(S), 'symbols': array(S), 'dry_run': B},
             ('work_copy_id', 'script')),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
-             'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP}),
+             'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
+             'previewed': B}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('export_kicad_manufacturing',
         'Export Gerbers and drill files from an untainted work copy through KiCad CLI. '

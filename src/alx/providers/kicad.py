@@ -54,6 +54,14 @@ MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024 * 1024
 
 
+class _Preview(Exception):
+    """A dry-run edit's result, carried out through the restore path."""
+
+    def __init__(self, result):
+        super().__init__('preview')
+        self.result = result
+
+
 class KiCadError(Exception):
     def __init__(self, code, recovery=None):
         super().__init__(code)
@@ -1101,6 +1109,7 @@ class KiCadProvider:
     def edit(self, arguments):
         with self._locked(arguments['work_copy_id']):
             script = arguments['script']
+            dry_run = bool(arguments.get('dry_run'))
             if not script or len(script) > 128000 or self.execute_python is None:
                 raise KiCadError('arguments_unusable')
             root, meta = self._load(arguments['work_copy_id'])
@@ -1162,7 +1171,7 @@ class KiCadProvider:
                     steps_after = fingerprints(project, meta['board'])
                     original_steps = self._original_steps(root, meta)
                     refusal = edit_refusal(steps_before, steps_after, original_steps, meta.get('approvals', {}))
-                    if refusal:
+                    if refusal and not dry_run:
                         raise KiCadError('step_not_approved', refusal)
                     steps = step_status(original_steps, meta.get('approvals', {}), steps_after)
                 current = design_inventory(project)
@@ -1173,6 +1182,8 @@ class KiCadProvider:
                           'board': structural_diff(facts_before, facts_after)}
                 if not library:
                     report['compared_to_original'] = self._compared(root, meta, signatures)
+                    if dry_run and refusal:
+                        report['step_refusal'] = refusal
                 # Friedl's taper rule on the edited board, so she sees a step
                 # before she shows anything (2026-11-12, finished 2026-11-13).
                 report['layout_rules'] = ({'findings': [], 'omitted': 0, 'not_checked': 'a library has no board'}
@@ -1225,6 +1236,11 @@ class KiCadProvider:
                                   before_copy_path=str(evidence / 'before'),
                                   after_copy_path=str(evidence / 'after'))
                 script_path.unlink(missing_ok=True)
+                if dry_run:
+                    # Seen, then undone: the copy goes back exactly as it was.
+                    raise _Preview({'work_copy_id': arguments['work_copy_id'], 'stdout': stdout[:16000],
+                                    'stderr': stderr[:16000], 'change_report': report, 'before': before,
+                                    'after': after, 'steps': steps, 'previewed': True})
                 revision = self._revision(root, meta)
                 if evidence:
                     # Restoring after this point uses the moved snapshot.
@@ -1235,7 +1251,8 @@ class KiCadProvider:
                 kept = bool(evidence)
                 return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision,
                         'stdout': stdout[:16000], 'stderr': stderr[:16000],
-                        'change_report': report, 'before': before, 'after': after, 'steps': steps}
+                        'change_report': report, 'before': before, 'after': after, 'steps': steps,
+                        'previewed': False}
             except BaseException as error:
                 restored = False
                 try:
@@ -1260,6 +1277,8 @@ class KiCadProvider:
                     work_copy_tainted=not restored, baseline_eligible=restored, stage=stage)
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise
+                if isinstance(error, _Preview) and restored:
+                    return dict(error.result, work_copy_revision=self._revision(root))
                 code = str(error) if isinstance(error, KiCadError) else (
                     'cli_timeout' if isinstance(error, KICAD_CLI_TIMEOUT) else 'verification_failed')
                 raise KiCadError(code, recovery) from error
