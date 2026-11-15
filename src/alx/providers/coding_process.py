@@ -481,15 +481,47 @@ def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     )
 
 
-def start_kicad_viewer(executable, path, *, launcher=None):
-    """One of KiCad's own windows on his screen, showing a copy made for looking (D-083).
+class _Viewer:
+    """A KiCad window opened through Launch Services, closed by its process id."""
 
-    It stays open after the call, in its own session, until he closes it or a
-    later call closes it; the returned process is how that later call does.
+    def __init__(self, pids):
+        self.pids = tuple(pids)
+
+    def terminate(self):
+        for pid in self.pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+
+def start_kicad_viewer(application, path, *, runner=None, settle_seconds=10.0):
+    """One of KiCad's own windows on his screen, in front, showing a copy made for looking (D-083).
+
+    Opened as a new instance through Launch Services, which brings it to the
+    front as a double-click would (15 Nov: started directly, both windows
+    opened behind his browser). It stays open until he closes it or a later
+    call closes it, by the process id found for it.
     """
-    return (subprocess.Popen if launcher is None else launcher)(
-        [str(executable), str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, start_new_session=True, shell=False)
+    application = Path(application)
+    binary = application / 'Contents' / 'MacOS' / application.stem
+
+    def running():
+        found = run_coding_subprocess(subprocess.run if runner is None else runner,
+                                      ['/usr/bin/pgrep', '-f', str(binary)], shell=False, check=False,
+                                      timeout=10, capture_output=True, text=True)
+        return {int(item) for item in (found.stdout or '').split() if item.isdigit()}
+    before = running()
+    run_coding_subprocess(subprocess.run if runner is None else runner,
+                          ['/usr/bin/open', '-n', '-a', str(application), str(path)], shell=False,
+                          check=False, timeout=30, capture_output=True, text=True)
+    deadline = monotonic() + settle_seconds
+    while monotonic() < deadline:
+        new = running() - before
+        if new:
+            return _Viewer(new)
+        sleep(0.25)
+    return _Viewer(())
 
 
 def capture_screen(target, *, runner=None, timeout_seconds=30):

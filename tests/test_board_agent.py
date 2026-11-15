@@ -122,3 +122,23 @@ class BoardAgentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ViewerTests(unittest.TestCase):
+    def test_a_viewer_opens_in_front_through_launch_services_and_is_found_by_its_process(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from alx.providers import coding_process
+        calls, found = [], iter(["", "", "4242\n"])
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=next(found) if argv[0] == "/usr/bin/pgrep" else "",
+                                   stderr="")
+        viewer = coding_process.start_kicad_viewer("/Apps/eeschema.app", "/tmp/x.kicad_sch", runner=runner,
+                                                   settle_seconds=5)
+        self.assertEqual(calls[1], ["/usr/bin/open", "-n", "-a", "/Apps/eeschema.app", "/tmp/x.kicad_sch"])
+        self.assertEqual(viewer.pids, (4242,))
+        with patch.object(coding_process.os, "kill") as kill:
+            viewer.terminate()
+        kill.assert_called_once()

@@ -54,7 +54,7 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
 
     def open_viewer(what, path, index):
         app = 'eeschema' if what == 'schematic' else 'pcbnew'
-        return start_kicad_viewer(applications / (app + '.app') / 'Contents/MacOS' / app, path)
+        return start_kicad_viewer(applications / (app + '.app'), path, runner=runner)
     provider.open_viewer = open_viewer
     provider.capture_screen = partial(capture_screen, runner=runner)
     nexar = [(environment[a], environment[b]) for a, b in (
