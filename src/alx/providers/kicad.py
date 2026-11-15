@@ -666,10 +666,20 @@ class KiCadProvider:
             project = bounded(self._source(arguments['project_dir']), self.design_roots)
             boards = sorted(project.glob('*.kicad_pcb'))
             if len(boards) != 1:
-                raise KiCadError('unsupported_project')
+                raise KiCadError('unsupported_project', {'detail': self._where_boards_are(project, boards)})
             # The board itself is checked too: a link must not lead outside.
             return bounded(boards[0], self.design_roots)
         raise KiCadError('arguments_unusable')
+
+    @staticmethod
+    def _where_boards_are(project, boards):
+        """Why a folder is not one project, and where its boards are (15 Nov: a bare refusal)."""
+        if len(boards) > 1:
+            return 'this folder holds %d boards: %s' % (len(boards), ', '.join(b.name for b in boards[:5]))
+        below = [str(path.parent) for path in sorted(project.rglob('*.kicad_pcb'))
+                 if 'backup' not in str(path).lower() and '.history' not in path.parts][:5]
+        return ('no board at the top of this folder; boards below it are in: ' + '; '.join(below)
+                if below else 'no KiCad board in this folder')
 
     def inspect(self, arguments):
         """Every part, net and zone of a board, read from a copy (D-074)."""
