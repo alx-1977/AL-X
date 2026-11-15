@@ -26,8 +26,10 @@ from alx.providers.credential_paths import denied
 MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
+from alx.providers.kicad_change import CHANGE_HELPERS, ChangeError, unmet, validate_change
 from alx.providers.kicad_rules import check_layout_rules
-from alx.providers.kicad_steps import STEPS, edit_refusal, fingerprints, parity_mismatches, ready, step_status
+from alx.providers.kicad_steps import (STEPS, board_pad_nets, edit_refusal, fingerprints, parity_mismatches, ready,
+                                      step_status)
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 from alx.providers.kicad_circuit import (
@@ -1109,16 +1111,32 @@ class KiCadProvider:
 
     def edit(self, arguments):
         with self._locked(arguments['work_copy_id']):
-            script = arguments['script']
+            change = arguments.get('change')
             dry_run = bool(arguments.get('dry_run'))
+            if (change is None) == (arguments.get('script') is None):
+                raise KiCadError('arguments_unusable', {'detail': 'give change (a structured change) or script'})
+            plan = None
+            if change is not None:
+                # D-084: a structured change, carried out and checked by code.
+                try:
+                    plan = validate_change(change)
+                except ChangeError as error:
+                    raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+                change = json.loads(json.dumps(change))
+                script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
+                          "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
+            else:
+                script = arguments['script']
             if not script or len(script) > 128000 or self.execute_python is None:
                 raise KiCadError('arguments_unusable')
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
             project = root / 'project'
-            footprints = self._library_parts(arguments.get('footprints'), project, 'footprints')
-            symbols = self._library_parts(arguments.get('symbols'), project, 'symbols')
+            wanted = (lambda kind: sorted(set(arguments.get(kind) or ()) | set((plan or {}).get(kind) or ())))
+            footprints = self._library_parts(wanted('footprints'), project, 'footprints')
+            symbols = self._library_parts([name for name in wanted('symbols')
+                                           if not self._sheet_has_symbol(project, name)], project, 'symbols')
             library = bool(meta.get('library'))
             # A library copy has no board: the script's argument is its folder.
             board = project / ('.library' if library else meta['board'])
@@ -1139,7 +1157,9 @@ class KiCadProvider:
                 # Tested helpers first, then her script compiled on its own, so
                 # its own first lines (a __future__ import) and line numbers
                 # stay as she wrote them (2026-11-12).
-                script_path.write_text(HELPERS + SCHEMATIC_HELPERS
+                pins_before = (self._pin_groups(root, meta)[0]
+                               if plan and plan['schematic'] and not library else {})
+                script_path.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS
                                        + '_LIBRARY_FOOTPRINTS.update(%r)\n' % footprints
                                        + '_LIBRARY_SYMBOLS.update(%r)\n' % symbols
                                        + script_runner(script))
@@ -1174,12 +1194,27 @@ class KiCadProvider:
                     if refusal and not dry_run:
                         raise KiCadError('step_not_approved', refusal)
                     steps = step_status(original_steps, meta.get('approvals', {}), steps_after)
+                change_result, problems = [], []
+                if plan is not None:
+                    marker = [line for line in stdout.splitlines() if line.startswith('CHANGE_RESULT ')]
+                    change_result = json.loads(marker[-1][len('CHANGE_RESULT '):]) if marker else []
+                    pins_after, names_after = (self._pin_groups(root, meta) if plan['schematic']
+                                               else ({}, {}))
+                    problems = unmet(change, pins_before, pins_after, names_after,
+                                     board_pad_nets(board.read_text()) if plan['board'] else {},
+                                     plan['touched'])
+                    if problems and not dry_run:
+                        # Not what the change declared: undone, every unmet item named.
+                        raise KiCadError('change_unmet', {'unmet': problems[:30], 'change_result': change_result})
                 current = design_inventory(project)
                 facts_after = board_facts('(kicad_pcb)' if library else board.read_text())
                 changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
                                  if original.get(name) != current.get(name))
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
+                if plan is not None:
+                    report['change_result'] = change_result
+                    report['unmet'] = problems[:30]
                 if not library and changed:
                     report['compared_to_original'] = self._compared(root, meta, signatures)
                     if dry_run and refusal:
@@ -1877,6 +1912,30 @@ class KiCadProvider:
     def _remember_drc(self, root, meta, totals, signatures):
         (root / 'drc-last.json').write_text(json.dumps({'board': self._drc_key(root, meta), 'totals': totals,
                                                         'signatures': signatures}))
+
+    @staticmethod
+    def _sheet_has_symbol(project, lib_id):
+        """Whether a sheet of the project already holds this library symbol."""
+        needle = '(symbol %s' % json.dumps(lib_id)
+        return any(needle in path.read_text(errors='replace') for path in project.glob('*.kicad_sch'))
+
+    def _pin_groups(self, root, meta):
+        """Each schematic pin (REF.PIN) with the pins on its net, and its net's name, from KiCad's netlist."""
+        from alx.providers.kicad_hierarchy import netlist_nets
+        schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
+        if not schematic.is_file():
+            return {}, {}
+        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
+        output.parent.mkdir(exist_ok=True)
+        self._run('sch', 'export', 'netlist', '--output', output, schematic)
+        groups, names = {}, {}
+        for nodes, name in netlist_nets(output.read_text(errors='replace')).items():
+            pins = frozenset('%s.%s' % node for node in nodes)
+            for pin in pins:
+                groups[pin] = pins
+                names[pin] = name
+        output.unlink(missing_ok=True)
+        return groups, names
 
     @staticmethod
     def _cached_symbol(project, lib_id):

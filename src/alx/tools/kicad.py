@@ -38,7 +38,7 @@ FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid
             'script_failed', 'export_would_overwrite', 'rename_ambiguous', 'unsupported_file',
             'project_too_large', 'evidence_full', 'verification_failed', 'unavailable')
 FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed', 'step_not_approved',
-             'schematic_board_differ', 'board_not_clean')
+             'schematic_board_differ', 'board_not_clean', 'change_unmet')
 
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
@@ -58,7 +58,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'step_refusal': MAP},
+    'step_refusal': MAP, 'change_result': array(MAP), 'unmet': array(S)},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -101,8 +101,24 @@ _ACTION_DEFINITIONS = (
             'compared_to_original': MAP}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('edit_kicad_work_copy',
-        'Run bounded Python source with bundled KiCad pcbnew on a registered untainted work '
-        'copy. argv[1] is the board. dry_run true runs it, reports everything it would change '
+        'Change a registered untainted work copy. change (D-084) is the way: a list of operations, '
+        'each {op, ...}, with exact references, pins as REF.PIN and nets. Schematic ops name their '
+        'sheet (file name): remove_symbols {refs}; swap_symbol {ref, lib_id, value?, footprint?, at?, '
+        'rotation?} (wiring left on old pins is tidied); wire {from, to} (straight out of the pin one '
+        'grid step, then one turn, his way); label {pin, net, kind?: label|global_label}; power {pin, '
+        'port} (a GND or power symbol already on that sheet with that value is copied, GND down, '
+        'power up, on a short wire); no_connect {pins}; tidy_fields {refs}. Board ops: remove_parts '
+        '{refs, with_tracks?} (copper only they used goes too); replace_part {ref, footprint, '
+        'pin_nets?}; add_part {ref, footprint, at, rotation?, side?, value?, pin_nets?}; place {ref, '
+        'at? | near: {ref, offset}, rotation?, side?}; track {width, from?: REF.PAD, to?: REF.PAD, '
+        'points?, net?, layer?, radius?}; via {net, at}; remove_tracks {nets, area?}; remove_teardrops '
+        '{area}. The library parts named are found by themselves. Code carries the change out in one '
+        'run and checks the result: every wire, label, power and no-connect holds in KiCad\'s netlist, '
+        'every replaced pad has its net, removed parts are gone, and no untouched part gained or lost '
+        'a connection; otherwise nothing is kept and change_unmet lists each unmet item. '
+        'change_report.change_result says what each operation did. script (bounded Python with '
+        'pcbnew) remains for what change cannot yet express, for you alone, not your board agent. '
+        'argv[1] is the board. dry_run true runs it, reports everything it would change '
         '(printed output, change report, DRC, comparison with his original, and step_refusal if '
         'his order would refuse it) and puts the copy back as it was: look before you change, '
         'never raise an error to undo. A script cannot start programs: check a copy with check '
@@ -169,8 +185,8 @@ _ACTION_DEFINITIONS = (
         'change_report.compared_to_original lists DRC findings his original did not have (new, '
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
-        obj({'work_copy_id': S, 'script': S, 'footprints': array(S), 'symbols': array(S), 'dry_run': B},
-            ('work_copy_id', 'script')),
+        obj({'work_copy_id': S, 'script': S, 'change': array(MAP), 'footprints': array(S), 'symbols': array(S),
+             'dry_run': B}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
              'previewed': B}),

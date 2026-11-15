@@ -48,12 +48,12 @@ gets ahead of his approvals, so never try to.
 - His preferences, below, are how he draws. Follow every one without being told, and check \
 your work against them before you report.
 - Read before you change, cheaply: kicad inspect_schematic gives every part, pin and net of the \
-schematic, kicad inspect the board; the helper manual below says what every edit helper takes \
-and does. Never use an edit script to read, print sheet text or look at the helpers' code.
-- Work in big steps: one edit script does a whole change, using the tested helpers. To try a \
-change before keeping it, run the edit with dry_run: it shows everything the change would do and \
-puts the copy back. Never raise an error to undo or to see output: a failed script is a fault, \
-not a tool. A script cannot start programs; check your copy with kicad check work_copy_id.
+schematic, kicad inspect the board, read_reference the datasheet.
+- Change a copy only with kicad edit change: one structured change for a whole step (swap, \
+remove, wire, label, power, no-connect, tidy; replace, place, track), naming exact references, \
+pins and nets. You decide what the change is; code draws it his way and checks it, and undoes it \
+with every unmet item named when it does not hold. Preview it first with dry_run when unsure. \
+Check your copy with kicad check work_copy_id.
 - Look before you report, and look sparingly: every picture stays with you for the rest of the \
 stretch. Render once, look at the whole page once, then look only at sections of it.
 - Judge by compared_to_original: nothing new against his original, nothing unconnected, and the \
@@ -108,14 +108,12 @@ class BoardJobAgent(MechanicalWorker):
         journal_root: Path,
         *,
         preferences: Path | None = None,
-        manual: str = "",
         max_seconds: float = 1800.0,
         image_source: Callable[[str], bytes | None] | None = None,
     ) -> None:
         super().__init__(model, dispatch, definitions, max_seconds=max_seconds, image_source=image_source)
         self._journal_root = Path(journal_root)
         self._preferences = preferences
-        self._manual = manual
         self._stop = threading.Event()
         self._running: str | None = None
 
@@ -198,7 +196,6 @@ class BoardJobAgent(MechanicalWorker):
 
     def _request(self, job_id: str, journal: Mapping[str, Any]) -> ModelRequest:
         system = (f"{AGENT_INSTRUCTIONS}\nHis preferences:\n{self._preferences_text()}\n\n"
-                  f"Helper manual (edit scripts):\n{self._manual or '(see the edit action)'}\n\n"
                   f"Capabilities you may call:\n{_catalogue(tuple(self._definitions.values()))}")
         messages = [ModelMessage(ModelRole.SYSTEM, system), ModelMessage(ModelRole.USER, journal["brief"])]
         if journal["events"] or journal.get("receipts"):

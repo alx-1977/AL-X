@@ -151,7 +151,6 @@ from alx.tools.board_agent import (
     board_agent_call_refusal, build_board_agent_executors,
 )
 from alx.tools.kicad import KICAD as KICAD_CAPABILITY, definition_for as kicad_definition_for
-from alx.providers.kicad_helpers import helper_manual
 from alx.tools.worker import (
     DEFINITION as WORKER_DEFINITION, WORKER_CAPABILITIES, build_worker_executors,
     worker_call_refusal,
@@ -1148,7 +1147,6 @@ async def run(repository_root: Path) -> None:
         board_agent = BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
                                     storage_root / "board-jobs",
                                     preferences=ALX_STORAGE.expanduser() / "Preferences" / "Schematic and layout.md",
-                                    manual=helper_manual(),
                                     image_source=partial(stored_image, look_runtime.store))
         executors.update(build_board_agent_executors(board_agent, current_call_id.get))
 

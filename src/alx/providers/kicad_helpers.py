@@ -578,34 +578,3 @@ NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rot
 
 __all__ = ["HELPERS", "NAMES", "script_runner"]
 
-
-def helper_manual():
-    """Every helper an edit script has, with its arguments and what it does, from the code itself.
-
-    15 Nov: the board agent read the helpers' source with dir() and inspect from
-    inside its edits, because the description named them without saying how.
-    """
-    import ast
-    from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
-
-    lines = []
-
-    def entry(node, prefix=""):
-        if node.name.startswith("_"):
-            return
-        arguments = [a.arg for a in node.args.args if a.arg != "self"]
-        defaults = node.args.defaults
-        shown = arguments[:len(arguments) - len(defaults)] + [
-            "%s=%s" % (name, ast.unparse(value)) for name, value in zip(arguments[len(arguments) - len(defaults):], defaults)]
-        doc = (ast.get_docstring(node) or "").split("\n\n")[0].replace("\n", " ")
-        lines.append("%s%s(%s): %s" % (prefix, node.name, ", ".join(shown), doc))
-    for source, title in ((HELPERS, "Board (pcbnew), b = load():"), (SCHEMATIC_HELPERS, "Schematic, s = sheet(NAME):")):
-        lines.append(title)
-        for node in ast.parse(source).body:
-            if isinstance(node, ast.FunctionDef):
-                entry(node, "  ")
-            elif isinstance(node, ast.ClassDef):
-                for item in node.body:
-                    if isinstance(item, ast.FunctionDef):
-                        entry(item, "  s.")
-    return "\n".join(lines)

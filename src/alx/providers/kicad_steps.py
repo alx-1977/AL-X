@@ -125,6 +125,24 @@ def edit_refusal(before: dict, after: dict, original: dict, approvals: dict):
     return None
 
 
+def board_pad_nets(board_text: str) -> dict:
+    """Each board pad as REF.PAD with its net's name."""
+    from alx.providers.kicad import references, sexpr
+    tree = sexpr(board_text)
+    names = {str(net.children[1]): str(net.children[2]) for net in tree.named('net') if len(net.children) > 2}
+    found = {}
+    for footprint in tree.named('footprint'):
+        refs = references(footprint)
+        if not refs or not refs[0]:
+            continue
+        for pad in footprint.named('pad'):
+            nets = pad.named('net')
+            values = [str(v) for v in nets[0].children[1:]] if nets else []
+            name = (values[-1] if len(values) > 1 else names.get(values[0], values[0])) if values else ''
+            found['%s.%s' % (refs[0], pad.children[1])] = name
+    return found
+
+
 def board_groups(board_text: str, with_parts: bool = False):
     """Every net of a board as its set of (reference, pad), for nets joining two or more pads.
 
@@ -180,5 +198,5 @@ def parity_mismatches(schematic_nets: dict, board_text: str) -> list:
     return sorted(lines)
 
 
-__all__ = ['STEPS', 'board_groups', 'board_steps', 'edit_refusal', 'fingerprints', 'parity_mismatches',
+__all__ = ['STEPS', 'board_groups', 'board_pad_nets', 'board_steps', 'edit_refusal', 'fingerprints', 'parity_mismatches',
            'ready', 'step_status']

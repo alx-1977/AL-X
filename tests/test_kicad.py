@@ -1335,8 +1335,12 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
                               symbols=['power:GND', 'Import:GND_POWER_GROUND'], script='print(sorted(_LIBRARY_SYMBOLS.items()))')
-        self.assertIn("('Import:GND_POWER_GROUND', '(symbol \"GND_POWER_GROUND\" (power))')", edited['stdout'])
+        # One already on a sheet needs nothing copied in; one from KiCad's own library does.
+        self.assertNotIn('Import:GND_POWER_GROUND', edited['stdout'])
         self.assertIn("('power:GND', '(symbol \"GND\" (power))')", edited['stdout'])
+        self.assertEqual(self.runtime.provider._cached_symbol(
+            next(self.storage.rglob(checked['work_copy_id'] + '/project')), 'Import:GND_POWER_GROUND'),
+            '(symbol "GND_POWER_GROUND" (power))')
         result = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], symbols=['Nowhere:GND'],
                            script='pass')
         self.assertIn('inspect_schematic', result.failure['recovery']['detail'])
