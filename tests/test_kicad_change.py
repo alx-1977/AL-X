@@ -82,7 +82,11 @@ class RealChangeTests(unittest.TestCase):
                 {"op": "no_connect", "sheet": "board.kicad_sch", "pins": ["R1.1"]},
                 {"op": "tidy_fields", "sheet": "board.kicad_sch", "refs": ["R1", "R2"]},
             ]
-            result = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=change)
+            # Read-only, as the broker hands every argument over (15 Nov: the first live run failed here).
+            from types import MappingProxyType
+            frozen = tuple(MappingProxyType({key: tuple(value) if isinstance(value, list) else value
+                                             for key, value in op.items()}) for op in change)
+            result = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=frozen)
             self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
             report = result.values["change_report"]
             self.assertEqual(list(report["unmet"]), [])

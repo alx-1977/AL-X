@@ -26,7 +26,7 @@ from alx.providers.credential_paths import denied
 MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
-from alx.providers.kicad_change import CHANGE_HELPERS, ChangeError, unmet, validate_change
+from alx.providers.kicad_change import CHANGE_HELPERS, ChangeError, plain, unmet, validate_change
 from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.kicad_steps import (STEPS, board_pad_nets, edit_refusal, fingerprints, parity_mismatches, ready,
                                       step_status)
@@ -1111,7 +1111,7 @@ class KiCadProvider:
 
     def edit(self, arguments):
         with self._locked(arguments['work_copy_id']):
-            change = arguments.get('change')
+            change = plain(arguments.get('change'))
             dry_run = bool(arguments.get('dry_run'))
             if (change is None) == (arguments.get('script') is None):
                 raise KiCadError('arguments_unusable', {'detail': 'give change (a structured change) or script'})
@@ -1122,7 +1122,6 @@ class KiCadProvider:
                     plan = validate_change(change)
                 except ChangeError as error:
                     raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
-                change = json.loads(json.dumps(change))
                 script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
                           "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
             else:

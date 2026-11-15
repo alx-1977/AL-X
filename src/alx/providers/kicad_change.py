@@ -41,6 +41,16 @@ class ChangeError(ValueError):
     """A change that names something wrongly or leaves a field out; the detail says which."""
 
 
+def plain(value: Any) -> Any:
+    """A change as plain lists and dicts: the broker hands it over read-only (15 Nov: every
+    structured edit of the first live run failed converting it)."""
+    if isinstance(value, Mapping):
+        return {str(key): plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(item) for item in value]
+    return value
+
+
 def validate_change(change: Any) -> dict[str, Any]:
     """Check a change's shape; return the library parts it needs and the parts it touches."""
     if not isinstance(change, (list, tuple)) or not change or len(change) > 200:
@@ -263,4 +273,4 @@ def apply_change(change):
 # ---- end of structured changes ----
 '''
 
-__all__ = ['BOARD_OPS', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'unmet', 'validate_change']
+__all__ = ['BOARD_OPS', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'plain', 'unmet', 'validate_change']

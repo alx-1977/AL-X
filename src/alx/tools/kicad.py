@@ -565,6 +565,10 @@ def build_kicad_executors(provider, call_id_source):
                 recovery = getattr(error, 'recovery', None)
                 if recovery is not None:
                     failure['recovery'] = recovery
+                elif str(error) not in FAILURES:
+                    # An unexpected fault says what it was, so it is not guessed at
+                    # (15 Nov: seven bare unsupported_project replies in a row).
+                    failure['fault'] = ('%s: %s' % (type(error).__name__, error))[:300]
         elif contract is None:
             failure['reason'] = 'action must be one of ' + ', '.join(item.value for item in KiCadAction)
         return CapabilityResult(call_id_source(), KICAD, CapabilityResultState.FAILED,
