@@ -140,9 +140,6 @@ class BoardAgentTests(unittest.TestCase):
         self.assertIn("open_in_kicad", DEFINITION.purpose)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ViewerTests(unittest.TestCase):
     def test_a_viewer_opens_in_front_through_launch_services_and_is_found_by_its_process(self) -> None:
@@ -162,3 +159,7 @@ class ViewerTests(unittest.TestCase):
         with patch.object(coding_process.os, "kill") as kill:
             viewer.terminate()
         kill.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
