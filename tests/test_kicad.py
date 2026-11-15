@@ -131,6 +131,10 @@ class KiCadTests(unittest.TestCase):
                 f'(net\n(code "1") (name "{name}") (node (ref "{ref}") (pin "{pin}")))'
                 for name, ref, pin in nets) + '))')
             return SimpleNamespace(returncode=0)
+        if argv[2:4] == ['export', 'pdf']:
+            self.exported = getattr(self, 'exported', []) + [argv]
+            Path(argv[argv.index('--output') + 1]).write_bytes(b'%PDF-1.7 /Type /Pages /Type /Page /Type /Page')
+            return SimpleNamespace(returncode=0)
         if argv[1:3] == ['sch', 'erc']:
             target = Path(argv[argv.index('--output') + 1])
             target.write_text(json.dumps(getattr(self, 'erc_report', None) or {'sheets': [
@@ -1191,6 +1195,53 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         for wrong in (['Local:Missing'], ['Nowhere:TwoPin'], ['Local/TwoPin']):
             self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
                          symbols=wrong, script='pass')
+
+    def test_render_draws_the_copy_or_his_original_for_looking(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        self.runtime.provider.render_folder = self.root / 'renders'
+        placed = self.success('render', work_copy_id=checked['work_copy_id'], what='placement')
+        self.assertTrue(Path(placed['path']).is_file())
+        self.assertEqual(placed['pages'], 2)
+        argv = self.exported[-1]
+        layers = argv[argv.index('--layers') + 1].split(',')
+        self.assertNotIn('F.Cu', layers)
+        self.assertIn('F.Fab', layers)
+        self.assertIn('--sketch-pads-on-fab-layers', argv)
+        board = self.success('render', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertIn('F.Cu', self.exported[-1][self.exported[-1].index('--layers') + 1].split(','))
+        original = self.success('render', work_copy_id=checked['work_copy_id'], what='schematic', original=True)
+        self.assertTrue(original['path'].endswith('schematic-original.pdf'))
+        self.assertIn('original-view', self.exported[-1][-1])
+        self.assertNotEqual(board['path'], placed['path'])
+        self.failure('arguments_unusable', 'render', work_copy_id=checked['work_copy_id'], what='gerber')
+
+    def test_open_in_kicad_shows_his_design_beside_her_copy_and_takes_a_screenshot(self):
+        checked = self.check()
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        opened, closed = [], []
+
+        class Viewer:
+            def __init__(self, path):
+                self.path = path
+
+            def terminate(self):
+                closed.append(self.path)
+
+        def open_viewer(what, path, index):
+            opened.append((what, Path(path).parent.name))
+            return Viewer(path)
+        provider.open_viewer = open_viewer
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        shown = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertEqual(opened, [('board', 'current'), ('board', 'amended')])
+        self.assertTrue(Path(shown['screenshot']).is_file())
+        self.assertEqual(Path(shown['opened'][0]).read_text(), BOARD)
+        # The windows of an earlier call are closed first.
+        self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertEqual(len(closed), 2)
 
     def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
         checked = self.check()

@@ -481,6 +481,26 @@ def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     )
 
 
+def start_kicad_viewer(executable, path, *, launcher=None):
+    """One of KiCad's own windows on his screen, showing a copy made for looking (D-083).
+
+    It stays open after the call, in its own session, until he closes it or a
+    later call closes it; the returned process is how that later call does.
+    """
+    return (subprocess.Popen if launcher is None else launcher)(
+        [str(executable), str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True, shell=False)
+
+
+def capture_screen(target, *, runner=None, timeout_seconds=30):
+    """A picture of his screen, for her to look at what she showed him (D-083)."""
+    return run_coding_subprocess(
+        subprocess.run if runner is None else runner, ['/usr/sbin/screencapture', '-x', str(target)],
+        shell=False, check=False, timeout=timeout_seconds, capture_output=True, text=True,
+        stop_descendants=True,
+    )
+
+
 def run_kicad_engine(executable, arguments, directory, *, runner=None, timeout_seconds=600):
     """Analysis engines share the managed process-group execution boundary."""
     return run_coding_subprocess(

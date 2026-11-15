@@ -860,6 +860,18 @@ def worker_settings(
     return replace(reasoning, model=model)
 
 
+# D-083: the board agent's model. Judgement on a layout is Opus's (D-070).
+BOARD_AGENT_DEFAULT_MODEL = "claude-opus-5-5"
+
+
+def board_agent_settings(
+    environment: Mapping[str, str], reasoning: "ReasoningSettings",
+) -> "ReasoningSettings":
+    """The board agent's model: the Core's login and transport, Opus by default (D-083)."""
+    model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_DEFAULT_MODEL
+    return replace(reasoning, model=model)
+
+
 def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:
     """How promptly a matured request is noticed. Not a cognition cadence.
 
@@ -1214,6 +1226,8 @@ class RuntimeSettings:
     autonomous_first_pass: "ReasoningSettings | None"
     # D-070: the worker that carries out mechanical briefs for her.
     worker: "ReasoningSettings"
+    # D-083: the board agent that does a whole KiCad board job for her.
+    board_agent: "ReasoningSettings"
     # D-028 coding jobs. Independent of the conversational Core.
     coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
@@ -1251,6 +1265,7 @@ class RuntimeSettings:
             autonomous=autonomous,
             autonomous_first_pass=autonomous_first_pass_settings(environment, autonomous),
             worker=worker_settings(environment, reasoning),
+            board_agent=board_agent_settings(environment, reasoning),
             coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),

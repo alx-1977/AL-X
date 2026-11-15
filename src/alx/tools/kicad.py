@@ -341,6 +341,26 @@ APPROVE_STEP = CapabilityDefinition('approve_step',
     SideEffect.EFFECTFUL, FAILURES)
 
 
+RENDER = CapabilityDefinition('render',
+    "KiCad's own drawing of a board work copy as a PDF in ALX_Storage, to read with look "
+    '(whole page first, then a section for detail). what: schematic (every sheet, one page '
+    'each), board (copper, silkscreen, fab with every pad outline and number, edges) or '
+    'placement (the same without copper: where each part sits and where its pins point). '
+    'original true draws his project as your copy was made from it. Look at your work before '
+    'you show it or report it.',
+    obj({'work_copy_id': S, 'what': S, 'original': B}, ('work_copy_id', 'what')),
+    obj({'path': S, 'pages': I, 'what': S, 'original': B}), SideEffect.NONE, FAILURES)
+OPEN_IN_KICAD = CapabilityDefinition('open_in_kicad',
+    "Show Friedl his design beside your copy in KiCad's own windows on his screen: what is "
+    'schematic or board; the first window is his design as it is (current), the second your '
+    'copy (amended). Both are fresh copies made for looking, so nothing done in those windows '
+    'changes his project or your copy; windows from an earlier call are closed first. A '
+    'screenshot of his screen comes back as a path: look at it before you say anything about '
+    'it. This is how each step of a board job (schematic, placement, routing) is shown to him.',
+    obj({'work_copy_id': S, 'what': S}),
+    obj({'opened': array(S), 'left': S, 'right': S, 'screenshot': S}), SideEffect.NONE, FAILURES)
+
+
 MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
     "Join a copy's separate top-level schematic sheets (an Altium import) into one "
     'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
@@ -383,6 +403,8 @@ class KiCadAction(str, Enum):
     COPY_LIBRARY = 'copy_library'
     FETCH_DATASHEET = 'fetch_datasheet'
     APPROVE_STEP = 'approve_step'
+    RENDER = 'render'
+    OPEN_IN_KICAD = 'open_in_kicad'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -401,12 +423,15 @@ CONTRACTS = {
     KiCadAction.COPY_LIBRARY: COPY_LIBRARY,
     KiCadAction.FETCH_DATASHEET: FETCH_DATASHEET,
     KiCadAction.APPROVE_STEP: APPROVE_STEP,
+    KiCadAction.RENDER: RENDER,
+    KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
-    KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET))
+    KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
+    KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -448,7 +473,9 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.MAKE_HIERARCHICAL: provider.make_hierarchical,
                KiCadAction.COPY_LIBRARY: provider.copy_library,
                KiCadAction.FETCH_DATASHEET: provider.fetch_datasheet,
-               KiCadAction.APPROVE_STEP: provider.approve_step}
+               KiCadAction.APPROVE_STEP: provider.approve_step,
+               KiCadAction.RENDER: provider.render,
+               KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad}
 
     def invoke(arguments):
         code = 'arguments_unusable'

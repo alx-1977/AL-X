@@ -144,6 +144,11 @@ from alx.tools.self_diagnosis import (
     build_self_diagnosis_executors,
 )
 from alx.specialists.worker import MechanicalWorker
+from alx.specialists.board_agent import BoardJobAgent
+from alx.tools.board_agent import (
+    BOARD_AGENT_CAPABILITIES, DEFINITION as BOARD_AGENT_DEFINITION, board_agent_call_refusal,
+    build_board_agent_executors,
+)
 from alx.tools.worker import (
     DEFINITION as WORKER_DEFINITION, WORKER_CAPABILITIES, build_worker_executors,
     worker_call_refusal,
@@ -1118,6 +1123,26 @@ async def run(repository_root: Path) -> None:
         executors.update(build_worker_executors(
             MechanicalWorker(providers.worker, worker_dispatch, worker_definitions,
                              image_source=partial(stored_image, look_runtime.store)),
+            current_call_id.get,
+        ))
+
+    # D-083: the board agent does a whole board job, through the same broker
+    # and gate, with her permissions and none of her approvals.
+    def board_agent_dispatch(call):
+        refusal = board_agent_call_refusal(call)
+        return refusal if refusal is not None else worker_dispatch(call)
+
+    board_agent_definitions = tuple(
+        item for item in registry.list_definitions()
+        if item.capability_id in BOARD_AGENT_CAPABILITIES
+    )
+    if board_agent_definitions:
+        register((BOARD_AGENT_DEFINITION,), TraceSubsystem.WORKER)
+        policies[BOARD_AGENT_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
+        executors.update(build_board_agent_executors(
+            BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
+                          storage_root / "board-jobs",
+                          image_source=partial(stored_image, look_runtime.store)),
             current_call_id.get,
         ))
 

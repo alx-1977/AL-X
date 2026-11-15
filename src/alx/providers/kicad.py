@@ -403,6 +403,13 @@ def compare_manufacturing(files, previous):
 
 
 class KiCadProvider:
+    # Set by the runtime: where drawings for looking go, and how KiCad's own
+    # windows are opened and the screen captured (open_in_kicad).
+    render_folder = Path('/nonexistent')
+    open_viewer = None
+    capture_screen = None
+    viewer_settle_seconds = 8.0
+
     def __init__(self, settings, execute_cli, execute_python=None):
         self.settings, self.execute_cli = settings, execute_cli
         self.execute_python = execute_python
@@ -413,6 +420,7 @@ class KiCadProvider:
         self.datasheet_folder = None
         self.datasheet_sources = None
         self.work_root = settings.work_root.expanduser().resolve()
+        self._viewers = []
         self.engine_paths = {}
         self.execute_engine = None
         self.execute_page = None
@@ -1804,6 +1812,99 @@ class KiCadProvider:
                 'new_findings': [dict(zip(('type', 'severity', 'description', 'items'), json.loads(item)))
                                  for item in list(new.elements())[:20]],
                 'schematic_vs_board_new': parity['new'][:20], 'schematic_vs_board_fixed': parity['fixed']}
+
+    def _original_view(self, root, meta):
+        """A copy of his project as the work copy was made from it, for looking at only."""
+        view = root / 'original-view'
+        if view.is_dir() and design_inventory(view) == meta['hashes']:
+            return view
+        shutil.rmtree(view, ignore_errors=True)
+        source = Path(meta['source'])
+        shutil.copytree(source, view, ignore=_without_local_history(source))
+        if design_inventory(view) != meta['hashes']:
+            shutil.rmtree(view, ignore_errors=True)
+            raise KiCadError('original_changed')
+        return view
+
+    def render(self, arguments):
+        """KiCad's own drawing of a work copy, or of his original, as a PDF to look at."""
+        what = arguments.get('what')
+        if what not in ('schematic', 'board', 'placement'):
+            raise KiCadError('arguments_unusable', {'detail': 'what is schematic, board or placement'})
+        root, meta = self._load(arguments['work_copy_id'])
+        if meta.get('library'):
+            raise KiCadError('arguments_unusable', {'detail': 'a library copy has no board or schematic'})
+        original = bool(arguments.get('original'))
+        project = self._original_view(root, meta) if original else root / 'project'
+        board = project / meta['board']
+        name = '%s-%s.pdf' % (what, 'original' if original else self._revision(root)[:10])
+        made = root / 'artifacts' / (uuid.uuid4().hex + '.pdf')
+        made.parent.mkdir(exist_ok=True)
+        if what == 'schematic':
+            schematic = board.with_suffix('.kicad_sch')
+            if not schematic.is_file():
+                raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
+            self._run('sch', 'export', 'pdf', '--output', made, schematic)
+        else:
+            inner = sorted(set(re.findall(r'"(In\d+\.Cu)"', board.read_text())),
+                           key=lambda n: int(re.sub(r'\D', '', n)))
+            copper = [] if what == 'placement' else ['F.Cu', *inner, 'B.Cu']
+            # The fab layers carry every pad outline and number: where each pin points.
+            layers = copper + ['F.Silkscreen', 'B.Silkscreen', 'F.Fab', 'B.Fab', 'Edge.Cuts']
+            self._run('pcb', 'export', 'pdf', '--mode-single', '--sketch-pads-on-fab-layers', '--scale', '0',
+                      *(('--black-and-white',) if what == 'placement' else ()),
+                      '--layers', ','.join(layers), '--output', made, board)
+        if not made.is_file():
+            raise KiCadError('render_failed')
+        folder = self.render_folder / arguments['work_copy_id']
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(made, folder / name)
+        pages = max(1, made.read_bytes().count(b'/Type /Page') - made.read_bytes().count(b'/Type /Pages'))
+        made.unlink(missing_ok=True)
+        return {'path': str(folder / name), 'pages': pages, 'what': what, 'original': original}
+
+    def open_in_kicad(self, arguments):
+        """His design as it is beside her copy, in KiCad's own windows on his screen.
+
+        Both are fresh copies made for looking; neither is his project or her
+        work copy, so nothing he does in those windows changes either. Windows
+        opened by an earlier call are closed first. A screenshot follows, for
+        her to look at before she says anything.
+        """
+        what = arguments.get('what')
+        if what not in ('schematic', 'board'):
+            raise KiCadError('arguments_unusable', {'detail': 'what is schematic or board'})
+        if self.open_viewer is None or self.capture_screen is None:
+            raise KiCadError('unavailable')
+        root, meta = self._load(arguments['work_copy_id'])
+        if meta.get('library'):
+            raise KiCadError('arguments_unusable', {'detail': 'a library copy has no board or schematic'})
+        for viewer in self._viewers:
+            with suppress(Exception):
+                viewer.terminate()
+        self._viewers = []
+        # Their copies go with them; only the windows opened now keep theirs.
+        for earlier in (root / 'views').glob('*') if (root / 'views').is_dir() else ():
+            shutil.rmtree(earlier, ignore_errors=True)
+        stamp = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6]
+        views = root / 'views' / stamp
+        current = views / 'current'
+        shutil.copytree(self._original_view(root, meta), current)
+        amended = views / 'amended'
+        shutil.copytree(root / 'project', amended)
+        suffix = '.kicad_sch' if what == 'schematic' else '.kicad_pcb'
+        files = [folder / Path(meta['board']).with_suffix(suffix).name for folder in (current, amended)]
+        if not all(path.is_file() for path in files):
+            raise KiCadError('unsupported_project', {'detail': 'no %s to open' % what})
+        for index, path in enumerate(files):
+            self._viewers.append(self.open_viewer(what, path, index))
+        time.sleep(self.viewer_settle_seconds)
+        folder = self.render_folder / arguments['work_copy_id']
+        folder.mkdir(parents=True, exist_ok=True)
+        shot = folder / ('screen-%s-%s.png' % (what, stamp))
+        self.capture_screen(shot)
+        return {'opened': [str(path) for path in files], 'left': 'current (his design)',
+                'right': 'amended (your copy)', 'screenshot': str(shot) if shot.is_file() else ''}
 
     def approve_step(self, arguments):
         """Friedl approved one step of her copy as he saw it (D-082)."""

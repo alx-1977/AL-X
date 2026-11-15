@@ -55,6 +55,8 @@ class RuntimeProviders:
     autonomous_first_pass: ReasoningModel | None
     # D-070: the worker's model, on her own Claude login.
     worker: ReasoningModel
+    # D-083: the board agent's model, on her own Claude login.
+    board_agent: ReasoningModel
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
@@ -285,6 +287,15 @@ def build_runtime_providers(
         oauth_token=settings.claude_oauth_token,
         session_record_dir=session_record_dir,
     )
+    board_agent = ClaudeSubscriptionReasoningModel(
+        settings.board_agent.model,
+        settings.board_agent.timeout_seconds,
+        telemetry_sink=telemetry_sink,
+        config_dir=settings.core_claude_config_dir,
+        expected_account=settings.core_claude_account,
+        oauth_token=settings.claude_oauth_token,
+        session_record_dir=session_record_dir,
+    )
     coding = _build_coding_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)
 
@@ -307,6 +318,7 @@ def build_runtime_providers(
         autonomous=autonomous,
         autonomous_first_pass=autonomous_first_pass,
         worker=worker,
+        board_agent=board_agent,
         coding=coding,
         coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth
