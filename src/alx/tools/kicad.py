@@ -58,7 +58,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'step_refusal': MAP, 'change_result': array(MAP), 'unmet': array(S)},
+    'step_refusal': MAP, 'change_result': array(MAP), 'unmet': array(S), 'reverted_edits': I},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -104,18 +104,26 @@ _ACTION_DEFINITIONS = (
         'Change a registered untainted work copy. change (D-084) is the way: a list of operations, '
         'each {op, ...}, with exact references, pins as REF.PIN and nets. Schematic ops name their '
         'sheet (file name): remove_symbols {refs}; swap_symbol {ref, lib_id, value?, footprint?, at?, '
-        'rotation?} (wiring left on old pins is tidied); wire {from, to} (straight out of the pin one '
-        'grid step, then one turn, his way); label {pin, net, kind?: label|global_label}; power {pin, '
+        'rotation?} (wiring left on old pins is tidied; pins_still_wired names new pins where old wiring '
+        'still ends, now joined to them: check each); wire {from, to} (straight out of the pin one '
+        'grid step, then one turn, his way); label {pin, net, kind?: label|global_label}; power {pin | pins, '
         'port} (a GND or power symbol already on that sheet with that value is copied, GND down, '
-        'power up, on a short wire); no_connect {pins}; tidy_fields {refs}. Board ops: remove_parts '
+        'power up, on a short wire; pins: neighbouring pins on one side share one wire and one port); no_connect {pins}; tidy_fields {refs}; remove_labels {nets, area?} (with the stubs only they '
+        'held); remove_items {area: [x1, y1, x2, y2], kinds?: wire|label|no_connect|junction|power} '
+        '(what lies wholly inside; power symbols found by place, unannotated too; never parts); '
+        'remove_dangling {area?} (no-connects off pins, labels on nothing, ports touching nothing, '
+        'wires with a free end). New wiring that would touch anything already there (a wire, a '
+        'label, a flag, another pin) is refused, naming it and where: clear it first. Board ops: remove_parts '
         '{refs, with_tracks?} (copper only they used goes too); replace_part {ref, footprint, '
         'pin_nets?}; add_part {ref, footprint, at, rotation?, side?, value?, pin_nets?}; place {ref, '
         'at? | near: {ref, offset}, rotation?, side?}; track {width, from?: REF.PAD, to?: REF.PAD, '
         'points?, net?, layer?, radius?}; via {net, at}; remove_tracks {nets, area?}; remove_teardrops '
         '{area}. The library parts named are found by themselves. Code carries the change out in one '
         'run and checks the result: every wire, label, power and no-connect holds in KiCad\'s netlist, '
-        'every replaced pad has its net, removed parts are gone, and no untouched part gained or lost '
-        'a connection; otherwise nothing is kept and change_unmet lists each unmet item. '
+        'every replaced pad has its net, removed parts are gone, and no pin (other than a '
+        'swapped or removed part\'s) is joined to anything the change did not join, nor split '
+        'unless the change removes labels or leftovers; otherwise nothing is kept and change_unmet lists each unmet item. revert_to (a revision '
+        'from an earlier result, or start) alone puts the copy back as it was then. '
         'change_report.change_result says what each operation did. script (bounded Python with '
         'pcbnew) remains for what change cannot yet express, for you alone, not your board agent. '
         'argv[1] is the board. dry_run true runs it, reports everything it would change '
@@ -186,7 +194,7 @@ _ACTION_DEFINITIONS = (
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
         obj({'work_copy_id': S, 'script': S, 'change': array(MAP), 'footprints': array(S), 'symbols': array(S),
-             'dry_run': B}, ('work_copy_id',)),
+             'dry_run': B, 'revert_to': S}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
              'previewed': B}),

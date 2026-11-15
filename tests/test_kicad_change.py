@@ -54,6 +54,26 @@ class ChangeShapeTests(unittest.TestCase):
         # R5 and R6 were never named, and came apart: that is reported too.
         self.assertTrue(any(p.startswith("R5.1 changed connection") for p in problems))
 
+    def test_a_short_through_a_named_part_is_still_caught(self):
+        """15 Nov: tidy_fields named C39, the old check then left C39 out, and RF1 grounded unseen."""
+        rf1 = frozenset({"U6.9", "C39.1"})
+        gnd = frozenset({"R5.2", "R6.2"})
+        before = {"U6.9": rf1, "C39.1": rf1, "U6.10": frozenset({"U6.10"}), "R5.2": gnd, "R6.2": gnd}
+        shorted = rf1 | gnd | {"U6.10"}
+        after = {pin: shorted for pin in shorted}
+        change = [{"op": "swap_symbol", "sheet": "a", "ref": "U6", "lib_id": "X:Y"},
+                  {"op": "power", "sheet": "a", "pin": "U6.10", "port": "power:GND"},
+                  {"op": "tidy_fields", "sheet": "a", "refs": ["U6", "C39"]}]
+        names = {"R5.2": "GND", "R6.2": "GND", "U6.9": "Net-(U6-RF1)", "C39.1": "Net-(U6-RF1)"}
+        problems = unmet(change, before, after, {pin: "GND" for pin in shorted}, {}, ["U6", "C39"], names)
+        self.assertTrue(any(p.startswith("C39.1 changed connection: gained R5.2, R6.2") for p in problems),
+                        problems)
+        # The same port, landing cleanly, is what was asked.
+        clean = {"U6.9": rf1, "C39.1": rf1, "U6.10": gnd | {"U6.10"}, "R5.2": gnd | {"U6.10"},
+                 "R6.2": gnd | {"U6.10"}}
+        self.assertEqual(unmet(change, before, clean, {"U6.10": "GND", "R5.2": "GND", "R6.2": "GND"},
+                               {}, ["U6", "C39"], names), [])
+
 
 @unittest.skipUnless(PYTHON.is_file() and CLI.is_file() and DEVICE.is_file(), "KiCad is not installed")
 class RealChangeTests(unittest.TestCase):
@@ -151,6 +171,95 @@ class RealChangeTests(unittest.TestCase):
                 {"op": "power", "sheet": "board.kicad_sch", "pin": "R3.2", "port": "GND"}])
             self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
             self.assertEqual(list(result.values["change_report"]["unmet"]), [])
+
+    def with_ground(self, project, extra=""):
+        """The sheet with a GND symbol (unannotated, as P0009 imports them) and extra items."""
+        import uuid as _uuid
+        power = (APP_SYMBOLS / "power.kicad_sym").read_text()
+        start = power.index('(symbol "GND"')
+        depth = 0
+        for end in range(start, len(power)):
+            depth += {"(": 1, ")": -1}.get(power[end], 0)
+            if depth == 0:
+                break
+        gnd = power[start:end + 1].replace('(symbol "GND"', '(symbol "power:GND"', 1)
+        text = (project / "board.kicad_sch").read_text()
+        text = text.replace("\t(lib_symbols\n", "\t(lib_symbols\n\t\t" + gnd + "\n", 1)
+        root = text.split('(uuid "', 1)[1].split('"', 1)[0]
+        placed = ('\t(symbol\n\t\t(lib_id "power:GND")\n\t\t(at 200 150 0)\n\t\t(unit 1)\n'
+                  '\t\t(uuid "%s")\n\t\t(property "Reference" "#PWR?"\n\t\t\t(at 200 155 0)\n\t\t)\n'
+                  '\t\t(property "Value" "GND"\n\t\t\t(at 200 153 0)\n\t\t)\n'
+                  '\t\t(pin "1"\n\t\t\t(uuid "%s")\n\t\t)\n\t\t(instances\n\t\t\t(project "t"\n'
+                  '\t\t\t\t(path "/%s"\n\t\t\t\t\t(reference "#PWR?")\n\t\t\t\t\t(unit 1)\n'
+                  '\t\t\t\t)\n\t\t\t)\n\t\t)\n\t)\n' % (_uuid.uuid4(), _uuid.uuid4(), root))
+        text = text.replace("\t(sheet_instances", placed + extra + "\t(sheet_instances", 1)
+        (project / "board.kicad_sch").write_text(text)
+
+    @staticmethod
+    def wire(*points):
+        import uuid as _uuid
+        return "".join('\t(wire\n\t\t(pts\n\t\t\t(xy %g %g) (xy %g %g)\n\t\t)\n\t\t(stroke\n\t\t\t(width 0)\n'
+                       '\t\t\t(type default)\n\t\t)\n\t\t(uuid "%s")\n\t)\n' % (a + b + (_uuid.uuid4(),))
+                       for a, b in zip(points, points[1:]))
+
+    def test_a_port_that_would_land_on_an_old_wire_is_refused_and_says_where(self):
+        """15 Nov: two GND ports landed on the corner of an old RF1 wire and grounded RF1."""
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            # An old wire from R1.2 runs under R3, where R3.2's GND port would go.
+            self.with_ground(project, self.wire((101.6, 105.41), (101.6, 107.95), (160, 107.95)))
+            checked = self.call(runtime, "check_kicad_board", project_dir=str(project)).values
+            copy = next(Path(folder).rglob(checked["work_copy_id"] + "/project/board.kicad_sch"))
+            before = copy.read_text()
+            result = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+                {"op": "power", "sheet": "board.kicad_sch", "pin": "R3.2", "port": "GND"}])
+            self.assertEqual(result.failure["code"], "script_failed")
+            self.assertIn("R3.2: the new wire would land on an existing wire at (152.4, 107.95)",
+                          result.failure["recovery"]["stderr"])
+            self.assertEqual(copy.read_text(), before)
+
+    def test_leftovers_are_cleared_and_a_kept_edit_can_be_gone_back_over(self):
+        import uuid as _uuid
+        stray = ('\t(no_connect\n\t\t(at 50.8 50.8)\n\t\t(uuid "%s")\n\t)\n' % _uuid.uuid4()
+                 + self.wire((40.64, 40.64), (45.72, 40.64)))
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            self.with_ground(project, stray)
+            checked = self.call(runtime, "check_kicad_board", project_dir=str(project)).values
+            work = checked["work_copy_id"]
+            copy = next(Path(folder).rglob(work + "/project/board.kicad_sch"))
+            start = copy.read_text()
+            first = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work, change=[
+                {"op": "label", "sheet": "board.kicad_sch", "pin": "R1.1", "net": "OLD"},
+                {"op": "label", "sheet": "board.kicad_sch", "pin": "R3.1", "net": "OLD"}])
+            self.assertEqual(first.state, CapabilityResultState.SUCCEEDED, first.failure)
+            labelled = copy.read_text()
+            # Taking the labels away splits R1.1 from R3.1: that is what it is for.
+            cleared = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work, change=[
+                {"op": "remove_labels", "sheet": "board.kicad_sch", "nets": ["OLD"]},
+                {"op": "remove_items", "sheet": "board.kicad_sch", "area": [195, 145, 205, 160],
+                 "kinds": ["power"]},
+                {"op": "remove_dangling", "sheet": "board.kicad_sch"}])
+            self.assertEqual(cleared.state, CapabilityResultState.SUCCEEDED, cleared.failure)
+            done = [item["removed"] for item in cleared.values["change_report"]["change_result"]]
+            self.assertEqual([dict(d) if not isinstance(d, int) else d for d in done],
+                             [2, {"power": 1}, {"no_connect": 1, "wire": 1}])
+            text = copy.read_text()
+            self.assertNotIn('"OLD"', text)
+            self.assertNotIn("(no_connect", text)
+            self.assertNotIn("(wire", text)
+            self.assertNotIn('(lib_id "power:GND")', text)
+            # Back to the labelled copy, then to the start.
+            back = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work,
+                             revert_to=first.values["work_copy_revision"])
+            self.assertEqual(back.state, CapabilityResultState.SUCCEEDED, back.failure)
+            self.assertEqual(back.values["work_copy_revision"], first.values["work_copy_revision"])
+            self.assertEqual(copy.read_text(), labelled)
+            again = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work, revert_to="start")
+            self.assertEqual(again.state, CapabilityResultState.SUCCEEDED, again.failure)
+            self.assertEqual(copy.read_text(), start)
+            nothing = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work, revert_to="start")
+            self.assertEqual(nothing.failure["code"], "arguments_unusable")
 
     def test_a_missing_power_port_names_what_the_sheet_has(self):
         with tempfile.TemporaryDirectory() as folder:

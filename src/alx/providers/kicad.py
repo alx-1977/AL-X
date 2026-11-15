@@ -1121,6 +1121,10 @@ class KiCadProvider:
 
     def edit(self, arguments):
         with self._locked(arguments['work_copy_id']):
+            if arguments.get('revert_to') is not None:
+                if arguments.get('change') is not None or arguments.get('script') is not None:
+                    raise KiCadError('arguments_unusable', {'detail': 'revert_to goes alone, without change or script'})
+                return self._revert(arguments)
             change = plain(arguments.get('change'))
             dry_run = bool(arguments.get('dry_run'))
             if (change is None) == (arguments.get('script') is None):
@@ -1141,6 +1145,7 @@ class KiCadProvider:
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
+            revision_before = self._revision(root, meta)
             project = root / 'project'
             wanted = (lambda kind: sorted(set(arguments.get(kind) or ()) | set((plan or {}).get(kind) or ())))
             footprints = self._library_parts(wanted('footprints'), project, 'footprints')
@@ -1166,8 +1171,8 @@ class KiCadProvider:
                 # Tested helpers first, then her script compiled on its own, so
                 # its own first lines (a __future__ import) and line numbers
                 # stay as she wrote them (2026-11-12).
-                pins_before = (self._pin_groups(root, meta)[0]
-                               if plan and plan['schematic'] and not library else {})
+                pins_before, names_before = (self._pin_groups(root, meta)
+                                             if plan and plan['schematic'] and not library else ({}, {}))
                 script_path.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS
                                        + '_LIBRARY_FOOTPRINTS.update(%r)\n' % footprints
                                        + '_LIBRARY_SYMBOLS.update(%r)\n' % symbols
@@ -1211,7 +1216,7 @@ class KiCadProvider:
                                                else ({}, {}))
                     problems = unmet(change, pins_before, pins_after, names_after,
                                      board_pad_nets(board.read_text()) if plan['board'] else {},
-                                     plan['touched'])
+                                     plan['touched'], names_before)
                     if problems and not dry_run:
                         # Not what the change declared: undone, every unmet item named.
                         raise KiCadError('change_unmet', {'unmet': problems[:30], 'change_result': change_result})
@@ -1290,6 +1295,9 @@ class KiCadProvider:
                                     'stderr': stderr[:16000], 'change_report': report, 'before': before,
                                     'after': after, 'steps': steps, 'previewed': True})
                 revision = self._revision(root, meta)
+                if changed:
+                    # Each kept edit can be gone back over (revert_to), 15 Nov.
+                    self._record_history(root, snapshot, original, changed, revision_before, revision)
                 if evidence:
                     # Restoring after this point uses the moved snapshot.
                     snapshot.rename(evidence / 'before')
@@ -1338,6 +1346,90 @@ class KiCadProvider:
                 with suppress(OSError, ValueError):
                     if not kept and not json.loads((root / 'metadata.json').read_text()).get('taint'):
                         shutil.rmtree(snapshot, ignore_errors=True)
+
+    HISTORY_KEPT = 60
+
+    def _record_history(self, root, snapshot, original, changed, before, after):
+        """Keep the files an edit changed as they were before it, to go back to."""
+        history = root / 'history'
+        history.mkdir(exist_ok=True)
+        entries = sorted(history.iterdir())
+        number = int(entries[-1].name.split('-', 1)[0]) + 1 if entries else 1
+        entry = history / ('%05d-%s' % (number, uuid.uuid4().hex[:8]))
+        (entry / 'files').mkdir(parents=True)
+        created = [name for name in changed if name not in original]
+        for name in changed:
+            if name in original:
+                (entry / 'files' / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(snapshot / name, entry / 'files' / name)
+        (entry / 'manifest.json').write_text(json.dumps(
+            {'before': before, 'after': after, 'changed': changed, 'created': created}))
+        for old in sorted(history.iterdir())[:-self.HISTORY_KEPT]:
+            shutil.rmtree(old, ignore_errors=True)
+
+    def _revert(self, arguments):
+        """Put the copy back as it was at an earlier revision of its kept edits.
+
+        15 Nov: a bad edit had nothing to go back with; the agent stopped,
+        blocked, on a copy it could not repair.
+        """
+        root, meta = self._load(arguments['work_copy_id'])
+        if meta.get('taint'):
+            raise KiCadError('work_copy_tainted')
+        history = root / 'history'
+        entries = [(path, json.loads((path / 'manifest.json').read_text()))
+                   for path in sorted(history.iterdir())] if history.is_dir() else []
+        current = self._revision(root, meta)
+        if not entries or entries[-1][1]['after'] != current:
+            raise KiCadError('arguments_unusable', {'detail': 'this copy has no kept edits to go back over'})
+        target = str(arguments['revert_to'])
+        if target in ('start', 'first'):
+            target = entries[0][1]['before']
+        index = next((i for i in range(len(entries) - 1, -1, -1)
+                      if len(target) >= 8 and entries[i][1]['before'].startswith(target)), None)
+        if index is None:
+            raise KiCadError('arguments_unusable', {
+                'detail': 'revert_to is one of these revisions (newest first) or start: '
+                          + ', '.join(m['before'][:12] for _, m in reversed(entries[-10:]))})
+        project = root / 'project'
+        library = bool(meta.get('library'))
+        board_text = (lambda: '(kicad_pcb)' if library else (project / meta['board']).read_text())
+        facts_before = board_facts(board_text())
+        snapshot = root / ('snapshot-' + uuid.uuid4().hex)
+        shutil.copytree(project, snapshot)
+        try:
+            changed = set()
+            for path, manifest in reversed(entries[index:]):
+                for name in manifest['changed']:
+                    changed.add(name)
+                    if name in manifest['created']:
+                        (project / name).unlink(missing_ok=True)
+                    else:
+                        shutil.copy2(path / 'files' / name, project / name)
+            revision = self._revision(root, meta)
+            if revision != entries[index][1]['before']:
+                raise KiCadError('verification_failed', {'detail': 'the copy did not come back to that revision'})
+        except BaseException:
+            shutil.rmtree(project, ignore_errors=True)
+            shutil.copytree(snapshot, project)
+            raise
+        finally:
+            shutil.rmtree(snapshot, ignore_errors=True)
+        for path, _ in entries[index:]:
+            shutil.rmtree(path, ignore_errors=True)
+        report = {'files_changed': sorted(changed), 'files_truncated': False, 'file_diffs': [],
+                  'diffs_truncated': False, 'board': structural_diff(facts_before, board_facts(board_text())),
+                  'reverted_edits': len(entries) - index}
+        steps, totals = {}, {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
+        if not library:
+            steps = step_status(self._original_steps(root, meta), meta.get('approvals', {}),
+                                fingerprints(project, meta['board']))
+            totals = self._board_drc(root, meta)[0]
+            if any(name.endswith('.kicad_sch') for name in changed):
+                report['erc'] = self._erc(root, meta)
+        return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision, 'stdout': '',
+                'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps,
+                'previewed': False}
 
     def export(self, arguments):
         with self._locked(arguments['work_copy_id']):
@@ -1496,8 +1588,10 @@ class KiCadProvider:
             raise KiCadError('path_denied')
         root = bounded(self.work_root / work_copy_id, (self.work_root,), protected=False)
         # Retained evidence is checked on its own, so it never blocks later work.
-        inventory(root, exclude={root / 'evidence'})
+        # So is the edit history (revert_to), which keeps only the files edits changed.
+        inventory(root, exclude={root / 'evidence', root / 'history'})
         evidence_bytes(root / 'evidence')
+        evidence_bytes(root / 'history')
         meta = json.loads((root / 'metadata.json').read_text())
         return root, meta
 

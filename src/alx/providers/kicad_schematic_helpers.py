@@ -221,25 +221,70 @@ class Sheet:
         origin = _placed(at, mirror[1] if mirror else None, 0.0, 0.0)
         return (round(end[0] - origin[0]), round(end[1] - origin[1]))
 
-    def pin_stub(self, ref, pin, length=2.54):
-        """A wire straight out of the pin, in its own direction, one grid step by default; its end."""
+    def _stub_end(self, ref, pin, length=2.54):
         start = self.symbol(ref)["pins"][str(pin)]
         dx, dy = self.pin_direction(ref, pin)
-        end = _r((start[0] + dx * length, start[1] + dy * length))
+        return start, _r((start[0] + dx * length, start[1] + dy * length))
+
+    def check_clear(self, ref, pin, points, allow=()):
+        """New wiring from a pin through points must touch nothing already on the sheet.
+
+        15 Nov: a GND port's wire landed on an old wire's corner and joined a
+        signal to ground. Anything the path would touch (a wire, a wire end, a
+        label, a no-connect, another pin) is refused, naming what and where.
+        """
+        own = self.symbol(ref)["pins"][str(pin)]
+        self._check_segments([(a, b, "%s.%s" % (ref, pin)) for a, b in zip(points, points[1:])],
+                             {own} | {_r(p) for p in allow})
+
+    def _check_segments(self, segments, allowed):
+        """segments: (a, b, the pin it is for); refused at the first that touches what is there."""
+        root, _ = self._tree()
+        libs = self._libs(root)
+        wires = self.wires()
+        things = [("a wire end", p) for pts in wires for p in (pts[0], pts[-1])]
+        things += [("label %s" % item["name"], item["at"]) for item in self.labels()]
+        things += [("a no-connect", _r(_child(n, "at")[1:3])) for n in _children(root, "no_connect")]
+        for symbol in _children(root, "symbol"):
+            name = self._ref(symbol)
+            for number, point in self._symbol_pins(symbol, libs).items():
+                if point not in allowed:
+                    things.append(("pin %s.%s" % (name, number), point))
+        for a, b, who in segments:
+            for what, point in things:
+                if point not in allowed and _on(point, a, b):
+                    raise ValueError("%s: the new wire would touch %s at (%g, %g); clear it (remove_labels, "
+                                     "remove_items, remove_dangling) or join the pins another way"
+                                     % (who, what, point[0], point[1]))
+            for end in (a, b):
+                if end in allowed:
+                    continue
+                for pts in wires:
+                    if any(_on(end, c, d) for c, d in zip(pts, pts[1:])):
+                        raise ValueError("%s: the new wire would land on an existing wire at (%g, %g); clear "
+                                         "it (remove_items, remove_dangling) or join the pins another way"
+                                         % (who, end[0], end[1]))
+
+    def pin_stub(self, ref, pin, length=2.54):
+        """A wire straight out of the pin, in its own direction, one grid step by default; its end."""
+        start, end = self._stub_end(ref, pin, length)
+        self.check_clear(ref, pin, [start, end])
         self.add_wire(start, end)
         return end
 
     def wire_pin_to(self, ref, pin, target, length=2.54):
         """From a pin, straight out one step, then on to target with one turn. Returns the points."""
-        end = self.pin_stub(ref, pin, length)
+        start, end = self._stub_end(ref, pin, length)
         dx, _ = self.pin_direction(ref, pin)
         target = _r(target)
         # The turn after the stub goes across the pin's direction, never back over the part.
         corner = (end[0], target[1]) if dx else (target[0], end[1])
         points = [end] + [p for p in (corner, target) if p != end]
+        self.check_clear(ref, pin, [start] + points, allow=(target,))
+        self.add_wire(start, end)
         if len(points) > 1:
             self.add_wire(*points)
-        return [self.symbol(ref)["pins"][str(pin)]] + points
+        return [start] + points
 
     def label_pin(self, ref, pin, name, kind="label", length=2.54):
         """A net label at the end of a short wire straight out of the pin."""
@@ -249,25 +294,84 @@ class Sheet:
         self.add_label(name, end, angle, kind)
         return end
 
-    def _port_pin(self, ref, pin, template, down):
-        end = self.pin_stub(ref, pin)
-        dx, dy = self.pin_direction(ref, pin)
+    def port_pins(self, pins, template, down):
+        """One port for each row of neighbouring pins: each pin straight out one step, the
+        row's ends joined by one wire, and a single port (GND down, power up) on it.
+
+        15 Nov: a port per pin put the ports of neighbouring NC pins on top of one
+        another. pins: [(ref, number), ...]. Returns the port points.
+        """
         want = 1 if down else -1
-        if (dx, dy) != (0, want):
-            # Out of the pin first, then turn toward where the port points.
-            turned = _r((end[0], end[1] + want * 2.54))
-            self.add_wire(end, turned)
-            end = turned
-        self.copy_symbol(template, end, 0)
-        return end
+        rows = {}
+        for ref, number in pins:
+            start, end = self._stub_end(ref, number)
+            direction = self.pin_direction(ref, number)
+            key = (ref, direction, end[0] if direction[0] else end[1])
+            rows.setdefault(key, []).append((start, end, "%s.%s" % (ref, number)))
+        # A row is pins one grid step apart: a gap (another pin between) starts a new row.
+        split = []
+        for key, row in sorted(rows.items()):
+            along = 1 if key[1][0] else 0
+            row.sort(key=lambda item: item[1][along])
+            current = [row[0]]
+            for item in row[1:]:
+                if item[1][along] - current[-1][1][along] > 2.54 + 1e-6:
+                    split.append((key, current))
+                    current = []
+                current.append(item)
+            split.append((key, current))
+        ports, segments, allowed = [], [], set()
+        for (ref, (dx, dy), _), row in split:
+            along = 1 if dx else 0
+            row.sort(key=lambda item: item[1][along])
+            ends = [item[1] for item in row]
+            segments += [(item[0], item[1], item[2]) for item in row]
+            segments += [(a[1], b[1], "%s to %s" % (a[2], b[2])) for a, b in zip(row, row[1:])]
+            # Only the pins themselves may already be wired; every new point is checked.
+            allowed |= {item[0] for item in row}
+            if (dx, dy) == (0, -want):
+                # Pins pointing away from where the port goes (GND pins on top): the row
+                # runs out past the nearer side of the part, clear of its side pins, and
+                # the port hangs from there the right way up.
+                xs = [point[0] for point in self.symbol(ref)["pins"].values()]
+                if ends[0][0] - min(xs) <= max(xs) - ends[-1][0]:
+                    port = _r((min(xs) - 5.08, ends[0][1]))
+                    segments.append((ends[0], port, "%s to its port" % row[0][2]))
+                else:
+                    port = _r((max(xs) + 5.08, ends[-1][1]))
+                    segments.append((ends[-1], port, "%s to its port" % row[-1][2]))
+            elif dx:
+                # Pins on a side: the row runs up and down; the port goes below (or above) it.
+                last = ends[-1] if down else ends[0]
+                port = _r((last[0], last[1] + want * 2.54))
+                segments.append((last, port, "%s to its port" % (row[-1] if down else row[0])[2]))
+            elif len(ends) == 1:
+                port = ends[0]
+            else:
+                middle = ends[len(ends) // 2]
+                port = _r((middle[0], middle[1] + want * 2.54))
+                segments.append((middle, port, "%s to its port" % row[len(ends) // 2][2]))
+            ports.append(port)
+        self._check_segments(segments, allowed)
+        counted = {}
+        for a, b, _ in segments:
+            self.add_wire(a, b)
+            for point in (a, b):
+                counted[point] = counted.get(point, 0) + 1
+        for point, count in counted.items():
+            if count >= 3:
+                self.add_junction(point)
+        for port in ports:
+            self.copy_symbol(template, port, 0)
+        return ports
 
     def ground_pin(self, ref, pin, template):
         """A GND port, pointing down, on a short wire from the pin. template: the reference (#PWR..) of a GND symbol already on this sheet, which is copied."""
-        return self._port_pin(ref, pin, template, down=True)
+        return self.port_pins([(ref, pin)], template, down=True)[0]
 
     def power_pin(self, ref, pin, template):
         """A power port, pointing up, on a short wire from the pin. template: that port's reference."""
-        return self._port_pin(ref, pin, template, down=False)
+        return self.port_pins([(ref, pin)], template, down=False)[0]
 
     def tidy_fields(self, ref):
         """Reference and value beside the part, the same way for every part, clear of its body.
@@ -401,6 +505,94 @@ class Sheet:
             if ends + 2 * middles + (1 if p in pins else 0) < 3:
                 dead.append(junction)
         self._cut([spans[id(item)] for item in dead])
+
+    @staticmethod
+    def _inside(point, area):
+        return area is None or (min(area[0], area[2]) - 1e-6 <= point[0] <= max(area[0], area[2]) + 1e-6
+                                and min(area[1], area[3]) - 1e-6 <= point[1] <= max(area[1], area[3]) + 1e-6)
+
+    def remove_labels(self, names, area=None):
+        """Remove net labels with these names (inside area [x1, y1, x2, y2] when given), and
+        the wire stubs that only held them. Returns how many labels went."""
+        root, spans = self._tree()
+        names = set(names)
+        found = [n for n in root if _head(n) in ("label", "global_label", "hierarchical_label")
+                 and _unq(n[1]) in names and self._inside(_r(_child(n, "at")[1:3]), area)]
+        points = {_r(_child(n, "at")[1:3]) for n in found}
+        self._cut([spans[id(n)] for n in found])
+        self.tidy(points)
+        return len(found)
+
+    def remove_items(self, area, kinds=("wire", "label", "no_connect", "junction", "power")):
+        """Remove what lies wholly inside area [x1, y1, x2, y2]: wires, labels, no-connects,
+        junctions and power symbols (#PWR, found by place, so unannotated ones too).
+        Parts are never removed this way (remove_symbols). Returns counts by kind."""
+        root, spans = self._tree()
+        libs = self._libs(root)
+        cut, points, counts = [], set(), {}
+        for node in root:
+            head = _head(node)
+            kind = {"global_label": "label", "hierarchical_label": "label"}.get(head, head)
+            if kind == "wire" and "wire" in kinds:
+                pts = [_r((p[1], p[2])) for p in _children(_child(node, "pts"), "xy")]
+                if all(self._inside(p, area) for p in pts):
+                    cut.append(node)
+                    points |= set(pts)
+                    counts["wire"] = counts.get("wire", 0) + 1
+            elif kind in ("label", "no_connect", "junction") and kind in kinds:
+                at = _r(_child(node, "at")[1:3])
+                if self._inside(at, area):
+                    cut.append(node)
+                    points.add(at)
+                    counts[kind] = counts.get(kind, 0) + 1
+            elif head == "symbol" and "power" in kinds and self._ref(node).startswith("#"):
+                at = _r(_child(node, "at")[1:3])
+                if self._inside(at, area):
+                    cut.append(node)
+                    points |= set(self._symbol_pins(node, libs).values())
+                    counts["power"] = counts.get("power", 0) + 1
+        self._cut([spans[id(n)] for n in cut])
+        self.tidy(points)
+        return counts
+
+    def remove_dangling(self, area=None):
+        """Remove what connects to nothing (inside area when given): no-connects off any pin,
+        labels on no wire or pin, power symbols touching nothing, wires with a free end.
+        Returns counts by kind."""
+        counts = {}
+        root, spans = self._tree()
+        libs = self._libs(root)
+        wires = self.wires()
+        on_wire = lambda p: any(_on(p, a, b) for pts in wires for a, b in zip(pts, pts[1:]))  # noqa: E731
+        parts = {p for s in _children(root, "symbol") if not self._ref(s).startswith("#")
+                 for p in self._symbol_pins(s, libs).values()}
+        ports = [s for s in _children(root, "symbol") if self._ref(s).startswith("#")]
+        port_pins = {id(s): set(self._symbol_pins(s, libs).values()) for s in ports}
+        cut = []
+        for node in _children(root, "no_connect"):
+            at = _r(_child(node, "at")[1:3])
+            if at not in parts and self._inside(at, area):
+                cut.append(node)
+                counts["no_connect"] = counts.get("no_connect", 0) + 1
+        for node in root:
+            if _head(node) in ("label", "global_label", "hierarchical_label"):
+                at = _r(_child(node, "at")[1:3])
+                if at not in parts and not on_wire(at) and self._inside(at, area):
+                    cut.append(node)
+                    counts["label"] = counts.get("label", 0) + 1
+        for node in ports:
+            others = parts | {p for s in ports if s is not node for p in port_pins[id(s)]}
+            mine = port_pins[id(node)]
+            if mine and all(p not in others and not on_wire(p) for p in mine) \
+                    and self._inside(_r(_child(node, "at")[1:3]), area):
+                cut.append(node)
+                counts["power"] = counts.get("power", 0) + 1
+        self._cut([spans[id(n)] for n in cut])
+        before = len(self.wires())
+        self.tidy({p for pts in self.wires() for p in (pts[0], pts[-1]) if self._inside(p, area)})
+        if before - len(self.wires()):
+            counts["wire"] = before - len(self.wires())
+        return counts
 
     def swap_symbol(self, ref, lib_id, value=None, footprint=None, at=None, rotation=None):
         """Change a symbol to another library symbol (named in the edit's symbols), in its place.

@@ -20,10 +20,15 @@ SCHEMATIC_OPS = {
     'swap_symbol': ('sheet', 'ref', 'lib_id'),
     'wire': ('sheet', 'from', 'to'),
     'label': ('sheet', 'pin', 'net'),
-    'power': ('sheet', 'pin', 'port'),
+    'power': ('sheet', 'port'),
     'no_connect': ('sheet', 'pins'),
     'tidy_fields': ('sheet', 'refs'),
+    'remove_labels': ('sheet', 'nets'),
+    'remove_items': ('sheet', 'area'),
+    'remove_dangling': ('sheet',),
 }
+# Removing labels and leftovers may split nets (that is what they are for); it never joins any.
+SPLITTING = ('remove_labels', 'remove_items', 'remove_dangling')
 BOARD_OPS = {
     'remove_parts': ('refs',),
     'replace_part': ('ref', 'footprint'),
@@ -69,6 +74,11 @@ def validate_change(change: Any) -> dict[str, Any]:
         for field in ('pins',):
             if op.get(field) is not None and not all(isinstance(p, str) and PIN.match(p) for p in op[field]):
                 raise ChangeError('%s: pins are REF.PIN, like U6.4' % where)
+        if op.get('area') is not None and not (isinstance(op['area'], (list, tuple)) and len(op['area']) == 4
+                                               and all(isinstance(v, (int, float)) for v in op['area'])):
+            raise ChangeError('%s: area is [x1, y1, x2, y2] in mm' % where)
+        if op['op'] == 'power' and not (op.get('pin') or op.get('pins')):
+            raise ChangeError('%s (power) needs pin, or pins for a row of neighbouring pins' % where)
         if op['op'] == 'swap_symbol':
             symbols.add(op['lib_id'])
         if op['op'] in ('replace_part', 'add_part'):
@@ -89,17 +99,22 @@ def validate_change(change: Any) -> dict[str, Any]:
             'board': any(op['op'] in BOARD_OPS for op in change)}
 
 
+def _power_pins(op):
+    return list(op.get('pins') or ()) + ([op['pin']] if op.get('pin') else [])
+
+
 def _short(net: str) -> str:
     return net.rsplit('/', 1)[-1]
 
 
 def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
           after: Mapping[str, frozenset], after_names: Mapping[str, str],
-          board_nets: Mapping[str, str], touched: Sequence[str]) -> list[str]:
+          board_nets: Mapping[str, str], touched: Sequence[str],
+          before_names: Mapping[str, str] | None = None) -> list[str]:
     """What the result does not do that the change declared, or does that it did not.
 
     before/after: each schematic pin ("U6.9") with the set of pins on its net;
-    after_names: each pin's net name; board_nets: each board pad's net name.
+    after_names/before_names: each pin's net name; board_nets: each board pad's net name.
     """
     problems = []
     for op in change:
@@ -110,8 +125,10 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
             problems.append('%s is not in the schematic' % op['from'])
         elif kind == 'label' and _short(after_names.get(op['pin'], '')) != _short(op['net']):
             problems.append('%s is on %s, not %s' % (op['pin'], after_names.get(op['pin'], 'no net'), op['net']))
-        elif kind == 'power' and _short(after_names.get(op['pin'], '')) != _short(op['port'].split(':', 1)[-1]):
-            problems.append('%s is on %s, not %s' % (op['pin'], after_names.get(op['pin'], 'no net'), op['port']))
+        elif kind == 'power':
+            for pin in _power_pins(op):
+                if _short(after_names.get(pin, '')) != _short(op['port'].split(':', 1)[-1]):
+                    problems.append('%s is on %s, not %s' % (pin, after_names.get(pin, 'no net'), op['port']))
         elif kind == 'no_connect':
             for pin in op['pins']:
                 if len(after.get(pin, frozenset({pin}))) > 1:
@@ -128,17 +145,74 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
         elif kind == 'remove_parts':
             problems += ['%s is still on the board' % ref for ref in op['refs']
                          if any(pad.split('.')[0] == ref for pad in board_nets)]
-    # Nothing else may be joined or split: an untouched part's pins keep the
-    # same partners among untouched parts.
-    touched = set(touched)
-    for pin, partners in before.items():
-        if pin.split('.')[0] in touched or pin not in after:
-            continue
-        old = {p for p in partners if p.split('.')[0] not in touched}
-        new = {p for p in after[pin] if p.split('.')[0] not in touched}
-        if old != new:
-            problems.append('%s changed connection: %s' % (pin, ', '.join(sorted(old ^ new))[:200]))
+    problems += _unasked(change, before, after, before_names or {})
     return problems
+
+
+def _unasked(change, before, after, before_names):
+    """Pins joined or split that the change did not ask for.
+
+    The nets the change should give are worked out from the nets before and
+    what each operation joins: a wire its two pins, a label or power port its
+    pin and that net. Every pin's net afterwards must lie within that; only
+    parts swapped or removed are left out, since their pins change by design.
+    15 Nov: a GND port landed on an old wire and grounded RF1; the earlier
+    check left out every part the change named, tidied text included, and
+    missed it.
+    """
+    free = {op['ref'] for op in change if op['op'] == 'swap_symbol'}
+    free |= {ref for op in change if op['op'] == 'remove_symbols' for ref in op['refs']}
+    parent: dict[str, str] = {}
+
+    def find(pin):
+        parent.setdefault(pin, pin)
+        while parent[pin] != pin:
+            parent[pin] = parent[parent[pin]]
+            pin = parent[pin]
+        return pin
+
+    def join(a, b):
+        parent[find(a)] = find(b)
+    # A swapped part's old pins say nothing about its new ones: only the
+    # operations join them.
+    kept = (lambda pin: pin.split('.')[0] not in free)
+    for pin, group in before.items():
+        if kept(pin):
+            find(pin)
+            for other in group:
+                if kept(other):
+                    join(pin, other)
+    named: dict[str, str] = {}
+    for pin, name in before_names.items():
+        if kept(pin):
+            named.setdefault(_short(name), pin)
+    for op in change:
+        if op['op'] == 'wire':
+            join(op['from'], op['to'])
+        elif op['op'] in ('label', 'power'):
+            net = _short(op['net'] if op['op'] == 'label' else op['port'].split(':', 1)[-1])
+            for pin in (_power_pins(op) if op['op'] == 'power' else [op['pin']]):
+                if net in named:
+                    join(pin, named[net])
+                named.setdefault(net, pin)
+    splitting = any(op['op'] in SPLITTING for op in change)
+    groups: dict[str, set] = {}
+    for pin in before:
+        if pin.split('.')[0] not in free:
+            groups.setdefault(find(pin), set()).add(pin)
+    problems = []
+    for pin, partners in sorted(after.items()):
+        if pin.split('.')[0] in free or pin not in before:
+            continue
+        now = {p for p in partners if p.split('.')[0] not in free}
+        gained = now - groups.get(find(pin), set())
+        lost = {p for p in before[pin] if p.split('.')[0] not in free} - now
+        if gained:
+            problems.append('%s changed connection: gained %s, which the change did not join'
+                            % (pin, ', '.join(sorted(gained))[:200]))
+        elif lost and not splitting:
+            problems.append('%s changed connection: lost %s' % (pin, ', '.join(sorted(lost))[:200]))
+    return problems[:30]
 
 
 CHANGE_HELPERS = r'''
@@ -169,7 +243,8 @@ def apply_change(change):
         return sheets[name]
     for index, op in enumerate(change):
         kind, done = op["op"], {}
-        if kind in ("remove_symbols", "swap_symbol", "wire", "label", "power", "no_connect", "tidy_fields"):
+        if kind in ("remove_symbols", "swap_symbol", "wire", "label", "power", "no_connect", "tidy_fields",
+                    "remove_labels", "remove_items", "remove_dangling"):
             s = sheet_of(op["sheet"])
             if kind == "remove_symbols":
                 for ref in op["refs"]:
@@ -180,6 +255,11 @@ def apply_change(change):
                 if loose:
                     s.tidy(loose)
                 done["old_pins_tidied"] = len(loose)
+                # New pins where the old part's wiring still ends: that wiring is now on them
+                # (15 Nov: the old VCTL wire sat on the new switch's NC pin 11).
+                ends = {p for pts in s.wires() for p in (pts[0], pts[-1])} | {l["at"] for l in s.labels()}
+                done["pins_still_wired"] = sorted((n for n, point in s.symbol(op["ref"])["pins"].items()
+                                                   if point in ends), key=lambda n: (len(n), n))
             elif kind == "wire":
                 ref, number = _pin(op["from"])
                 to_ref, to_number = _pin(op["to"])
@@ -188,12 +268,10 @@ def apply_change(change):
                 ref, number = _pin(op["pin"])
                 s.label_pin(ref, number, op["net"], op.get("kind", "label"))
             elif kind == "power":
-                ref, number = _pin(op["pin"])
+                pins = [_pin(text) for text in (op.get("pins") or [])] + ([_pin(op["pin"])] if op.get("pin") else [])
                 template = op.get("template") or _power_template(s, op["port"])
-                if "GND" in op["port"].split(":", 1)[-1].upper():
-                    s.ground_pin(ref, number, template)
-                else:
-                    s.power_pin(ref, number, template)
+                done["ports"] = len(s.port_pins(pins, template,
+                                                down="GND" in op["port"].split(":", 1)[-1].upper()))
             elif kind == "no_connect":
                 for text in op["pins"]:
                     ref, number = _pin(text)
@@ -201,6 +279,13 @@ def apply_change(change):
             elif kind == "tidy_fields":
                 for ref in op["refs"]:
                     s.tidy_fields(ref)
+            elif kind == "remove_labels":
+                done["removed"] = s.remove_labels(op["nets"], op.get("area"))
+            elif kind == "remove_items":
+                done["removed"] = s.remove_items(op["area"], tuple(op.get("kinds") or
+                                                              ("wire", "label", "no_connect", "junction", "power")))
+            elif kind == "remove_dangling":
+                done["removed"] = s.remove_dangling(op.get("area"))
         else:
             if board is None:
                 board = load()
@@ -275,4 +360,4 @@ def apply_change(change):
 # ---- end of structured changes ----
 '''
 
-__all__ = ['BOARD_OPS', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'plain', 'unmet', 'validate_change']
+__all__ = ['BOARD_OPS', 'SPLITTING', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'plain', 'unmet', 'validate_change']
