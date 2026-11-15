@@ -36,7 +36,8 @@ FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid
             'original_changed', 'work_copy_changed', 'work_copy_tainted', 'work_copy_busy',
             'script_failed', 'export_would_overwrite', 'rename_ambiguous', 'unsupported_file',
             'project_too_large', 'evidence_full', 'verification_failed', 'unavailable')
-FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed')
+FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed', 'step_not_approved',
+             'schematic_board_differ')
 
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
@@ -55,7 +56,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'layer_moves': array(obj({'id': S, 'kind': S, 'before': array(S), 'after': array(S)})),
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
-    'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC},
+    'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -126,10 +127,19 @@ _ACTION_DEFINITIONS = (
         'never a step; where the pad is the wider one, no taper; inside an antenna clearance '
         "follow the manufacturer's geometry exactly. Every check and edit report lists "
         'layout_rules findings (steps where copper meets a narrower pad); clear them, or say '
-        'why one stands, before showing a board.',
+        'why one stands, before showing a board. Board work goes in Friedl\'s order (D-082): '
+        'schematic, then placement, then routing, each shown to him and approved with '
+        'approve_step before the next. Until he approves the schematic the board cannot change; '
+        'until he approves the placement no copper can be added (parts may move and copper be '
+        'removed). An edit that gets ahead is undone with step_not_approved naming the step he '
+        'must see. steps gives each step as unchanged, approved, needs_approval or waiting; '
+        'changing an approved step needs his approval again, and so does every step after it. '
+        'change_report.compared_to_original lists DRC findings his original did not have (new, '
+        'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
+        'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
         obj({'work_copy_id': S, 'script': S}),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
-             'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS}),
+             'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('export_kicad_manufacturing',
         'Export Gerbers and drill files from an untainted work copy through KiCad CLI. '
@@ -162,7 +172,9 @@ _ACTION_DEFINITIONS = (
         'Write changed KiCad design files (board, schematic, project, rules, libraries) from the exact approved work-copy '
         'revision to its recorded original project. Requires approval of this exact call. '
         'Refuses open boards and changed originals; verifies backups and staged files before '
-        'replacement. On failure, already replaced files may remain; recovery depends on '
+        'replacement. A board copy is written only when every changed step is approved '
+        '(step_not_approved names the one still needed) and the board disagrees with the '
+        'schematic nowhere his original did not (schematic_board_differ lists where). On failure, already replaced files may remain; recovery depends on '
         'the returned backups and evidence, with no automatic undo. '
         'Generated reports and renders are excluded. report, when given, is your written '
         'review of this board in Markdown (findings, what you changed, what is still open, '
@@ -298,6 +310,20 @@ CONFIRM_READINGS = CapabilityDefinition('confirm_layout_readings',
     obj({'confirmed': B, 'readings': I}), SideEffect.EFFECTFUL, FAILURES)
 
 
+APPROVE_STEP = CapabilityDefinition('approve_step',
+    "Record Friedl's approval of one step of a board work copy, as he saw it on your screen: "
+    'step is schematic, placement or routing (D-082). Needs his approval of this exact call; '
+    'you may list it with the next write in one go. Ask only after showing him that step, '
+    'current against your copy. work_copy_revision is the revision he saw: a later edit '
+    'refuses with work_copy_changed. A step needs every step before it unchanged or approved, '
+    'else step_not_approved names the one he must see first. A step he has not changed needs no '
+    'approval. The approval holds only while that step and those before it stay as he saw '
+    'them. Returns every step\'s state.',
+    obj({'work_copy_id': S, 'work_copy_revision': S, 'step': S}),
+    obj({'step': S, 'steps': MAP, 'work_copy_id': S, 'work_copy_revision': S}),
+    SideEffect.EFFECTFUL, FAILURES)
+
+
 MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
     "Join a copy's separate top-level schematic sheets (an Altium import) into one "
     'hierarchical design: a new top sheet placing every sheet, symbols and board parts '
@@ -339,6 +365,7 @@ class KiCadAction(str, Enum):
     MAKE_HIERARCHICAL = 'make_hierarchical'
     COPY_LIBRARY = 'copy_library'
     FETCH_DATASHEET = 'fetch_datasheet'
+    APPROVE_STEP = 'approve_step'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -356,6 +383,7 @@ CONTRACTS = {
     KiCadAction.MAKE_HIERARCHICAL: MAKE_HIERARCHICAL,
     KiCadAction.COPY_LIBRARY: COPY_LIBRARY,
     KiCadAction.FETCH_DATASHEET: FETCH_DATASHEET,
+    KiCadAction.APPROVE_STEP: APPROVE_STEP,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
@@ -377,7 +405,7 @@ DEFINITION = CapabilityDefinition(KICAD,
     'nets and keep-outs; read_reference reads PDFs page by page. Then edit a work copy, '
     'check it (DRC), analyse copper, simulate a circuit, export manufacturing files or apply '
     'an approved copy to his project. action names which; its fields are listed per action '
-    'below. export, write_back and confirm_layout_readings need his approval of the exact '
+    'below. export, write_back, approve_step and confirm_layout_readings need his approval of the exact '
     'call; every other action is free. Each action below lists its fields and the ones it requires. ' + ' '.join(
         f'[{name.value}] fields: {", ".join(definition.input_schema.properties) or "none"}; '
         f'required: {", ".join(definition.input_schema.required) or "none"}. {definition.purpose}'
@@ -402,7 +430,8 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.CONFIRM_LAYOUT_READINGS: provider.confirm_layout_readings,
                KiCadAction.MAKE_HIERARCHICAL: provider.make_hierarchical,
                KiCadAction.COPY_LIBRARY: provider.copy_library,
-               KiCadAction.FETCH_DATASHEET: provider.fetch_datasheet}
+               KiCadAction.FETCH_DATASHEET: provider.fetch_datasheet,
+               KiCadAction.APPROVE_STEP: provider.approve_step}
 
     def invoke(arguments):
         code = 'arguments_unusable'

@@ -26,6 +26,7 @@ from alx.providers.credential_paths import denied
 MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_rules import check_layout_rules
+from alx.providers.kicad_steps import STEPS, edit_refusal, fingerprints, parity_mismatches, ready, step_status
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
 from alx.providers.kicad_circuit import (
@@ -1113,6 +1114,7 @@ class KiCadProvider:
             try:
                 before = empty if library else self._drc(root, meta)['totals']
                 facts_before = board_facts('(kicad_pcb)' if library else board.read_text())
+                steps_before = None if library else fingerprints(project, meta['board'])
                 # Tested helpers first, then her script compiled on its own, so
                 # its own first lines (a __future__ import) and line numbers
                 # stay as she wrote them (2026-11-12).
@@ -1137,13 +1139,26 @@ class KiCadProvider:
                     raise KiCadError('script_failed', detail)
                 inventory(project)
                 stage = 'after_drc'
-                after = empty if library else self._drc(root, meta)['totals']
+                signatures = []
+                after = empty if library else self._drc(root, meta, signatures)['totals']
+                steps = {}
+                if not library:
+                    # Friedl's order (D-082): an edit that gets ahead of his
+                    # approvals is undone, and says which step he must see.
+                    steps_after = fingerprints(project, meta['board'])
+                    original_steps = self._original_steps(root, meta)
+                    refusal = edit_refusal(steps_before, steps_after, original_steps, meta.get('approvals', {}))
+                    if refusal:
+                        raise KiCadError('step_not_approved', refusal)
+                    steps = step_status(original_steps, meta.get('approvals', {}), steps_after)
                 current = design_inventory(project)
                 facts_after = board_facts('(kicad_pcb)' if library else board.read_text())
                 changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
                                  if original.get(name) != current.get(name))
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
+                if not library:
+                    report['compared_to_original'] = self._compared(root, meta, signatures)
                 # Friedl's taper rule on the edited board, so she sees a step
                 # before she shows anything (2026-11-12, finished 2026-11-13).
                 report['layout_rules'] = ({'findings': [], 'omitted': 0, 'not_checked': 'a library has no board'}
@@ -1206,7 +1221,7 @@ class KiCadProvider:
                 kept = bool(evidence)
                 return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision,
                         'stdout': stdout[:16000], 'stderr': stderr[:16000],
-                        'change_report': report, 'before': before, 'after': after}
+                        'change_report': report, 'before': before, 'after': after, 'steps': steps}
             except BaseException as error:
                 restored = False
                 try:
@@ -1479,7 +1494,7 @@ class KiCadProvider:
         return {'checked': True, 'reason': '', 'totals': totals, 'groups': ordered,
                 'top_level_sheets': top_level_sheets(schematic.parent)}
 
-    def _drc(self, root, meta):
+    def _drc(self, root, meta, signatures=None):
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
         output.parent.mkdir(exist_ok=True)
         # The board against its schematic too: without this option KiCad never
@@ -1566,6 +1581,13 @@ class KiCadProvider:
                     raise KiCadError('invalid_report')
                 totals[severity] += 1
                 totals['total'] += 1
+                if signatures is not None:
+                    # Every finding, before the limits, so a later check can say
+                    # exactly what is new against his original (D-082).
+                    signatures.append({'type': kind, 'severity': severity,
+                                       'description': finding.get('description', ''),
+                                       'items': sorted(str(item.get('description', ''))
+                                                       for item in finding['items'])})
                 # Count all citations before finding limits, once per finding/rule.
                 for name in cited_names(finding.get('description', '')):
                     citations[name] = citations.get(name, 0) + 1
@@ -1619,7 +1641,16 @@ class KiCadProvider:
             raise KiCadError('original_changed')
         meta = {'source': str(source), 'hashes': hashes, 'board': boards[0]}
         (root / 'metadata.json').write_text(json.dumps(meta))
-        result = self._drc(root, meta)
+        signatures = []
+        result = self._drc(root, meta, signatures)
+        # His original as it was copied: each step's fingerprint, every DRC
+        # finding and every schematic/board disagreement, so later work is
+        # judged against it (D-082).
+        steps = fingerprints(root / 'project', meta['board'])
+        steps.pop('copper')
+        self._save_metadata(root, dict(meta, original_steps=steps))
+        (root / 'baseline.json').write_text(json.dumps({'drc': signatures,
+                                                        'parity': self._parity(root, meta)}))
         # The schematic is checked too, errors and warnings, aiming for a
         # clean result like the DRC (Friedl, 2026-11-13).
         result['erc'] = self._erc(root, meta)
@@ -1663,6 +1694,84 @@ class KiCadProvider:
                 'footprint_libraries': [{'path': name, 'name': Path(name).stem, 'footprints': counts[name]}
                                         for name in pretty],
                 'symbol_libraries': symbols}
+
+    def _original_steps(self, root, meta):
+        # Copies made before D-082 have none recorded; their original is
+        # still his project, which write-back proves unchanged.
+        if meta.get('original_steps'):
+            return meta['original_steps']
+        steps = fingerprints(Path(meta['source']), meta['board'])
+        steps.pop('copper')
+        return steps
+
+    def _step_status(self, root, meta):
+        current = fingerprints(root / 'project', meta['board'])
+        return step_status(self._original_steps(root, meta), meta.get('approvals', {}), current)
+
+    def _parity(self, root, meta):
+        """Where the schematic and the board disagree, pin by pin, across every sheet; None without one."""
+        from alx.providers.kicad_hierarchy import netlist_nets
+        board = root / 'project' / meta['board']
+        schematic = board.with_suffix('.kicad_sch')
+        if not schematic.is_file():
+            return None
+        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
+        output.parent.mkdir(exist_ok=True)
+        self._run('sch', 'export', 'netlist', '--output', output, schematic)
+        return parity_mismatches(netlist_nets(output.read_text(errors='replace')), board.read_text())
+
+    def _baseline(self, root):
+        path = root / 'baseline.json'
+        return json.loads(path.read_text()) if path.is_file() else None
+
+    def _compared_parity(self, root, meta):
+        now = self._parity(root, meta) or []
+        base = (self._baseline(root) or {}).get('parity') or []
+        return {'new': sorted(set(now) - set(base)), 'fixed': len(set(base) - set(now)),
+                'schematic': now is not None}
+
+    def _compared(self, root, meta, signatures):
+        """What the DRC finds now that it did not find on his original, and what it no longer finds."""
+        base = self._baseline(root)
+        if base is None:
+            return {'available': False}
+        key = lambda f: json.dumps([f['type'], f['severity'], f['description'], f['items']])  # noqa: E731
+        before, after = Counter(map(key, base['drc'])), Counter(map(key, signatures))
+        new, resolved = after - before, before - after
+        parity = self._compared_parity(root, meta)
+        return {'available': True, 'new': sum(new.values()), 'resolved': sum(resolved.values()),
+                'new_findings': [dict(zip(('type', 'severity', 'description', 'items'), json.loads(item)))
+                                 for item in list(new.elements())[:20]],
+                'schematic_vs_board_new': parity['new'][:20], 'schematic_vs_board_fixed': parity['fixed']}
+
+    def approve_step(self, arguments):
+        """Friedl approved one step of her copy as he saw it (D-082)."""
+        step = arguments.get('step')
+        if step not in STEPS:
+            raise KiCadError('arguments_unusable', {'detail': 'step is schematic, placement or routing'})
+        with self._locked(arguments['work_copy_id']):
+            root, meta = self._load(arguments['work_copy_id'])
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            if meta.get('library'):
+                raise KiCadError('arguments_unusable', {'detail': 'a library copy has no steps'})
+            revision = self._revision(root)
+            if revision != arguments['work_copy_revision']:
+                raise KiCadError('work_copy_changed')
+            current = fingerprints(root / 'project', meta['board'])
+            original = self._original_steps(root, meta)
+            approvals = dict(meta.get('approvals', {}))
+            status = step_status(original, approvals, current)
+            index = STEPS.index(step)
+            if index and not ready(status, STEPS[index - 1]):
+                raise KiCadError('step_not_approved', {
+                    'needs': next(name for name in STEPS if status[name] not in ('unchanged', 'approved')),
+                    'steps': status})
+            if status[step] != 'unchanged':
+                approvals[step] = {name: current[name] for name in STEPS[:index + 1]}
+                self._save_metadata(root, dict(meta, approvals=approvals))
+            return {'step': step, 'steps': step_status(original, approvals, current),
+                    'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision}
 
     def write_back(self, arguments):
         report = arguments.get('report')
@@ -1724,6 +1833,17 @@ class KiCadProvider:
             raise KiCadError('work_copy_changed')
         if meta.get('taint'):
             raise KiCadError('work_copy_tainted')
+        if not meta.get('library'):
+            # Nothing reaches his project before he has approved every changed
+            # step, and the board matches the schematic he approved (D-082).
+            status = self._step_status(root, meta)
+            if not ready(status, 'routing'):
+                raise KiCadError('step_not_approved', {
+                    'needs': next(step for step in STEPS if status[step] not in ('unchanged', 'approved')),
+                    'steps': status})
+            differing = self._compared_parity(root, meta)['new']
+            if differing:
+                raise KiCadError('schematic_board_differ', {'new_mismatches': differing[:20]})
 
         temporary = set()
         expected = dict(meta['hashes'])

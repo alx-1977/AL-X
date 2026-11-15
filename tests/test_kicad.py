@@ -694,6 +694,9 @@ class KiCadTests(unittest.TestCase):
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
             EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(edited))
+        self.success('approve_step', step='schematic', work_copy_id=edited['work_copy_id'],
+                     work_copy_revision=edited['work_copy_revision'])
         written = self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn(str(self.project / 'test.kicad_sch'), written['written'])
         self.assertIn('version 2', (self.project / 'test.kicad_sch').read_text())
@@ -1037,6 +1040,139 @@ class KiCadTests(unittest.TestCase):
         self.assertEqual((self.project / 'test.kicad_pcb').read_text(), BOARD)
         self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn('(layer "User.1")', (self.project / 'test.kicad_pcb').read_text())
+
+    # D-082: schematic, placement, routing, each approved by Friedl before the next.
+    MOVE_U1 = """
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('(uuid "footprint-id")', '(at 5 5) (uuid "footprint-id")', 1))
+"""
+    ADD_TRACK = """
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text()[:-1] + ' (segment (start 3 4) (end 6 4) (width 0.25) (layer "F.Cu")))')
+"""
+    CHANGE_SCHEMATIC = """
+import sys
+from pathlib import Path
+Path(sys.argv[1]).with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')
+"""
+
+    def approve(self, result, step):
+        return self.success('approve_step', step=step, work_copy_id=result['work_copy_id'],
+                            work_copy_revision=result['work_copy_revision'])
+
+    def test_board_work_goes_placement_then_routing_then_write_back(self):
+        checked = self.check()
+        copy = checked['work_copy_id']
+        # The schematic is unchanged, so the parts may move at once; copper may not be added.
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.assertEqual(dict(moved['steps']), {'schematic': 'unchanged', 'placement': 'needs_approval',
+                                                'routing': 'unchanged'})
+        result = self.call('edit_kicad_work_copy', work_copy_id=copy, script=self.ADD_TRACK)
+        self.assertEqual(result.failure['code'], 'step_not_approved')
+        self.assertEqual(result.failure['recovery']['needs'], 'placement')
+        self.assertEqual(result.failure['recovery']['rollback_status'], 'restored')
+        self.assertNotIn('(start 3 4) (end 6 4)', next(self.storage.rglob('project/test.kicad_pcb')).read_text())
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(moved))
+        self.approve(moved, 'placement')
+        routed = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.ADD_TRACK)
+        self.assertEqual(routed['steps']['routing'], 'needs_approval')
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(routed))
+        self.approve(routed, 'routing')
+        self.success('write_back_kicad_board', **self.write_args(routed))
+        board = (self.project / 'test.kicad_pcb').read_text()
+        self.assertIn('(at 5 5)', board)
+        self.assertIn('(start 3 4) (end 6 4)', board)
+
+    def test_nothing_on_the_board_changes_before_the_schematic_is_approved(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        copy = checked['work_copy_id']
+        result = self.call('edit_kicad_work_copy', work_copy_id=copy, script=self.CHANGE_SCHEMATIC + self.MOVE_U1)
+        self.assertEqual(result.failure['code'], 'step_not_approved')
+        self.assertEqual(result.failure['recovery']['needs'], 'schematic')
+        drawn = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.CHANGE_SCHEMATIC)
+        self.assertEqual(drawn['steps']['schematic'], 'needs_approval')
+        # A later step cannot be approved before the one he must see first.
+        self.failure('step_not_approved', 'approve_step', step='placement', work_copy_id=copy,
+                     work_copy_revision=drawn['work_copy_revision'])
+        self.approve(drawn, 'schematic')
+        self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+
+    def test_changing_an_approved_step_needs_it_and_every_later_one_again(self):
+        checked = self.check()
+        copy = checked['work_copy_id']
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.approve(moved, 'placement')
+        routed = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.ADD_TRACK)
+        approved = self.approve(routed, 'routing')
+        self.assertEqual(dict(approved['steps']), {'schematic': 'unchanged', 'placement': 'approved',
+                                                   'routing': 'approved'})
+        again = self.success('edit_kicad_work_copy', work_copy_id=copy, script="""
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
+""")
+        self.assertEqual(dict(again['steps']), {'schematic': 'unchanged', 'placement': 'needs_approval',
+                                                'routing': 'waiting'})
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(again))
+        # An approval is of the revision he saw.
+        self.failure('work_copy_changed', 'approve_step', step='placement', work_copy_id=copy,
+                     work_copy_revision=routed['work_copy_revision'])
+
+    def test_an_unchanged_step_needs_no_approval_and_approving_it_records_nothing(self):
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertEqual(set(edited['steps'].values()), {'unchanged'})
+        self.assertEqual(self.approve(edited, 'schematic')['steps']['schematic'], 'unchanged')
+        self.success('write_back_kicad_board', **self.write_args(edited))
+
+    def test_a_board_that_disagrees_with_the_schematic_is_not_written(self):
+        board = BOARD.replace('(pad "1" smd rect (at 1 2) (size 1 1) (layers "F.Cu") (uuid "pad-id")))',
+                              '(pad "1" smd rect (at 1 2) (size 1 1) (layers "F.Cu") (net 1 "A") (uuid "pad-id"))'
+                              ' (pad "2" smd rect (at 3 2) (size 1 1) (layers "F.Cu") (net 2 "B")))')
+        (self.project / 'test.kicad_pcb').write_text(board)
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        # Original and copy: U1 pins 1 and 2 on nets of their own in the schematic.
+        self.netlists = [[('A', 'U1', '1'), ('B', 'U1', '2')] for _ in range(3)]
+        checked = self.check()
+        # Her copy joins them on the board.
+        joined = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="""
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
+""")
+        self.assertEqual(list(joined['change_report']['compared_to_original']['schematic_vs_board_new']),
+                         ['board only: U1.1, U1.2'])
+        result = self.call('write_back_kicad_board', **self.write_args(joined))
+        self.assertEqual(result.failure['code'], 'schematic_board_differ')
+        self.assertEqual(list(result.failure['recovery']['new_mismatches']), ['board only: U1.1, U1.2'])
+        self.assertIn('(net 2 "B")', (self.project / 'test.kicad_pcb').read_text())
+
+    def test_an_edit_reports_what_the_drc_finds_that_his_original_did_not(self):
+        checked = self.check()
+        self.report = {'violations': [{'type': 'clearance', 'severity': 'error', 'description': 'Clearance',
+                                       'items': [{'description': 'Track [A] on F.Cu'}]}],
+                       'unconnected_items': [], 'schematic_parity': []}
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        compared = edited['change_report']['compared_to_original']
+        self.assertEqual(compared['new'], 1)
+        self.assertEqual(compared['resolved'], 2)
+        self.assertEqual(compared['new_findings'][0]['type'], 'clearance')
+
+    def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
+        checked = self.check()
+        metadata = next(self.storage.rglob(checked['work_copy_id'] + '/metadata.json'))
+        meta = json.loads(metadata.read_text())
+        meta.pop('original_steps')
+        metadata.write_text(json.dumps(meta))
+        moved = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.MOVE_U1)
+        self.assertEqual(moved['steps']['placement'], 'needs_approval')
 
     def test_failed_edit_restores_entire_copy_and_absent_files(self):
         checked = self.check()
