@@ -82,6 +82,42 @@ def _lib_pins(symbol):
     return pins
 
 
+def _lib_pin_angles(symbol):
+    """{number: angle} of a library symbol's pins: the way each pin runs from its end into the body."""
+    angles = {}
+
+    def walk(node):
+        for item in node:
+            if _head(item) == "pin":
+                at, number = _child(item, "at"), _child(item, "number")
+                if at is not None and number is not None:
+                    angles[_unq(number[1])] = float(at[3]) if len(at) > 3 else 0.0
+            elif isinstance(item, list):
+                walk(item)
+    walk(symbol)
+    return angles
+
+
+def _lib_outline(symbol):
+    """Every drawn point of a library symbol (its body), its own coordinates (y up)."""
+    points = []
+
+    def walk(node):
+        for item in node:
+            if not isinstance(item, list):
+                continue
+            head = _head(item)
+            if head in ("start", "end", "mid", "xy", "center") and len(item) >= 3:
+                try:
+                    points.append((float(item[1]), float(item[2])))
+                except ValueError:
+                    pass
+            if head not in ("property", "pin"):
+                walk(item)
+    walk(symbol)
+    return points
+
+
 def _placed(at, mirror, x, y):
     """A library point (y up) placed on the sheet (y down): mirrored, then turned."""
     sx, sy = x, -y
@@ -160,6 +196,116 @@ class Sheet:
                           "mirror": mirror[1] if mirror else None,
                           "pins": self._symbol_pins(symbol, libs)})
         return found
+
+    def _placed_symbol(self, ref):
+        root, spans = self._tree()
+        libs = self._libs(root)
+        found = [s for s in _children(root, "symbol") if self._ref(s) == ref]
+        if not found:
+            raise KeyError("no symbol %s on %s" % (ref, _os.path.basename(self.path)))
+        symbol = found[0]
+        return symbol, libs.get(_unq(_child(symbol, "lib_id")[1])), spans
+
+    def pin_direction(self, ref, pin):
+        """The way a pin points out of its part on the sheet: (1, 0) right, (0, 1) down, ..."""
+        symbol, lib, _ = self._placed_symbol(ref)
+        angles = {}
+        for part in _children(lib, "symbol"):
+            angles.update(_lib_pin_angles(part))
+        if str(pin) not in angles:
+            raise KeyError("%s has no pin %s" % (ref, pin))
+        turn = _math.radians(angles[str(pin)] + 180.0)
+        at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
+        end = _placed(at, mirror[1] if mirror else None, _math.cos(turn), _math.sin(turn))
+        origin = _placed(at, mirror[1] if mirror else None, 0.0, 0.0)
+        return (round(end[0] - origin[0]), round(end[1] - origin[1]))
+
+    def pin_stub(self, ref, pin, length=2.54):
+        """A wire straight out of the pin, in its own direction, one grid step by default; its end."""
+        start = self.symbol(ref)["pins"][str(pin)]
+        dx, dy = self.pin_direction(ref, pin)
+        end = _r((start[0] + dx * length, start[1] + dy * length))
+        self.add_wire(start, end)
+        return end
+
+    def wire_pin_to(self, ref, pin, target, length=2.54):
+        """From a pin, straight out one step, then on to target with one turn. Returns the points."""
+        end = self.pin_stub(ref, pin, length)
+        dx, _ = self.pin_direction(ref, pin)
+        target = _r(target)
+        # The turn after the stub goes across the pin's direction, never back over the part.
+        corner = (end[0], target[1]) if dx else (target[0], end[1])
+        points = [end] + [p for p in (corner, target) if p != end]
+        if len(points) > 1:
+            self.add_wire(*points)
+        return [self.symbol(ref)["pins"][str(pin)]] + points
+
+    def label_pin(self, ref, pin, name, kind="label", length=2.54):
+        """A net label at the end of a short wire straight out of the pin."""
+        end = self.pin_stub(ref, pin, length)
+        dx, dy = self.pin_direction(ref, pin)
+        angle = {(1, 0): 0, (-1, 0): 180, (0, -1): 90, (0, 1): 270}[(dx, dy)]
+        self.add_label(name, end, angle, kind)
+        return end
+
+    def _port_pin(self, ref, pin, template, down):
+        end = self.pin_stub(ref, pin)
+        dx, dy = self.pin_direction(ref, pin)
+        want = 1 if down else -1
+        if (dx, dy) != (0, want):
+            # Out of the pin first, then turn toward where the port points.
+            turned = _r((end[0], end[1] + want * 2.54))
+            self.add_wire(end, turned)
+            end = turned
+        self.copy_symbol(template, end, 0)
+        return end
+
+    def ground_pin(self, ref, pin, template):
+        """A GND port, pointing down, on a short wire from the pin. template: a GND symbol's reference."""
+        return self._port_pin(ref, pin, template, down=True)
+
+    def power_pin(self, ref, pin, template):
+        """A power port, pointing up, on a short wire from the pin. template: that port's reference."""
+        return self._port_pin(ref, pin, template, down=False)
+
+    def tidy_fields(self, ref):
+        """Reference and value beside the part, the same way for every part, clear of its body.
+
+        Upright parts get them to the right, reference above value; parts lying
+        down get them above and below, centred.
+        """
+        symbol, lib, spans = self._placed_symbol(ref)
+        at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
+        outline = []
+        for part in _children(lib, "symbol"):
+            outline += _lib_outline(part) + list(_lib_pins(part).values())
+        placed = [_placed(at, mirror[1] if mirror else None, x, y) for x, y in outline] or [_r(at[1:3])]
+        left, right = min(p[0] for p in placed), max(p[0] for p in placed)
+        top, bottom = min(p[1] for p in placed), max(p[1] for p in placed)
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        if bottom - top >= right - left:
+            spots = {"Reference": (right + 1.27, cy - 1.27, "left"), "Value": (right + 1.27, cy + 1.27, "left")}
+        else:
+            spots = {"Reference": (cx, top - 1.27, ""), "Value": (cx, bottom + 2.54, "")}
+        start, end = spans[id(symbol)]
+        block = self.text[start:end]
+        for name, (x, y, justify) in spots.items():
+            match = _re.search(r'\(property "%s" ' % name, block)
+            if not match:
+                continue
+            depth, index = 0, match.start()
+            for index in range(match.start(), len(block)):
+                depth += {"(": 1, ")": -1}.get(block[index], 0)
+                if depth == 0:
+                    break
+            prop = block[match.start():index + 1]
+            prop = _re.sub(r'\(at [-\d.]+ [-\d.]+(?: [-\d.]+)?\)', "(at %g %g 0)" % (round(x, 2), round(y, 2)),
+                           prop, count=1)
+            prop = _re.sub(r'\s*\(justify [^)]*\)', "", prop)
+            if justify and "(effects" in prop:
+                prop = prop.replace("(effects", "(effects (justify %s)" % justify, 1)
+            block = block[:match.start()] + prop + block[index + 1:]
+        self.text = self.text[:start] + block + self.text[end:]
 
     def symbol(self, ref):
         for item in self.symbols():

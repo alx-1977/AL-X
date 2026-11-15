@@ -147,6 +147,38 @@ print("swapped", s.symbol("R1")["lib_id"], s.symbol("R1")["value"], s.symbol("R1
             nets = self.netlist(folder)
             self.assertEqual(nets["/CAP"], frozenset({("R1", "1"), ("R2", "1")}))
 
+    def test_pins_are_wired_his_way_and_kicad_agrees(self):
+        """15 Nov: wires straight out of each pin first, GND down on a short wire, text tidy."""
+        with tempfile.TemporaryDirectory() as folder:
+            text = schematic().replace('(property "Reference" "R4"', '(property "Reference" "#PWR01"', 1)
+            text = text.replace('(reference "R4")', '(reference "#PWR01")', 1)
+            (Path(folder) / "t.kicad_sch").write_text(text)
+            out = self.run_script(folder, """
+s = sheet("t.kicad_sch")
+print("dirs", s.pin_direction("R1", "1"), s.pin_direction("R1", "2"), s.pin_direction("R2", "1"),
+      s.pin_direction("R3", "1"))
+points = s.wire_pin_to("R1", "2", s.symbol("R2")["pins"]["1"])
+print("route", points)
+s.label_pin("R2", "2", "OUT")
+s.label_pin("R3", "1", "OUT")
+end = s.ground_pin("R3", "2", "#PWR01")
+print("gnd", end)
+s.tidy_fields("R1")
+s.tidy_fields("R2")
+s.save()
+""")
+            self.assertIn("dirs (0, -1) (0, 1) (-1, 0) (0, -1)", out)
+            # Straight down out of R1 pin 2 first, then across and on to R2 pin 1.
+            self.assertIn("route [(101.6, 105.41), (101.6, 107.95), (123.19, 107.95), (123.19, 101.6)]", out)
+            self.assertIn("gnd (152.4, 107.95)", out)
+            nets = self.netlist(folder)
+            self.assertIn(frozenset({("R1", "2"), ("R2", "1")}), nets.values())
+            self.assertEqual(nets["/OUT"], frozenset({("R2", "2"), ("R3", "1")}))
+            saved = Path(folder, "t.kicad_sch").read_text()
+            # R1 stands upright: its text to the right; R2 lies down: above and below.
+            self.assertIn('(property "Reference" "R1"\n\t\t\t(at 103.89 100.33 0)', saved)
+            self.assertIn('(property "Reference" "R2"\n\t\t\t(at 127 ', saved)
+
     def test_a_power_symbol_is_copied_with_a_free_number(self):
         with tempfile.TemporaryDirectory() as folder:
             text = schematic()
