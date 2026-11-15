@@ -142,6 +142,10 @@ class LiveVoiceServer:
         # because one carries input and the other carries output; conflating
         # them is how a console starts inferring where text should go.
         self._typed_queues: dict[str, list[Any]] = {}
+        # Each connection's own typed queue: a line goes to the screen it was
+        # typed on, never to every screen of the conversation (15 Nov: with two
+        # screens open, one message ran two whole turns).
+        self._typed_by_connection: dict[Any, Any] = {}
         # The loop that owns those queues, captured when a listener registers.
         # Delivery from a worker thread has to hand the work back to it.
         self._delivery_loop: Any = None
@@ -350,7 +354,7 @@ class LiveVoiceServer:
     # guessed at.
     DELIVERY_ACK_SECONDS = 5.0
 
-    def _queue_typed_turn(self, conversation_id: str, payload: str) -> None:
+    def _queue_typed_turn(self, conversation_id: str, payload: str, queue: Any) -> None:
         """Hand a typed line to the session, or drop a malformed frame.
 
         Dropping rather than raising: a browser sending nonsense must not end a
@@ -374,12 +378,12 @@ class LiveVoiceServer:
         if len(content) > self.MAX_TYPED_CHARACTERS:
             LOGGER.info("Ignoring an oversized console frame")
             return
-        queues = getattr(self, "_typed_queues", {}).get(conversation_id) or []
-        for queue in queues:
-            try:
-                queue.put_nowait(content)
-            except Exception:
-                continue
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(content)
+        except Exception:
+            return
 
     def _typed_queue(self, conversation_id: str):
         """The queue this exchange drains typed lines from.
@@ -423,6 +427,7 @@ class LiveVoiceServer:
         self._delivery_queues.setdefault(conversation_id, []).append(deliveries)
         typed: asyncio.Queue[str] = asyncio.Queue()
         self._typed_queues.setdefault(conversation_id, []).append(typed)
+        self._typed_by_connection[connection] = typed
         self._delivery_loop = asyncio.get_running_loop()
         self._live_conversations.append(conversation_id)
         LOGGER.info("Voice session connected")
@@ -509,6 +514,7 @@ class LiveVoiceServer:
                 typed_waiting.remove(typed)
             if not typed_waiting:
                 self._typed_queues.pop(conversation_id, None)
+            self._typed_by_connection.pop(connection, None)
             # Unregister before waiting: a disconnected listener cannot accept
             # new deliveries while a running Core worker finishes under its lock.
             cancelled_during_cleanup = False
@@ -531,7 +537,7 @@ class LiveVoiceServer:
                 conversation_id,
                 self._audio(connection, conversation_id),
                 self._delivery_queue(conversation_id),
-                self._typed_queue(conversation_id),
+                getattr(self, "_typed_by_connection", {}).get(connection) or self._typed_queue(conversation_id),
             ):
                 if event.kind is VoiceEventKind.AUDIO:
                     assert event.audio is not None
@@ -640,7 +646,8 @@ class LiveVoiceServer:
                 # The only non-audio frame the socket accepts. It carries what
                 # Friedl typed and nothing else: no command, no destination, no
                 # grammar. Where it goes is decided here, not by what it says.
-                self._queue_typed_turn(stream_id, payload)
+                self._queue_typed_turn(stream_id, payload,
+                                       getattr(self, "_typed_by_connection", {}).get(connection))
                 continue
             if not isinstance(payload, bytes) or not payload:
                 continue
