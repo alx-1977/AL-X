@@ -17,10 +17,12 @@ message says.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -30,6 +32,8 @@ from alx.contracts import (
     ReasoningModel,
 )
 from alx.specialists.worker import MechanicalWorker, WorkerError, _catalogue, _plain, worker_tools
+
+logger = logging.getLogger(__name__)
 
 REPORT_TOOL = "report_step"
 RECEIPTS_KEPT = 40
@@ -195,6 +199,31 @@ class BoardJobAgent(MechanicalWorker):
         journal["receipts"] = (journal.get("receipts", []) + [receipt])[-RECEIPTS_KEPT:]
         self._save(job_id, journal)
 
+    def _log_call(self, job_id: str, tool_use: Mapping[str, Any], summary: Mapping[str, Any], answer: str) -> None:
+        """Every call in full, beside the journal and never shown to the model: what was sent
+        and, when it failed, why (16 Nov: refusals could not be read while a job ran)."""
+        try:
+            returned = json.loads(answer)
+        except ValueError:
+            returned = {"unparsed": answer[:2000]}
+        failure = returned.get("failure") if isinstance(returned, Mapping) else None
+        if isinstance(failure, Mapping):
+            recovery = failure.get("recovery") if isinstance(failure.get("recovery"), Mapping) else {}
+            failure = {"code": failure.get("code"), "fault": failure.get("fault"),
+                       "detail": recovery.get("detail") or failure.get("detail"),
+                       "unmet": recovery.get("unmet"), "stderr": str(recovery.get("stderr") or "")[-1500:]}
+        entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "call_id": summary.get("call_id"),
+                 "capability_id": summary.get("capability_id"), "outcome": summary.get("outcome"),
+                 "sent": str((tool_use.get("input") or {}).get("arguments_json", ""))[:6000],
+                 "refused": returned.get("refused") if isinstance(returned, Mapping) else None,
+                 "reason_code": returned.get("reason_code") if isinstance(returned, Mapping) else None,
+                 "failure": failure}
+        try:
+            with (self._journal_root / f"{job_id}.calls.jsonl").open("a") as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            logger.warning("board job %s: call log not written", job_id)
+
     def _request(self, job_id: str, journal: Mapping[str, Any]) -> ModelRequest:
         system = (f"{AGENT_INSTRUCTIONS}\nHis preferences:\n{self._preferences_text()}\n\n"
                   f"Capabilities you may call:\n{_catalogue(tuple(self._definitions.values()))}")
@@ -259,6 +288,7 @@ class BoardJobAgent(MechanicalWorker):
                 calls.append(summary)
                 returned.append({**summary, "returned": json.loads(answer)})
                 self._receipt(job_id, journal, summary, answer)
+                self._log_call(job_id, completion.tool_use, summary, answer)
                 if self._stop.is_set():
                     return stopped("stopped_by_alx")
                 completion = self._model.complete(replace(request, tool_result=answer, tool_images=images))
