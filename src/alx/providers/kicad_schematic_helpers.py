@@ -226,7 +226,48 @@ class Sheet:
         dx, dy = self.pin_direction(ref, pin)
         return start, _r((start[0] + dx * length, start[1] + dy * length))
 
-    def check_clear(self, ref, pin, points, allow=()):
+    def _wired_to(self, point):
+        """The wires joined to point, through ends and wires they end on: (their points, their ends)."""
+        wires = [tuple(pts) for pts in self.wires()]
+        reached, ends, frontier = set(), {_r(point)}, [_r(point)]
+        while frontier:
+            here = frontier.pop()
+            for index, pts in enumerate(wires):
+                if index in reached:
+                    continue
+                if here in (pts[0], pts[-1]) or any(_on(here, a, b) for a, b in zip(pts, pts[1:])) \
+                        or any(_on(e, here, here) for e in (pts[0], pts[-1])):
+                    reached.add(index)
+                    for e in (pts[0], pts[-1]):
+                        if e not in ends:
+                            ends.add(e)
+                            frontier.append(e)
+        return [wires[i] for i in reached], ends
+
+    def _orphan_wires(self, root, libs):
+        """Wires in groups that reach no pin, label or port."""
+        wires = [tuple(pts) for pts in self.wires()]
+        anchors = {p for s in _children(root, "symbol") for p in self._symbol_pins(s, libs).values()}
+        anchors |= {_r(_child(n, "at")[1:3]) for n in root
+                    if _head(n) in ("label", "global_label", "hierarchical_label")}
+        parent = list(range(len(wires)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        for i, a in enumerate(wires):
+            for j in range(i + 1, len(wires)):
+                b = wires[j]
+                if any(_on(e, c, d) for e in (a[0], a[-1]) for c, d in zip(b, b[1:])) or \
+                        any(_on(e, c, d) for e in (b[0], b[-1]) for c, d in zip(a, a[1:])):
+                    parent[find(i)] = find(j)
+        anchored = {find(i) for i, pts in enumerate(wires)
+                    if any(_on(p, c, d) for p in anchors for c, d in zip(pts, pts[1:]))}
+        return {pts for i, pts in enumerate(wires) if find(i) not in anchored}
+
+    def check_clear(self, ref, pin, points, allow=(), joined_to=None):
         """New wiring from a pin through points must touch nothing already on the sheet.
 
         15 Nov: a GND port's wire landed on an old wire's corner and joined a
@@ -234,14 +275,19 @@ class Sheet:
         label, a no-connect, another pin) is refused, naming what and where.
         """
         own = self.symbol(ref)["pins"][str(pin)]
+        # Wiring already on the target's net may be touched: it joins what is to be joined.
+        same, ends = self._wired_to(joined_to) if joined_to is not None else ([], set())
         self._check_segments([(a, b, "%s.%s" % (ref, pin)) for a, b in zip(points, points[1:])],
-                             {own} | {_r(p) for p in allow})
+                             {own} | {_r(p) for p in allow} | ends, same)
 
-    def _check_segments(self, segments, allowed):
+    def _check_segments(self, segments, allowed, same=()):
         """segments: (a, b, the pin it is for); refused at the first that touches what is there."""
         root, _ = self._tree()
         libs = self._libs(root)
-        wires = self.wires()
+        # Leftover wiring joined to nothing (no pin, label or port anywhere on it) is no hazard:
+        # touching it joins nothing. remove_dangling clears it.
+        skip = set(same) | self._orphan_wires(root, libs)
+        wires = [pts for pts in self.wires() if tuple(pts) not in skip]
         things = [("a wire end", p) for pts in wires for p in (pts[0], pts[-1])]
         things += [("label %s" % item["name"], item["at"]) for item in self.labels()]
         things += [("a no-connect", _r(_child(n, "at")[1:3])) for n in _children(root, "no_connect")]
@@ -250,20 +296,33 @@ class Sheet:
             for number, point in self._symbol_pins(symbol, libs).items():
                 if point not in allowed:
                     things.append(("pin %s.%s" % (name, number), point))
+        pin_names = {}
+        for symbol in _children(root, "symbol"):
+            for number, point in self._symbol_pins(symbol, libs).items():
+                pin_names.setdefault(point, "%s.%s" % (self._ref(symbol), number))
+        label_names = {item["at"]: item["name"] for item in self.labels()}
+
+        def joined(point):
+            # What that wiring already reaches, so the refusal says whose net it is.
+            group, _ = self._wired_to(point)
+            reached = sorted({name for q, name in list(pin_names.items()) + list(label_names.items())
+                              if any(_on(q, c, d) for pts in group for c, d in zip(pts, pts[1:]))})
+            return (" (wiring joined to %s)" % ", ".join(reached[:6])) if reached else ""
         for a, b, who in segments:
             for what, point in things:
                 if point not in allowed and _on(point, a, b):
-                    raise ValueError("%s: the new wire would touch %s at (%g, %g); clear it (remove_labels, "
-                                     "remove_items, remove_dangling) or join the pins another way"
-                                     % (who, what, point[0], point[1]))
+                    raise ValueError("%s: the new wire would touch %s at (%g, %g)%s; clear it (remove_labels, "
+                                     "remove_items, remove_dangling), route to that wiring if it is the net "
+                                     "you want, or join the pins another way"
+                                     % (who, what, point[0], point[1], joined(point) if what == "a wire end" else ""))
             for end in (a, b):
                 if end in allowed:
                     continue
                 for pts in wires:
                     if any(_on(end, c, d) for c, d in zip(pts, pts[1:])):
-                        raise ValueError("%s: the new wire would land on an existing wire at (%g, %g); clear "
+                        raise ValueError("%s: the new wire would land on an existing wire at (%g, %g)%s; clear "
                                          "it (remove_items, remove_dangling) or join the pins another way"
-                                         % (who, end[0], end[1]))
+                                         % (who, end[0], end[1], joined(end)))
 
     def pin_stub(self, ref, pin, length=2.54):
         """A wire straight out of the pin, in its own direction, one grid step by default; its end."""
@@ -272,15 +331,37 @@ class Sheet:
         self.add_wire(start, end)
         return end
 
-    def wire_pin_to(self, ref, pin, target, length=2.54):
-        """From a pin, straight out one step, then on to target with one turn. Returns the points."""
+    def wire_pin_to(self, ref, pin, target, length=2.54, via=None):
+        """From a pin, straight out one step, then on to target with one turn. Returns the points.
+
+        via: points to pass through on the way, to route around what is in the way; every
+        piece then runs straight across or straight up and down.
+        """
         start, end = self._stub_end(ref, pin, length)
-        dx, _ = self.pin_direction(ref, pin)
+        dx, dy = self.pin_direction(ref, pin)
         target = _r(target)
-        # The turn after the stub goes across the pin's direction, never back over the part.
-        corner = (end[0], target[1]) if dx else (target[0], end[1])
+        if via:
+            points = [end] + [_r(p) for p in via] + [target]
+            points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
+            for a, b in zip(points, points[1:]):
+                if a[0] != b[0] and a[1] != b[1]:
+                    raise ValueError("%s.%s: via (%g, %g) to (%g, %g) is neither straight across nor straight up "
+                                     "and down" % (ref, pin, a[0], a[1], b[0], b[1]))
+            self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
+            self.add_wire(start, end)
+            self.add_wire(*points)
+            return [start] + points
+        # Straight out of the pin to the target's line, then one turn into it: the wire leaves
+        # the part's side at once (16 Nov: turning right after the stub ran the RFC wire up the
+        # switch's side across where pins 1 and 2 come out). A target behind the pin turns
+        # right after the stub, never back over the part.
+        ahead = (target[0] - end[0]) * dx > 0 if dx else (target[1] - end[1]) * dy > 0
+        if ahead:
+            corner = (target[0], end[1]) if dx else (end[0], target[1])
+        else:
+            corner = (end[0], target[1]) if dx else (target[0], end[1])
         points = [end] + [p for p in (corner, target) if p != end]
-        self.check_clear(ref, pin, [start] + points, allow=(target,))
+        self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
         self.add_wire(start, end)
         if len(points) > 1:
             self.add_wire(*points)

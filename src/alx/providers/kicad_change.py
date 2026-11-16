@@ -263,7 +263,8 @@ def apply_change(change):
             elif kind == "wire":
                 ref, number = _pin(op["from"])
                 to_ref, to_number = _pin(op["to"])
-                done["points"] = s.wire_pin_to(ref, number, s.symbol(to_ref)["pins"][to_number])
+                done["points"] = s.wire_pin_to(ref, number, s.symbol(to_ref)["pins"][to_number],
+                                               via=[tuple(p) for p in op.get("via") or ()] or None)
             elif kind == "label":
                 ref, number = _pin(op["pin"])
                 s.label_pin(ref, number, op["net"], op.get("kind", "label"))
