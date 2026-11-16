@@ -275,6 +275,11 @@ def apply_change(change):
                 if loose:
                     s.tidy(loose)
                 done["old_pins_tidied"] = len(loose)
+                # The new part's own notes (its Notes field), so they are read when it is used.
+                library_part = s._libs(s._tree()[0]).get(op["lib_id"])
+                for prop in _children(library_part or [], "property"):
+                    if _unq(prop[1]) == "Notes" and _unq(prop[2]).strip():
+                        done["notes"] = _unq(prop[2]).strip()
                 # New pins where the old part's wiring still ends: that wiring is now on them
                 # (15 Nov: the old VCTL wire sat on the new switch's NC pin 11).
                 ends = {p for pts in s.wires() for p in (pts[0], pts[-1])} | {l["at"] for l in s.labels()}

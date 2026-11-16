@@ -2323,11 +2323,13 @@ class KiCadProvider:
         names = [n for n in (arguments.get('library_symbols') or ())][:10]
         for name, block in (self._library_parts([n for n in names if not self._sheet_has_symbol(project, n)],
                                                 project, 'symbols') if names else {}).items():
-            library.append({'lib_id': name, 'pins': self._symbol_pins_from(block)})
+            library.append({'lib_id': name, 'pins': self._symbol_pins_from(block),
+                            **self._symbol_notes_from(block)})
         for name in names:
             cached = self._cached_symbol(project, name) if self._sheet_has_symbol(project, name) else None
             if cached is not None:
-                library.append({'lib_id': name, 'pins': self._symbol_pins_from(cached)})
+                library.append({'lib_id': name, 'pins': self._symbol_pins_from(cached),
+                                **self._symbol_notes_from(cached)})
         return {'sheets': sheets, 'parts': parts[:limit], 'nets': chosen[:limit], 'library_symbols': library,
                 'truncated': {'parts': len(parts) > limit, 'nets': len(chosen) > limit}}
 
@@ -2357,6 +2359,15 @@ class KiCadProvider:
                     direction = None
                 pin.update(at=list(point), points={(1, 0): 'right', (-1, 0): 'left', (0, 1): 'down',
                                                    (0, -1): 'up'}.get(direction, ''), wired=point in ends)
+
+    @staticmethod
+    def _symbol_notes_from(block):
+        """A library part's own design notes (its Notes field), when it has them: what its
+        datasheet asks of the board, kept on the part (16 Nov: the RFSW6024's NC pins)."""
+        for node in sexpr(block).named('property'):
+            if len(node.children) > 2 and str(node.children[1]) == 'Notes' and str(node.children[2]).strip():
+                return {'notes': str(node.children[2]).strip()}
+        return {}
 
     @staticmethod
     def _symbol_pins_from(block):
