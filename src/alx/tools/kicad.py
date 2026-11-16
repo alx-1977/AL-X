@@ -123,7 +123,8 @@ _ACTION_DEFINITIONS = (
         'pin_nets?}; add_part {ref, footprint, at, rotation?, side?, value?, pin_nets?}; place {ref, '
         'at? | near: {ref, offset}, rotation?, side?}; track {width, from?: REF.PAD, to?: REF.PAD, '
         'points?, net?, layer?, radius?}; via {net, at}; remove_tracks {nets, area?}; remove_teardrops '
-        '{area}. The library parts named are found by themselves. Code carries the change out in one '
+        '{area}; remove_dangling_tracks {area} (tracks and vias inside that lead nowhere, by KiCad\'s '
+        'own connectivity, repeated until none). The library parts named are found by themselves. Code carries the change out in one '
         'run and checks the result: every wire, label, power and no-connect holds in KiCad\'s netlist, '
         'every replaced pad has its net, removed parts are gone, and no pin (other than a '
         'swapped or removed part\'s) is joined to anything the change did not join, nor split '
@@ -302,11 +303,14 @@ INSPECT = CapabilityDefinition('inspect',
     'extent, the board outline and the copper layers. The board is project_dir (one '
     'top-level board), board (a .kicad_pcb path) or work_copy_id. refs, nets and contains '
     '(text in a reference, value, footprint or field) narrow the parts and nets; limit '
-    '(default 300) bounds each list, with truncated saying when more exist.',
+    '(default 300) bounds each list, with truncated saying when more exist. window [x0, y0, x1, y1] '
+    '(mm) adds copper: the tracks (points, width, layer, net), vias and pads (ref, number, net, '
+    'centre, size) inside it, narrowed by nets and refs when given: what to route to.',
     obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'refs': array(S), 'nets': array(S),
-         'contains': S, 'limit': I}, ()),
+         'contains': S, 'limit': I, 'window': array(N)}, ()),
     obj({'board': MAP, 'parts': array(MAP), 'nets': array(MAP), 'zones': array(MAP),
-         'truncated': MAP}), SideEffect.NONE, FAILURES)
+         'truncated': MAP, 'copper': MAP}, ('board', 'parts', 'nets', 'zones', 'truncated')),
+    SideEffect.NONE, FAILURES)
 
 FETCH_DATASHEET = CapabilityDefinition('fetch_datasheet',
     "A part's datasheet as a PDF, by manufacturer part number (manufacturer narrows it). "

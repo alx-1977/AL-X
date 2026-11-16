@@ -687,12 +687,42 @@ class KiCadProvider:
         if self.execute_python is None:
             raise KiCadError('engine_unavailable')
         board = self._board_for(arguments)
+        overview_args = {key: value for key, value in arguments.items() if key != 'window'}
         try:
-            return read_overview(board, arguments, scratch_root=self.work_root / 'sections',
-                                 kicad_python=self.settings.kicad_python,
-                                 execute_python=self.execute_python)
+            result = read_overview(board, overview_args, scratch_root=self.work_root / 'sections',
+                                   kicad_python=self.settings.kicad_python,
+                                   execute_python=self.execute_python)
+            if arguments.get('window') is not None:
+                result = dict(result, copper=self._copper_in(board, arguments))
+            return result
         except SectionError as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error
+
+    def _copper_in(self, board, arguments):
+        """The copper inside a window, compactly: what a route has to reach (16 Nov: the
+        board view gave only counts, so nothing could be routed to an existing track)."""
+        from alx.providers.kicad_section import read_section
+        section = read_section(board, {'window': arguments['window'], 'nets': arguments.get('nets') or [],
+                                       'refs': arguments.get('refs') or []},
+                               scratch_root=self.work_root / 'sections', kicad_python=self.settings.kicad_python,
+                               execute_python=self.execute_python)
+        rounded = (lambda point: [round(float(point[0]), 3), round(float(point[1]), 3)])
+        pads = []
+        for pad in section.get('pads') or ():
+            outline = [p for polygon in pad.get('polygons') or () for p in polygon.get('outer') or ()]
+            if not outline:
+                continue
+            xs, ys = [p[0] for p in outline], [p[1] for p in outline]
+            pads.append({'pad': '%s.%s' % (pad.get('ref'), pad.get('number')), 'net': pad.get('net', ''),
+                         'centre': rounded(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)),
+                         'size': [round(max(xs) - min(xs), 3), round(max(ys) - min(ys), 3)]})
+        return {'window': list(arguments['window']),
+                'tracks': [{'points': [rounded(p) for p in item.get('points') or ()], 'width': item.get('width'),
+                            'layer': item.get('layer'), 'net': item.get('net', '')}
+                           for item in (section.get('tracks') or ())][:300],
+                'vias': [{'at': rounded(item['at']), 'diameter': item.get('diameter'), 'net': item.get('net', '')}
+                         for item in (section.get('vias') or ()) if item.get('at')][:200],
+                'pads': pads[:300]}
 
     def section(self, arguments):
         """One window of a board as geometry, for the viewer (D-073).
@@ -1785,10 +1815,14 @@ class KiCadProvider:
                 if signatures is not None and compared:
                     # Every finding, before the limits, so a later check can say
                     # exactly what is new against his original (D-082).
+                    first = (finding['items'] or [{}])[0].get('pos') or {}
                     signatures.append({'type': kind, 'severity': severity,
                                        'description': finding.get('description', ''),
                                        'items': sorted(str(item.get('description', ''))
-                                                       for item in finding['items'])})
+                                                       for item in finding['items']),
+                                       # Where it is, so it can be found and fixed (16 Nov); not
+                                       # part of what makes a finding the same as his.
+                                       'at': [round(float(first.get('x', 0)), 3), round(float(first.get('y', 0)), 3)]})
                 # Count all citations before finding limits, once per finding/rule.
                 for name in cited_names(finding.get('description', '')):
                     citations[name] = citations.get(name, 0) + 1
@@ -2139,9 +2173,19 @@ class KiCadProvider:
         before, after = Counter(map(key, base['drc'])), Counter(map(key, signatures))
         new, resolved = after - before, before - after
         parity = self._compared_parity(root, meta)
+        places = {}
+        for finding in signatures:
+            places.setdefault(key(finding), []).append(finding.get('at'))
+        found = []
+        for item in new.elements():
+            entry = dict(zip(('type', 'severity', 'description', 'items'), json.loads(item)))
+            spots = places.get(item) or [None]
+            entry['at'] = spots.pop() if len(spots) > 1 else spots[0]
+            found.append(entry)
+        found.sort(key=lambda entry: (entry['severity'] != 'error', entry['type']))
+        by_type = Counter(entry['type'] for entry in found)
         return {'available': True, 'new': sum(new.values()), 'resolved': sum(resolved.values()),
-                'new_findings': [dict(zip(('type', 'severity', 'description', 'items'), json.loads(item)))
-                                 for item in list(new.elements())[:20]],
+                'new_by_type': dict(by_type), 'new_findings': found[:25],
                 'schematic_vs_board_new': parity['new'][:20], 'schematic_vs_board_fixed': parity['fixed']}
 
     def _original_view(self, root, meta):

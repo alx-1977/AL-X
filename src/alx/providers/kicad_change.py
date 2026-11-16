@@ -39,6 +39,7 @@ BOARD_OPS = {
     'via': ('net', 'at'),
     'remove_tracks': ('nets',),
     'remove_teardrops': ('area',),
+    'remove_dangling_tracks': ('area',),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -86,6 +87,8 @@ def validate_change(change: Any) -> dict[str, Any]:
             footprints.add(op['footprint'])
         if op['op'] == 'track' and not (op.get('points') or (op.get('from') and op.get('to'))):
             raise ChangeError('%s (track) needs points, or from and to pads' % where)
+        if op['op'] == 'track' and not (op.get('net') or op.get('from') or op.get('to')):
+            raise ChangeError('%s (track) needs net, or a from or to pad to take it from' % where)
         for field in ('ref',):
             if isinstance(op.get(field), str):
                 touched.add(op[field])
@@ -350,7 +353,12 @@ def apply_change(change):
                     points = [xy(start.GetPosition())] + points
                 if op.get("to"):
                     ref, number = _pin(op["to"])
-                    points = points + [xy(pad(b, ref, number).GetPosition())]
+                    end = pad(b, ref, number)
+                    # A track that starts at a point takes its net from the pad it ends on (16 Nov).
+                    net = net or end.GetNetname()
+                    points = points + [xy(end.GetPosition())]
+                if not net:
+                    raise ValueError("track %d: name its net, or start or end it on a pad" % (index + 1))
                 add_track(b, net, points, op["width"], op.get("layer", "F"), op.get("radius"))
                 done["length_mm"] = track_length(b, net)
             elif kind == "via":
@@ -367,6 +375,36 @@ def apply_change(change):
                 for item in gone:
                     remove(b, item)
                 done["removed"] = len(gone)
+            elif kind == "remove_dangling_tracks":
+                # KiCad's own connectivity says which ends lead nowhere; repeated, since
+                # taking one stub off can leave the next hanging (16 Nov: 17 stubs and 2 vias
+                # were left where moved parts had been).
+                area, total = op["area"], 0
+
+                def within(item):
+                    ends = [item.GetPosition()] if item.GetClass() == "PCB_VIA" else [item.GetStart(), item.GetEnd()]
+                    return all(min(area[0], area[2]) <= mm(p.x) <= max(area[0], area[2])
+                               and min(area[1], area[3]) <= mm(p.y) <= max(area[1], area[3]) for p in ends)
+                for _ in range(20):
+                    # Zones filled as the board now is, as the DRC will see them.
+                    refill(b)
+                    b.BuildConnectivity()
+                    links = b.GetConnectivity()
+                    copper = [_pcbnew.F_Cu, _pcbnew.B_Cu] + [_pcbnew.In1_Cu + 2 * i for i in range(30)
+                                                            if b.IsLayerEnabled(_pcbnew.In1_Cu + 2 * i)]
+
+                    def dangling(item):
+                        # A via joins nothing unless it is connected on two layers, as KiCad's DRC counts it.
+                        if item.GetClass() == "PCB_VIA":
+                            return sum(1 for layer in copper if links.IsConnectedOnLayer(item, layer)) < 2
+                        return links.TestTrackEndpointDangling(item, False)
+                    gone = [t for t in list(b.GetTracks()) if within(t) and dangling(t)]
+                    if not gone:
+                        break
+                    for item in gone:
+                        remove(b, item)
+                    total += len(gone)
+                done["removed"] = total
             elif kind == "remove_teardrops":
                 gone = teardrops(b, op["area"])
                 for item in gone:
