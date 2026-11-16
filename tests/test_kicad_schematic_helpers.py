@@ -272,6 +272,23 @@ s.save()
             self.assertIn('(property "Description" "Resistor"', block)
             self.assertIn('(property "Value" "22k"', block)
 
+    def test_a_swap_takes_fields_from_his_library_not_the_sheets_bare_copy(self):
+        """16 Nov: the stored 100 pF part had no MPN; parts swapped to it lost theirs."""
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "t.kicad_sch").write_text(schematic())
+            full = library_symbol("R").replace('(symbol "R"', '(symbol "R"', 1).replace(
+                '(property "Description"', '(property "MPN" "RC0603FR-073R9L"\n\t\t\t(at 0 0 0)\n\t\t)\n'
+                '\t\t(property "Description"', 1)
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+s.swap_symbol("R1", "Device:R", value="3.9")
+s.save()
+""", symbols={"Device:R": full})
+            saved = Path(folder, "t.kicad_sch").read_text()
+            block = saved[saved.index('(property "Reference" "R1"') - 400:saved.index('(property "Reference" "R2"')]
+            self.assertIn('(property "MPN" "RC0603FR-073R9L"', block)
+            self.assertEqual(saved.count('(symbol "Device:R"'), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

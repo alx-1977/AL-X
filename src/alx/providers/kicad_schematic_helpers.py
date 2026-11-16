@@ -1303,7 +1303,16 @@ class Sheet:
     def _ensure_lib(self, lib_id):
         root, spans = self._tree()
         if lib_id in self._libs(root):
-            return
+            if lib_id not in _LIBRARY_SYMBOLS:
+                return
+            # The sheet's stored copy is replaced by his library's own (16 Nov: an imported
+            # copy of the 100 pF part had no MPN or LCSC, and parts swapped to it lost theirs).
+            cache = _child(root, "lib_symbols")
+            stored = [n for n in _children(cache, "symbol") if _unq(n[1]) == lib_id]
+            if stored:
+                first, last = spans[id(stored[0])]
+                self.text = self.text[:first] + self.text[last:]
+                root, spans = self._tree()
         block = _LIBRARY_SYMBOLS[lib_id]
         if "(extends" in block:
             raise ValueError("%s came without the symbol it extends; name it as LIBRARY:NAME from his "
