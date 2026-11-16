@@ -290,8 +290,7 @@ def apply_change(change):
                 pins = [_pin(text) for text in (op.get("pins") or [])] + ([_pin(op["pin"])] if op.get("pin") else [])
                 template = op.get("template") or _power_template(s, op["port"])
                 done["ports"] = len(s.port_pins(pins, template,
-                                                down="GND" in op["port"].split(":", 1)[-1].upper(),
-                                                facing=op.get("facing")))
+                                                down="GND" in op["port"].split(":", 1)[-1].upper()))
             elif kind == "no_connect":
                 for text in op["pins"]:
                     ref, number = _pin(text)
@@ -412,6 +411,17 @@ def apply_change(change):
                 done["removed"] = len(gone)
         report.append(dict(op=kind, n=index + 1, **{k: v for k, v in done.items() if k != "pads"}))
     for s in sheets.values():
+        # Every part on a sheet the change touched gets its reference and value placed his
+        # way, asked or not (16 Nov, Friedl: designators and values were still a mess).
+        tidied = 0
+        for item in s.symbols():
+            if item["ref"] and not item["ref"].startswith("#"):
+                try:
+                    s.tidy_fields(item["ref"])
+                    tidied += 1
+                except (KeyError, ValueError):
+                    pass
+        report.append(dict(op="tidy_sheet", sheet=s.path.rsplit("/", 1)[-1], parts=tidied))
         s.save()
     if board is not None:
         refill(board)

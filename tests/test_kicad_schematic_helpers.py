@@ -175,9 +175,13 @@ s.save()
             self.assertIn(frozenset({("R1", "2"), ("R2", "1")}), nets.values())
             self.assertEqual(nets["/OUT"], frozenset({("R2", "2"), ("R3", "1")}))
             saved = Path(folder, "t.kicad_sch").read_text()
-            # R1 stands upright: its text to the right; R2 lies down: above and below.
-            self.assertIn('(property "Reference" "R1"\n\t\t\t(at 103.89 100.33 0)', saved)
+            # R1 stands upright: its text beside it, centred; R2 lies down: above and below,
+            # its text turned with it so it reads across (16 Nov).
+            import re as _re
+            r1 = _re.search(r'\(property "Reference" "R1"\n\t\t\t\(at ([-\d.]+) ([-\d.]+) 0\)', saved)
+            self.assertTrue(r1 and abs(float(r1.group(1)) - 101.6) > 1.5, saved[:0])
             self.assertIn('(property "Reference" "R2"\n\t\t\t(at 127 ', saved)
+            self.assertRegex(saved, r'\(property "Reference" "R2"\n\t\t\t\(at 127 [-\d.]+ 90\)')
 
     def test_a_power_symbol_is_copied_with_a_free_number(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -112,8 +112,9 @@ class RealChangeTests(unittest.TestCase):
             self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
             report = result.values["change_report"]
             self.assertEqual(list(report["unmet"]), [])
+            # Each operation in order, then the sheet tidied as a whole (16 Nov).
             self.assertEqual([item["op"] for item in report["change_result"]],
-                             [op["op"] for op in change])
+                             [op["op"] for op in change] + ["tidy_sheet"])
             self.assertEqual(result.values["steps"]["schematic"], "needs_approval")
             text = next(Path(folder).rglob(checked["work_copy_id"] + "/project/board.kicad_sch")).read_text()
             self.assertIn('(lib_id "Device:C")', text)
@@ -241,7 +242,8 @@ class RealChangeTests(unittest.TestCase):
                  "kinds": ["power"]},
                 {"op": "remove_dangling", "sheet": "board.kicad_sch"}])
             self.assertEqual(cleared.state, CapabilityResultState.SUCCEEDED, cleared.failure)
-            done = [item["removed"] for item in cleared.values["change_report"]["change_result"]]
+            done = [item["removed"] for item in cleared.values["change_report"]["change_result"]
+                    if item["op"] != "tidy_sheet"]
             self.assertEqual([dict(d) if not isinstance(d, int) else d for d in done],
                              [2, {"power": 1}, {"no_connect": 1, "wire": 1}])
             text = copy.read_text()

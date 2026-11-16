@@ -131,6 +131,19 @@ def _placed(at, mirror, x, y):
     return _r((float(at[1]) + rx, float(at[2]) + ry))
 
 
+def _straight(points):
+    """A path without points where it runs straight on: no wire break there for another
+    wire's end to join (16 Nov: a GND lead crossing an RF wire at its stub end)."""
+    out = [points[0]]
+    for here, nxt in zip(points[1:], points[2:]):
+        prev = out[-1]
+        if (prev[0] == here[0] == nxt[0]) or (prev[1] == here[1] == nxt[1]):
+            continue
+        out.append(here)
+    out.append(points[-1])
+    return [p for i, p in enumerate(out) if i == 0 or p != out[i - 1]]
+
+
 def _on(point, a, b):
     """The point lies on the wire a-b, ends included."""
     (x, y), (x1, y1), (x2, y2) = point, a, b
@@ -308,7 +321,22 @@ class Sheet:
             reached = sorted({name for q, name in list(pin_names.items()) + list(label_names.items())
                               if any(_on(q, c, d) for pts in group for c, d in zip(pts, pts[1:]))})
             return (" (wiring joined to %s)" % ", ".join(reached[:6])) if reached else ""
+        bodies = []
+        for symbol in _children(root, "symbol"):
+            if not self._ref(symbol).startswith("#"):
+                continue
+            ox, oy = _r(_child(symbol, "at")[1:3])
+            value = next((_unq(p[2]) for p in _children(symbol, "property") if _unq(p[1]) == "Value"), "")
+            down_port = "GND" in value.upper()
+            bodies.append(((ox, oy), (ox - 1.5, oy + 0.3, ox + 1.5, oy + 5.6) if down_port
+                           else (ox - 1.5, oy - 5.6, ox + 1.5, oy - 0.3)))
         for a, b, who in segments:
+            for (ox, oy), (x0, y0, x1, y1) in bodies:
+                if (ox, oy) in (a, b):
+                    continue
+                if max(a[0], b[0]) >= x0 and min(a[0], b[0]) <= x1 and max(a[1], b[1]) >= y0 and min(a[1], b[1]) <= y1:
+                    raise ValueError("%s: the new wire would run over the port symbol at (%g, %g); route another way"
+                                     % (who, ox, oy))
             for what, point in things:
                 if point not in allowed and _on(point, a, b):
                     raise ValueError("%s: the new wire would touch %s at (%g, %g)%s; clear it (remove_labels, "
@@ -348,8 +376,7 @@ class Sheet:
                     raise ValueError("%s.%s: via (%g, %g) to (%g, %g) is neither straight across nor straight up "
                                      "and down" % (ref, pin, a[0], a[1], b[0], b[1]))
             self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
-            self.add_wire(start, end)
-            self.add_wire(*points)
+            self.add_wire(*_straight([start] + points))
             return [start] + points
         # Straight out of the pin to the target's line, then one turn into it: the wire leaves
         # the part's side at once (16 Nov: turning right after the stub ran the RFC wire up the
@@ -362,37 +389,75 @@ class Sheet:
             corner = (end[0], target[1]) if dx else (target[0], end[1])
         points = [end] + [p for p in (corner, target) if p != end]
         self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
-        self.add_wire(start, end)
-        if len(points) > 1:
-            self.add_wire(*points)
+        self.add_wire(*_straight([start] + points))
         return [start] + points
 
     def label_pin(self, ref, pin, name, kind="label", length=2.54):
-        """A net label at the end of a short wire straight out of the pin."""
-        end = self.pin_stub(ref, pin, length)
+        """A net label at the end of a short wire straight out of the pin; on a pin already
+        wired, on the pin itself (16 Nov: the stub landed on the pin's own wire)."""
         dx, dy = self.pin_direction(ref, pin)
+        point = self.symbol(ref)["pins"][str(pin)]
+        if any(point in (pts[0], pts[-1]) for pts in self.wires()):
+            angle = {(1, 0): 0, (-1, 0): 180, (0, -1): 90, (0, 1): 270}[(dx, dy)]
+            self.add_label(name, point, angle, kind)
+            return point
+        end = self.pin_stub(ref, pin, length)
         angle = {(1, 0): 0, (-1, 0): 180, (0, -1): 90, (0, 1): 270}[(dx, dy)]
         self.add_label(name, end, angle, kind)
         return end
 
-    def port_pins(self, pins, template, down, facing=None):
+    def _body_clear(self, port, down, reach=5.6):
+        """Where a port's symbol is drawn (below a GND point, above a power one), nothing of
+        the sheet may be: 16 Nov, Friedl: a GND symbol drawn on a net is not acceptable.
+        reach: how far its drawing and name go from its point (from his own symbol)."""
+        x0, x1 = port[0] - 1.6, port[0] + 1.6
+        y0, y1 = (port[1] + 0.3, port[1] + reach) if down else (port[1] - reach, port[1] - 0.3)
+        root, _ = self._tree()
+        libs = self._libs(root)
+        # Nor where another part's pins will be wired: one grid step out of each pin.
+        for symbol in _children(root, "symbol"):
+            if self._ref(symbol).startswith("#"):
+                continue
+            for number, (px, py) in self._symbol_pins(symbol, libs).items():
+                try:
+                    ddx, ddy = self.pin_direction(self._ref(symbol), number)
+                except (KeyError, ValueError, TypeError):
+                    continue
+                qx, qy = px + ddx * 2.54, py + ddy * 2.54
+                if max(px, qx) >= x0 and min(px, qx) <= x1 and max(py, qy) >= y0 and min(py, qy) <= y1:
+                    return False
+        for pts in self.wires():
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                if max(ax, bx) >= x0 and min(ax, bx) <= x1 and max(ay, by) >= y0 and min(ay, by) <= y1:
+                    return False
+        points = [item["at"] for item in self.labels()]
+        for symbol in _children(root, "symbol"):
+            points += list(self._symbol_pins(symbol, libs).values())
+            if self._ref(symbol).startswith("#"):
+                points.append(_r(_child(symbol, "at")[1:3]))
+        return not any(x0 <= px <= x1 and y0 <= py <= y1 for px, py in points)
+
+    def port_pins(self, pins, template, down):
         """One port for each row of neighbouring pins: each pin straight out one step, the
         row's ends joined by one wire, and a single port (GND down, power up) on it.
 
-        15 Nov: a port per pin put the ports of neighbouring NC pins on top of one
-        another. pins: [(ref, number), ...]. Returns the port points.
-
-        facing (left, right, up, down): each pin gets its own port at the end of its
-        stub, turned that way, for where the usual way is blocked (NC pins between two
-        RF pins, 16 Nov). His rule is GND down, power up; facing is the exception.
+        15 Nov: a port per pin put the ports of neighbouring NC pins on top of one another.
+        16 Nov, Friedl's drawing: where the row is boxed in (NC pins between two RF pins),
+        the wire goes on down, crossing the RF wire once, to a port clear of everything.
+        pins: [(ref, number), ...]. Returns the port points.
         """
-        natural = None
-        if facing:
-            natural = {"down": 0, "right": 90, "up": 180, "left": 270} if down else \
-                {"up": 0, "left": 90, "down": 180, "right": 270}
-            if facing not in natural:
-                raise ValueError("facing is left, right, up or down")
         want = 1 if down else -1
+        # How far his symbol's name sits from its point (an imported GND's is 6.35 mm below).
+        reach = 3.0
+        for item in self.symbols():
+            if item["uuid"] == template or item["ref"] == template:
+                tree, _ = self._tree()
+                for node in _children(tree, "symbol"):
+                    if _child(node, "uuid") and _unq(_child(node, "uuid")[1]) == item["uuid"]:
+                        value = [p for p in _children(node, "property") if _unq(p[1]) == "Value"]
+                        if value and _child(value[0], "at"):
+                            reach = max(reach, abs(float(_child(value[0], "at")[2]) - item["at"][1]) + 0.9)
+                break
         rows = {}
         for ref, number in pins:
             start, end = self._stub_end(ref, number)
@@ -416,38 +481,62 @@ class Sheet:
             along = 1 if dx else 0
             row.sort(key=lambda item: item[1][along])
             ends = [item[1] for item in row]
-            segments += [(item[0], item[1], item[2]) for item in row]
-            segments += [(a[1], b[1], "%s to %s" % (a[2], b[2])) for a, b in zip(row, row[1:])]
+            own = [(item[0], item[1], item[2]) for item in row]
+            own += [(a[1], b[1], "%s to %s" % (a[2], b[2])) for a, b in zip(row, row[1:])]
             # Only the pins themselves may already be wired; every new point is checked.
-            allowed |= {item[0] for item in row}
-            if natural is not None:
-                # Turned the asked way: one port on the row, at its middle pin's stub end.
-                ports.append(ends[len(ends) // 2])
-                continue
+            row_allowed = {item[0] for item in row}
             if (dx, dy) == (0, -want):
                 # Pins pointing away from where the port goes (GND pins on top): the row
                 # runs out past the nearer side of the part, clear of its side pins, and
                 # the port hangs from there the right way up.
                 xs = [point[0] for point in self.symbol(ref)["pins"].values()]
                 if ends[0][0] - min(xs) <= max(xs) - ends[-1][0]:
-                    port = _r((min(xs) - 5.08, ends[0][1]))
-                    segments.append((ends[0], port, "%s to its port" % row[0][2]))
+                    start, step, who = ends[0], (-2.54, 0), row[0][2]
+                    first = _r((min(xs) - 5.08, ends[0][1]))
                 else:
-                    port = _r((max(xs) + 5.08, ends[-1][1]))
-                    segments.append((ends[-1], port, "%s to its port" % row[-1][2]))
+                    start, step, who = ends[-1], (2.54, 0), row[-1][2]
+                    first = _r((max(xs) + 5.08, ends[-1][1]))
             elif dx:
                 # Pins on a side: the row runs up and down; the port goes below (or above) it.
-                last = ends[-1] if down else ends[0]
-                port = _r((last[0], last[1] + want * 2.54))
-                segments.append((last, port, "%s to its port" % (row[-1] if down else row[0])[2]))
+                start = ends[-1] if down else ends[0]
+                who = (row[-1] if down else row[0])[2]
+                step, first = (0, want * 2.54), _r((start[0], start[1] + want * 2.54))
             elif len(ends) == 1:
-                port = ends[0]
+                start, who, step, first = ends[0], row[0][2], (0, want * 2.54), ends[0]
             else:
-                middle = ends[len(ends) // 2]
-                port = _r((middle[0], middle[1] + want * 2.54))
-                segments.append((middle, port, "%s to its port" % row[len(ends) // 2][2]))
+                start = ends[len(ends) // 2]
+                who = row[len(ends) // 2][2]
+                step, first = (0, want * 2.54), _r((start[0], start[1] + want * 2.54))
+            # The first place, going on in the same way, where the lead touches nothing and
+            # the symbol sits on nothing; crossing a wire on the way is allowed. Failing that,
+            # the row runs out past the side of the part and the port hangs there (16 Nov: a
+            # GND under one switch sat on the next switch's wiring).
+            xs = [point[0] for point in self.symbol(ref)["pins"].values()]
+            tries = [(start, _r((first[0] + step[0] * k, first[1] + step[1] * k)), who) for k in range(8)]
+            for lead_start, lead_who, edge in ((ends[-1], row[-1][2], max(xs) + 5.08),
+                                               (ends[0], row[0][2], min(xs) - 5.08)):
+                if not dx:
+                    for k in range(4):
+                        sign = 1 if edge > lead_start[0] else -1
+                        tries.append((lead_start, _r((edge + sign * 2.54 * k, lead_start[1])), lead_who))
+            port, reason = None, None
+            for lead_start, candidate, lead_who in tries:
+                lead = [] if candidate == lead_start else [(lead_start, candidate, "%s to its port" % lead_who)]
+                try:
+                    self._check_segments(own + lead, row_allowed)
+                except ValueError as error:
+                    reason = error
+                    continue
+                if self._body_clear(candidate, down, reach):
+                    port = candidate
+                    segments += own + lead
+                    allowed |= row_allowed
+                    break
+                reason = ValueError("%s: no clear place for its %s port nearby"
+                                    % (who, "GND" if down else "power"))
+            if port is None:
+                raise reason
             ports.append(port)
-        self._check_segments(segments, allowed)
         counted = {}
         for a, b, _ in segments:
             self.add_wire(a, b)
@@ -457,7 +546,9 @@ class Sheet:
             if count >= 3:
                 self.add_junction(point)
         for port in ports:
-            self.copy_symbol(template, port, natural[facing] if natural is not None else 0)
+            # Turned as his own symbol on the sheet is turned (16 Nov: forcing the angle
+            # put imported 3V3 symbols upside down).
+            self.copy_symbol(template, port, None)
         return ports
 
     def ground_pin(self, ref, pin, template):
@@ -485,13 +576,33 @@ class Sheet:
         cx, cy = (left + right) / 2, (top + bottom) / 2
         props = {_unq(p[1]): _unq(p[2]) for p in _children(symbol, "property")}
         width = lambda name: 0.9 * 1.27 * len(props.get(name, "")) + 0.5  # noqa: E731
-        right_side = {"Reference": (right + 1.27, cy - 1.27, "left"), "Value": (right + 1.27, cy + 1.27, "left")}
+        # Centred text at a worked-out spot: KiCad flips left/right justification on parts
+        # turned 180 degrees, which put text over the part (16 Nov).
+        side = lambda name, x, sign: x + sign * (1.27 + width(name) / 2)  # noqa: E731
+        right_side = {"Reference": (side("Reference", right, 1), cy - 1.27, ""),
+                      "Value": (side("Value", right, 1), cy + 1.27, "")}
         above_below = {"Reference": (cx, top - 1.27, ""), "Value": (cx, bottom + 2.54, "")}
-        left_side = {"Reference": (left - 1.27, cy - 1.27, "right"), "Value": (left - 1.27, cy + 1.27, "right")}
+        left_side = {"Reference": (side("Reference", left, -1), cy - 1.27, ""),
+                     "Value": (side("Value", left, -1), cy + 1.27, "")}
         upright = bottom - top >= right - left
-        corners = {"Reference": (right + 1.27, top - 1.27, "left"), "Value": (right + 1.27, bottom + 2.54, "left")}
+        corners = {"Reference": (side("Reference", right, 1), top - 1.27, ""),
+                   "Value": (side("Value", right, 1), bottom + 2.54, "")}
+        stacks = [{"Reference": (sx, y - 2.54, ""), "Value": (sx, y, "")}
+                  for y in (top - 1.27,) for sx in (side("Value", right, 1), side("Value", left, -1))]
+        stacks += [{"Reference": (sx, y, ""), "Value": (sx, y + 2.54, "")}
+                   for y in (bottom + 2.54,) for sx in (side("Value", right, 1), side("Value", left, -1))]
         options = ([right_side, corners, above_below, left_side] if upright
-                   else [above_below, right_side, corners, left_side])
+                   else [above_below, right_side, corners, left_side]) + stacks
+        # And a ring of nearby spots, reference over value, for crowded places.
+        wide = max(width("Reference"), width("Value"))
+        for i in range(4):
+            for sx in (right + 1.27 + wide / 2 + 2.54 * i, left - 1.27 - wide / 2 - 2.54 * i):
+                for k in range(-3, int((bottom - top) / 1.27) + 4):
+                    y = top + 1.27 * k
+                    options.append({"Reference": (sx, y - 1.27, ""), "Value": (sx, y + 1.27, "")})
+        for k in range(1, 4):
+            options.append({"Reference": (cx, top - 1.27 - 2.54 * k, ""), "Value": (cx, top - 1.27 * k, "")})
+            options.append({"Reference": (cx, bottom + 2.54 * k, ""), "Value": (cx, bottom + 2.54 * k + 2.54, "")})
         # The place where the text lands on the least: wiring, ports, labels, other parts'
         # pins (16 Nov: sideways GND ports sat on a switch's reference and value).
         root_now, _ = self._tree()
@@ -515,8 +626,11 @@ class Sheet:
                 boxes.append((lx - 1.2, ly, lx + 1.2, ly + w))
             else:
                 boxes.append((lx, ly - 1.2, lx + w, ly + 1.2))
+        mine = _unq(_child(symbol, "uuid")[1]) if _child(symbol, "uuid") else None
         for other in _children(root_now, "symbol"):
-            if other is symbol:
+            # Its own text and pins are not in its way (a fresh parse: compared by uuid).
+            if (mine and _child(other, "uuid") and _unq(_child(other, "uuid")[1]) == mine) or \
+                    (not mine and self._ref(other) == ref):
                 continue
             for px, py in self._symbol_pins(other, libs_now).values():
                 if (px, py) not in own:
@@ -524,6 +638,27 @@ class Sheet:
             if self._ref(other).startswith("#"):
                 ox, oy = _r(_child(other, "at")[1:3])
                 boxes.append((ox - 2.2, oy - 2.2, ox + 2.2, oy + 2.2))
+                continue
+            # Other parts' visible reference and value text (16 Nov: C44 and C45 overlapped).
+            turned_other = (float(_child(other, "at")[3]) if len(_child(other, "at")) > 3 else 0.0) % 180
+            for prop in _children(other, "property"):
+                if _unq(prop[1]) not in ("Reference", "Value") or "hide yes" in str(prop):
+                    continue
+                pat = _child(prop, "at")
+                if pat is None:
+                    continue
+                px, py = float(pat[1]), float(pat[2])
+                pw = 0.9 * 1.27 * len(_unq(prop[2])) + 0.5
+                angle = ((float(pat[3]) if len(pat) > 3 else 0.0) + turned_other) % 180
+                text = str(prop)
+                if angle == 90:
+                    boxes.append((px - 1.0, py - pw / 2, px + 1.0, py + pw / 2))
+                elif "justify left" in text:
+                    boxes.append((px, py - 1.0, px + pw, py + 1.0))
+                elif "justify right" in text:
+                    boxes.append((px - pw, py - 1.0, px, py + 1.0))
+                else:
+                    boxes.append((px - pw / 2, py - 1.0, px + pw / 2, py + 1.0))
 
         def box(name, x, y, justify):
             w = width(name)
@@ -540,7 +675,10 @@ class Sheet:
                 count += sum(1 for (ax, ay), (bx, by) in segments
                              if max(ax, bx) >= x0 and min(ax, bx) <= x1 and max(ay, by) >= y0 and min(ay, by) <= y1)
             return count
-        spots = min(options, key=hits)
+        # Fewest things touched; among equals, the order above, then the nearest.
+        scored = [(hits(option), index if index < 9 else 9 + abs(option["Value"][0] - cx) + abs(option["Value"][1] - cy),
+                   index) for index, option in enumerate(options)]
+        spots = options[min(scored)[2]]
         symbol, lib, spans = self._placed_symbol(ref)
         start, end = spans[id(symbol)]
         block = self.text[start:end]
@@ -554,8 +692,11 @@ class Sheet:
                 if depth == 0:
                     break
             prop = block[match.start():index + 1]
-            prop = _re.sub(r'\(at [-\d.]+ [-\d.]+(?: [-\d.]+)?\)', "(at %g %g 0)" % (round(x, 2), round(y, 2)),
-                           prop, count=1)
+            # KiCad turns a field with its part: on a part turned 90 or 270 the field's own
+            # angle is 90 for the text to read across (16 Nov: it ran down the wires).
+            turned = (float(at[3]) if len(at) > 3 else 0.0) % 180
+            prop = _re.sub(r'\(at [-\d.]+ [-\d.]+(?: [-\d.]+)?\)',
+                           "(at %g %g %g)" % (round(x, 2), round(y, 2), turned), prop, count=1)
             prop = _re.sub(r'\s*\(justify [^)]*\)', "", prop)
             if justify and "(effects" in prop:
                 prop = prop.replace("(effects", "(effects (justify %s)" % justify, 1)
@@ -888,6 +1029,8 @@ class Sheet:
         start, end = spans[id(symbol)]
         block = self.text[start:end]
         old = _child(symbol, "at")
+        if rotation is None:
+            rotation = float(old[3]) if len(old) > 3 else 0.0
         dx, dy = at[0] - float(old[1]), at[1] - float(old[2])
         first = block.index("(at ")
         close = block.index(")", first)
