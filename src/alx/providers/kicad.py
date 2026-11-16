@@ -641,6 +641,10 @@ class KiCadProvider:
         if any(impedance[i][i].real <= 0 or impedance[i][i].imag <= 0 for i in range(len(ports))):
             raise KiCadError('invalid_report', {'reason': 'nonpassive_copper_matrix'})
 
+    @staticmethod
+    def _is_copy_id(value):
+        return isinstance(value, str) and len(value) == 32 and all(c in '0123456789abcdef' for c in value)
+
     def _project(self, name):
         """A project as he names it: a folder, or just its number (P0009), down to the folder
         that holds its one board. 16 Nov: the agent spent 14 calls looking for "P0009"."""
@@ -689,7 +693,11 @@ class KiCadProvider:
                 raise KiCadError('arguments_unusable', {'detail': 'footprint is for a library copy'})
             return root / 'project' / meta['board']
         if arguments.get('board'):
-            return bounded(self._source(arguments['board']), self.design_roots)
+            board = str(arguments['board'])
+            if not board.endswith('.kicad_pcb'):
+                # A project named where a board file was expected (16 Nov: board "P0009").
+                return self._board_for({'project_dir': board})
+            return bounded(self._source(board), self.design_roots)
         if arguments.get('project_dir'):
             project = bounded(self._project(arguments['project_dir']), self.design_roots)
             boards = sorted(project.glob('*.kicad_pcb'))
@@ -1167,7 +1175,54 @@ class KiCadProvider:
             # Both connections are closed, whatever happened (review of #243).
             fetcher.close()
 
+    def _storage_root(self):
+        """AL/X's storage (ALX_Storage), from the design folder that is its Projects."""
+        for root in self.design_roots:
+            if root.name == 'Projects' and root.parent.name == 'ALX_Storage':
+                return root.parent
+        return None
+
+    def _reference_location(self, text):
+        """Where a read points, the way models name it (16 Nov: 30 refused reads guessed
+        '~/ALX_Storage/...', 'P0020/datasheets' or AL/X's own docs)."""
+        given = Path(str(text).strip())
+        parts = given.parts
+        storage = self._storage_root()
+        for alias in (('~', 'ALX_Storage'), (Path.home() / 'ALX_Storage').parts):
+            if storage is not None and parts[:len(alias)] == alias:
+                return storage.joinpath(*parts[len(alias):])
+        if parts and not given.is_absolute() and parts[0] != '~':
+            head, rest = parts[0], parts[1:]
+            if len(head) >= 4 and head[0].isascii() and head[0].isalpha() and head[1:].isascii() and head[1:].isdigit():
+                found = [path for root in self.design_roots for path in root.glob('*')
+                         if path.is_dir() and path.name.split('-', 1)[0].lower() == head.lower()]
+                if len(found) == 1:
+                    return found[0].joinpath(*rest)
+            raise KiCadError('path_denied', {'detail': (
+                'give a full path; a relative path is not read. AL/X\'s own documents are not readable here: '
+                'your brief and instructions carry the job. ' + self._where_things_are())})
+        return Path(text).expanduser()
+
+    def _where_things_are(self):
+        storage = self._storage_root()
+        return ('Projects are found by number: kicad check or inspect with project_dir P0020. A datasheet: '
+                'kicad fetch_datasheet gives its path. Design folders: %s.%s' % (
+                    ', '.join(str(root) for root in self.design_roots),
+                    ' AL/X storage: %s.' % storage if storage else ''))
+
     def read_reference(self, arguments):
+        location = self._reference_location(arguments['path'])
+        placeholder = location.with_name('.' + location.name + '.icloud')
+        if not location.exists() and not placeholder.is_file():
+            # A refused place stays refused; only an allowed one that is missing gets the map.
+            from alx.providers.reference_file import ReferenceError as _Refused, reference_path
+            try:
+                reference_path(location)
+            except _Refused as error:
+                raise KiCadError(str(error)) from error
+            raise KiCadError('unavailable', {'detail': 'no such file or folder: %s. %s' % (
+                location, self._where_things_are())})
+        arguments = dict(arguments, path=str(location))
         raw = Path(arguments['path']).expanduser().absolute()
         if not raw.resolve().is_relative_to(self.work_root):
             return read_reference(arguments)
@@ -2256,14 +2311,25 @@ class KiCadProvider:
         is large and says nothing directly about connections (15 Nov: the board
         agent spent 26 previews reading its way around a schematic).
         """
-        root, meta = self._load(arguments['work_copy_id'])
-        if meta.get('library'):
-            raise KiCadError('arguments_unusable', {'detail': 'a library copy has no schematic'})
-        project = self._original_view(root, meta) if arguments.get('original') else root / 'project'
+        named = arguments.get('project_dir') or arguments.get('work_copy_id')
+        if arguments.get('project_dir') or not self._is_copy_id(named):
+            # His project, read where it is: nothing is copied or written there (16 Nov:
+            # five models asked for P0020's or P0009's schematic by project).
+            project = bounded(self._project(named), self.design_roots)
+            boards = sorted(project.glob('*.kicad_pcb'))
+            if len(boards) != 1:
+                raise KiCadError('unsupported_project', {'detail': self._where_boards_are(project, boards)})
+            meta, scratch = {'board': boards[0].name}, self.work_root / 'sections'
+        else:
+            root, meta = self._load(named)
+            if meta.get('library'):
+                raise KiCadError('arguments_unusable', {'detail': 'a library copy has no schematic'})
+            project = self._original_view(root, meta) if arguments.get('original') else root / 'project'
+            scratch = root / 'artifacts'
         schematic = (project / meta['board']).with_suffix('.kicad_sch')
         if not schematic.is_file():
             raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
-        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
+        output = scratch / (uuid.uuid4().hex + '.net')
         output.parent.mkdir(exist_ok=True)
         self._run('sch', 'export', 'netlist', '--output', output, schematic)
         tree = sexpr(output.read_text(errors='replace'))

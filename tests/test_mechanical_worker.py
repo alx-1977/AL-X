@@ -93,6 +93,15 @@ class WorkerLoopTests(unittest.TestCase):
         self.assertIn('"id": "run_program"', first.messages[0].content)
         self.assertNotIn("send_mail_reply", first.messages[0].content)
 
+    def test_an_action_called_as_a_capability_is_pointed_to_its_tool(self) -> None:
+        kicad = CapabilityDefinition("kicad", "Board work. Actions: inspect, fetch_datasheet.", OBJECT,
+                                     OBJECT, SideEffect.EFFECTFUL)
+        model = ScriptedModel([tool("fetch_datasheet", {}), tool("send_mail_reply", {})])
+        MechanicalWorker(model, self.dispatch, (kicad,)).run("Get the datasheet.", "job", 10)
+        answers = [json.loads(r.tool_result) for r in model.requests[1:]]
+        self.assertIn("call kicad with action fetch_datasheet", answers[0]["hint"])
+        self.assertNotIn("hint", answers[1])
+
     def test_a_look_picture_goes_with_the_next_step_only(self) -> None:
         """14 Nov: the worker read datasheet drawings as text alone; now the
         picture a look call made reaches its next step, and only that one."""

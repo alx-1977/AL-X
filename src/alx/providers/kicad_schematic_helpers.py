@@ -211,12 +211,78 @@ class Sheet:
                           "pins": self._symbol_pins(symbol, libs)})
         return found
 
+    _PAPER = {"A5": (210, 148), "A4": (297, 210), "A3": (420, 297), "A2": (594, 420), "A1": (841, 594),
+              "A0": (1189, 841), "A": (279.4, 215.9), "B": (431.8, 279.4), "C": (558.8, 431.8)}
+
+    def _title_block(self, root):
+        """The title block's area on this sheet, [x0, y0, x1, y1], from his page template
+        (16 Nov, Friedl: the drawing ran into the title block). None when unknown."""
+        paper = _child(root, "paper")
+        if not paper:
+            return None
+        if _unq(paper[1]) == "User" and len(paper) >= 4:
+            width, height = float(paper[2]), float(paper[3])
+        elif _unq(paper[1]) in self._PAPER:
+            width, height = self._PAPER[_unq(paper[1])]
+        else:
+            return None
+        if len(paper) > 2 and _unq(paper[-1]) == "portrait":
+            width, height = height, width
+        folder = _os.path.dirname(self.path)
+        margins, reach_x, reach_y = (10.0, 10.0), 110.0, 32.0   # KiCad's own title block
+        try:
+            import json as _json
+            project = [n for n in _os.listdir(folder) if n.endswith(".kicad_pro")]
+            layout = _json.load(open(_os.path.join(folder, project[0]))).get("schematic", {}).get(
+                "page_layout_descr_file") if project else None
+            if layout and _os.path.isfile(_os.path.join(folder, layout)):
+                text = open(_os.path.join(folder, layout)).read()
+                found = _re.search(r"\(right_margin ([\d.]+)\).*?\(bottom_margin ([\d.]+)\)", text)
+                if found:
+                    margins = (float(found.group(1)), float(found.group(2)))
+                reach_x, reach_y = 0.0, 0.0
+                for item in _re.finditer(r"\((tbtext|bitmap|line|rect)\b[^\n]*?\(pos ([\d.-]+) ([\d.-]+) rbcorner\)"
+                                         r"(?:[^\n]*?\(scale ([\d.]+)\))?", text):
+                    x, y = float(item.group(2)), float(item.group(3))
+                    if item.group(1) == "bitmap":
+                        # A picture is centred on its point; its size from the PNG header (300 ppi).
+                        header = _re.search(r'\(data "89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 '
+                                            r'((?:[0-9A-F]{2} ){8})', text[item.start():])
+                        if header:
+                            raw = bytes.fromhex(header.group(1))
+                            scale = float(item.group(4) or 1)
+                            w = int.from_bytes(raw[:4], "big") / 300 * 25.4 * scale
+                            h = int.from_bytes(raw[4:8], "big") / 300 * 25.4 * scale
+                            x, y = x + w / 2, y + h / 2
+                    else:
+                        y += 3.0   # the text's own height, below its point
+                    reach_x, reach_y = max(reach_x, x), max(reach_y, y)
+        except (OSError, ValueError, IndexError):
+            pass
+        if not reach_x or not reach_y:
+            return None
+        right, bottom = width - margins[0], height - margins[1]
+        return (right - reach_x, bottom - reach_y, right, bottom)
+
+    def _missing(self, ref):
+        """No such symbol here; where it is instead (16 Nov: the agent named the wrong sheet)."""
+        folder = _os.path.dirname(self.path)
+        elsewhere = []
+        for name in sorted(n for n in _os.listdir(folder) if n.endswith(".kicad_sch")):
+            if _os.path.join(folder, name) == self.path:
+                continue
+            with open(_os.path.join(folder, name)) as handle:
+                if '(property "Reference" "%s"' % ref in handle.read():
+                    elsewhere.append(name)
+        return KeyError("no symbol %s on %s%s" % (ref, _os.path.basename(self.path),
+                                                   "; it is on %s" % ", ".join(elsewhere) if elsewhere else ""))
+
     def _placed_symbol(self, ref):
         root, spans = self._tree()
         libs = self._libs(root)
         found = [s for s in _children(root, "symbol") if self._ref(s) == ref]
         if not found:
-            raise KeyError("no symbol %s on %s" % (ref, _os.path.basename(self.path)))
+            raise self._missing(ref)
         symbol = found[0]
         return symbol, libs.get(_unq(_child(symbol, "lib_id")[1])), spans
 
@@ -327,16 +393,28 @@ class Sheet:
                  if not power and direction is not None and point not in allowed and point not in ends_now]
         for a, b, who in segments:
             for name, p, q in stubs:
-                if (max(a[0], b[0]) >= min(p[0], q[0]) and min(a[0], b[0]) <= max(p[0], q[0])
-                        and max(a[1], b[1]) >= min(p[1], q[1]) and min(a[1], b[1]) <= max(p[1], q[1])):
+                # Running along that spot, or through where its wire will end, is in the way;
+                # crossing it is not (16 Nov: leads refused for crossing a free pin's spot).
+                along = (_on(a, p, q) and _on(b, p, q)) or (_on(p, a, b) and _on(q, a, b)) or \
+                    ((_on(a, p, q) or _on(b, p, q)) and (a[0] == b[0] == p[0] == q[0] or a[1] == b[1] == p[1] == q[1]))
+                if along or _on(q, a, b):
                     raise ValueError("%s: the new wire would run across where pin %s comes out (%g, %g); "
                                      "wire that pin first or route another way" % (who, name, p[0], p[1]))
+            block = scene["title_block"]
+            if block and max(a[0], b[0]) > block[0] and max(a[1], b[1]) > block[1]:
+                raise ValueError("%s: the new wire would run into the title block (x > %g, y > %g); route "
+                                 "another way" % (who, block[0], block[1]))
+            for part, (x0, y0, x1, y1) in scene["parts"]:
+                if (max(a[0], b[0]) > x0 + 0.2 and min(a[0], b[0]) < x1 - 0.2
+                        and max(a[1], b[1]) > y0 + 0.2 and min(a[1], b[1]) < y1 - 0.2):
+                    raise ValueError("%s: the new wire would run across %s; route around it (via)" % (who, part))
             for (ox, oy), (x0, y0, x1, y1) in bodies:
                 if (ox, oy) in (a, b):
                     continue
                 if max(a[0], b[0]) >= x0 and min(a[0], b[0]) <= x1 and max(a[1], b[1]) >= y0 and min(a[1], b[1]) <= y1:
-                    raise ValueError("%s: the new wire would run over the port symbol at (%g, %g); route another way"
-                                     % (who, ox, oy))
+                    raise ValueError("%s: the new wire would run over the port symbol at (%g, %g)%s; route another "
+                                     "way (a port placed before a part was swapped can sit where the new part's "
+                                     "pins come out: swap parts first)" % (who, ox, oy, joined((ox, oy))))
             for what, point in things:
                 if point not in allowed and _on(point, a, b):
                     raise ValueError("%s: the new wire would touch %s at (%g, %g)%s; clear it (remove_labels, "
@@ -382,15 +460,35 @@ class Sheet:
         # the part's side at once (16 Nov: turning right after the stub ran the RFC wire up the
         # switch's side across where pins 1 and 2 come out). A target behind the pin turns
         # right after the stub, never back over the part.
-        ahead = (target[0] - end[0]) * dx > 0 if dx else (target[1] - end[1]) * dy > 0
-        if ahead:
-            corner = (target[0], end[1]) if dx else (end[0], target[1])
-        else:
-            corner = (end[0], target[1]) if dx else (target[0], end[1])
-        points = [end] + [p for p in (corner, target) if p != end]
-        self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
-        self.add_wire(*_straight([start] + points))
-        return [start] + points
+        # Into a part's pin the wire arrives the way that pin points, out of it first, never
+        # turning right at the pin (16 Nov, Friedl: C37's net turned down at the capacitor pin).
+        into = next((d for _, point, power, d in self._scene()["pins"]
+                     if point == target and not power and d is not None), None)
+        entry = _r((target[0] + into[0] * length, target[1] + into[1] * length)) if into else target
+        ahead = (entry[0] - end[0]) * dx > 0 if dx else (entry[1] - end[1]) * dy > 0
+        corners = [(entry[0], end[1]), (end[0], entry[1])]
+        if not ((ahead and dx) or (not ahead and dy)):
+            corners.reverse()
+        tries = []
+        for corner in corners:
+            points = [end] + [p for p in (corner, entry, target) if p != end]
+            points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
+            if points not in tries:
+                tries.append(points)
+        if into is not None and entry != target:
+            # Where the target pin's own spot is taken, straight to it as before.
+            tries += [[end] + [p for p in (c, target) if p != end] for c in
+                      ((target[0], end[1]), (end[0], target[1]))]
+        reason = None
+        for points in tries:
+            try:
+                self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
+            except ValueError as error:
+                reason = reason or error
+                continue
+            self.add_wire(*_straight([start] + points))
+            return [start] + points
+        raise reason
 
     def label_pin(self, ref, pin, name, kind="label", length=2.54):
         """A net label at the end of a short wire straight out of the pin; on a pin already
@@ -427,23 +525,33 @@ class Sheet:
             return cached[1]
         root, _ = self._tree()
         libs = self._libs(root)
-        pins, bodies, ports = [], [], []
+        pins, bodies, ports, parts, values = [], [], [], [], {}
         for symbol in _children(root, "symbol"):
             name = self._ref(symbol)
             lib = libs.get(_unq(_child(symbol, "lib_id")[1]))
             power = name.startswith("#")
+            value = next((_unq(p[2]) for p in _children(symbol, "property") if _unq(p[1]) == "Value"), "")
             for number, point in self._symbol_pins(symbol, libs).items():
                 direction = None if power or lib is None else self._direction_of(symbol, lib, number)
                 pins.append(("%s.%s" % (name, number), point, power, direction))
+                if power:
+                    values[point] = value
+            if not power and lib is not None:
+                # The part's drawn body (16 Nov: the VCTL wire was drawn straight over C56).
+                at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
+                drawn = [_placed(at, mirror[1] if mirror else None, x, y) for x, y in _lib_outline(lib)]
+                if drawn:
+                    xs, ys = [p[0] for p in drawn], [p[1] for p in drawn]
+                    parts.append((name, (min(xs), min(ys), max(xs), max(ys))))
             if power:
                 ox, oy = _r(_child(symbol, "at")[1:3])
                 ports.append((ox, oy))
-                value = next((_unq(p[2]) for p in _children(symbol, "property") if _unq(p[1]) == "Value"), "")
                 bodies.append(((ox, oy), (ox - 1.5, oy + 0.3, ox + 1.5, oy + 5.6) if "GND" in value.upper()
                                else (ox - 1.5, oy - 5.6, ox + 1.5, oy - 0.3)))
         scene = {"root": root, "libs": libs, "wires": self.wires(), "labels": self.labels(),
                  "no_connects": [_r(_child(n, "at")[1:3]) for n in _children(root, "no_connect")],
-                 "pins": pins, "bodies": bodies, "ports": ports, "orphans": None}
+                 "pins": pins, "bodies": bodies, "ports": ports, "orphans": None, "parts": parts,
+                 "values": values, "title_block": self._title_block(root)}
         self._scene_cache = (self.text, scene)
         return scene
 
@@ -451,6 +559,9 @@ class Sheet:
         """Where a port's symbol is drawn (below a GND point, above a power one), nothing of
         the sheet may be: 16 Nov, Friedl: a GND symbol drawn on a net is not acceptable.
         reach: how far its drawing and name go from its point (from his own symbol)."""
+        # At least as far as the later checks count a port symbol (16 Nov: one switch's GND was
+        # placed where the next switch's GND pins come out, then refused their leads).
+        reach = max(reach, 5.6)
         x0, x1 = port[0] - 1.6, port[0] + 1.6
         y0, y1 = (port[1] + 0.3, port[1] + reach) if down else (port[1] - reach, port[1] - 0.3)
         scene = self._scene()
@@ -465,6 +576,12 @@ class Sheet:
             for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                 if max(ax, bx) >= x0 and min(ax, bx) <= x1 and max(ay, by) >= y0 and min(ay, by) <= y1:
                     return False
+        if any(max(x0, a0) < min(x1, a1) and max(y0, b0) < min(y1, b1)
+               for _, (a0, b0, a1, b1) in scene["parts"]):
+            return False
+        block = scene["title_block"]
+        if block and x1 > block[0] and y1 > block[1]:
+            return False
         points = [item["at"] for item in scene["labels"]] + [point for _, point, _, _ in scene["pins"]]
         points += scene["ports"]
         return not any(x0 <= px <= x1 and y0 <= py <= y1 for px, py in points)
@@ -481,6 +598,16 @@ class Sheet:
         want = 1 if down else -1
         # How far his symbol's name sits from its point (an imported GND's is 6.35 mm below).
         reach = 3.0
+        # Wiring already on this port's net may be touched: it is the net the leads join
+        # (16 Nov: GND and 3V3 leads refused for touching GND and 3V3 wiring).
+        value = next((item["value"] for item in self.symbols()
+                      if item["uuid"] == template or item["ref"] == template), None)
+        same, same_ends = [], set()
+        for point, port_value in self._scene()["values"].items():
+            if value is not None and port_value == value:
+                group, ends = self._wired_to(point)
+                same += list(group)
+                same_ends |= set(ends) | {point}
         for item in self.symbols():
             if item["uuid"] == template or item["ref"] == template:
                 tree, _ = self._tree()
@@ -561,7 +688,7 @@ class Sheet:
                 candidate, lead_start = points[-1], points[0]
                 lead = [(a, b, "%s to its port" % lead_who) for a, b in zip(points, points[1:]) if a != b]
                 try:
-                    self._check_segments(own + lead, row_allowed)
+                    self._check_segments(own + lead, row_allowed | same_ends, same)
                 except ValueError as error:
                     reason = error
                     continue
@@ -629,8 +756,12 @@ class Sheet:
                   for y in (top - 1.27,) for sx in (side("Value", right, 1), side("Value", left, -1))]
         stacks += [{"Reference": (sx, y, ""), "Value": (sx, y + 2.54, "")}
                    for y in (bottom + 2.54,) for sx in (side("Value", right, 1), side("Value", left, -1))]
+        # A part lying down next to another (C44 over C45, 16 Nov): both lines above it, or
+        # both below, centred, before any side.
+        stacked_above = {"Reference": (cx, top - 3.81, ""), "Value": (cx, top - 1.27, "")}
+        stacked_below = {"Reference": (cx, bottom + 2.54, ""), "Value": (cx, bottom + 5.08, "")}
         options = ([right_side, corners, above_below, left_side] if upright
-                   else [above_below, right_side, corners, left_side]) + stacks
+                   else [above_below, stacked_above, stacked_below, right_side, corners, left_side]) + stacks
         # And a ring of nearby spots, reference over value, for crowded places.
         wide = max(width("Reference"), width("Value"))
         for i in range(4):
@@ -664,6 +795,8 @@ class Sheet:
                 boxes.append((lx - 1.2, ly, lx + 1.2, ly + w))
             else:
                 boxes.append((lx, ly - 1.2, lx + w, ly + 1.2))
+        # Other parts' bodies (16 Nov: C45's reference sat on C44, 5 mm above it).
+        boxes += [body for name, body in self._scene()["parts"] if name != ref]
         mine = _unq(_child(symbol, "uuid")[1]) if _child(symbol, "uuid") else None
         for other in _children(root_now, "symbol"):
             # Its own text and pins are not in its way (a fresh parse: compared by uuid).
@@ -717,8 +850,11 @@ class Sheet:
                     continue
                 x0, y0, x1, y1 = box(name, x, y, justify)
                 count += sum(1 for bx0, by0, bx1, by1 in boxes if bx0 <= x1 and bx1 >= x0 and by0 <= y1 and by1 >= y0)
+                # A wire needs air beside the text, not only no overlap (16 Nov: C44's text
+                # sat on either side of its own wire, a quarter of a millimetre off it).
                 count += sum(1 for (ax, ay), (bx, by) in segments
-                             if max(ax, bx) >= x0 and min(ax, bx) <= x1 and max(ay, by) >= y0 and min(ay, by) <= y1)
+                             if max(ax, bx) >= x0 - 0.5 and min(ax, bx) <= x1 + 0.5
+                             and max(ay, by) >= y0 - 0.5 and min(ay, by) <= y1 + 0.5)
             return count
         # Fewest things touched; among equals, the order above, then the nearest.
         scored = [(hits(option), index if index < 9 else 9 + abs(option["Value"][0] - cx) + abs(option["Value"][1] - cy),
@@ -753,7 +889,7 @@ class Sheet:
         for item in self.symbols():
             if item["ref"] == ref:
                 return item
-        raise KeyError("no symbol %s on %s" % (ref, _os.path.basename(self.path)))
+        raise self._missing(ref)
 
     def wires(self):
         """Every wire as its list of points (x, y)."""
@@ -787,7 +923,7 @@ class Sheet:
         libs = self._libs(root)
         found = [s for s in _children(root, "symbol") if self._ref(s) == ref]
         if not found:
-            raise KeyError("no symbol %s on %s" % (ref, _os.path.basename(self.path)))
+            raise self._missing(ref)
         points = set()
         for symbol in found:
             points |= set(self._symbol_pins(symbol, libs).values())
@@ -1115,7 +1251,7 @@ class Sheet:
                  if (_child(s, "uuid") and _unq(_child(s, "uuid")[1]) == ref)] or \
                 [s for s in _children(root, "symbol") if self._ref(s) == ref]
         if not found:
-            raise KeyError("no symbol %s on %s" % (ref, _os.path.basename(self.path)))
+            raise self._missing(ref)
         symbol = found[0]
         ref = self._ref(symbol)
         if not ref.startswith("#"):

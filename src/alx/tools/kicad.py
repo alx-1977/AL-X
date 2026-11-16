@@ -114,12 +114,12 @@ _ACTION_DEFINITIONS = (
         'port} (a GND or power symbol already on that sheet with that value is copied, GND down, '
         'power up, on a short wire; pins: neighbouring pins on one side share one wire and one port; where they are boxed in, '
         'the wire goes on, crossing a wire once, to a port clear of everything); no_connect {pins}; tidy_fields {refs}; remove_labels {nets, area?} (with the stubs only they '
-        'held); remove_items {area: [x1, y1, x2, y2], kinds?: wire|label|no_connect|junction|power} '
+        'held; without sheet, on every sheet); remove_items {area: [x1, y1, x2, y2], kinds?: wire|label|no_connect|junction|power} '
         '(what lies wholly inside; power symbols found by place, unannotated too; never parts); '
         'unwire {pins} (whatever is wired to those pins, and wiring left hanging; wiring on to other '
         'pins stays); remove_dangling {area?} (no-connects off pins, labels on nothing, ports touching nothing, '
         'wires with a free end). New wiring that would touch anything already there (a wire, a '
-        'label, a flag, another pin) is refused, naming it and where: clear it first. Board ops: remove_parts '
+        'label, a flag, another pin) is refused, naming it and where, unless it is already on the same net. Board ops: remove_parts '
         '{refs, with_tracks?} (copper only they used goes too); replace_part {ref, footprint, '
         'pin_nets?}; add_part {ref, footprint, at, rotation?, side?, value?, pin_nets?}; place {ref, '
         'at? | near: {ref, offset}, rotation?, side?}; track {width, from?: REF.PAD, to?: REF.PAD, '
@@ -398,16 +398,17 @@ APPROVE_STEP = CapabilityDefinition('approve_step',
 
 
 INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
-    "Read a work copy's schematic as facts, changing nothing: every part (reference, value, "
+    "Read a work copy's schematic (work_copy_id), or one of his projects where it is (project_dir, "
+    "e.g. P0020), as facts, changing nothing: every part (reference, value, "
     'footprint, sheet, place and rotation) with each pin number, pin name and net; every net '
     "with the pins it joins, from KiCad's own netlist across every sheet; and each sheet's "
     'labels. With refs, each pin also gives at (its point, mm), points (left/right/up/down) and '
     'wired (wiring already ends there). library_symbols (LIBRARY:NAME, up to 10) gives each such symbol\'s pins (number, '
-    'name, type) before it is placed, for a swap. original true reads his project as your copy was made from it. refs, nets and '
+    'name, type, and the part\'s own notes) before it is placed, for a swap. original true reads his project as your copy was made from it. refs, nets and '
     'contains (text in a reference, value or footprint) narrow it; limit (default 200) bounds '
     'each list. Read the schematic this way, never by printing sheet text from an edit script.',
-    obj({'work_copy_id': S, 'original': B, 'refs': array(S), 'nets': array(S), 'contains': S, 'limit': I,
-         'library_symbols': array(S)}, ('work_copy_id',)),
+    obj({'work_copy_id': S, 'project_dir': S, 'original': B, 'refs': array(S), 'nets': array(S), 'contains': S,
+         'limit': I, 'library_symbols': array(S)}, ()),
     obj({'sheets': array(MAP), 'parts': array(MAP), 'nets': array(MAP), 'library_symbols': array(MAP),
          'truncated': MAP}), SideEffect.NONE, FAILURES)
 RENDER = CapabilityDefinition('render',
@@ -595,6 +596,21 @@ def build_kicad_executors(provider, call_id_source):
                     failure['fault'] = ('%s: %s' % (type(error).__name__, error))[:300]
         elif contract is None:
             failure['reason'] = 'action must be one of ' + ', '.join(item.value for item in KiCadAction)
+        else:
+            # Which fields are wrong, so they are not guessed at (16 Nov: a dozen bare
+            # arguments_unusable replies, mostly project_dir or original sent where they are not taken).
+            schema = contract.input_schema
+            allowed = sorted(getattr(schema, 'properties', {}) or {})
+            unknown = sorted(set(values) - set(allowed))
+            missing = sorted(set(getattr(schema, 'required', ()) or ()) - set(values))
+            parts = []
+            if unknown:
+                parts.append('not taken by %s: %s' % (action.value, ', '.join(unknown)))
+            if missing:
+                parts.append('needed: %s' % ', '.join(missing))
+            if not parts:
+                parts.append('a field has the wrong type')
+            failure['recovery'] = {'detail': '; '.join(parts) + '. %s takes: %s' % (action.value, ', '.join(allowed))}
         return CapabilityResult(call_id_source(), KICAD, CapabilityResultState.FAILED,
                                 failure=dict(failure, code=code))
     return {KICAD: invoke}

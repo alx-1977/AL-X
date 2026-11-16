@@ -214,8 +214,17 @@ class MechanicalWorker:
         summary: dict[str, Any] = {"call_id": call_id, "capability_id": capability_id}
         if tool_use.get("name") != CALL_TOOL or capability_id not in self._definitions:
             summary["outcome"] = "not_listed"
-            return json.dumps({"refused": "capability_not_listed",
-                               "listed": list(self.capability_ids)}), summary, ()
+            refusal: dict[str, Any] = {"refused": "capability_not_listed", "listed": list(self.capability_ids)}
+            # An action named as if it were a capability (16 Nov: fetch_datasheet, read_reference):
+            # say which capability takes it.
+            owner = next((item.capability_id for item in self._definitions.values()
+                          if isinstance(capability_id, str) and capability_id
+                          and capability_id in "".join(
+                              c if c.isalnum() or c == "_" else " " for c in item.purpose).split()), None)
+            if owner is not None:
+                refusal["hint"] = "%s is an action of %s: call %s with action %s" % (
+                    capability_id, owner, owner, capability_id)
+            return json.dumps(refusal), summary, ()
         try:
             parsed = json.loads(arguments.get("arguments_json") or "{}")
             if not isinstance(parsed, dict):

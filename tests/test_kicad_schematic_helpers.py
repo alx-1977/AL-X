@@ -168,8 +168,10 @@ s.tidy_fields("R2")
 s.save()
 """)
             self.assertIn("dirs (0, -1) (0, 1) (-1, 0) (0, -1)", out)
-            # Straight down out of R1 pin 2 first, then across and on to R2 pin 1.
-            self.assertIn("route [(101.6, 105.41), (101.6, 107.95), (123.19, 107.95), (123.19, 101.6)]", out)
+            # Straight down out of R1 pin 2 first, then across, and into R2 pin 1 the way that
+            # pin points (from its left), never turning at the pin itself.
+            self.assertIn("route [(101.6, 105.41), (101.6, 107.95), (120.65, 107.95), (120.65, 101.6), "
+                          "(123.19, 101.6)]", out)
             self.assertIn("gnd (152.4, 107.95)", out)
             nets = self.netlist(folder)
             self.assertIn(frozenset({("R1", "2"), ("R2", "1")}), nets.values())
@@ -204,6 +206,37 @@ s.save()
             self.assertIn("(at 200.66 101.6 0)", saved)
             self.assertEqual(len(set(re.findall(r'\(uuid "([^"]+)"\)', saved))),
                              len(re.findall(r'\(uuid "([^"]+)"\)', saved)))
+
+    def test_new_wiring_keeps_off_part_bodies_and_the_title_block(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "t.kicad_sch").write_text(schematic())
+            out = self.run_script(folder, """
+s = sheet("t.kicad_sch")
+print("block", s._title_block(s._tree()[0]))
+for segment in (((127.0, 95.25), (127.0, 107.95)), ((180.34, 190.5), (190.5, 190.5)), ((115.57, 90.17), (139.7, 90.17))):
+    try:
+        s._check_segments([segment + ("test",)], set())
+        print("clear")
+    except ValueError as error:
+        print("refused", error)
+""")
+            # A4 without his template: KiCad's own title block, bottom right inside the margins.
+            self.assertIn("block (177.0, 168.0, 287.0, 200.0)", out)
+            self.assertIn("refused test: the new wire would run across R2", out)
+            self.assertIn("refused test: the new wire would run into the title block", out)
+            self.assertIn("clear", out)
+
+    def test_a_missing_symbol_names_the_sheet_it_is_on(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "t.kicad_sch").write_text(schematic())
+            (Path(folder) / "other.kicad_sch").write_text(schematic().replace('"R1"', '"U9"'))
+            out = self.run_script(folder, """
+try:
+    sheet("t.kicad_sch").symbol("U9")
+except KeyError as error:
+    print(error)
+""")
+            self.assertIn("no symbol U9 on t.kicad_sch; it is on other.kicad_sch", out)
 
 
 if __name__ == "__main__":

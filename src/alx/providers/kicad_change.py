@@ -23,7 +23,7 @@ SCHEMATIC_OPS = {
     'power': ('sheet', 'port'),
     'no_connect': ('sheet', 'pins'),
     'tidy_fields': ('sheet', 'refs'),
-    'remove_labels': ('sheet', 'nets'),
+    'remove_labels': ('nets',),
     'remove_items': ('sheet', 'area'),
     'remove_dangling': ('sheet',),
     'unwire': ('sheet', 'pins'),
@@ -134,6 +134,7 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
     after_names/before_names: each pin's net name; board_nets: each board pad's net name.
     """
     problems = []
+    swapped = {op['ref'] for op in change if op['op'] == 'swap_symbol'}
     for op in change:
         kind = op['op']
         if kind == 'wire' and after.get(op['from']) is not None and op['to'] not in after.get(op['from'], ()):
@@ -144,6 +145,8 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
             got = after_names.get(op['pin'], 'no net')
             hint = ('; %s is a global net on this board: use kind global_label' % op['net']
                     if op['net'] in set((before_names or {}).values()) and got != op['net'] else '')
+            if not hint and op['pin'].split('.')[0] in swapped and got != 'no net':
+                hint = '; the old part\'s wiring may still sit on this pin: unwire it first'
             problems.append('%s is on %s, not %s%s' % (op['pin'], got, op['net'], hint))
         elif kind == 'power':
             for pin in _power_pins(op):
@@ -153,7 +156,7 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
             for pin in op['pins']:
                 if len(after.get(pin, frozenset({pin}))) > 1:
                     problems.append('%s is joined to %s, not left unconnected'
-                                    % (pin, ', '.join(sorted(after[pin] - {pin}))))
+                                    % (pin, _pins_text(after[pin] - {pin}, after_names)))
         elif kind == 'remove_symbols':
             problems += ['%s is still in the schematic' % ref for ref in op['refs']
                          if any(pin.split('.')[0] == ref for pin in after)]
@@ -165,11 +168,21 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
         elif kind == 'remove_parts':
             problems += ['%s is still on the board' % ref for ref in op['refs']
                          if any(pad.split('.')[0] == ref for pad in board_nets)]
-    problems += _unasked(change, before, after, before_names or {})
+    problems += _unasked(change, before, after, before_names or {}, after_names)
     return problems
 
 
-def _unasked(change, before, after, before_names):
+def _pins_text(pins, names) -> str:
+    """Pins named in a refusal; a whole net is named by its name (16 Nov: a pin on GND was
+    reported with its 120 partners, and the agent could not see it was GND)."""
+    pins = sorted(pins)
+    if len(pins) <= 6:
+        return ', '.join(pins)
+    nets = sorted({_short(names.get(pin, '')) for pin in pins} - {''})
+    return 'net %s (%d pins, e.g. %s)' % ('/'.join(nets) or '?', len(pins), ', '.join(pins[:3]))
+
+
+def _unasked(change, before, after, before_names, after_names=None):
     """Pins joined or split that the change did not ask for.
 
     The nets the change should give are worked out from the nets before and
@@ -229,9 +242,9 @@ def _unasked(change, before, after, before_names):
         lost = {p for p in before[pin] if p.split('.')[0] not in free} - now
         if gained:
             problems.append('%s changed connection: gained %s, which the change did not join'
-                            % (pin, ', '.join(sorted(gained))[:200]))
+                            % (pin, _pins_text(gained, after_names or {})))
         elif lost and not splitting:
-            problems.append('%s changed connection: lost %s' % (pin, ', '.join(sorted(lost))[:200]))
+            problems.append('%s changed connection: lost %s' % (pin, _pins_text(lost, before_names)))
     return problems[:30]
 
 
@@ -263,8 +276,18 @@ def apply_change(change):
         return sheets[name]
     for index, op in enumerate(change):
         kind, done = op["op"], {}
-        if kind in ("remove_symbols", "swap_symbol", "wire", "label", "power", "no_connect", "tidy_fields",
-                    "remove_labels", "remove_items", "remove_dangling", "unwire"):
+        if kind == "remove_labels" and not op.get("sheet"):
+            # Without a sheet: every sheet that has them (16 Nov: three refusals for a missing sheet).
+            done["removed"] = {}
+            folder = _os.path.dirname(BOARD_PATH)
+            for name in sorted(n for n in _os.listdir(folder) if n.endswith(".kicad_sch")):
+                held = sheets.get(name) or sheet(name)
+                count = held.remove_labels(op["nets"], op.get("area"))
+                if count:
+                    sheets[name] = held
+                    done["removed"][name] = count
+        elif kind in ("remove_symbols", "swap_symbol", "wire", "label", "power", "no_connect", "tidy_fields",
+                      "remove_labels", "remove_items", "remove_dangling", "unwire"):
             s = sheet_of(op["sheet"])
             if kind == "remove_symbols":
                 for ref in op["refs"]:

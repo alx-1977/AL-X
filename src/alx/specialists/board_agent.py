@@ -211,7 +211,9 @@ class BoardJobAgent(MechanicalWorker):
             recovery = failure.get("recovery") if isinstance(failure.get("recovery"), Mapping) else {}
             failure = {"code": failure.get("code"), "fault": failure.get("fault"),
                        "detail": recovery.get("detail") or failure.get("detail"),
-                       "unmet": recovery.get("unmet"), "stderr": str(recovery.get("stderr") or "")[-1500:]}
+                       "unmet": recovery.get("unmet"), "stderr": str(recovery.get("stderr") or "")[-1500:],
+                       # A refused drawing prints its reason (16 Nov: 30 refusals logged without one).
+                       "stdout": str(recovery.get("stdout") or "")[-3000:], "hint": recovery.get("hint")}
         entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "call_id": summary.get("call_id"),
                  "capability_id": summary.get("capability_id"), "outcome": summary.get("outcome"),
                  "sent": str((tool_use.get("input") or {}).get("arguments_json", ""))[:6000],

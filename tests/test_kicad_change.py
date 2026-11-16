@@ -75,6 +75,24 @@ class ChangeShapeTests(unittest.TestCase):
                                {}, ["U6", "C39"], names), [])
 
 
+    def test_a_pin_on_a_whole_net_is_named_by_that_net(self):
+        """16 Nov: U6.11 was reported joined to 120 pins; the agent could not see it was GND."""
+        gnd = frozenset({"U6.11"} | {"C%d.1" % n for n in range(10, 30)})
+        after = {pin: gnd for pin in gnd}
+        before = {"U6.11": frozenset({"U6.11"}), **{pin: gnd - {"U6.11"} for pin in gnd - {"U6.11"}}}
+        names = {pin: "GND" for pin in gnd}
+        problems = unmet([{"op": "no_connect", "sheet": "a", "pins": ["U6.11"]},
+                          {"op": "swap_symbol", "sheet": "a", "ref": "U6", "lib_id": "X:Y"},
+                          {"op": "label", "sheet": "a", "pin": "U6.11", "net": "RF"}],
+                         before, after, names, {}, ["U6"], {})
+        self.assertIn("U6.11 is joined to net GND (20 pins, e.g. C10.1, C11.1, C12.1), not left unconnected",
+                      problems)
+        self.assertTrue(any("unwire it first" in p for p in problems), problems)
+
+    def test_labels_can_be_removed_on_every_sheet_at_once(self):
+        self.assertEqual(validate_change([{"op": "remove_labels", "nets": ["V1"]}])["schematic"], True)
+
+
 @unittest.skipUnless(PYTHON.is_file() and CLI.is_file() and DEVICE.is_file(), "KiCad is not installed")
 class RealChangeTests(unittest.TestCase):
     def runtime(self, folder):
