@@ -645,7 +645,8 @@ class KiCadProvider:
         """A project as he names it: a folder, or just its number (P0009), down to the folder
         that holds its one board. 16 Nov: the agent spent 14 calls looking for "P0009"."""
         text = str(name).strip()
-        if re.fullmatch(r'[A-Za-z]\d{3,}', text):
+        # A project number is one letter and its digits (P0009): a folder name, not language.
+        if len(text) >= 4 and text[0].isascii() and text[0].isalpha() and text[1:].isascii() and text[1:].isdigit():
             found = []
             for root in self.design_roots:
                 for depth in ('*', '*/*'):
