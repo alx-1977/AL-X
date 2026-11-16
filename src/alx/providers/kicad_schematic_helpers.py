@@ -153,6 +153,17 @@ def _on(point, a, b):
             and min(y1, y2) - 1e-6 <= y <= max(y1, y2) + 1e-6)
 
 
+def _overlap(a, b, c, d):
+    """Two wires on one line sharing a stretch (more than a point)."""
+    cross = lambda p, q, r: (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])  # noqa: E731
+    if a == b or c == d or abs(cross(a, b, c)) > 1e-6 or abs(cross(a, b, d)) > 1e-6:
+        return False
+    axis = 0 if abs(b[0] - a[0]) >= abs(b[1] - a[1]) else 1
+    low = max(min(a[axis], b[axis]), min(c[axis], d[axis]))
+    high = min(max(a[axis], b[axis]), max(c[axis], d[axis]))
+    return high - low > 1e-6
+
+
 class Sheet:
     """One schematic sheet of the copy, edited as text and saved with save()."""
 
@@ -421,6 +432,14 @@ class Sheet:
                                      "remove_items, remove_dangling), route to that wiring if it is the net "
                                      "you want, or join the pins another way"
                                      % (who, what, point[0], point[1], joined(point) if what == "a wire end" else ""))
+            # Never along a wire already there, whatever its net: two wires on one line
+            # (16 Nov, R18: the new R38 wire ran over the old one).
+            for pts in scene["wires"]:
+                for c, d in zip(pts, pts[1:]):
+                    if _overlap(a, b, c, d):
+                        raise ValueError("%s: the new wire would run along an existing wire from (%g, %g) to "
+                                         "(%g, %g)%s; those pins may already be joined" % (
+                                             who, c[0], c[1], d[0], d[1], joined(c)))
             for end in (a, b):
                 if end in allowed:
                     continue
@@ -446,6 +465,11 @@ class Sheet:
         start, end = self._stub_end(ref, pin, length)
         dx, dy = self.pin_direction(ref, pin)
         target = _r(target)
+        # Already wired to each other: nothing is drawn (16 Nov, R18: R38 to J5.2 drawn a
+        # second time over the wire that already joined them).
+        group, _ = self._wired_to(target)
+        if any(_on(start, a, b) for pts in group for a, b in zip(pts, pts[1:])):
+            return []
         if via:
             points = [end] + [_r(p) for p in via] + [target]
             points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]

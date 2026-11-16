@@ -56,6 +56,8 @@ Friedl reads both usages after each restart, once AL/X is idle, before the job i
 | R15 Opus medium | 20 min | 53 (5) | Claude | +23% | +3% | good; C44/C45 text |
 | R16 Sol 6.1 medium | 8 min | 38 (4) | GPT | +5% | +1% | only C44/C45 text |
 | R17 Sol 6.1 medium | 8 min | 42 (9) | GPT | +5% | +1% | right; C37 turn, wire over C56, C44/C45 text |
+| R18 Sol 6.1 medium | 6 min | 33 (2) | GPT | +5% | 0% | right; J5 wires drawn twice (tool, fixed) |
+| R18 | 16 Nov 19:34 | gpt-6.1-sol | medium | e2939f7 (refusal fixes) | schematic | 6 min | 33 (2) | 35→38% / 4→4% (her turns) | 10→15% / 31→31% | Finished; part note read at call 10; NC pins and EP grounded; nothing new in ERC. Both refusals the swap-order trap. Friedl: R38/R40/R42/R44 to J5 drawn twice (a second wire over the one already joining them, allowed by the same-net rule); fixed after: a wire between pins already joined draws nothing, no wire may run along another, later swaps done first |
 
 Friedl: time matters less than cost when the result is right, since it runs in the background; a faster
 model can be offered when he asks.

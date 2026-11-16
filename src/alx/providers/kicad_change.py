@@ -274,7 +274,22 @@ def apply_change(change):
         if name not in sheets:
             sheets[name] = sheet(name)
         return sheets[name]
-    for index, op in enumerate(change):
+    # Every part swapped before anything is drawn round it, where nothing before a swap
+    # names that part (16 Nov, R17 and R18: one switch's GND port was placed where the
+    # other switch's new pins then came out). Reports keep each operation's own number.
+    order = list(range(len(change)))
+    first = next((i for i, op in enumerate(change) if op["op"] == "swap_symbol"), None)
+    if first is not None:
+        def names(op):
+            found = {op.get("ref")} | {str(p).split(".")[0] for p in op.get("pins") or ()}
+            found |= {str(op.get(k) or "").split(".")[0] for k in ("from", "to", "pin")}
+            return found | set(op.get("refs") or ())
+        swaps = [i for i in range(first + 1, len(change)) if change[i]["op"] == "swap_symbol"
+                 and not any(change[i]["ref"] in names(change[k]) for k in range(first + 1, i))]
+        order = [i for i in order if i not in swaps]
+        order[first + 1:first + 1] = swaps
+    for index in order:
+        op = change[index]
         kind, done = op["op"], {}
         if kind == "remove_labels" and not op.get("sheet"):
             # Without a sheet: every sheet that has them (16 Nov: three refusals for a missing sheet).
@@ -313,6 +328,9 @@ def apply_change(change):
                 to_ref, to_number = _pin(op["to"])
                 done["points"] = s.wire_pin_to(ref, number, s.symbol(to_ref)["pins"][to_number],
                                                via=[tuple(p) for p in op.get("via") or ()] or None)
+                if not done["points"]:
+                    done["already_joined"] = "%s and %s were already wired together; nothing drawn" % (
+                        op["from"], op["to"])
             elif kind == "label":
                 ref, number = _pin(op["pin"])
                 s.label_pin(ref, number, op["net"], op.get("kind", "label"))
