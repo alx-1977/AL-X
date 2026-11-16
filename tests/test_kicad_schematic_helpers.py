@@ -238,6 +238,40 @@ except KeyError as error:
 """)
             self.assertIn("no symbol U9 on t.kicad_sch; it is on other.kicad_sch", out)
 
+    def test_a_part_is_added_as_a_copy_and_joined_onto_wiring_with_a_tee(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "t.kicad_sch").write_text(schematic())
+            out = self.run_script(folder, """
+s = sheet("t.kicad_sch")
+s.wire_pin_to("R1", "2", s.symbol("R3")["pins"]["2"])
+try:
+    s.copy_part("R1", "R3", (60.96, 152.4))
+except ValueError as error:
+    print("refused", error)
+print("pins", s.copy_part("R1", "R9", (114.3, 132.08)))
+print("tee", s.wire_pin_to("R9", "1", s.symbol("R3")["pins"]["2"]))
+s.save()
+""")
+            self.assertIn("refused R3 is already used on t.kicad_sch", out)
+            nets = self.netlist(folder)
+            self.assertIn(frozenset({("R1", "2"), ("R3", "2"), ("R9", "1")}), nets.values())
+            self.assertIn("(junction", Path(folder, "t.kicad_sch").read_text())
+
+    def test_a_swapped_part_takes_its_fields_from_the_library(self):
+        with tempfile.TemporaryDirectory() as folder:
+            text = schematic().replace('(property "Value" "10k"', '(property "MPN" "OLD-PART")\n\t\t(property "Value" "10k"', 1)
+            (Path(folder) / "t.kicad_sch").write_text(text)
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+s.swap_symbol("R1", "Device:R", value="22k")
+s.save()
+""")
+            saved = Path(folder, "t.kicad_sch").read_text()
+            block = saved[saved.index('(property "Reference" "R1"') - 400:saved.index('(property "Reference" "R2"')]
+            self.assertNotIn("OLD-PART", block)
+            self.assertIn('(property "Description" "Resistor"', block)
+            self.assertIn('(property "Value" "22k"', block)
+
 
 if __name__ == "__main__":
     unittest.main()

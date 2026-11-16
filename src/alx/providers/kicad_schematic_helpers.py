@@ -153,6 +153,48 @@ def _on(point, a, b):
             and min(y1, y2) - 1e-6 <= y <= max(y1, y2) + 1e-6)
 
 
+def _top_properties(block):
+    """(name, start, end) of each property directly in a symbol's text block."""
+    found, depth, index, quoted = [], 0, 0, False
+    while index < len(block):
+        char = block[index]
+        if quoted:
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char == "(":
+            depth += 1
+            if depth == 2 and block.startswith('(property "', index):
+                name_end = block.index('"', index + 11)
+                level, j, inside = 0, index, False
+                while j < len(block):
+                    c = block[j]
+                    if inside:
+                        if c == "\\":
+                            j += 1
+                        elif c == '"':
+                            inside = False
+                    elif c == '"':
+                        inside = True
+                    elif c == "(":
+                        level += 1
+                    elif c == ")":
+                        level -= 1
+                        if level == 0:
+                            break
+                    j += 1
+                found.append((block[index + 11:name_end], index, j + 1))
+                index = j
+                depth -= 1
+        elif char == ")":
+            depth -= 1
+        index += 1
+    return found
+
+
 def _overlap(a, b, c, d):
     """Two wires on one line sharing a stretch (more than a point)."""
     cross = lambda p, q, r: (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])  # noqa: E731
@@ -484,6 +526,28 @@ class Sheet:
         # the part's side at once (16 Nov: turning right after the stub ran the RFC wire up the
         # switch's side across where pins 1 and 2 come out). A target behind the pin turns
         # right after the stub, never back over the part.
+        # A target already wired: straight out of the pin onto that wiring, a T with a
+        # junction, is his usual way (16 Nov: the second 220 pF on the TX1 line).
+        if not via and group:
+            hits = []
+            for pts in group:
+                for a, b in zip(pts, pts[1:]):
+                    if dx and a[0] == b[0] and min(a[1], b[1]) < end[1] < max(a[1], b[1]) \
+                            and (a[0] - end[0]) * dx >= 0:
+                        hits.append((abs(a[0] - end[0]), (a[0], end[1])))
+                    if dy and a[1] == b[1] and min(a[0], b[0]) < end[0] < max(a[0], b[0]) \
+                            and (a[1] - end[1]) * dy >= 0:
+                        hits.append((abs(a[1] - end[1]), (end[0], a[1])))
+            for _, tee in sorted(hits):
+                tee = _r(tee)
+                try:
+                    self.check_clear(ref, pin, [start, end, tee] if tee != end else [start, end],
+                                     allow=(tee,), joined_to=target)
+                except ValueError:
+                    continue
+                self.add_wire(*_straight([start, end, tee] if tee != end else [start, end]))
+                self.add_junction(tee)
+                return [start, end, tee]
         # Into a part's pin the wire arrives the way that pin points, out of it first, never
         # turning right at the pin (16 Nov, Friedl: C37's net turned down at the capacitor pin).
         into = next((d for _, point, power, d in self._scene()["pins"]
@@ -1198,7 +1262,19 @@ class Sheet:
                 return "(at %g %g %s)" % (float(m.group(1)) + dx, float(m.group(2)) + dy, m.group(3))
             block = (block[:first] + "(at %g %g %g)" % (x, y, turn) + block[close + 1:head_end]
                      + _re.sub(r'\(at ([-\d.]+) ([-\d.]+) ([-\d.]+)\)', shift, block[head_end:]))
-        for name, text in (("Value", value), ("Footprint", footprint)):
+        # The new part's own fields, from its library part: an assembler builds from these
+        # (16 Nov: swapped switches still named the old PE42462 MPN, LCSC number and
+        # datasheet). The old part's identity fields go; its reference stays.
+        library_fields = {_unq(p[1]): _unq(p[2]) for p in _children(self._libs(self._tree()[0])[lib_id], "property")}
+        kept = ("Reference", "Value", "Footprint")
+        for name, start_at, end_at in reversed(_top_properties(block)):
+            if name not in kept and name not in library_fields:
+                cut_from = block.rfind("\n", 0, start_at)
+                block = block[:cut_from if cut_from >= 0 else start_at] + block[end_at:]
+        fields = [(n, t) for n, t in library_fields.items() if n not in kept]
+        fields += [("Value", value if value is not None else library_fields.get("Value")),
+                   ("Footprint", footprint if footprint is not None else library_fields.get("Footprint"))]
+        for name, text in fields:
             if text is None:
                 continue
             pattern = r'\(property "%s" "(?:[^"\\]|\\.)*"' % name
@@ -1304,6 +1380,53 @@ class Sheet:
                 number += 1
             block = block.replace('"%s"' % ref, '"#PWR%04d"' % number)
         self._append("\t" + block)
+
+    def copy_part(self, like, ref, at, rotation=None):
+        """A new part, a copy of part `like` on this sheet (same library part, fields and
+        footprint), under the free reference `ref` at `at`. 16 Nov: the second 220 pF on TX1.
+        Its pins may touch nothing already there; it is wired with wire, label and power."""
+        folder = _os.path.dirname(self.path)
+        for name in (n for n in _os.listdir(folder) if n.endswith(".kicad_sch")):
+            with open(_os.path.join(folder, name)) as handle:
+                text = handle.read()
+            if '(property "Reference" "%s"' % ref in text or '(reference "%s")' % ref in text:
+                raise ValueError("%s is already used on %s; take a free reference" % (ref, name))
+        root, spans = self._tree()
+        found = [n for n in _children(root, "symbol") if self._ref(n) == like]
+        if not found:
+            raise self._missing(like)
+        if like.startswith("#"):
+            raise ValueError("%s is a power symbol; use power to place ports" % like)
+        symbol = found[0]
+        start, end = spans[id(symbol)]
+        block = self.text[start:end]
+        old = _child(symbol, "at")
+        turn = rotation if rotation is not None else (float(old[3]) if len(old) > 3 else 0.0)
+        dx, dy = at[0] - float(old[1]), at[1] - float(old[2])
+        first = block.index("(at ")
+        close = block.index(")", first)
+        head_end = block.index("(property")
+
+        def shift(m):
+            return "(at %g %g %s)" % (float(m.group(1)) + dx, float(m.group(2)) + dy, m.group(3))
+        block = (block[:first] + "(at %g %g %g)" % (at[0], at[1], turn) + block[close + 1:head_end]
+                 + _re.sub(r'\(at ([-\d.]+) ([-\d.]+) ([-\d.]+)\)', shift, block[head_end:]))
+        block = _re.sub(r'\(uuid "[^"]+"\)', lambda m: '(uuid "%s")' % _uuid.uuid4(), block)
+        block = block.replace('(property "Reference" "%s"' % like, '(property "Reference" "%s"' % ref, 1)
+        block = block.replace('(reference "%s")' % like, '(reference "%s")' % ref)
+        scene = self._scene()
+        self._append("\t" + block)
+        mine = self.symbol(ref)["pins"]
+        for number, point in mine.items():
+            if any(_on(point, a, b) for pts in scene["wires"] for a, b in zip(pts, pts[1:])) or \
+                    point in {q for _, q, _, _ in scene["pins"]} or point in {l["at"] for l in scene["labels"]}:
+                raise ValueError("%s pin %s at (%g, %g) would land on what is already there; place it "
+                                 "elsewhere" % (ref, number, point[0], point[1]))
+        body = [b for n, b in self._scene()["parts"] if n == ref]
+        for name, (x0, y0, x1, y1) in scene["parts"]:
+            if body and max(x0, body[0][0]) < min(x1, body[0][2]) and max(y0, body[0][1]) < min(y1, body[0][3]):
+                raise ValueError("%s would sit on %s; place it elsewhere" % (ref, name))
+        return mine
 
     def save(self):
         """Write the sheet back, after checking it still parses."""

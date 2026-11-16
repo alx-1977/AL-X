@@ -18,6 +18,7 @@ PIN = re.compile(r'^[^.\s]+\.[^.\s]+$')
 SCHEMATIC_OPS = {
     'remove_symbols': ('sheet', 'refs'),
     'swap_symbol': ('sheet', 'ref', 'lib_id'),
+    'add_symbol': ('sheet', 'ref', 'like', 'at'),
     'wire': ('sheet', 'from', 'to'),
     'label': ('sheet', 'pin', 'net'),
     'power': ('sheet', 'port'),
@@ -81,7 +82,7 @@ def validate_change(change: Any) -> dict[str, Any]:
             raise ChangeError('%s: area is [x1, y1, x2, y2] in mm' % where)
         if op['op'] == 'power' and not (op.get('pin') or op.get('pins')):
             raise ChangeError('%s (power) needs pin, or pins for a row of neighbouring pins' % where)
-        if op['op'] == 'swap_symbol':
+        if op['op'] == 'swap_symbol' or (op['op'] == 'add_symbol' and op.get('lib_id')):
             symbols.add(op['lib_id'])
         if op['op'] in ('replace_part', 'add_part'):
             footprints.add(op['footprint'])
@@ -157,6 +158,9 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
                 if len(after.get(pin, frozenset({pin}))) > 1:
                     problems.append('%s is joined to %s, not left unconnected'
                                     % (pin, _pins_text(after[pin] - {pin}, after_names)))
+        elif kind == 'add_symbol':
+            if not any(pin.split('.')[0] == op['ref'] for pin in after):
+                problems.append('%s is not in the schematic' % op['ref'])
         elif kind == 'remove_symbols':
             problems += ['%s is still in the schematic' % ref for ref in op['refs']
                          if any(pin.split('.')[0] == ref for pin in after)]
@@ -301,7 +305,7 @@ def apply_change(change):
                 if count:
                     sheets[name] = held
                     done["removed"][name] = count
-        elif kind in ("remove_symbols", "swap_symbol", "wire", "label", "power", "no_connect", "tidy_fields",
+        elif kind in ("remove_symbols", "swap_symbol", "add_symbol", "wire", "label", "power", "no_connect", "tidy_fields",
                       "remove_labels", "remove_items", "remove_dangling", "unwire"):
             s = sheet_of(op["sheet"])
             if kind == "remove_symbols":
@@ -323,6 +327,11 @@ def apply_change(change):
                 ends = {p for pts in s.wires() for p in (pts[0], pts[-1])} | {l["at"] for l in s.labels()}
                 done["pins_still_wired"] = sorted((n for n, point in s.symbol(op["ref"])["pins"].items()
                                                    if point in ends), key=lambda n: (len(n), n))
+            elif kind == "add_symbol":
+                pins = s.copy_part(op["like"], op["ref"], tuple(op["at"]), op.get("rotation"))
+                if op.get("lib_id"):
+                    s.swap_symbol(op["ref"], op["lib_id"], value=op.get("value"))
+                done["pins"] = {n: list(p) for n, p in s.symbol(op["ref"])["pins"].items()}
             elif kind == "wire":
                 ref, number = _pin(op["from"])
                 to_ref, to_number = _pin(op["to"])
