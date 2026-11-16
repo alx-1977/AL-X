@@ -43,10 +43,12 @@ FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed', 'step_not_
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
 BOARD_ITEM = obj({'id': S, 'kind': S, 'layers': array(S)})
-ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, 'groups': array(obj({
+ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, 'only_new': B, 'new': TOTALS,
+          'groups': array(obj({
     'check_type': S, 'count': I, 'severity': S, 'omitted_findings': I, 'findings': array(obj({
         'severity': S, 'sheet': S, 'description': S, 'items': array(obj({
-            'description': S, 'designator': S, 'position': obj({'x': N, 'y': N}, ())}))}))}))})
+            'description': S, 'designator': S, 'position': obj({'x': N, 'y': N}, ())}))}))}))},
+    ('checked', 'reason', 'totals', 'top_level_sheets', 'groups'))
 
 LAYOUT_RULES = obj({'findings': array(StructuredSchema(ValueKind.OBJECT)), 'omitted': I,
                     'not_checked': S}, ('findings', 'omitted'))
@@ -109,10 +111,12 @@ _ACTION_DEFINITIONS = (
         'grid step, then one turn, his way; via: [[x, y], ...] in mm on the 1.27 grid to route around '
         'what is in the way, each piece straight across or up and down); label {pin, net, kind?: label|global_label}; power {pin | pins, '
         'port} (a GND or power symbol already on that sheet with that value is copied, GND down, '
-        'power up, on a short wire; pins: neighbouring pins on one side share one wire and one port); no_connect {pins}; tidy_fields {refs}; remove_labels {nets, area?} (with the stubs only they '
+        'power up, on a short wire; pins: neighbouring pins on one side share one wire and one port; facing?: left|right|up|down '
+        'gives each pin its own port turned that way, only where his way is blocked); no_connect {pins}; tidy_fields {refs}; remove_labels {nets, area?} (with the stubs only they '
         'held); remove_items {area: [x1, y1, x2, y2], kinds?: wire|label|no_connect|junction|power} '
         '(what lies wholly inside; power symbols found by place, unannotated too; never parts); '
-        'remove_dangling {area?} (no-connects off pins, labels on nothing, ports touching nothing, '
+        'unwire {pins} (whatever is wired to those pins, and wiring left hanging; wiring on to other '
+        'pins stays); remove_dangling {area?} (no-connects off pins, labels on nothing, ports touching nothing, '
         'wires with a free end). New wiring that would touch anything already there (a wire, a '
         'label, a flag, another pin) is refused, naming it and where: clear it first. Board ops: remove_parts '
         '{refs, with_tracks?} (copper only they used goes too); replace_part {ref, footprint, '
@@ -390,7 +394,8 @@ INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
     "Read a work copy's schematic as facts, changing nothing: every part (reference, value, "
     'footprint, sheet, place and rotation) with each pin number, pin name and net; every net '
     "with the pins it joins, from KiCad's own netlist across every sheet; and each sheet's "
-    'labels. library_symbols (LIBRARY:NAME, up to 10) gives each such symbol\'s pins (number, '
+    'labels. With refs, each pin also gives at (its point, mm), points (left/right/up/down) and '
+    'wired (wiring already ends there). library_symbols (LIBRARY:NAME, up to 10) gives each such symbol\'s pins (number, '
     'name, type) before it is placed, for a swap. original true reads his project as your copy was made from it. refs, nets and '
     'contains (text in a reference, value or footprint) narrow it; limit (default 200) bounds '
     'each list. Read the schematic this way, never by printing sheet text from an edit script.',

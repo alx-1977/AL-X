@@ -189,10 +189,28 @@ def parity_mismatches(schematic_nets: dict, board_text: str) -> list:
         return frozenset(node for node in group if node[0] in shared)
     left = {g for g in map(within, schematic) if len(g) > 1}
     right = {g for g in map(within, board) if len(g) > 1}
-    lines = ['schematic only: ' + ', '.join('%s.%s' % node for node in sorted(group))
-             for group in left - right]
-    lines += ['board only: ' + ', '.join('%s.%s' % node for node in sorted(group))
-              for group in right - left]
+
+    def names(nodes):
+        nodes = sorted(nodes)
+        shown = ', '.join('%s.%s' % node for node in nodes[:12])
+        return shown + (' and %d more' % (len(nodes) - 12) if len(nodes) > 12 else '')
+    # A net that differs by a few pins is named by what differs, not listed whole
+    # (16 Nov: three new GND pins listed every GND pin on the board, twice).
+    lines, matched = [], set()
+    for group in sorted(left - right, key=sorted):
+        best = max(right, key=lambda other: len(group & other), default=frozenset())
+        common = group & best
+        if not common:
+            lines.append('schematic only: ' + names(group))
+            continue
+        matched.add(best)
+        anchor = '%s.%s' % min(common)
+        if group - best:
+            lines.append('schematic joins to the net of %s, the board does not: %s' % (anchor, names(group - best)))
+        if best - group:
+            lines.append('board joins to the net of %s, the schematic does not: %s' % (anchor, names(best - group)))
+    lines += ['board only: ' + names(group) for group in sorted(right - left - matched, key=sorted)
+              if not any(group & other for other in left - right)]
     lines += ['part on the board only: ' + ref for ref in sorted(board_refs - schematic_refs)]
     lines += ['part in the schematic only: ' + ref for ref in sorted(schematic_refs - board_refs)]
     return sorted(lines)

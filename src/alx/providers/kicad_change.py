@@ -26,9 +26,10 @@ SCHEMATIC_OPS = {
     'remove_labels': ('sheet', 'nets'),
     'remove_items': ('sheet', 'area'),
     'remove_dangling': ('sheet',),
+    'unwire': ('sheet', 'pins'),
 }
 # Removing labels and leftovers may split nets (that is what they are for); it never joins any.
-SPLITTING = ('remove_labels', 'remove_items', 'remove_dangling')
+SPLITTING = ('remove_labels', 'remove_items', 'remove_dangling', 'unwire')
 BOARD_OPS = {
     'remove_parts': ('refs',),
     'replace_part': ('ref', 'footprint'),
@@ -103,6 +104,17 @@ def _power_pins(op):
     return list(op.get('pins') or ()) + ([op['pin']] if op.get('pin') else [])
 
 
+def _label_holds(op, got: str, before_names) -> bool:
+    """A label's pin is on the net it names. Where a net of exactly that name already
+    exists (a global one, 16 Nov: V2 and V3), only that net will do: a local label of the
+    same name makes a separate net that KiCad names after the sheet."""
+    if got == op['net']:
+        return True
+    if op['net'] in set(before_names.values()):
+        return False
+    return _short(got) == _short(op['net'])
+
+
 def _short(net: str) -> str:
     return net.rsplit('/', 1)[-1]
 
@@ -123,8 +135,11 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
             problems.append('%s is not joined to %s' % (op['from'], op['to']))
         elif kind == 'wire' and op['from'] not in after:
             problems.append('%s is not in the schematic' % op['from'])
-        elif kind == 'label' and _short(after_names.get(op['pin'], '')) != _short(op['net']):
-            problems.append('%s is on %s, not %s' % (op['pin'], after_names.get(op['pin'], 'no net'), op['net']))
+        elif kind == 'label' and not _label_holds(op, after_names.get(op['pin'], ''), before_names or {}):
+            got = after_names.get(op['pin'], 'no net')
+            hint = ('; %s is a global net on this board: use kind global_label' % op['net']
+                    if op['net'] in set((before_names or {}).values()) and got != op['net'] else '')
+            problems.append('%s is on %s, not %s%s' % (op['pin'], got, op['net'], hint))
         elif kind == 'power':
             for pin in _power_pins(op):
                 if _short(after_names.get(pin, '')) != _short(op['port'].split(':', 1)[-1]):
@@ -244,7 +259,7 @@ def apply_change(change):
     for index, op in enumerate(change):
         kind, done = op["op"], {}
         if kind in ("remove_symbols", "swap_symbol", "wire", "label", "power", "no_connect", "tidy_fields",
-                    "remove_labels", "remove_items", "remove_dangling"):
+                    "remove_labels", "remove_items", "remove_dangling", "unwire"):
             s = sheet_of(op["sheet"])
             if kind == "remove_symbols":
                 for ref in op["refs"]:
@@ -272,7 +287,8 @@ def apply_change(change):
                 pins = [_pin(text) for text in (op.get("pins") or [])] + ([_pin(op["pin"])] if op.get("pin") else [])
                 template = op.get("template") or _power_template(s, op["port"])
                 done["ports"] = len(s.port_pins(pins, template,
-                                                down="GND" in op["port"].split(":", 1)[-1].upper()))
+                                                down="GND" in op["port"].split(":", 1)[-1].upper(),
+                                                facing=op.get("facing")))
             elif kind == "no_connect":
                 for text in op["pins"]:
                     ref, number = _pin(text)
@@ -287,6 +303,11 @@ def apply_change(change):
                                                               ("wire", "label", "no_connect", "junction", "power")))
             elif kind == "remove_dangling":
                 done["removed"] = s.remove_dangling(op.get("area"))
+            elif kind == "unwire":
+                done["removed"] = {}
+                for text in op["pins"]:
+                    for what, count in s.unwire(*_pin(text)).items():
+                        done["removed"][what] = done["removed"].get(what, 0) + count
         else:
             if board is None:
                 board = load()

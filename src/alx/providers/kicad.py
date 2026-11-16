@@ -1243,9 +1243,12 @@ class KiCadProvider:
                                           if not changed else self._layout_rules(board))
                 if not library and any(name.endswith('.kicad_sch') for name in changed):
                     # A schematic edit is checked like the first copy (review of #239).
-                    report['erc'] = self._erc(root, meta)
-                diffs, budget = [], 24000
-                for name in changed[:200]:
+                    report['erc'] = self._erc(root, meta, against_original=True)
+                # A structured change says what each operation did and is checked against
+                # the netlist; the raw text diff added ~24,000 characters to every one of the
+                # agent's edits and nothing it used (16 Nov). History keeps the before files.
+                diffs, budget = [], (0 if plan is not None else 24000)
+                for name in (changed[:200] if budget else ()):
                     left = (snapshot / name).read_text(errors='replace') if name in original else ''
                     right = (project / name).read_text(errors='replace') if name in current else ''
                     # Stream the diff into a bounded report; retain the snapshot
@@ -1263,7 +1266,7 @@ class KiCadProvider:
                     budget -= used
                     if budget <= 0:
                         break
-                truncated = len(diffs) < len(changed) or any(d['truncated'] for d in diffs)
+                truncated = plan is None and (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
                 report.update(file_diffs=diffs, diffs_truncated=truncated)
                 if truncated:
                     # The report is cut short: keep before and after copies and the
@@ -1426,7 +1429,7 @@ class KiCadProvider:
                                 fingerprints(project, meta['board']))
             totals = self._board_drc(root, meta)[0]
             if any(name.endswith('.kicad_sch') for name in changed):
-                report['erc'] = self._erc(root, meta)
+                report['erc'] = self._erc(root, meta, against_original=True)
         return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision, 'stdout': '',
                 'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps,
                 'previewed': False}
@@ -1623,8 +1626,19 @@ class KiCadProvider:
         except Exception as error:  # noqa: BLE001 - a fact for her, not a failed step
             return {'findings': [], 'omitted': 0, 'not_checked': str(error)[:200]}
 
-    def _erc(self, root, meta):
-        """KiCad's electrical rules check of the copy's schematic, grouped like the DRC."""
+    def _erc(self, root, meta, signatures=None, against_original=False):
+        """KiCad's electrical rules check of the copy's schematic, grouped like the DRC.
+
+        against_original: only findings his original did not already have are listed
+        (totals stay whole); 16 Nov: every edit carried the whole ERC, some 30,000
+        characters of his own findings, into the board agent's context.
+        """
+        known = None
+        if against_original:
+            try:
+                known = set(map(tuple, json.loads((root / 'baseline.json').read_text())['erc']))
+            except (OSError, ValueError, KeyError, TypeError):
+                known = None
         schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
         if not schematic.is_file():
             return {'checked': False, 'reason': 'no schematic beside the board', 'totals':
@@ -1639,6 +1653,7 @@ class KiCadProvider:
         except (ValueError, OSError, KeyError, TypeError) as error:
             raise KiCadError('invalid_report') from error
         totals = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
+        new = {'error': 0, 'warning': 0, 'ignore': 0}
         groups = {}
         for sheet in sheets:
             for finding in sheet.get('violations') or ():
@@ -1647,6 +1662,14 @@ class KiCadProvider:
                     raise KiCadError('invalid_report')
                 totals[severity] += 1
                 totals['total'] += 1
+                mark = (kind, str(finding.get('description', '')),
+                        '|'.join(str(i.get('description', '')) for i in (finding.get('items') or ())))
+                if signatures is not None:
+                    signatures.append(list(mark))
+                if known is not None:
+                    if mark in known:
+                        continue
+                    new[severity] += 1
                 items = []
                 for item in (finding.get('items') or ())[:ITEMS_PER_FINDING]:
                     description = str(item.get('description', ''))
@@ -1666,8 +1689,11 @@ class KiCadProvider:
         for entry in ordered:
             entry['omitted_findings'] = max(0, len(entry['findings']) - FINDINGS_PER_CHECK_TYPE)
             entry['findings'] = entry['findings'][:FINDINGS_PER_CHECK_TYPE]
-        return {'checked': True, 'reason': '', 'totals': totals, 'groups': ordered,
-                'top_level_sheets': top_level_sheets(schematic.parent)}
+        result = {'checked': True, 'reason': '', 'totals': totals, 'groups': ordered,
+                  'top_level_sheets': top_level_sheets(schematic.parent)}
+        if known is not None:
+            result.update(only_new=True, new=dict(new, total=sum(new.values())))
+        return result
 
     def _drc(self, root, meta, signatures=None):
         output = root / 'artifacts' / (uuid.uuid4().hex + '.json')
@@ -1833,11 +1859,13 @@ class KiCadProvider:
         steps = fingerprints(root / 'project', meta['board'])
         steps.pop('copper')
         self._save_metadata(root, dict(meta, original_steps=steps))
-        (root / 'baseline.json').write_text(json.dumps({'drc': signatures,
-                                                        'parity': self._parity(root, meta)}))
         # The schematic is checked too, errors and warnings, aiming for a
         # clean result like the DRC (Friedl, 2026-11-13).
-        result['erc'] = self._erc(root, meta)
+        baseline = {'drc': signatures, 'parity': self._parity(root, meta)}
+        (root / 'baseline.json').write_text(json.dumps(baseline))
+        erc_signatures = []
+        result['erc'] = self._erc(root, meta, erc_signatures)
+        (root / 'baseline.json').write_text(json.dumps(dict(baseline, erc=erc_signatures)))
         result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
         result['compared_to_original'] = self._compared(root, meta, signatures)
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
@@ -1854,7 +1882,7 @@ class KiCadProvider:
             signatures = []
             result = self._drc(root, meta, signatures)
             self._remember_drc(root, meta, self._board_totals(result), signatures)
-            result['erc'] = self._erc(root, meta)
+            result['erc'] = self._erc(root, meta, against_original=True)
             result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
             result['compared_to_original'] = self._compared(root, meta, signatures)
             return dict(result, work_copy_id=work_copy_id, work_copy_revision=self._revision(root))
@@ -2193,6 +2221,10 @@ class KiCadProvider:
                     wanted_nets and not any(p['net'] in wanted_nets for p in item['pins'])):
                 continue
             parts.append(item)
+        if refs and parts:
+            # Where each asked part's pins are on its sheet, which way they point and whether
+            # wiring already ends there: what routing and clearing need (16 Nov).
+            self._pin_geometry(project, meta, parts[:20])
         chosen = [net for net in nets if (not wanted_nets or net['name'] in wanted_nets)
                   and (not refs or any(node.split('.')[0] in refs for node in net['nodes']))]
         # A library symbol's pins, before it is placed: what a swap's pin map needs.
@@ -2207,6 +2239,33 @@ class KiCadProvider:
                 library.append({'lib_id': name, 'pins': self._symbol_pins_from(cached)})
         return {'sheets': sheets, 'parts': parts[:limit], 'nets': chosen[:limit], 'library_symbols': library,
                 'truncated': {'parts': len(parts) > limit, 'nets': len(chosen) > limit}}
+
+    @staticmethod
+    def _pin_geometry(project, meta, parts):
+        namespace = {'__name__': 'alx_sheet_reader'}
+        exec(compile(SCHEMATIC_HELPERS, 'schematic_helpers', 'exec'), namespace)  # noqa: S102 - our own tested reader
+        namespace['BOARD_PATH'] = str(project / meta['board'])
+        opened = {}
+        for part in parts:
+            name = part.get('sheet')
+            if not name:
+                continue
+            try:
+                sheet = opened.setdefault(name, namespace['Sheet'](name))
+                placed = sheet.symbol(part['ref'])['pins']
+                ends = {p for pts in sheet.wires() for p in (pts[0], pts[-1])} | {l['at'] for l in sheet.labels()}
+            except (KeyError, ValueError, IndexError):
+                continue
+            for pin in part['pins']:
+                point = placed.get(pin['number'])
+                if point is None:
+                    continue
+                try:
+                    direction = sheet.pin_direction(part['ref'], pin['number'])
+                except (KeyError, ValueError, TypeError):
+                    direction = None
+                pin.update(at=list(point), points={(1, 0): 'right', (-1, 0): 'left', (0, 1): 'down',
+                                                   (0, -1): 'up'}.get(direction, ''), wired=point in ends)
 
     @staticmethod
     def _symbol_pins_from(block):

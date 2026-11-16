@@ -375,13 +375,23 @@ class Sheet:
         self.add_label(name, end, angle, kind)
         return end
 
-    def port_pins(self, pins, template, down):
+    def port_pins(self, pins, template, down, facing=None):
         """One port for each row of neighbouring pins: each pin straight out one step, the
         row's ends joined by one wire, and a single port (GND down, power up) on it.
 
         15 Nov: a port per pin put the ports of neighbouring NC pins on top of one
         another. pins: [(ref, number), ...]. Returns the port points.
+
+        facing (left, right, up, down): each pin gets its own port at the end of its
+        stub, turned that way, for where the usual way is blocked (NC pins between two
+        RF pins, 16 Nov). His rule is GND down, power up; facing is the exception.
         """
+        natural = None
+        if facing:
+            natural = {"down": 0, "right": 90, "up": 180, "left": 270} if down else \
+                {"up": 0, "left": 90, "down": 180, "right": 270}
+            if facing not in natural:
+                raise ValueError("facing is left, right, up or down")
         want = 1 if down else -1
         rows = {}
         for ref, number in pins:
@@ -410,6 +420,10 @@ class Sheet:
             segments += [(a[1], b[1], "%s to %s" % (a[2], b[2])) for a, b in zip(row, row[1:])]
             # Only the pins themselves may already be wired; every new point is checked.
             allowed |= {item[0] for item in row}
+            if natural is not None:
+                # Turned the asked way: one port on the row, at its middle pin's stub end.
+                ports.append(ends[len(ends) // 2])
+                continue
             if (dx, dy) == (0, -want):
                 # Pins pointing away from where the port goes (GND pins on top): the row
                 # runs out past the nearer side of the part, clear of its side pins, and
@@ -443,7 +457,7 @@ class Sheet:
             if count >= 3:
                 self.add_junction(point)
         for port in ports:
-            self.copy_symbol(template, port, 0)
+            self.copy_symbol(template, port, natural[facing] if natural is not None else 0)
         return ports
 
     def ground_pin(self, ref, pin, template):
@@ -469,10 +483,65 @@ class Sheet:
         left, right = min(p[0] for p in placed), max(p[0] for p in placed)
         top, bottom = min(p[1] for p in placed), max(p[1] for p in placed)
         cx, cy = (left + right) / 2, (top + bottom) / 2
-        if bottom - top >= right - left:
-            spots = {"Reference": (right + 1.27, cy - 1.27, "left"), "Value": (right + 1.27, cy + 1.27, "left")}
-        else:
-            spots = {"Reference": (cx, top - 1.27, ""), "Value": (cx, bottom + 2.54, "")}
+        props = {_unq(p[1]): _unq(p[2]) for p in _children(symbol, "property")}
+        width = lambda name: 0.9 * 1.27 * len(props.get(name, "")) + 0.5  # noqa: E731
+        right_side = {"Reference": (right + 1.27, cy - 1.27, "left"), "Value": (right + 1.27, cy + 1.27, "left")}
+        above_below = {"Reference": (cx, top - 1.27, ""), "Value": (cx, bottom + 2.54, "")}
+        left_side = {"Reference": (left - 1.27, cy - 1.27, "right"), "Value": (left - 1.27, cy + 1.27, "right")}
+        upright = bottom - top >= right - left
+        corners = {"Reference": (right + 1.27, top - 1.27, "left"), "Value": (right + 1.27, bottom + 2.54, "left")}
+        options = ([right_side, corners, above_below, left_side] if upright
+                   else [above_below, right_side, corners, left_side])
+        # The place where the text lands on the least: wiring, ports, labels, other parts'
+        # pins (16 Nov: sideways GND ports sat on a switch's reference and value).
+        root_now, _ = self._tree()
+        libs_now = self._libs(root_now)
+        own = set(self._symbol_pins(symbol, libs_now).values())
+        segments = [(a, b) for pts in self.wires() for a, b in zip(pts, pts[1:])]
+        boxes = []
+        for item in self.labels():
+            (lx, ly), w = item["at"], 1.27 * len(item["name"]) + 2.5
+            angle = 0
+            for node in root_now:
+                if _head(node) in ("label", "global_label", "hierarchical_label") and \
+                        _r(_child(node, "at")[1:3]) == item["at"]:
+                    at_node = _child(node, "at")
+                    angle = float(at_node[3]) if len(at_node) > 3 else 0
+            if angle == 180:
+                boxes.append((lx - w, ly - 1.2, lx, ly + 1.2))
+            elif angle == 90:
+                boxes.append((lx - 1.2, ly - w, lx + 1.2, ly))
+            elif angle == 270:
+                boxes.append((lx - 1.2, ly, lx + 1.2, ly + w))
+            else:
+                boxes.append((lx, ly - 1.2, lx + w, ly + 1.2))
+        for other in _children(root_now, "symbol"):
+            if other is symbol:
+                continue
+            for px, py in self._symbol_pins(other, libs_now).values():
+                if (px, py) not in own:
+                    boxes.append((px - 0.3, py - 0.3, px + 0.3, py + 0.3))
+            if self._ref(other).startswith("#"):
+                ox, oy = _r(_child(other, "at")[1:3])
+                boxes.append((ox - 2.2, oy - 2.2, ox + 2.2, oy + 2.2))
+
+        def box(name, x, y, justify):
+            w = width(name)
+            x0 = x if justify == "left" else x - w if justify == "right" else x - w / 2
+            return (x0 - 0.3, y - 1.0, x0 + w + 0.3, y + 1.0)
+
+        def hits(spots):
+            count = 0
+            for name, (x, y, justify) in spots.items():
+                if name not in props:
+                    continue
+                x0, y0, x1, y1 = box(name, x, y, justify)
+                count += sum(1 for bx0, by0, bx1, by1 in boxes if bx0 <= x1 and bx1 >= x0 and by0 <= y1 and by1 >= y0)
+                count += sum(1 for (ax, ay), (bx, by) in segments
+                             if max(ax, bx) >= x0 and min(ax, bx) <= x1 and max(ay, by) >= y0 and min(ay, by) <= y1)
+            return count
+        spots = min(options, key=hits)
+        symbol, lib, spans = self._placed_symbol(ref)
         start, end = spans[id(symbol)]
         block = self.text[start:end]
         for name, (x, y, justify) in spots.items():
@@ -591,6 +660,37 @@ class Sheet:
     def _inside(point, area):
         return area is None or (min(area[0], area[2]) - 1e-6 <= point[0] <= max(area[0], area[2]) + 1e-6
                                 and min(area[1], area[3]) - 1e-6 <= point[1] <= max(area[1], area[3]) + 1e-6)
+
+    def unwire(self, ref, pin):
+        """Take off whatever is wired to one pin (wires, labels, no-connects, ports) and the
+        wiring that then hangs loose; wiring that goes on to other pins stays.
+        16 Nov: a swapped part's new pins sat on the old part's wiring. Returns counts."""
+        point = self.symbol(ref)["pins"][str(pin)]
+        root, spans = self._tree()
+        libs = self._libs(root)
+        cut, others, counts = [], set(), {}
+        for node in _children(root, "wire"):
+            pts = [_r((p[1], p[2])) for p in _children(_child(node, "pts"), "xy")]
+            if point in (pts[0], pts[-1]):
+                cut.append(node)
+                others |= set(pts) - {point}
+                counts["wire"] = counts.get("wire", 0) + 1
+            elif any(_on(point, a, b) for a, b in zip(pts, pts[1:])):
+                raise ValueError("%s.%s: a wire runs through the pin at (%g, %g); remove_items there first"
+                                 % (ref, pin, point[0], point[1]))
+        for node in root:
+            head = _head(node)
+            if head in ("label", "global_label", "hierarchical_label", "no_connect") and \
+                    _r(_child(node, "at")[1:3]) == point:
+                cut.append(node)
+                counts[head] = counts.get(head, 0) + 1
+            elif head == "symbol" and self._ref(node).startswith("#") and \
+                    point in self._symbol_pins(node, libs).values():
+                cut.append(node)
+                counts["power"] = counts.get("power", 0) + 1
+        self._cut([spans[id(n)] for n in cut])
+        self.tidy(others)
+        return counts
 
     def remove_labels(self, names, area=None):
         """Remove net labels with these names (inside area [x1, y1, x2, y2] when given), and
