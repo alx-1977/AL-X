@@ -234,8 +234,10 @@ def _unasked(change, before, after, before_names, after_names=None):
                 named.setdefault(net, pin)
     splitting = any(op['op'] in SPLITTING for op in change)
     groups: dict[str, set] = {}
-    for pin in before:
-        if pin.split('.')[0] not in free:
+    # A part the change adds has pins only afterwards; what the change joins them to counts
+    # (16 Nov: the added C93 was reported as joined unasked to L6, C44 and GND).
+    for pin in set(before) | set(after):
+        if pin.split('.')[0] not in free and (pin in before or pin in parent):
             groups.setdefault(find(pin), set()).add(pin)
     problems = []
     for pin, partners in sorted(after.items()):

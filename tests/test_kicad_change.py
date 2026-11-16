@@ -89,6 +89,19 @@ class ChangeShapeTests(unittest.TestCase):
                       problems)
         self.assertTrue(any("unwire it first" in p for p in problems), problems)
 
+    def test_an_added_part_joined_as_asked_is_not_reported(self):
+        """16 Nov: the added C93 (second 220 pF on TX1) was reported as joined unasked."""
+        tx1, gnd = frozenset({"L6.2", "C44.2"}), frozenset({"C54.1", "C5.1"})
+        before = {"L6.2": tx1, "C44.2": tx1, "C54.1": gnd, "C5.1": gnd}
+        after = {**{p: tx1 | {"C93.1"} for p in tx1 | {"C93.1"}}, **{p: gnd | {"C93.2"} for p in gnd | {"C93.2"}}}
+        names = {p: "GND" for p in gnd | {"C93.2"}}
+        change = [{"op": "add_symbol", "sheet": "a", "ref": "C93", "like": "C55", "at": [1, 2]},
+                  {"op": "wire", "sheet": "a", "from": "C93.1", "to": "L6.2"},
+                  {"op": "power", "sheet": "a", "pin": "C93.2", "port": "GND"}]
+        self.assertEqual(unmet(change, before, after, names, {}, ["C93"], names), [])
+        shorted = {p: tx1 | gnd | {"C93.1", "C93.2"} for p in tx1 | gnd | {"C93.1", "C93.2"}}
+        self.assertTrue(unmet(change[:2], before, shorted, names, {}, ["C93"], names))
+
     def test_labels_can_be_removed_on_every_sheet_at_once(self):
         self.assertEqual(validate_change([{"op": "remove_labels", "nets": ["V1"]}])["schematic"], True)
 
