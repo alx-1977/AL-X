@@ -864,10 +864,19 @@ def worker_settings(
 BOARD_AGENT_DEFAULT_MODEL = "claude-opus-5-5"
 
 
+BOARD_AGENT_CODEX_DEFAULT_MODEL = "gpt-6-astra"
+
+
 def board_agent_settings(
     environment: Mapping[str, str], reasoning: "ReasoningSettings",
 ) -> "ReasoningSettings":
-    """The board agent's model: the Core's login and transport, Opus by default (D-083)."""
+    """The board agent's model: the Core's login and transport, Opus by default (D-083);
+    ALX_BOARD_AGENT_PROVIDER=codex_subscription runs it on Codex (Astra by default) through
+    Friedl's ChatGPT login (16 Nov)."""
+    provider = environment.get("ALX_BOARD_AGENT_PROVIDER", "").strip() or reasoning.provider
+    if provider == CODEX_SUBSCRIPTION_PROVIDER:
+        model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_CODEX_DEFAULT_MODEL
+        return replace(reasoning, provider=provider, model=model)
     model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_DEFAULT_MODEL
     return replace(reasoning, model=model)
 

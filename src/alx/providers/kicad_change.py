@@ -119,7 +119,9 @@ def _label_holds(op, got: str, before_names) -> bool:
 
 
 def _short(net: str) -> str:
-    return net.rsplit('/', 1)[-1]
+    """A net's own name: without its sheet path, and without its bus (/RFID_Control.V3 is V3),
+    16 Nov: after the conversion a V3 label landed rightly on /RFID_Control.V3."""
+    return net.rsplit('/', 1)[-1].rsplit('.', 1)[-1]
 
 
 def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],

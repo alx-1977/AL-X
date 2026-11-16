@@ -1109,7 +1109,7 @@ def build_dhl_executors(
             ("waybill", waybill, fields.get("waybill")),
         ):
             if str(csv_value or "") != str(pdf_value or ""):
-                mismatches.append(f"{shape} differs between CSV and PDF")
+                mismatches.append(f"{label} differs between CSV and PDF")
         if not _agrees(_money(evidence.get("total")), _money(fields.get("total"))):
             mismatches.append("total differs between CSV and PDF")
         if csv_invoice_date and pdf_invoice_date and csv_invoice_date != pdf_invoice_date:

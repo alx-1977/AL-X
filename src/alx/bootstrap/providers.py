@@ -21,6 +21,7 @@ from alx.providers import (
     CartesiaTranscriber,
     ClaudeSubscriptionReasoningModel,
     CodexSubscriptionReasoningModel,
+    CodexSubscriptionAgentModel,
     ElevenLabsSynthesizer,
     OpenAIReasoningModel,
     XAIReasoningModel,
@@ -287,15 +288,25 @@ def build_runtime_providers(
         oauth_token=settings.claude_oauth_token,
         session_record_dir=session_record_dir,
     )
-    board_agent = ClaudeSubscriptionReasoningModel(
-        settings.board_agent.model,
-        settings.board_agent.timeout_seconds,
-        telemetry_sink=telemetry_sink,
-        config_dir=settings.core_claude_config_dir,
-        expected_account=settings.core_claude_account,
-        oauth_token=settings.claude_oauth_token,
-        session_record_dir=session_record_dir,
-    )
+    if settings.board_agent.provider == CODEX_SUBSCRIPTION_PROVIDER:
+        if not codex_subscription_cli_present():
+            raise ConfigurationError("the Codex CLI is required for the board agent on Codex")
+        board_agent = CodexSubscriptionAgentModel(
+            settings.board_agent.model,
+            settings.board_agent.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+            effort="high",
+        )
+    else:
+        board_agent = ClaudeSubscriptionReasoningModel(
+            settings.board_agent.model,
+            settings.board_agent.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+            config_dir=settings.core_claude_config_dir,
+            expected_account=settings.core_claude_account,
+            oauth_token=settings.claude_oauth_token,
+            session_record_dir=session_record_dir,
+        )
     coding = _build_coding_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)
 

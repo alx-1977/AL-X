@@ -1774,6 +1774,20 @@ class DhlImportLifecycleTests(unittest.TestCase):
         self.assertEqual(bill["LineAmountTypes"], "NoTax")
         self.assertIn("DHL freight; waybill 1921099471", bill["Reference"])
 
+    def test_a_weight_discount_is_its_own_negative_line(self) -> None:
+        """16 Nov: CPTR001032278's weight discount of -3,297.15 was left out; refused as not adding up."""
+        header = (b"Line Type,Invoice Number,Shipment Number,Invoice Date,Due Date,Currency,"
+                  b"Total amount (incl. VAT),Total Tax,Invoice Fee,Weight Charge,Weight Tax (VAT),"
+                  b"Discount 1,Discount 1 Amount,Discount 2,Discount 2 Amount,"
+                  b"XC1 Code,XC1 Name,XC1 Charge,XC1 Discount,XC1 Tax,XC1 Total\n")
+        row = (b"S,CPTR001032278,1921099471,20261110,20261117,ZAR,6111.25,0.00,,7327.00,0.00,"
+               b"W,-3297.15,,0,FF,FUEL SURCHARGE,3713.49,-1632.09,0.00,2081.40\n")
+        evidence = DhlImportAnalyzerAdapter().invoice_evidence(header + row)
+        self.assertTrue(evidence["verified"], evidence["problems"])
+        self.assertEqual([(line["code"], line["amount"]) for line in evidence["lines"]],
+                         [("WEIGHT", "7327.00"), ("DISC1", "-3297.15"), ("FF", "2081.40")])
+        self.assertEqual(evidence["lines"][1]["description"], "Discount 1 (W)")
+
     def test_the_real_freight_export_reads_as_weight_and_fuel(self) -> None:
         evidence = DhlImportAnalyzerAdapter().invoice_evidence(
             (FIXTURES / "mybill_freight_sanitized.csv").read_bytes())

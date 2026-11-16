@@ -295,25 +295,22 @@ class Sheet:
 
     def _check_segments(self, segments, allowed, same=()):
         """segments: (a, b, the pin it is for); refused at the first that touches what is there."""
-        root, _ = self._tree()
-        libs = self._libs(root)
+        scene = self._scene()
+        root, libs = scene["root"], scene["libs"]
         # Leftover wiring joined to nothing (no pin, label or port anywhere on it) is no hazard:
         # touching it joins nothing. remove_dangling clears it.
-        skip = set(same) | self._orphan_wires(root, libs)
-        wires = [pts for pts in self.wires() if tuple(pts) not in skip]
+        if scene["orphans"] is None:
+            scene["orphans"] = self._orphan_wires(root, libs)
+        skip = set(same) | scene["orphans"]
+        wires = [pts for pts in scene["wires"] if tuple(pts) not in skip]
         things = [("a wire end", p) for pts in wires for p in (pts[0], pts[-1])]
-        things += [("label %s" % item["name"], item["at"]) for item in self.labels()]
-        things += [("a no-connect", _r(_child(n, "at")[1:3])) for n in _children(root, "no_connect")]
-        for symbol in _children(root, "symbol"):
-            name = self._ref(symbol)
-            for number, point in self._symbol_pins(symbol, libs).items():
-                if point not in allowed:
-                    things.append(("pin %s.%s" % (name, number), point))
+        things += [("label %s" % item["name"], item["at"]) for item in scene["labels"]]
+        things += [("a no-connect", point) for point in scene["no_connects"]]
+        things += [("pin %s" % name, point) for name, point, _, _ in scene["pins"] if point not in allowed]
         pin_names = {}
-        for symbol in _children(root, "symbol"):
-            for number, point in self._symbol_pins(symbol, libs).items():
-                pin_names.setdefault(point, "%s.%s" % (self._ref(symbol), number))
-        label_names = {item["at"]: item["name"] for item in self.labels()}
+        for name, point, _, _ in scene["pins"]:
+            pin_names.setdefault(point, name)
+        label_names = {item["at"]: item["name"] for item in scene["labels"]}
 
         def joined(point):
             # What that wiring already reaches, so the refusal says whose net it is.
@@ -321,16 +318,19 @@ class Sheet:
             reached = sorted({name for q, name in list(pin_names.items()) + list(label_names.items())
                               if any(_on(q, c, d) for pts in group for c, d in zip(pts, pts[1:]))})
             return (" (wiring joined to %s)" % ", ".join(reached[:6])) if reached else ""
-        bodies = []
-        for symbol in _children(root, "symbol"):
-            if not self._ref(symbol).startswith("#"):
-                continue
-            ox, oy = _r(_child(symbol, "at")[1:3])
-            value = next((_unq(p[2]) for p in _children(symbol, "property") if _unq(p[1]) == "Value"), "")
-            down_port = "GND" in value.upper()
-            bodies.append(((ox, oy), (ox - 1.5, oy + 0.3, ox + 1.5, oy + 5.6) if down_port
-                           else (ox - 1.5, oy - 5.6, ox + 1.5, oy - 0.3)))
+        bodies = scene["bodies"]
+        # Where a pin not yet wired will come out, one grid step: nothing new may cross it
+        # (16 Nov: a GND lead ran across pin 5's spot and the V2 label then had no way out).
+        ends_now = {p for pts in scene["wires"] for p in (pts[0], pts[-1])} | {i["at"] for i in scene["labels"]}
+        stubs = [(name, point, _r((point[0] + direction[0] * 2.54, point[1] + direction[1] * 2.54)))
+                 for name, point, power, direction in scene["pins"]
+                 if not power and direction is not None and point not in allowed and point not in ends_now]
         for a, b, who in segments:
+            for name, p, q in stubs:
+                if (max(a[0], b[0]) >= min(p[0], q[0]) and min(a[0], b[0]) <= max(p[0], q[0])
+                        and max(a[1], b[1]) >= min(p[1], q[1]) and min(a[1], b[1]) <= max(p[1], q[1])):
+                    raise ValueError("%s: the new wire would run across where pin %s comes out (%g, %g); "
+                                     "wire that pin first or route another way" % (who, name, p[0], p[1]))
             for (ox, oy), (x0, y0, x1, y1) in bodies:
                 if (ox, oy) in (a, b):
                     continue
@@ -406,35 +406,67 @@ class Sheet:
         self.add_label(name, end, angle, kind)
         return end
 
+    def _direction_of(self, symbol, lib, number):
+        """A pin's outward direction from its parsed symbol (pin_direction without re-reading)."""
+        angles = {}
+        for part in _children(lib, "symbol"):
+            angles.update(_lib_pin_angles(part))
+        if str(number) not in angles:
+            return None
+        turn = _math.radians(angles[str(number)] + 180.0)
+        at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
+        end = _placed(at, mirror[1] if mirror else None, _math.cos(turn), _math.sin(turn))
+        origin = _placed(at, mirror[1] if mirror else None, 0.0, 0.0)
+        return (round(end[0] - origin[0]), round(end[1] - origin[1]))
+
+    def _scene(self):
+        """What is on the sheet, read once for each state of its text (16 Nov: the checks
+        re-read the whole sheet for every pin and an edit ran out of time)."""
+        cached = getattr(self, "_scene_cache", None)
+        if cached is not None and cached[0] is self.text:
+            return cached[1]
+        root, _ = self._tree()
+        libs = self._libs(root)
+        pins, bodies, ports = [], [], []
+        for symbol in _children(root, "symbol"):
+            name = self._ref(symbol)
+            lib = libs.get(_unq(_child(symbol, "lib_id")[1]))
+            power = name.startswith("#")
+            for number, point in self._symbol_pins(symbol, libs).items():
+                direction = None if power or lib is None else self._direction_of(symbol, lib, number)
+                pins.append(("%s.%s" % (name, number), point, power, direction))
+            if power:
+                ox, oy = _r(_child(symbol, "at")[1:3])
+                ports.append((ox, oy))
+                value = next((_unq(p[2]) for p in _children(symbol, "property") if _unq(p[1]) == "Value"), "")
+                bodies.append(((ox, oy), (ox - 1.5, oy + 0.3, ox + 1.5, oy + 5.6) if "GND" in value.upper()
+                               else (ox - 1.5, oy - 5.6, ox + 1.5, oy - 0.3)))
+        scene = {"root": root, "libs": libs, "wires": self.wires(), "labels": self.labels(),
+                 "no_connects": [_r(_child(n, "at")[1:3]) for n in _children(root, "no_connect")],
+                 "pins": pins, "bodies": bodies, "ports": ports, "orphans": None}
+        self._scene_cache = (self.text, scene)
+        return scene
+
     def _body_clear(self, port, down, reach=5.6):
         """Where a port's symbol is drawn (below a GND point, above a power one), nothing of
         the sheet may be: 16 Nov, Friedl: a GND symbol drawn on a net is not acceptable.
         reach: how far its drawing and name go from its point (from his own symbol)."""
         x0, x1 = port[0] - 1.6, port[0] + 1.6
         y0, y1 = (port[1] + 0.3, port[1] + reach) if down else (port[1] - reach, port[1] - 0.3)
-        root, _ = self._tree()
-        libs = self._libs(root)
+        scene = self._scene()
         # Nor where another part's pins will be wired: one grid step out of each pin.
-        for symbol in _children(root, "symbol"):
-            if self._ref(symbol).startswith("#"):
+        for _, (px, py), power, direction in scene["pins"]:
+            if power or direction is None:
                 continue
-            for number, (px, py) in self._symbol_pins(symbol, libs).items():
-                try:
-                    ddx, ddy = self.pin_direction(self._ref(symbol), number)
-                except (KeyError, ValueError, TypeError):
-                    continue
-                qx, qy = px + ddx * 2.54, py + ddy * 2.54
-                if max(px, qx) >= x0 and min(px, qx) <= x1 and max(py, qy) >= y0 and min(py, qy) <= y1:
-                    return False
-        for pts in self.wires():
+            qx, qy = px + direction[0] * 2.54, py + direction[1] * 2.54
+            if max(px, qx) >= x0 and min(px, qx) <= x1 and max(py, qy) >= y0 and min(py, qy) <= y1:
+                return False
+        for pts in scene["wires"]:
             for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                 if max(ax, bx) >= x0 and min(ax, bx) <= x1 and max(ay, by) >= y0 and min(ay, by) <= y1:
                     return False
-        points = [item["at"] for item in self.labels()]
-        for symbol in _children(root, "symbol"):
-            points += list(self._symbol_pins(symbol, libs).values())
-            if self._ref(symbol).startswith("#"):
-                points.append(_r(_child(symbol, "at")[1:3]))
+        points = [item["at"] for item in scene["labels"]] + [point for _, point, _, _ in scene["pins"]]
+        points += scene["ports"]
         return not any(x0 <= px <= x1 and y0 <= py <= y1 for px, py in points)
 
     def port_pins(self, pins, template, down):
@@ -512,16 +544,23 @@ class Sheet:
             # the row runs out past the side of the part and the port hangs there (16 Nov: a
             # GND under one switch sat on the next switch's wiring).
             xs = [point[0] for point in self.symbol(ref)["pins"].values()]
-            tries = [(start, _r((first[0] + step[0] * k, first[1] + step[1] * k)), who) for k in range(8)]
+            # Each try: the lead's points from the row to the port.
+            tries = [([start, _r((first[0] + step[0] * k, first[1] + step[1] * k))], who) for k in range(8)]
             for lead_start, lead_who, edge in ((ends[-1], row[-1][2], max(xs) + 5.08),
                                                (ends[0], row[0][2], min(xs) - 5.08)):
                 if not dx:
+                    sign = 1 if edge > lead_start[0] else -1
                     for k in range(4):
-                        sign = 1 if edge > lead_start[0] else -1
-                        tries.append((lead_start, _r((edge + sign * 2.54 * k, lead_start[1])), lead_who))
+                        for drop in range(4):
+                            # Out past the side of the part, then on down, crossing a wire
+                            # once if it must (16 Nov: boxed in by the agent's RF wire).
+                            corner = _r((edge + sign * 2.54 * k, lead_start[1]))
+                            end = _r((corner[0], corner[1] + want * 2.54 * drop))
+                            tries.append(([lead_start, corner] + ([end] if drop else []), lead_who))
             port, reason = None, None
-            for lead_start, candidate, lead_who in tries:
-                lead = [] if candidate == lead_start else [(lead_start, candidate, "%s to its port" % lead_who)]
+            for points, lead_who in tries:
+                candidate, lead_start = points[-1], points[0]
+                lead = [(a, b, "%s to its port" % lead_who) for a, b in zip(points, points[1:]) if a != b]
                 try:
                     self._check_segments(own + lead, row_allowed)
                 except ValueError as error:
@@ -884,10 +923,17 @@ class Sheet:
         counts = {}
         root, spans = self._tree()
         libs = self._libs(root)
+        # A label is held by a wire, a bus, a pin or a bus entry's end (an import puts labels
+        # straight on bus-entry ends, 16 Nov: four such were taken as loose).
         wires = self.wires()
+        wires += [[_r((q[1], q[2])) for q in _children(_child(b, "pts"), "xy")] for b in _children(root, "bus")]
         on_wire = lambda p: any(_on(p, a, b) for pts in wires for a, b in zip(pts, pts[1:]))  # noqa: E731
         parts = {p for s in _children(root, "symbol") if not self._ref(s).startswith("#")
                  for p in self._symbol_pins(s, libs).values()}
+        pins_only = set(parts)
+        for entry in _children(root, "bus_entry"):
+            at, size = _child(entry, "at"), _child(entry, "size")
+            parts |= {_r(at[1:3]), _r((float(at[1]) + float(size[1]), float(at[2]) + float(size[2])))}
         ports = [s for s in _children(root, "symbol") if self._ref(s).startswith("#")]
         port_pins = {id(s): set(self._symbol_pins(s, libs).values()) for s in ports}
         cut = []
@@ -914,6 +960,26 @@ class Sheet:
         self.tidy({p for pts in self.wires() for p in (pts[0], pts[-1]) if self._inside(p, area)})
         if before - len(self.wires()):
             counts["wire"] = before - len(self.wires())
+        # A bus entry whose wire side reaches nothing (16 Nov: entries left where V1 and LS
+        # were taken off the RFID Control bus).
+        root, spans = self._tree()
+        wires = self.wires()
+        buses = [[_r((q[1], q[2])) for q in _children(_child(b, "pts"), "xy")] for b in _children(root, "bus")]
+        labels = {item["at"] for item in self.labels()}
+        on = lambda p, lines: any(_on(p, c, d) for pts in lines for c, d in zip(pts, pts[1:]))  # noqa: E731
+        loose = []
+        for entry in _children(root, "bus_entry"):
+            at, size = _child(entry, "at"), _child(entry, "size")
+            a = _r(at[1:3])
+            b = _r((float(at[1]) + float(size[1]), float(at[2]) + float(size[2])))
+            # Its wire side is the end that is not on a bus; loose when that reaches nothing.
+            wire_side = [p for p in (a, b) if not on(p, buses)]
+            if wire_side and all(not on(p, wires) and p not in labels and p not in pins_only for p in wire_side) \
+                    and self._inside(a, area):
+                loose.append(entry)
+        if loose:
+            self._cut([spans[id(n)] for n in loose])
+            counts["bus_entry"] = len(loose)
         return counts
 
     def swap_symbol(self, ref, lib_id, value=None, footprint=None, at=None, rotation=None):

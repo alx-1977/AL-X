@@ -63,6 +63,7 @@ class CodexSubscriptionReasoningModel:
         environment: Mapping[str, str] | None = None,
         retry_policy: SubscriptionRetryPolicy | None = None,
         effort: str = "",
+        launcher: "Callable[..., Any] | None" = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -76,6 +77,8 @@ class CodexSubscriptionReasoningModel:
         self._runner = runner or subprocess.run
         self._environment = os.environ if environment is None else environment
         self._effort = effort.strip()
+        # D-083a: the one launcher a native agent session uses (as D-065 for Claude).
+        self._launcher = launcher or subprocess.Popen
 
     def child_environment(self) -> dict[str, str]:
         """Keep Codex's subscription login, never a metered API credential."""
@@ -217,6 +220,120 @@ class CodexSubscriptionReasoningModel:
             })
         except Exception:
             LOGGER.info("Codex subscription telemetry sink failed")
+
+
+# Codex's own tools an agent of AL/X's never needs: it acts only through her tools,
+# which reach it through the bridge and her broker (16 Nov, Friedl: the board agent on
+# Astra). Code mode stays, since it is how Codex reaches MCP tools; the read-only
+# sandbox holds apply_patch. Probed 16 Nov: no file, shell or network from code mode.
+_AGENT_FEATURES_OFF = (
+    "shell_tool", "unified_exec", "view_image", "apps", "plugins", "browser_use",
+    "browser_use_external", "computer_use", "image_generation", "multi_agent", "multi_agent_v2",
+    "goals", "tool_suggest", "in_app_browser", "memories",
+)
+
+
+class CodexSubscriptionAgentModel(CodexSubscriptionReasoningModel):
+    """A Codex model (Astra) as an agent of AL/X's: it calls her tools natively.
+
+    The same bridge and pause as the Claude agent (D-065): the CLI runs with the bridge
+    as its only MCP server, offering exactly the request's tools; a call waits at the
+    bridge until the Core answers, so the run keeps its conversation for the stretch.
+    Requests without tools are one-turn reviews, as before.
+    """
+
+    PAUSE_LIMIT_SECONDS = 3600
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._session: Any = None
+        self._bridge = os.path.join(os.path.dirname(os.path.abspath(__file__)), "native_tool_bridge.py")
+
+    def native_command(self, request: ModelRequest, socket_path: str, tools_path: str) -> list[str]:
+        import sys
+        folder = os.path.dirname(tools_path)
+        schema_path = os.path.join(folder, "schema.json")
+        with open(schema_path, "w", encoding="utf-8") as schema_file:
+            json.dump(_json_value(request.output_schema), schema_file, sort_keys=True)
+        command = [
+            self._executable, "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+            "--sandbox", "read-only", "--skip-git-repo-check", "--model", self._model,
+            "--output-schema", schema_path, "--cd", folder,
+            "--config", 'web_search="disabled"',
+            "--config", "mcp_servers.alx.command=%s" % json.dumps(sys.executable),
+            "--config", "mcp_servers.alx.args=%s" % json.dumps(["-I", self._bridge, socket_path, tools_path]),
+            "--config", "mcp_servers.alx.tool_timeout_sec=%d" % self.PAUSE_LIMIT_SECONDS,
+            "--config", 'mcp_servers.alx.default_tools_approval_mode="approve"',
+        ]
+        for feature in _AGENT_FEATURES_OFF:
+            command.extend(["--disable", feature])
+        if self._effort:
+            command.extend(["--config", f'model_reasoning_effort="{self._effort}"'])
+        command.append("-")
+        return command
+
+    def abandon_session(self) -> None:
+        session, self._session = self._session, None
+        if session is not None:
+            session.close()
+
+    def _native_event(self, request: ModelRequest) -> tuple[str, Any]:
+        from alx.providers.claude_subscription import _NativeSession
+        session = self._session
+        if request.tool_result is not None and session is not None and session.alive:
+            session.answer(request.tool_result, request.tool_images)
+        else:
+            self.abandon_session()
+            session = _NativeSession(
+                self._launcher, lambda path, tools: self.native_command(request, path, tools),
+                self._prompt(request), self.child_environment(), self.PAUSE_LIMIT_SECONDS, request.tools)
+            self._session = session
+        if request.on_dispatched is not None:
+            request.on_dispatched()
+        try:
+            event = session.next_event(self._timeout_seconds)
+        except BaseException:
+            self._session = None
+            session.close()
+            raise
+        if event[0] == "exit":
+            self._session = None
+            session.close()
+        return event
+
+    @retry_subscription
+    def complete(self, request: ModelRequest) -> ModelCompletion:
+        if not request.tools:
+            return CodexSubscriptionReasoningModel.complete.__wrapped__(self, request)
+        started_at = monotonic()
+        details: dict[str, object] = {}
+        try:
+            kind, payload = self._native_event(request)
+            if kind == "tool":
+                return ModelCompletion(PROVIDER_NAME, self._model, {}, {"input_tokens": 0, "output_tokens": 0},
+                                       tool_use=payload)
+            returncode, stdout, stderr = payload
+            if returncode != 0:
+                raise _CodexProtocolError("cli_failed", service_message=cli_failure_message(stderr, stdout),
+                                          exit_status=returncode)
+            output, usage, reported = self._parse(stdout)
+            self._emit(request, "reasoning.completed", started_at, usage, reported)
+            return ModelCompletion(PROVIDER_NAME, self._model, output, usage)
+        except subprocess.TimeoutExpired as error:
+            details = {"service_message": "reasoning_timeout"}
+            error_code = "reasoning_timeout"
+            del error
+        except FileNotFoundError as error:
+            details = {"service_message": str(error)}
+            error_code = "cli_not_installed"
+        except OSError as error:
+            details = {"service_message": str(error)}
+            error_code = "cli_unavailable"
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+            error_code = error.code if isinstance(error, _CodexProtocolError) else "response_invalid"
+            details = dict(error.details) if isinstance(error, _CodexProtocolError) else {}
+        self._emit(request, "reasoning.failed", started_at, {})
+        raise_provider_failure(PROVIDER_NAME, error_code, **details)
 
 
 def subscription_cli_present(executable: str = "codex") -> bool:
