@@ -412,6 +412,42 @@ def compare_manufacturing(files, previous):
     return {'files': result[:200], 'truncated': len(result) > 200}
 
 
+def flat_symbol(text, tree, node, name):
+    """A library symbol as a schematic stores it: one that extends another (16 Nov: every FireFli
+    capacitor extends "C") gets that symbol's drawing and pins under its own name, and keeps
+    its own fields."""
+    extends = node.named('extends')
+    if not extends:
+        return text[node.start:node.end]
+    base_name = extends[0].children[1]
+    base = [n for n in tree.named('symbol') if len(n.children) > 1 and n.children[1] == base_name]
+    if not base:
+        raise KiCadError('arguments_unusable', {'detail': '%s extends %s, which is not in its library'
+                                                % (name, base_name)})
+    base = base[0]
+    if base.named('extends'):
+        raise KiCadError('arguments_unusable', {'detail': '%s extends a symbol that itself extends another'
+                                                % name})
+    own_fields = {p.children[1] for p in node.named('property') if len(p.children) > 1}
+    own_kinds = {c.name for c in node.children if isinstance(c, Node)}
+    added = []
+    for child in base.children[2:]:
+        if not isinstance(child, Node) or child.name == 'extends':
+            continue
+        if child.name == 'property' and len(child.children) > 1 and child.children[1] in own_fields:
+            continue
+        if child.name not in ('property', 'symbol') and child.name in own_kinds:
+            continue
+        piece = text[child.start:child.end]
+        if child.name == 'symbol' and len(child.children) > 1:
+            unit = str(child.children[1])
+            piece = piece.replace(json.dumps(unit), json.dumps(name + unit[len(base_name):]), 1)
+        added.append(piece)
+    head = text[node.start:extends[0].start].rstrip()
+    rest = text[extends[0].end:node.end - 1].rstrip()
+    return head + rest + '\n' + '\n'.join('\t\t' + piece for piece in added) + '\n\t)'
+
+
 class KiCadProvider:
     # Set by the runtime: where drawings for looking go, and how KiCad's own
     # windows are opened and the screen captured (open_in_kicad).
@@ -2127,7 +2163,7 @@ class KiCadProvider:
                          and node.children[1] == name]
                 if not block:
                     raise KiCadError('arguments_unusable', {'detail': 'no symbol %s' % item})
-                text = text[block[0].start:block[0].end]
+                text = flat_symbol(text, tree, block[0], name)
             found[item] = text
         return found
 

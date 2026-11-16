@@ -1804,5 +1804,30 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
             self.failure('path_denied', 'read_reference_file', path='~/innocent.txt')
 
 
+class FlatSymbolTests(unittest.TestCase):
+    def test_a_derived_library_part_is_stored_whole_under_its_own_name(self):
+        from alx.providers.kicad import flat_symbol, sexpr
+        library = (
+            '(kicad_symbol_lib (version 20241209)\n'
+            '\t(symbol "C" (pin_names (offset 0.254)) (in_bom yes) (on_board yes)\n'
+            '\t\t(property "Reference" "C" (at 0 0 0))\n\t\t(property "Value" "C" (at 0 0 0))\n'
+            '\t\t(property "ki_keywords" "cap" (at 0 0 0))\n'
+            '\t\t(symbol "C_0_1" (polyline (pts (xy -2 -0.7) (xy 2 -0.7))))\n'
+            '\t\t(symbol "C_1_1" (pin passive line (at 0 3.8 270) (length 3) (name "~") (number "1"))))\n'
+            '\t(symbol "CC36" (extends "C")\n\t\t(property "Reference" "C" (at 0 0 0))\n'
+            '\t\t(property "Value" "36p" (at 0 0 0))\n\t\t(property "MPN" "CC36" (at 0 0 0)))\n)\n')
+        tree = sexpr(library)
+        node = [n for n in tree.named('symbol') if n.children[1] == 'CC36'][0]
+        flat = flat_symbol(library, tree, node, 'CC36')
+        self.assertNotIn('extends', flat)
+        self.assertIn('(symbol "CC36_0_1"', flat)
+        self.assertIn('(symbol "CC36_1_1"', flat)
+        self.assertIn('"MPN" "CC36"', flat)
+        self.assertIn('"Value" "36p"', flat)
+        self.assertNotIn('"Value" "C"', flat)
+        self.assertIn('"ki_keywords" "cap"', flat)
+        self.assertEqual(sexpr(flat).children[1], 'CC36')
+
+
 if __name__ == '__main__':
     unittest.main()

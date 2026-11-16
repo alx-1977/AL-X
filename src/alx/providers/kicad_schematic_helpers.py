@@ -1306,7 +1306,8 @@ class Sheet:
             return
         block = _LIBRARY_SYMBOLS[lib_id]
         if "(extends" in block:
-            raise ValueError("%s is derived from another symbol; use the symbol it extends" % lib_id)
+            raise ValueError("%s came without the symbol it extends; name it as LIBRARY:NAME from his "
+                             "library so the tool can read both" % lib_id)
         name = lib_id.split(":", 1)[1]
         block = block.replace("(symbol %s" % _q(name), "(symbol %s" % _q(lib_id), 1)
         cache = _child(root, "lib_symbols")
