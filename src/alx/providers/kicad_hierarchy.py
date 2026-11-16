@@ -107,6 +107,26 @@ def _without_sheet_instances(schematic: str) -> str:
     return re.sub(r"\n\t\(sheet_instances\n.*?\n\t\)(?=\n)", "", schematic, flags=re.S)
 
 
+def _alias_without_spaces(project: Path, settings: dict) -> dict[str, str]:
+    """A bus alias named with a space (an Altium import's "RFID Control") renamed with an
+    underscore, in the project and every label that names it: inside braces KiCad reads a
+    space as two members, so the bus carried none of its signals (16 Nov). Returns renames."""
+    aliases = settings.get("schematic", {}).get("bus_aliases") or {}
+    renames = {name: re.sub(r"\s+", "_", name.strip()) for name in aliases if re.search(r"\s", name)}
+    renames = {old: new for old, new in renames.items() if new not in aliases}
+    if not renames:
+        return {}
+    settings["schematic"]["bus_aliases"] = {renames.get(name, name): members for name, members in aliases.items()}
+    for path in project.glob("*.kicad_sch"):
+        text = path.read_text()
+        changed = text
+        for old, new in renames.items():
+            changed = changed.replace("{%s}" % old, "{%s}" % new)
+        if changed != text:
+            path.write_text(changed)
+    return renames
+
+
 def make_hierarchical(project: Path) -> dict[str, Any]:
     """Convert the project in `project` (a work copy folder) in place; report what changed."""
     pro_files = sorted(project.glob("*.kicad_pro"))
@@ -114,6 +134,9 @@ def make_hierarchical(project: Path) -> dict[str, Any]:
         raise HierarchyError("unsupported_project", "the copy needs exactly one .kicad_pro")
     pro_path = pro_files[0]
     settings = json.loads(pro_path.read_text())
+    alias_renames = _alias_without_spaces(project, settings)
+    if alias_renames:
+        pro_path.write_text(json.dumps(settings, indent=2) + "\n")
     sheets = [dict(item) for item in (settings.get("schematic", {}).get("top_level_sheets") or ())]
     if len(sheets) < 2:
         return {"converted": False, "reason": "already one top sheet", "sheets": [s.get("name", "") for s in sheets],
@@ -181,7 +204,7 @@ def make_hierarchical(project: Path) -> dict[str, Any]:
         board = re.sub(r"\n\t\(footprint .*?\n\t\)(?=\n)", relink, board, flags=re.S)
         board_path.write_text(board)
     return {"converted": True, "reason": "", "sheets": [sheet["name"] for sheet in sheets], "renamed": renamed,
-            "footprints_relinked": relinked, "footprints_not_found": not_found[:40]}
+            "footprints_relinked": relinked, "footprints_not_found": not_found[:40], "bus_aliases_renamed": alias_renames}
 
 
 def _global_labels(schematic: str) -> list[tuple[str, str, str]]:
@@ -198,6 +221,25 @@ def _as_hierarchical(block: str) -> str:
     block = block.replace("\n\t(global_label ", "\n\t(hierarchical_label ", 1)
     block = re.sub(r'\n\t\t\(property "Intersheetrefs".*?\n\t\t\)(?=\n)', "", block, flags=re.S)
     return re.sub(r"\n\t\t\(fields_autoplaced [a-z]+\)", "", block)
+
+
+def _as_local(block: str) -> str:
+    """A global label as a plain net label: same name, place and identifier."""
+    block = block.replace("\n\t(global_label ", "\n\t(label ", 1)
+    block = re.sub(r"\n\t\t\(shape [a-z_]+\)", "", block, count=1)
+    block = re.sub(r'\n\t\t\(property "Intersheetrefs".*?\n\t\t\)(?=\n)', "", block, flags=re.S)
+    return re.sub(r"\n\t\t\(fields_autoplaced [a-z]+\)", "", block)
+
+
+def _members(label: str, aliases: dict[str, list[str]]) -> set[str]:
+    """The signals a bus label carries: its alias's members, or its own {A B C} list."""
+    inner = re.search(r"\{([^}]*)\}", label)
+    if not inner:
+        return set()
+    name = inner.group(1).strip()
+    if name in aliases:
+        return set(aliases[name])
+    return set(name.split())
 
 
 def _segment(kind: str, x1: float, y1: float, x2: float, y2: float) -> str:
@@ -254,7 +296,7 @@ def _resize_paper(head, rectangles, routes, extent):
     return head + '\t' + declaration + '\n'
 
 
-def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
+def connect_with_sheet_pins(project: Path, keep_single: frozenset = frozenset()) -> dict[str, Any]:
     """Show how the sheets connect, as Altium's sheet entries did (Friedl, 2026-11-13).
 
     A global label used on more than one sheet becomes a hierarchical label
@@ -309,6 +351,22 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
             # Each block's pin shows that sheet's own direction (review of #240).
             sheet["shapes"].setdefault(label, shape)
     shared = sorted(label for label, where in uses.items() if len(where) > 1)
+    # A signal a bus already carries between the same blocks is not drawn again on
+    # its own (16 Nov, Friedl: the root sheet uses buses, not single nets; SDA, SCL,
+    # V1-V3, LS, IRQ and RSTPD ran beside the I2C and RFID Control buses that carry them).
+    pro = sorted(project.glob("*.kicad_pro"))
+    aliases = {}
+    if pro:
+        try:
+            aliases = dict(json.loads(pro[0].read_text()).get("schematic", {}).get("bus_aliases") or {})
+        except (ValueError, AttributeError):
+            aliases = {}
+    buses = [label for label in shared if "{" in label]
+    # keep_single: signals the netlist showed a bus does not really carry (an import's
+    # bus whose members are not on its wires); they keep their own wire.
+    carried = {label for label in shared if "{" not in label and label not in keep_single
+               and any(label in _members(bus, aliases) and set(uses[label]) <= set(uses[bus]) for bus in buses)}
+    shared = [label for label in shared if label not in carried]
     if not shared:
         return {"connected": [], "reason": "no global label is used on more than one sheet",
                 "top_sheet_crossings": 0}
@@ -323,6 +381,8 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
         for whole, label, _ in sheet["labels"]:
             if label in shared:
                 schematic = schematic.replace(whole, _as_hierarchical(whole), 1)
+            elif label in carried:
+                schematic = schematic.replace(whole, _as_local(whole), 1)
         target.write_text(schematic)
     parts, drawing = [], []
     for index, sheet in enumerate(sheets):
@@ -392,7 +452,7 @@ def connect_with_sheet_pins(project: Path) -> dict[str, Any]:
     tail = top[blocks[-1].end():]
     head = _resize_paper(head, rectangles, routes, extent)
     root_path.write_text(head + "".join(parts) + "".join(drawing) + tail.lstrip("\n"))
-    return {"connected": shared, "reason": "", "top_sheet_crossings": crossings}
+    return {"connected": shared, "carried_by_buses": sorted(carried), "reason": "", "top_sheet_crossings": crossings}
 
 
 def rename_nets(project: Path, renames: dict[str, str]) -> dict[str, int]:

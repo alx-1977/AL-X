@@ -889,29 +889,43 @@ class KiCadProvider:
             snapshot = root / ('snapshot-' + uuid.uuid4().hex)
             shutil.copytree(project, snapshot)
             try:
-                try:
-                    result = make_hierarchical(project)
-                    # Then the sheets' connections drawn as Altium showed them:
-                    # pins on the blocks, wires between (Friedl, 2026-11-13).
-                    pins = connect_with_sheet_pins(project)
-                except HierarchyError as error:
-                    raise KiCadError(error.code, {'detail': error.detail}) from error
-                result = dict(result, connected=pins['connected'],
+                keep = frozenset()
+                for _ in range(3):
+                    try:
+                        result = make_hierarchical(project)
+                        # Then the sheets' connections drawn as Altium showed them:
+                        # pins on the blocks, wires between (Friedl, 2026-11-13).
+                        pins = connect_with_sheet_pins(project, keep)
+                    except HierarchyError as error:
+                        raise KiCadError(error.code, {'detail': error.detail}) from error
+                    after = netlist() if result['converted'] or pins['connected'] else before
+                    differing = sorted({before.get(k, '') for k in set(before) - set(after)}
+                                       | {after.get(k, '') for k in set(after) - set(before)})
+                    # A signal left to a bus that does not really carry it comes apart:
+                    # it keeps its own wire, and the conversion is done again (16 Nov).
+                    split = {name.rsplit('/', 1)[-1] for name in differing}
+                    loose = split & set(pins.get('carried_by_buses') or ())
+                    if not differing or not loose or split - loose:
+                        break
+                    keep |= loose
+                    shutil.rmtree(project)
+                    shutil.copytree(snapshot, project)
+                result = dict(result, connected=pins['connected'], carried_by_buses=pins.get('carried_by_buses', []),
                               reason=result['reason'] or pins['reason'])
                 if 'top_sheet_crossings' in pins:
                     result['top_sheet_crossings'] = pins['top_sheet_crossings']
-                after = netlist() if result['converted'] or pins['connected'] else before
                 # Every connection must be the same. Only a net now joined on the
                 # top sheet by a plain net label may take KiCad's hierarchical
                 # name, and the board, its rules and net classes follow it.
-                differing = sorted({before.get(k, '') for k in set(before) - set(after)}
-                                   | {after.get(k, '') for k in set(after) - set(before)})
                 if differing:
                     raise KiCadError('verification_failed', {'detail': 'the netlist changed; the copy is back '
                                                              'as it was', 'nets_differing': differing[:20]})
                 renames = {before[k]: after[k] for k in before if before[k] != after[k]}
+                # A signal a bus carries takes KiCad's bus-member name (/I2C.SDA), 16 Nov.
+                carried = set(pins.get('carried_by_buses') or ())
                 unexpected = sorted(old for old, new in renames.items()
-                                    if new != '/' + old or not pins['connected'])
+                                    if not ((new == '/' + old and pins['connected'])
+                                            or (old in carried and re.fullmatch(r'/[^/.]+\.' + re.escape(old), new))))
                 if unexpected:
                     raise KiCadError('verification_failed', {'detail': 'a net name changed other than to its '
                                                              'hierarchical name; the copy is back as it was',
