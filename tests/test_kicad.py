@@ -1336,7 +1336,9 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
                               symbols=['power:GND', 'Import:GND_POWER_GROUND'], script='print(sorted(_LIBRARY_SYMBOLS.items()))')
         # One already on a sheet needs nothing copied in; one from KiCad's own library does.
-        self.assertNotIn('Import:GND_POWER_GROUND', edited['stdout'])
+        # A symbol only the project keeps goes in as the sheet keeps it (16 Nov: library
+        # parts are now always read fresh from the library, so a bare stored copy is replaced).
+        self.assertIn("('Import:GND_POWER_GROUND', '(symbol \"GND_POWER_GROUND\" (power))')", edited['stdout'])
         self.assertIn("('power:GND', '(symbol \"GND\" (power))')", edited['stdout'])
         self.assertEqual(self.runtime.provider._cached_symbol(
             next(self.storage.rglob(checked['work_copy_id'] + '/project')), 'Import:GND_POWER_GROUND'),

@@ -1312,8 +1312,16 @@ class KiCadProvider:
             project = root / 'project'
             wanted = (lambda kind: sorted(set(arguments.get(kind) or ()) | set((plan or {}).get(kind) or ())))
             footprints = self._library_parts(wanted('footprints'), project, 'footprints')
-            symbols = self._library_parts([name for name in wanted('symbols')
-                                           if not self._sheet_has_symbol(project, name)], project, 'symbols')
+            # From his library even where a sheet already keeps a copy: that copy may be bare
+            # (16 Nov: the stored 100 pF part had no MPN or LCSC). A copy the library cannot
+            # give (an import's own symbols) stays as the sheet keeps it.
+            symbols = {}
+            for name in wanted('symbols'):
+                try:
+                    symbols.update(self._library_parts([name], project, 'symbols'))
+                except KiCadError:
+                    if not self._sheet_has_symbol(project, name):
+                        raise
             library = bool(meta.get('library'))
             # A library copy has no board: the script's argument is its folder.
             board = project / ('.library' if library else meta['board'])

@@ -221,7 +221,7 @@ def _unasked(change, before, after, before_names, after_names=None):
                     join(pin, other)
     named: dict[str, str] = {}
     for pin, name in before_names.items():
-        if kept(pin):
+        if kept(pin) and pin in before:
             named.setdefault(_short(name), pin)
     for op in change:
         if op['op'] == 'wire':
