@@ -295,7 +295,7 @@ def build_runtime_providers(
             settings.board_agent.model,
             settings.board_agent.timeout_seconds,
             telemetry_sink=telemetry_sink,
-            effort="high",
+            effort=settings.board_agent.effort if settings.board_agent.effort != "none" else "high",
         )
     else:
         board_agent = ClaudeSubscriptionReasoningModel(
@@ -306,6 +306,7 @@ def build_runtime_providers(
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,
             session_record_dir=session_record_dir,
+            effort=settings.board_agent.effort if settings.board_agent.effort != "none" else "",
         )
     coding = _build_coding_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)

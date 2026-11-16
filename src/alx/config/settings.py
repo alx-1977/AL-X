@@ -874,11 +874,16 @@ def board_agent_settings(
     ALX_BOARD_AGENT_PROVIDER=codex_subscription runs it on Codex (Astra by default) through
     Friedl's ChatGPT login (16 Nov)."""
     provider = environment.get("ALX_BOARD_AGENT_PROVIDER", "").strip() or reasoning.provider
+    # ALX_BOARD_AGENT_EFFORT: low, medium, high or max (16 Nov: models benchmarked at set efforts).
+    effort = environment.get("ALX_BOARD_AGENT_EFFORT", "").strip().lower()
+    if effort and effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigurationError("ALX_BOARD_AGENT_EFFORT must be low, medium, high, xhigh or max")
     if provider == CODEX_SUBSCRIPTION_PROVIDER:
         model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_CODEX_DEFAULT_MODEL
-        return replace(reasoning, provider=provider, model=model)
+        return replace(reasoning, provider=provider, model=model, effort=effort or "high")
     model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_DEFAULT_MODEL
-    return replace(reasoning, model=model)
+    # "none": the CLI's own effort, as the Core's subscription turn has no dial.
+    return replace(reasoning, model=model, effort=effort or "none")
 
 
 def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:

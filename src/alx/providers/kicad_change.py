@@ -423,7 +423,8 @@ def apply_change(change):
                     tidied += 1
                 except (KeyError, ValueError):
                     pass
-        report.append(dict(op="tidy_sheet", sheet=s.path.rsplit("/", 1)[-1], parts=tidied))
+        labels = s.tidy_labels()
+        report.append(dict(op="tidy_sheet", sheet=s.path.rsplit("/", 1)[-1], parts=tidied, labels=labels))
         s.save()
     if board is not None:
         refill(board)

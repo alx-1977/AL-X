@@ -56,8 +56,8 @@ schematic, kicad inspect the board, read_reference the datasheet.
 - Change a copy only with kicad edit change: one structured change for a whole step (swap, \
 remove, wire, label, power, no-connect, tidy, clear leftovers; replace, place, track), naming \
 exact references, pins and nets. You decide what the change is; code draws it his way and checks \
-it, and undoes it with every unmet item named when it does not hold. Preview it first with dry_run \
-when unsure. A kept edit you regret is undone with kicad edit revert_to (a revision from an \
+it, and undoes it with every unmet item named when it does not hold, so a refused change costs \
+nothing: make the change rather than preview it. Check the copy once at the end of the step. A kept edit you regret is undone with kicad edit revert_to (a revision from an \
 earlier result, or start). Check your copy with kicad check work_copy_id.
 - Look before you report, and look sparingly: every picture stays with you for the rest of the \
 stretch. Render once, look at the whole page once, then look only at sections of it.

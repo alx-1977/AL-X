@@ -519,15 +519,12 @@ class Sheet:
             row_allowed = {item[0] for item in row}
             if (dx, dy) == (0, -want):
                 # Pins pointing away from where the port goes (GND pins on top): the row
-                # runs out past the nearer side of the part, clear of its side pins, and
-                # the port hangs from there the right way up.
+                # runs out past the nearer side of the part, clear of its side pins, and on
+                # into the port the way it points (16 Nov: never into its pin sideways).
                 xs = [point[0] for point in self.symbol(ref)["pins"].values()]
-                if ends[0][0] - min(xs) <= max(xs) - ends[-1][0]:
-                    start, step, who = ends[0], (-2.54, 0), row[0][2]
-                    first = _r((min(xs) - 5.08, ends[0][1]))
-                else:
-                    start, step, who = ends[-1], (2.54, 0), row[-1][2]
-                    first = _r((max(xs) + 5.08, ends[-1][1]))
+                start, who = (ends[0], row[0][2]) if ends[0][0] - min(xs) <= max(xs) - ends[-1][0] \
+                    else (ends[-1], row[-1][2])
+                step, first = (0, want * 2.54), None
             elif dx:
                 # Pins on a side: the row runs up and down; the port goes below (or above) it.
                 start = ends[-1] if down else ends[0]
@@ -545,13 +542,15 @@ class Sheet:
             # GND under one switch sat on the next switch's wiring).
             xs = [point[0] for point in self.symbol(ref)["pins"].values()]
             # Each try: the lead's points from the row to the port.
-            tries = [([start, _r((first[0] + step[0] * k, first[1] + step[1] * k))], who) for k in range(8)]
+            tries = [] if first is None else [
+                ([start, _r((first[0] + step[0] * k, first[1] + step[1] * k))], who) for k in range(8)]
             for lead_start, lead_who, edge in ((ends[-1], row[-1][2], max(xs) + 5.08),
                                                (ends[0], row[0][2], min(xs) - 5.08)):
                 if not dx:
                     sign = 1 if edge > lead_start[0] else -1
                     for k in range(4):
-                        for drop in range(4):
+                        # At least one step down (or up) into the port, the way its pin points.
+                        for drop in range(1, 5):
                             # Out past the side of the part, then on down, crossing a wire
                             # once if it must (16 Nov: boxed in by the agent's RF wire).
                             corner = _r((edge + sign * 2.54 * k, lead_start[1]))
@@ -677,6 +676,13 @@ class Sheet:
             if self._ref(other).startswith("#"):
                 ox, oy = _r(_child(other, "at")[1:3])
                 boxes.append((ox - 2.2, oy - 2.2, ox + 2.2, oy + 2.2))
+                # And its name where it is drawn (an imported GND's is 6.35 mm below it).
+                for prop in _children(other, "property"):
+                    pat = _child(prop, "at")
+                    if _unq(prop[1]) == "Value" and pat is not None and "hide yes" not in str(prop):
+                        vx, vy = float(pat[1]), float(pat[2])
+                        half = (0.9 * 1.27 * len(_unq(prop[2])) + 0.5) / 2
+                        boxes.append((vx - half, vy - 1.0, vx + half, vy + 1.0))
                 continue
             # Other parts' visible reference and value text (16 Nov: C44 and C45 overlapped).
             turned_other = (float(_child(other, "at")[3]) if len(_child(other, "at")) > 3 else 0.0) % 180
@@ -871,6 +877,28 @@ class Sheet:
         self._cut([spans[id(n)] for n in cut])
         self.tidy(others)
         return counts
+
+    def tidy_labels(self):
+        """Every plain net label sits on its wire, not centred across it: an import's
+        "(justify left)" gets "bottom" (16 Nov, Friedl: middle-aligned labels on the net).
+        Global and sheet labels keep their own shape. Returns how many changed."""
+        changed = 0
+
+        def fix(match):
+            nonlocal changed
+            block = match.group(0)
+            justify = _re.search(r'\(justify ([a-z ]*)\)', block)
+            if justify is None:
+                at = _re.search(r'\(at [-\d.]+ [-\d.]+ ([-\d.]+)\)', block)
+                side = "right" if at and float(at.group(1)) in (180.0, 270.0) else "left"
+                block = block.replace("(effects", "(effects (justify %s bottom)" % side, 1)
+                changed += 1
+            elif "bottom" not in justify.group(1).split() and "top" not in justify.group(1).split():
+                block = block[:justify.start()] + "(justify %s bottom)" % justify.group(1).strip() + block[justify.end():]
+                changed += 1
+            return block
+        self.text = _re.sub(r'\n\t\(label "(?:[^"\\]|\\.)*".*?\n\t\)', fix, self.text, flags=_re.S)
+        return changed
 
     def remove_labels(self, names, area=None):
         """Remove net labels with these names (inside area [x1, y1, x2, y2] when given), and

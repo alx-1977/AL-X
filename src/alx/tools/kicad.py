@@ -129,7 +129,9 @@ _ACTION_DEFINITIONS = (
         'run and checks the result: every wire, label, power and no-connect holds in KiCad\'s netlist, '
         'every replaced pad has its net, removed parts are gone, and no pin (other than a '
         'swapped or removed part\'s) is joined to anything the change did not join, nor split '
-        'unless the change removes labels or leftovers; otherwise nothing is kept and change_unmet lists each unmet item. revert_to (a revision '
+        'unless the change removes labels or leftovers; otherwise nothing is kept and change_unmet lists each unmet item, so a refused change costs '
+        'nothing: make the change rather than preview it. A change runs no ERC (checks true asks for '
+        'it); run check work_copy_id once at the end of the step. revert_to (a revision '
         'from an earlier result, or start) alone puts the copy back as it was then. '
         'change_report.change_result says what each operation did. script (bounded Python with '
         'pcbnew) remains for what change cannot yet express, for you alone, not your board agent. '
@@ -201,7 +203,7 @@ _ACTION_DEFINITIONS = (
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
         obj({'work_copy_id': S, 'script': S, 'change': array(MAP), 'footprints': array(S), 'symbols': array(S),
-             'dry_run': B, 'revert_to': S}, ('work_copy_id',)),
+             'dry_run': B, 'revert_to': S, 'checks': B}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
              'previewed': B}),

@@ -1313,8 +1313,12 @@ class KiCadProvider:
                                           if library else
                                           {'findings': [], 'omitted': 0, 'not_checked': 'nothing changed'}
                                           if not changed else self._layout_rules(board))
-                if not library and any(name.endswith('.kicad_sch') for name in changed):
-                    # A schematic edit is checked like the first copy (review of #239).
+                if not library and any(name.endswith('.kicad_sch') for name in changed) and (
+                        plan is None or arguments.get('checks')):
+                    # A schematic edit is checked like the first copy (review of #239). A
+                    # structured change is already proven against the netlist, so its ERC
+                    # waits for the step's check unless asked for (16 Nov, Friedl: ERC once,
+                    # at the end, not after every edit).
                     report['erc'] = self._erc(root, meta, against_original=True)
                 # A structured change says what each operation did and is checked against
                 # the netlist; the raw text diff added ~24,000 characters to every one of the
