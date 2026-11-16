@@ -641,6 +641,33 @@ class KiCadProvider:
         if any(impedance[i][i].real <= 0 or impedance[i][i].imag <= 0 for i in range(len(ports))):
             raise KiCadError('invalid_report', {'reason': 'nonpassive_copper_matrix'})
 
+    def _project(self, name):
+        """A project as he names it: a folder, or just its number (P0009), down to the folder
+        that holds its one board. 16 Nov: the agent spent 14 calls looking for "P0009"."""
+        text = str(name).strip()
+        if re.fullmatch(r'[A-Za-z]\d{3,}', text):
+            found = []
+            for root in self.design_roots:
+                for depth in ('*', '*/*'):
+                    found += [path for path in root.glob(depth) if path.is_dir()
+                              and (path.name == text or path.name.lower().startswith(text.lower() + '-'))]
+            found = sorted(set(found))
+            if not found:
+                raise KiCadError('unsupported_project', {'detail': 'no project %s in the design folders' % text})
+            if len(found) > 1:
+                raise KiCadError('unsupported_project', {'detail': 'more than one project %s: %s' % (
+                    text, '; '.join(str(path) for path in found[:5]))})
+            folder = found[0]
+        else:
+            folder = self._source(text)
+        if folder.is_dir() and not any(folder.glob('*.kicad_pcb')):
+            # A project's own folder: its one board below it, backups left out.
+            below = sorted({path.parent for path in folder.rglob('*.kicad_pcb')
+                            if 'backup' not in str(path).lower() and '.history' not in path.parts})
+            if len(below) == 1:
+                return below[0]
+        return folder
+
     def _source(self, path):
         raw = Path(path).expanduser().absolute()
         if any(raw.resolve().is_relative_to(r) for r in self.design_roots):
@@ -663,7 +690,7 @@ class KiCadProvider:
         if arguments.get('board'):
             return bounded(self._source(arguments['board']), self.design_roots)
         if arguments.get('project_dir'):
-            project = bounded(self._source(arguments['project_dir']), self.design_roots)
+            project = bounded(self._project(arguments['project_dir']), self.design_roots)
             boards = sorted(project.glob('*.kicad_pcb'))
             if len(boards) != 1:
                 raise KiCadError('unsupported_project', {'detail': self._where_boards_are(project, boards)})
@@ -1881,15 +1908,16 @@ class KiCadProvider:
                                                     'or work_copy_id (one of yours, checked again)'})
         if arguments.get('work_copy_id'):
             return self._check_copy(arguments['work_copy_id'])
-        source = self._source(arguments['project_dir'])
+        source = self._project(arguments['project_dir'])
         if source.is_relative_to(self.work_root) or self.work_root.is_relative_to(source):
             raise KiCadError('path_denied')
         if not source.is_dir():
-            raise KiCadError('unsupported_project')
+            raise KiCadError('unsupported_project', {'detail': 'not a folder: %s' % source})
         hashes = design_inventory(source)
         boards = [name for name in hashes if '/' not in name and name.endswith('.kicad_pcb')]
         if len(boards) != 1:
-            raise KiCadError('unsupported_project')
+            raise KiCadError('unsupported_project', {'detail': self._where_boards_are(
+                source, sorted(source.glob('*.kicad_pcb')))})
         work_id = uuid.uuid4().hex
         root = self.work_root / work_id
         root.mkdir(parents=True)

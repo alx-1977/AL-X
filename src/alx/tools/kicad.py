@@ -85,7 +85,8 @@ TUNING = obj({'components': array(obj({'reference': S, 'values': array(N),
 _ACTION_DEFINITIONS = (
     CapabilityDefinition('check_kicad_board',
         'Run all-severity KiCad DRC with zone refill on a new isolated project copy. '
-        'Requires exactly one top-level board. Returns grouped facts, configured noise flags '
+        'project_dir is his project\'s folder or just its number (P0009): the folder holding its one '
+        'board is found. Requires exactly one top-level board. Returns grouped facts, configured noise flags '
         'and revision for exact write approval. custom_rule_citations counts rule names '
         'cited in violations, not all loaded rules; does not interpret findings. A review of his '
         'board ends in corrections on a copy shown as Current and Amended, not in questions to '

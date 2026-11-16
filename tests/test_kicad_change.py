@@ -263,6 +263,26 @@ class RealChangeTests(unittest.TestCase):
             nothing = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work, revert_to="start")
             self.assertEqual(nothing.failure["code"], "arguments_unusable")
 
+    def test_a_project_is_found_by_its_number(self):
+        """16 Nov: the agent spent 14 calls finding "P0009"."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            project = root / "designs" / "P0123-test-board" / "hardware" / "kicad"
+            project.mkdir(parents=True)
+            (project / "board.kicad_pcb").write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
+            (project / "board.kicad_pro").write_text(json.dumps({"meta": {"filename": "board.kicad_pro", "version": 1}}))
+            (project / "board.kicad_sch").write_text(schematic())
+            (project / "backups" / "old").mkdir(parents=True)
+            (project / "backups" / "old" / "board.kicad_pcb").write_text("(kicad_pcb)")
+            runtime = build_kicad_runtime(lambda: "call", {"ALX_KICAD_DESIGN_ROOTS": str(root / "designs")},
+                                          root / "storage")
+            for name in ("P0123", str(root / "designs" / "P0123-test-board")):
+                with self.subTest(name=name):
+                    checked = self.call(runtime, "check_kicad_board", project_dir=name)
+                    self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
+            missing = self.call(runtime, "check_kicad_board", project_dir="P0999")
+            self.assertIn("no project P0999", missing.failure["recovery"]["detail"])
+
     def test_a_missing_power_port_names_what_the_sheet_has(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime, project = self.runtime(folder)
