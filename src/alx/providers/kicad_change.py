@@ -573,8 +573,10 @@ def apply_change(change):
                         sides.append(op.get("layer") if op.get("layer") and found.IsOnLayer(layer(op["layer"]))
                                      else ("F" if found.IsOnLayer(_pcbnew.F_Cu) else "B"))
                     else:
+                        # A point end is on the layer named, else the first of the layers given
+                        # (17 Nov: a route between points with layers [In2] started on top).
                         ends.append((float(end[0]), float(end[1])))
-                        sides.append(op.get("layer", "F"))
+                        sides.append(op.get("layer") or (op.get("layers") or ["F"])[0])
                 if not net:
                     raise ValueError("route %d: name its net, or start or end it on a pad" % (index + 1))
                 # His style (17 Nov), from his own board: its usual width and via, its routing layers;
