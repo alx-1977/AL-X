@@ -42,6 +42,7 @@ BOARD_OPS = {
     'remove_teardrops': ('area',),
     'remove_dangling_tracks': ('area',),
     'sync_from_schematic': (),
+    'board_text': ('ref', 'field'),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -515,6 +516,27 @@ def apply_change(change):
                         remove(b, item)
                     total += len(gone)
                 done["removed"] = total
+            elif kind == "board_text":
+                # A part's reference or value text on the board: where, how big, turned, shown
+                # (17 Nov: silkscreen over pads after placement; C93's text too large).
+                found = part(b, op["ref"])
+                field = (found.Reference() if op["field"] == "Reference" else found.Value() if op["field"] == "Value"
+                         else found.GetField(op["field"]))
+                if field is None:
+                    raise ValueError("%s has no field %s" % (op["ref"], op["field"]))
+                if op.get("at"):
+                    field.SetPosition(point(op["at"][0], op["at"][1]))
+                if op.get("size"):
+                    height = _pcbnew.FromMM(op["size"])
+                    field.SetTextSize(_pcbnew.VECTOR2I(height, height))
+                    field.SetTextThickness(_pcbnew.FromMM(op["size"] * 0.15))
+                if op.get("angle") is not None:
+                    field.SetTextAngleDegrees(op["angle"])
+                if op.get("hide") is not None:
+                    field.SetVisible(not op["hide"])
+                done["text"] = {"at": [round(_pcbnew.ToMM(field.GetPosition().x), 3),
+                                       round(_pcbnew.ToMM(field.GetPosition().y), 3)],
+                                "size": round(_pcbnew.ToMM(field.GetTextHeight()), 3), "shown": field.IsVisible()}
             elif kind == "sync_from_schematic":
                 done.update(sync_from_schematic(b, op["_sync"], op.get("place") or {}))
             elif kind == "remove_teardrops":
