@@ -46,6 +46,7 @@ BOARD_OPS = {
     'keepout': ('outline',),
     'remove_keepouts': ('area',),
     'copper_shape': ('net', 'outline'),
+    'route': ('from', 'to', 'width'),
     'remove_copper_shapes': ('nets', 'area'),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
@@ -548,6 +549,36 @@ def apply_change(change):
                     outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
                 b.Add(area)
                 done["keepout"] = {"corners": len(op["outline"]), "layers": layers.CuStack().size()}
+            elif kind == "route":
+                # One connection, path found by code: 45-degree bends, as few bends and vias as it
+                # can, clear of everything (17 Nov). from/to: REF.PAD or [x, y]; the net comes from
+                # the pads; it may cross to another layer through vias.
+                ends, sides, net = [], [], op.get("net")
+                for end in (op["from"], op["to"]):
+                    if isinstance(end, str):
+                        ref, number = _pin(end)
+                        found = pad(b, ref, number)
+                        net = net or found.GetNetname()
+                        ends.append(xy(found.GetPosition()))
+                        sides.append(op.get("layer") if op.get("layer") and found.IsOnLayer(layer(op["layer"]))
+                                     else ("F" if found.IsOnLayer(_pcbnew.F_Cu) else "B"))
+                    else:
+                        ends.append((float(end[0]), float(end[1])))
+                        sides.append(op.get("layer", "F"))
+                if not net:
+                    raise ValueError("route %d: name its net, or start or end it on a pad" % (index + 1))
+                runs, vias = route(b, net, ends[0], ends[1], op["width"], sides[0], end_on=sides[1],
+                                   layers=op.get("layers"))
+                for name, corners in runs:
+                    add_track(b, net, corners, op["width"], name, op.get("radius"))
+                for spot in vias:
+                    add_via(b, net, spot, 0.45, 0.2)
+                import math as _m
+                length = sum(_m.hypot(q[0] - p[0], q[1] - p[1]) for _, pts in runs for p, q in zip(pts, pts[1:]))
+                done["route"] = {"net": net, "runs": [{"layer": n, "points": pts} for n, pts in runs],
+                                 "vias": vias, "bends": sum(len(pts) - 2 for _, pts in runs),
+                                 "length_mm": round(length, 3),
+                                 "straight_mm": round(_m.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]), 3)}
             elif kind == "copper_shape":
                 # A solid copper polygon on one net: a taper from a wide feed to a small pad, or feed
                 # copper (17 Nov, his rule: copper wider than its pad joins through a taper). Solid

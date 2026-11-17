@@ -82,6 +82,10 @@ try:
     add_track(b, "ARC", [(0, 0), (5, 0), (5, 5)], 0.3)
 except ValueError as error:
     print("touch", "would touch pad U1.1 of net STEP" in str(error))
+runs, vias = route(b, "ARC", (110, 110), (115, 113), 0.2, "F")
+import math as _rm
+angles = {round(_rm.degrees(_rm.atan2(q[1] - p[1], q[0] - p[0]))) % 45 for _, pts in runs for p, q in zip(pts, pts[1:])}
+print("routed", len(runs), len(vias), angles == {0})
 added = add_part(b, "U99", "Test/TwoPad", (40, 40), 90, "B", "NEW", {"1": "BRAND_NEW", "2": "ARC"})
 print("added", added["side"], added["rotation"], added["at"], sorted(p["net"] for p in added["pads"]))
 save(b)
@@ -105,6 +109,8 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
             self.assertIn("tight True", done.stdout)
             # A track onto another net's pad is refused before anything is drawn (17 Nov).
             self.assertIn("touch True", done.stdout)
+            # A connection routed by code: one layer here, only 0/45/90-degree runs (17 Nov).
+            self.assertIn("routed 1 0 True", done.stdout)
             self.assertIn("added B 90.0 (40.0, 40.0) ['ARC', 'BRAND_NEW']", done.stdout)
             self.assertNotIn(".alx-fp-", " ".join(p.name for p in Path(folder).iterdir()))
             self.assertRegex(done.stdout, r"teardrops [1-9]\d* 0")

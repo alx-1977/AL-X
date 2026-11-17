@@ -244,6 +244,174 @@ def _refuse_touching(board, net, code, made, on_layer):
                                                 round(_pcbnew.ToMM(where.y), 3), round(_pcbnew.ToMM(clearance), 3)))
 
 
+def route(board, net, start, end, width, on="F", step=0.1, margin=None, bend_cost=2.0, layers=None,
+          via=(0.45, 0.2), via_cost=3.0, end_on=None):
+    """A clean path for one connection, worked out by code (17 Nov, Friedl: the switch control
+    lines drawn coordinate by coordinate were "horrible at best"): from start (on layer `on`) to
+    end (on `end_on`, else `on`), straight runs and 45-degree bends, as few bends and vias and as
+    short as it can, clear of every other net by the board's clearance, inside the board and out
+    of keep-outs that forbid tracks. It may change layer through vias among `layers` (default
+    F and B). Returns [(layer, [points...]), ...] runs and the via points between them."""
+    import heapq as _heapq
+    import math as _math
+    layers = list(layers or ([on] if end_on in (None, on) and on not in ("F", "B") else ["F", "B"]))
+    if on not in layers:
+        layers.insert(0, on)
+    end_on = end_on or on
+    if end_on not in layers:
+        layers.append(end_on)
+    if margin is None:
+        reason = None
+        for wider in (4.0, 8.0, 14.0):
+            try:
+                return route(board, net, start, end, width, on, step, wider, bend_cost, layers, via, via_cost, end_on)
+            except ValueError as error:
+                if "no clear path" not in str(error):
+                    raise
+                reason = error
+        raise reason
+    code = board.FindNet(net)
+    if code is None:
+        raise KeyError("no net %s on this board" % net)
+    try:
+        clearance = _pcbnew.ToMM(board.GetDesignSettings().m_NetSettings.GetDefaultNetclass().GetClearance())
+    except Exception:  # noqa: BLE001
+        clearance = 0.2
+    reach = _pcbnew.FromMM(clearance + width / 2.0)
+    via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0)
+    # The grid runs through the start point, so the first run leaves it exactly straight.
+    x0 = start[0] - _math.ceil((start[0] - min(start[0], end[0]) + margin) / step) * step
+    y0 = start[1] - _math.ceil((start[1] - min(start[1], end[1]) + margin) / step) * step
+    x1, y1 = max(start[0], end[0]) + margin, max(start[1], end[1]) + margin
+    cols, rows = int(round((x1 - x0) / step)) + 1, int(round((y1 - y0) / step)) + 1
+    if cols * rows * len(layers) > 900000:
+        raise ValueError("the two ends are too far apart for one route (%d x %d mm); route it in parts"
+                         % (x1 - x0, y1 - y0))
+    window = _pcbnew.BOX2I(point(x0, y0), _pcbnew.VECTOR2L(_pcbnew.FromMM(x1 - x0), _pcbnew.FromMM(y1 - y0)))
+    window.Inflate(via_reach)
+    mine = code.GetNetCode()
+    obstacles = {name: [] for name in layers}
+    banned = {name: [] for name in layers}
+    for name in layers:
+        on_layer = layer(name)
+        for item in board.GetTracks():
+            if item.GetNetCode() != mine and (item.GetClass() == "PCB_VIA" or item.GetLayer() == on_layer) \
+                    and window.Intersects(item.GetBoundingBox()):
+                obstacles[name].append(item.GetEffectiveShape(on_layer))
+        for footprint in board.GetFootprints():
+            for item in footprint.Pads():
+                if item.GetNetCode() != mine and window.Intersects(item.GetBoundingBox()) and (
+                        item.IsOnLayer(on_layer) or item.GetAttribute() == _pcbnew.PAD_ATTRIB_PTH):
+                    obstacles[name].append(item.GetEffectiveShape(on_layer))
+        for item in board.GetDrawings():
+            if item.GetClass() == "PCB_SHAPE" and item.GetLayer() == on_layer and item.GetNetCode() != mine \
+                    and item.IsOnCopperLayer() and window.Intersects(item.GetBoundingBox()):
+                obstacles[name].append(item.GetEffectiveShape(on_layer))
+        for zone in list(board.Zones()) + [z for fp in board.GetFootprints() for z in fp.Zones()]:
+            if zone.GetIsRuleArea() and zone.GetDoNotAllowTracks() and zone.IsOnLayer(on_layer):
+                banned[name].append(zone.Outline())
+    no_vias = [zone.Outline() for zone in list(board.Zones()) + [z for fp in board.GetFootprints() for z in fp.Zones()]
+               if zone.GetIsRuleArea() and zone.GetDoNotAllowVias()]
+    # Nor on a pad too small for it, its own net's included (a via on a 0.3 mm pin, 17 Nov).
+    small_pads = []
+    for footprint in board.GetFootprints():
+        for item in footprint.Pads():
+            size = item.GetSize(_pcbnew.F_Cu) if item.IsOnLayer(_pcbnew.F_Cu) else item.GetSize(_pcbnew.B_Cu)
+            if _pcbnew.ToMM(min(size.x, size.y)) < via[0] + 0.1 and window.Intersects(item.GetBoundingBox()):
+                small_pads.append(item.GetEffectiveShape(_pcbnew.F_Cu if item.IsOnLayer(_pcbnew.F_Cu) else _pcbnew.B_Cu))
+    # Other nets' pours on a layer are not obstacles: they are refilled clear of new copper.
+    outline = _pcbnew.SHAPE_POLY_SET()
+    has_outline = board.GetBoardPolygonOutlines(outline, False)
+    inside = None
+    if has_outline and outline.OutlineCount():
+        inside = _pcbnew.SHAPE_POLY_SET(outline)
+        try:
+            inside.Deflate(_pcbnew.FromMM(max(width, via[0]) / 2.0 + 0.3), _pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS,
+                           _pcbnew.FromMM(0.01))
+        except Exception:  # noqa: BLE001
+            inside = outline
+
+    def at(c, r):
+        return point(x0 + c * step, y0 + r * step)
+    track_free, via_free = {}, {}
+
+    def free(c, r, li):
+        key = (c, r, li)
+        if key not in track_free:
+            here = at(c, r)
+            name = layers[li]
+            track_free[key] = (0 <= c < cols and 0 <= r < rows
+                               and (inside is None or inside.Contains(here))
+                               and not any(area.Contains(here) for area in banned[name])
+                               and not any(shape.Collide(here, reach) for shape in obstacles[name]))
+        return track_free[key]
+
+    def via_ok(c, r):
+        if (c, r) not in via_free:
+            here = at(c, r)
+            via_free[(c, r)] = (not any(area.Contains(here) for area in no_vias)
+                                and not any(shape.Collide(here, _pcbnew.FromMM(via[0] / 2.0 + 0.05))
+                                            for shape in small_pads)
+                                and all(not any(shape.Collide(here, via_reach) for shape in obstacles[name])
+                                        for name in layers))
+        return via_free[(c, r)]
+    sc, sr = int(round((start[0] - x0) / step)), int(round((start[1] - y0) / step))
+    ec, er = int(round((end[0] - x0) / step)), int(round((end[1] - y0) / step))
+    sl, el = layers.index(on), layers.index(end_on)
+    track_free[(sc, sr, sl)] = track_free[(ec, er, el)] = True
+    moves = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    start_state = (sc, sr, sl, -1)
+    frontier, best, came, goal = [(0.0, 0.0, start_state)], {start_state: 0.0}, {}, None
+    while frontier:
+        _, spent, state = _heapq.heappop(frontier)
+        c, r, li, d = state
+        if (c, r, li) == (ec, er, el):
+            goal = state
+            break
+        if spent > best.get(state, 1e18):
+            continue
+        steps = []
+        for index, (dc, dr) in enumerate(moves):
+            if free(c + dc, r + dr, li):
+                turn = 0.0 if d in (-1, index) else (bend_cost * 2 if (moves[d][0] * dc + moves[d][1] * dr) <= 0
+                                                      else bend_cost)
+                steps.append(((c + dc, r + dr, li, index), _math.hypot(dc, dr) * step + turn))
+        if d != -2 and (c, r) != (sc, sr) and (c, r) != (ec, er) and via_ok(c, r):
+            for other in range(len(layers)):
+                if other != li and free(c, r, other):
+                    steps.append(((c, r, other, -2), via_cost))
+        for nxt, cost in steps:
+            total = spent + cost
+            if total < best.get(nxt, 1e18):
+                best[nxt], came[nxt] = total, state
+                left = _math.hypot(ec - nxt[0], er - nxt[1]) * step
+                _heapq.heappush(frontier, (total + left, total, nxt))
+        if len(best) > 4000000:
+            break
+    if goal is None:
+        raise ValueError("no clear path for %s between (%g, %g) and (%g, %g); route it in parts"
+                         % (net, start[0], start[1], end[0], end[1]))
+    states = [goal]
+    while states[-1] != start_state:
+        states.append(came[states[-1]])
+    states.reverse()
+    runs, vias, current = [], [], [(start[0], start[1])]
+    for prev, here, nxt in zip(states, states[1:], states[2:] + [None]):
+        place = (round(x0 + here[0] * step, 4), round(y0 + here[1] * step, 4))
+        if here[3] == -2:
+            runs.append((layers[prev[2]], current + ([place] if current[-1] != place else [])))
+            vias.append(place)
+            current = [place]
+        elif nxt is not None and nxt[3] != here[3] and nxt[3] != -2:
+            current.append(place)
+        elif nxt is not None and nxt[3] == -2:
+            current.append(place)
+    current.append((end[0], end[1]))
+    runs.append((layers[goal[2]], current))
+    runs = [(name, [p for k, p in enumerate(points) if k == 0 or p != points[k - 1]]) for name, points in runs]
+    return [(name, points) for name, points in runs if len(points) > 1], vias
+
+
 def track_length(board, net):
     """Total length in mm of a net's tracks and arcs (vias not counted)."""
     return round(sum(_pcbnew.ToMM(item.GetLength()) for item in board.GetTracks()
@@ -380,6 +548,22 @@ def add_via(board, net, at, diameter=0.6, drill=0.3):
     via.SetWidth(_pcbnew.FromMM(diameter))
     via.SetDrill(_pcbnew.FromMM(drill))
     via.SetNet(code)
+    # A via in a pad fits inside that pad (17 Nov: 0.6 mm vias on the switches' 0.3 mm pins,
+    # solder wicking and bridging to the next pin). Nor may it touch another net.
+    where = point(*at)
+    for footprint in board.GetFootprints():
+        for item in footprint.Pads():
+            side = _pcbnew.F_Cu if item.IsOnLayer(_pcbnew.F_Cu) else _pcbnew.B_Cu
+            if (item.IsOnLayer(_pcbnew.F_Cu) or item.IsOnLayer(_pcbnew.B_Cu)) and \
+                    item.GetEffectiveShape(side).Collide(where, _pcbnew.FromMM(diameter / 2.0)):
+                size = item.GetSize(side)
+                smallest = _pcbnew.ToMM(min(size.x, size.y))
+                if diameter > smallest - 0.1:
+                    raise ValueError("a %g mm via on pad %s.%s (%g mm across) is bigger than the pad; put "
+                                     "vias in a larger pad (an exposed pad) or beside the pad"
+                                     % (diameter, footprint.GetReference(), item.GetNumber(), round(smallest, 3)))
+    for on_layer in (_pcbnew.F_Cu, _pcbnew.B_Cu):
+        _refuse_touching(board, net, code, [via], on_layer)
     board.Add(via)
     return via
 
