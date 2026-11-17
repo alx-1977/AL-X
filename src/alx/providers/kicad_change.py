@@ -485,6 +485,16 @@ def apply_change(change):
                     points = points + [xy(end.GetPosition())]
                 if not net:
                     raise ValueError("track %d: name its net, or start or end it on a pad" % (index + 1))
+                # Ordinary connections go through route, which draws them in his style (17 Nov: the
+                # agent drew control lines point by point again and none of his style applied).
+                # track is for RF and feed copper (0.3 mm and wider) and short stubs.
+                import math as _m
+                drawn = sum(_m.hypot(q[0] - p[0], q[1] - p[1]) for p, q in zip(points, points[1:]))
+                if float(op["width"]) < 0.3 and drawn > 2.0:
+                    raise ValueError("track %d: a %.1f mm %s line is drawn with route, not track (route "
+                                     "{from, to, follow?}; split it at points [x, y] if it cannot find a "
+                                     "path in one go). track is for RF or feed copper 0.3 mm and wider, "
+                                     "and stubs up to 2 mm" % (index + 1, drawn, net))
                 add_track(b, net, points, op["width"], op.get("layer", "F"), op.get("radius"))
                 done["length_mm"] = track_length(b, net)
             elif kind == "via":
