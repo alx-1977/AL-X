@@ -1781,7 +1781,9 @@ class KiCadProvider:
         root = bounded(self.work_root / work_copy_id, (self.work_root,), protected=False)
         # Retained evidence is checked on its own, so it never blocks later work.
         # So is the edit history (revert_to), which keeps only the files edits changed.
-        inventory(root, exclude={root / 'evidence', root / 'history'})
+        # His viewing windows' copies are not the work copy (17 Nov: KiCad's own .history,
+        # a git store, in a view he saved refused every call on the copy).
+        inventory(root, exclude={root / 'evidence', root / 'history', root / 'views'})
         evidence_bytes(root / 'evidence')
         evidence_bytes(root / 'history')
         meta = json.loads((root / 'metadata.json').read_text())
@@ -2613,7 +2615,8 @@ class KiCadProvider:
         seen = (meta.get('view') or {})
         for earlier in (root / 'views').glob('*') if (root / 'views').is_dir() else ():
             if (earlier.name == seen.get('stamp') and (earlier / 'amended').is_dir()
-                    and design_inventory(earlier / 'amended') != seen.get('files')):
+                    and design_inventory(earlier / 'amended', exclude={earlier / 'amended' / '.history'})
+                    != seen.get('files')):
                 kept_views.append(earlier.name)
                 continue
             shutil.rmtree(earlier, ignore_errors=True)
@@ -2664,7 +2667,7 @@ class KiCadProvider:
                 raise KiCadError('arguments_unusable', {'detail': 'your copy changed after the window was opened '
                                                         'for him; open it again for his edit'})
             project = root / 'project'
-            theirs, ours = design_inventory(folder), design_inventory(project)
+            theirs, ours = design_inventory(folder, exclude={folder / '.history'}), design_inventory(project)
             # KiCad's lock files while his window is open are not the design.
             changed = sorted(name for name in theirs if theirs[name] != ours.get(name)
                              and not (Path(name).name.startswith('~') or name.endswith('.lck')))
