@@ -2720,6 +2720,11 @@ class KiCadProvider:
             revision = self._revision(root)
             if revision != arguments['work_copy_revision']:
                 raise KiCadError('work_copy_changed')
+            # He approves what he has seen: this exact copy opened for him in KiCad (17 Nov: asked
+            # three times about one capacitor without being shown it once).
+            if (meta.get('view') or {}).get('revision') != revision:
+                raise KiCadError('arguments_unusable', {'detail': 'he has not been shown this version: open it '
+                                                        'for him with open_in_kicad first, then ask'})
             current = fingerprints(root / 'project', meta['board'])
             original = self._original_steps(root, meta)
             approvals = dict(meta.get('approvals', {}))

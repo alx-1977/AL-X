@@ -86,23 +86,32 @@ def step_status(original: dict, approvals: dict, current: dict) -> dict:
     for index, step in enumerate(STEPS):
         record = approvals.get(step) or {}
         held = all(record.get(name) == current[name] for name in STEPS[:index + 1])
+        later = approvals.get('routing') or {}
         if current[step] == original.get(step):
             state = 'unchanged'
         elif held and record:
             state = 'approved'
+        elif (step == 'placement' and later and all(later.get(name) == current[name]
+                                                      for name in ('schematic', 'placement'))):
+            # His routing approval saw the placement as it now is.
+            state = 'approved'
+        elif step == 'placement' and record and record.get('schematic') == current['schematic']:
+            # Parts nudged after he approved the placement, while routing (17 Nov: C1 moved 0.2 mm
+            # for Würth's gap, and he was asked three times, blind). Shown with the routed board.
+            state = 'adjusted'
         else:
             state = 'needs_approval'
         if not earlier_ok and state != 'unchanged':
             # A changed step cannot stand on an earlier one he has not seen.
             state = 'waiting'
         status[step] = state
-        earlier_ok = earlier_ok and state in ('unchanged', 'approved')
+        earlier_ok = earlier_ok and state in ('unchanged', 'approved', 'adjusted')
     return status
 
 
 def ready(status: dict, step: str) -> bool:
     """Every step up to and including this one is unchanged or approved."""
-    return all(status[name] in ('unchanged', 'approved') for name in STEPS[:STEPS.index(step) + 1])
+    return all(status[name] in ('unchanged', 'approved', 'adjusted') for name in STEPS[:STEPS.index(step) + 1])
 
 
 def edit_refusal(before: dict, after: dict, original: dict, approvals: dict):

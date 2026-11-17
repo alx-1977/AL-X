@@ -168,7 +168,30 @@ class KiCadTests(unittest.TestCase):
         return SimpleNamespace(returncode=0)
 
     def call(self, name, **arguments):
+        if name == 'approve_step' and arguments.get('work_copy_id'):
+            # He approves what he was shown (17 Nov): the copy is opened for him first.
+            self.shown(arguments['work_copy_id'])
         return kicad_call(self.runtime.executors, name, arguments)
+
+    def shown(self, work_copy_id):
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        return kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': work_copy_id, 'what': 'board'})
+
+    def test_a_step_is_approved_only_once_he_was_shown_that_version(self):
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
+            EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        unshown = kicad_call(self.runtime.executors, 'approve_step', {
+            'step': 'schematic', 'work_copy_id': edited['work_copy_id'],
+            'work_copy_revision': edited['work_copy_revision']})
+        self.assertEqual(unshown.state, CapabilityResultState.FAILED)
+        self.assertIn('open_in_kicad', unshown.failure['recovery']['detail'])
+        self.success('approve_step', step='schematic', work_copy_id=edited['work_copy_id'],
+                     work_copy_revision=edited['work_copy_revision'])
 
     def success(self, name, **arguments):
         result = self.call(name, **arguments)
@@ -1123,9 +1146,14 @@ from pathlib import Path
 p = Path(sys.argv[1])
 p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
 """)
-        self.assertEqual(dict(again['steps']), {'schematic': 'unchanged', 'placement': 'needs_approval',
-                                                'routing': 'waiting'})
+        # A part nudged after the placement was approved (17 Nov) does not reopen the placement:
+        # it is adjusted, and the routing he approves next, seeing it, covers it.
+        self.assertEqual(dict(again['steps']), {'schematic': 'unchanged', 'placement': 'adjusted',
+                                                'routing': 'needs_approval'})
         self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(again))
+        covered = self.approve(again, 'routing')
+        self.assertEqual(dict(covered['steps']), {'schematic': 'unchanged', 'placement': 'approved',
+                                                  'routing': 'approved'})
         # An approval is of the revision he saw.
         self.failure('work_copy_changed', 'approve_step', step='placement', work_copy_id=copy,
                      work_copy_revision=routed['work_copy_revision'])
