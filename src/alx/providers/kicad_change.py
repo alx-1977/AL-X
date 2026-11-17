@@ -467,12 +467,16 @@ def apply_change(change):
             elif kind == "track":
                 points = [tuple(p) for p in op.get("points") or ()]
                 net = op.get("net")
-                if op.get("from"):
+                if isinstance(op.get("from"), (list, tuple)):
+                    points = [tuple(op["from"])] + points
+                elif op.get("from"):
                     ref, number = _pin(op["from"])
                     start = pad(b, ref, number)
                     net = net or start.GetNetname()
                     points = [xy(start.GetPosition())] + points
-                if op.get("to"):
+                if isinstance(op.get("to"), (list, tuple)):
+                    points = points + [tuple(op["to"])]
+                elif op.get("to"):
                     ref, number = _pin(op["to"])
                     end = pad(b, ref, number)
                     # A track that starts at a point takes its net from the pad it ends on (16 Nov).
