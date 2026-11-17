@@ -328,17 +328,11 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         clearance = _pcbnew.ToMM(board.GetDesignSettings().m_NetSettings.GetDefaultNetclass().GetClearance())
     except Exception:  # noqa: BLE001
         clearance = 0.2
-    # Copper is checked at grid points; a thin track between two points must not slip through,
-    # so the reach grows with the grid step (17 Nov: a 0.25 mm grid passed a ToF track).
-    # A 45-degree run passes up to 0.354 of a step from the points it was checked at.
-    slack = 0.36 * step
-    reach = _pcbnew.FromMM(clearance + width / 2.0 + slack)
-    # Within 1 mm of an end the grid runs straight out of the pin, so no slack there: a coarse
-    # grid's slack closed fine-pitch pins in (17 Nov, J2's 0.5 mm pins); add_track still
-    # checks the real copper exactly.
-    close_reach = _pcbnew.FromMM(clearance + width / 2.0)
-    close_via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0)
-    via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0 + slack)
+    # Every move is checked as the exact piece of track it draws (17 Nov: point checks on a grid
+    # let a path slip past a fine-pitch pin, and drawing it was then refused), so whatever the
+    # search finds can be drawn.
+    reach = _pcbnew.FromMM(clearance + width / 2.0)
+    via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0)
     # The grid runs through the start point, so the first run leaves it exactly straight.
     x0 = start[0] - _math.ceil((start[0] - min(start[0], end[0]) + margin) / step) * step
     y0 = start[1] - _math.ceil((start[1] - min(start[1], end[1]) + margin) / step) * step
@@ -407,6 +401,7 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
                     table.setdefault((bx, by), []).append(shape)
         return table
     track_table = {name: filed(obstacles[name], reach) for name in layers}
+    edge_table = {name: filed(obstacles[name], reach + _pcbnew.FromMM(step * 1.5)) for name in layers}
     via_table = {name: filed(obstacles[name], via_reach) for name in layers}
     small_table = filed(small_pads, _pcbnew.FromMM(via[0] / 2.0 + 0.05))
     # Beside a followed net: within one grid step of the closest a track may come to it.
@@ -439,10 +434,19 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             track_free[key] = (0 <= c < cols and 0 <= r < rows
                                and (inside is None or inside.Contains(here))
                                and not any(area.Contains(here) for area in banned[name])
-                               and not any(shape.Collide(here, close_reach if min(
-                                   abs(c - sc) + abs(r - sr), abs(c - ec) + abs(r - er)) * step <= 1.0 else reach)
-                                   for shape in near(track_table[name], here)))
+                               and not any(shape.Collide(here, reach) for shape in near(track_table[name], here)))
         return track_free[key]
+    edge_free = {}
+
+    def move_ok(c, r, dc, dr, li):
+        key = (c, r, dc, dr, li) if (dc, dr) > (0, 0) else (c + dc, r + dr, -dc, -dr, li)
+        if key not in edge_free:
+            a, z = at(c, r), at(c + dc, r + dr)
+            piece = _pcbnew.SEG(a, z)
+            shapes = {id(shape): shape for shape in list(near(edge_table[layers[li]], a))
+                      + list(near(edge_table[layers[li]], z))}.values()
+            edge_free[key] = not any(shape.Collide(piece, reach) for shape in shapes)
+        return edge_free[key]
 
     def via_ok(c, r):
         if (c, r) not in via_free:
@@ -450,9 +454,7 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             via_free[(c, r)] = (not any(area.Contains(here) for area in no_vias)
                                 and not any(shape.Collide(here, _pcbnew.FromMM(via[0] / 2.0 + 0.05))
                                             for shape in near(small_table, here))
-                                and all(not any(shape.Collide(here, close_via_reach if min(
-                                            abs(c - sc) + abs(r - sr), abs(c - ec) + abs(r - er)) * step <= 1.0
-                                            else via_reach) for shape in near(via_table[name], here))
+                                and all(not any(shape.Collide(here, via_reach) for shape in near(via_table[name], here))
                                         for name in layers))
         return via_free[(c, r)]
     sc, sr = int(round((start[0] - x0) / step)), int(round((start[1] - y0) / step))
@@ -472,7 +474,7 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             continue
         steps = []
         for index, (dc, dr) in enumerate(moves):
-            if free(c + dc, r + dr, li):
+            if free(c + dc, r + dr, li) and move_ok(c, r, dc, dr, li):
                 turn = 0.0 if d in (-1, index) else (bend_cost * 2 if (moves[d][0] * dc + moves[d][1] * dr) <= 0
                                                       else bend_cost)
                 run = _math.hypot(dc, dr) * step
@@ -494,6 +496,10 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
     if goal is None:
         raise ValueError("no clear path for %s between (%g, %g) and (%g, %g); route it in parts"
                          % (net, start[0], start[1], end[0], end[1]))
+    def clear(name, a, z):
+        a, z = point(*a), point(*z)
+        shapes = {id(shape): shape for shape in list(near(edge_table[name], a)) + list(near(edge_table[name], z))}
+        return not any(shape.Collide(_pcbnew.SEG(a, z), reach) for shape in shapes.values())
     states = [goal]
     while states[-1] != start_state:
         states.append(came[states[-1]])
@@ -521,7 +527,8 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         if abs(cross) > 1e-9:
             t = ((ex - ax) * dy - (ey - ay) * dx) / cross
             moved = (round(ax + t * ux, 4), round(ay + t * uy, 4))
-            if _math.hypot(moved[0] - bx, moved[1] - by) <= step and 0 < t:
+            if _math.hypot(moved[0] - bx, moved[1] - by) <= step and 0 < t \
+                    and clear(layers[goal[2]], (ax, ay), moved) and clear(layers[goal[2]], moved, (ex, ey)):
                 current[-2] = moved
     elif len(current) == 2 and goal[3] >= 0 and vias and runs and current[0] == vias[-1]:
         # Straight from a via into the pin: the via slides across so the run comes in square;
@@ -530,7 +537,10 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         dx, dy = moves[goal[3]]
         k = ((ex - vx) * dx + (ey - vy) * dy) / float(dx * dx + dy * dy)
         moved = (round(ex - k * dx, 4), round(ey - k * dy, 4))
-        if _math.hypot(moved[0] - vx, moved[1] - vy) <= step and k > 0:
+        name, before = runs[-1]
+        if _math.hypot(moved[0] - vx, moved[1] - vy) <= step and k > 0 and clear(layers[goal[2]], moved, (ex, ey)) \
+                and clear(name, before[-2], moved) and not any(
+                    shape.Collide(point(*moved), via_reach) for other in layers for shape in near(via_table[other], point(*moved))):
             vias[-1] = current[0] = moved
             name, before = runs[-1]
             runs[-1] = (name, before[:-1] + [moved])
