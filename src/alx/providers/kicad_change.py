@@ -43,6 +43,7 @@ BOARD_OPS = {
     'remove_dangling_tracks': ('area',),
     'sync_from_schematic': (),
     'board_text': ('ref', 'field'),
+    'keepout': ('outline',),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -516,6 +517,34 @@ def apply_change(change):
                         remove(b, item)
                     total += len(gone)
                 done["removed"] = total
+            elif kind == "keepout":
+                # A keep-out (rule) area: no zone fill, and by default no tracks or vias, on the
+                # copper layers named (all by default). The pours pull back from it when refilled
+                # (17 Nov: a chip antenna's clearance from its datasheet layout).
+                area = _pcbnew.ZONE(b)
+                area.SetIsRuleArea(True)
+                area.SetDoNotAllowZoneFills(True)
+                area.SetDoNotAllowTracks(bool(op.get("no_tracks", True)))
+                area.SetDoNotAllowVias(bool(op.get("no_vias", True)))
+                area.SetDoNotAllowPads(False)
+                area.SetDoNotAllowFootprints(False)
+                layers = _pcbnew.LSET()
+                names = op.get("layers") or ["F", "B"] + ["In%d" % i for i in range(1, 31)]
+                for name in names:
+                    layer = {"F": _pcbnew.F_Cu, "B": _pcbnew.B_Cu}.get(name)
+                    if layer is None and name.startswith("In") and name[2:].isdigit():
+                        layer = _pcbnew.In1_Cu + 2 * (int(name[2:]) - 1)
+                    if layer is not None and b.IsLayerEnabled(layer):
+                        layers.AddLayer(layer)
+                area.SetLayerSet(layers)
+                if op.get("name"):
+                    area.SetZoneName(op["name"])
+                outline = area.Outline()
+                outline.NewOutline()
+                for x, y in op["outline"]:
+                    outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
+                b.Add(area)
+                done["keepout"] = {"corners": len(op["outline"]), "layers": layers.CuStack().size()}
             elif kind == "board_text":
                 # A part's reference or value text on the board: where, how big, turned, shown
                 # (17 Nov: silkscreen over pads after placement; C93's text too large).
