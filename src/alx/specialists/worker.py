@@ -232,8 +232,23 @@ class MechanicalWorker:
         except (TypeError, ValueError):
             summary["outcome"] = "arguments_unusable"
             return json.dumps({"refused": "arguments_json must be a JSON object"}), summary, ()
+        # The same call again, unchanged, right after it was refused, is not run (17 Nov: one
+        # refused inspect was sent 33 times in a row). Three such repeats end the job.
+        key = json.dumps([capability_id, parsed], sort_keys=True, default=str)
+        if key == getattr(self, "_last_refused", None):
+            self._repeats = getattr(self, "_repeats", 0) + 1
+            summary["outcome"] = "repeated_refused_call"
+            if self._repeats >= 3:
+                raise WorkerError("stuck_on_refused_call")
+            return json.dumps({"refused": "same_call_as_just_refused",
+                               "hint": "this exact call was refused a moment ago; read that refusal and "
+                                       "change the call, or do something else"}), summary, ()
         attempt = self._dispatch(CapabilityCall(call_id, capability_id, parsed))
         result = attempt.result
+        refused_now = result is None or result.state.value != "succeeded"
+        self._last_refused = key if refused_now else None
+        if not refused_now:
+            self._repeats = 0
         summary["outcome"] = (attempt.reason_code if result is None
                               else result.state.value)
         return json.dumps(bound_result({

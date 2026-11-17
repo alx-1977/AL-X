@@ -93,6 +93,22 @@ class WorkerLoopTests(unittest.TestCase):
         self.assertIn('"id": "run_program"', first.messages[0].content)
         self.assertNotIn("send_mail_reply", first.messages[0].content)
 
+    def test_the_same_refused_call_is_not_run_again_and_a_loop_ends_the_job(self) -> None:
+        """17 Nov: one refused inspect was sent 33 times in a row."""
+        def refuse(call):
+            self.dispatched.append(call)
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.FAILED, {},
+                                                      failure={"code": "arguments_unusable"}))
+        model = ScriptedModel([tool("run_program", {"argv": ["x"]})] * 6)
+        with self.assertRaises(WorkerError) as raised:
+            MechanicalWorker(model, refuse, (RUN,)).run("Run x.", "job", 10)
+        self.assertEqual(raised.exception.code, "stuck_on_refused_call")
+        self.assertEqual(len(self.dispatched), 1)
+        answers = [json.loads(r.tool_result) for r in model.requests[1:]]
+        self.assertEqual(answers[1]["refused"], "same_call_as_just_refused")
+
     def test_an_action_called_as_a_capability_is_pointed_to_its_tool(self) -> None:
         kicad = CapabilityDefinition("kicad", "Board work. Actions: inspect, fetch_datasheet.", OBJECT,
                                      OBJECT, SideEffect.EFFECTFUL)

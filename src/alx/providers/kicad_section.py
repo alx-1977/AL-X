@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 MAX_SECTION_BYTES = 4_000_000
-MAX_NAMES = 64
+# A whole board's parts (17 Nov: 236 on P0009, refused in a loop at 64).
+MAX_NAMES = 400
 
 # KiCad 10's bundled Python (3.9). Layers are read by number, never by name:
 # boards converted from Altium name theirs "Top Layer", "Board Shape" and so on.
@@ -352,7 +353,9 @@ def read_section(
         value = arguments.get(key) or []
         if (not isinstance(value, (list, tuple)) or len(value) > MAX_NAMES
                 or not all(isinstance(v, str) and v for v in value)):
-            raise SectionError("arguments_unusable", f"{key} is a list of up to {MAX_NAMES} names")
+            raise SectionError("arguments_unusable", f"{key} is a list of up to {MAX_NAMES} names"
+                               + (f"; this one has {len(value)}: send fewer, or a window alone"
+                                  if isinstance(value, (list, tuple)) else ""))
         names[key] = list(value)
     return _run(board, {"window": None if window is None else list(window), **names,
                         "placement": bool(arguments.get("placement"))}, SECTION_SCRIPT, scratch_root,
