@@ -44,6 +44,7 @@ BOARD_OPS = {
     'sync_from_schematic': (),
     'board_text': ('ref', 'field'),
     'keepout': ('outline',),
+    'remove_keepouts': ('area',),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -545,6 +546,23 @@ def apply_change(change):
                     outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
                 b.Add(area)
                 done["keepout"] = {"corners": len(op["outline"]), "layers": layers.CuStack().size()}
+            elif kind == "remove_keepouts":
+                # Keep-out areas lying wholly inside area [x1, y1, x2, y2] (or only the one named),
+                # to resize or replace them (17 Nov: AE1's old clearance was the wrong size).
+                x0, y0, x1, y1 = (min(op["area"][0], op["area"][2]), min(op["area"][1], op["area"][3]),
+                                  max(op["area"][0], op["area"][2]), max(op["area"][1], op["area"][3]))
+                gone = []
+                for zone in list(b.Zones()):
+                    if not zone.GetIsRuleArea():
+                        continue
+                    if op.get("name") and zone.GetZoneName() != op["name"]:
+                        continue
+                    box = zone.GetBoundingBox()
+                    if (x0 <= _pcbnew.ToMM(box.GetLeft()) and _pcbnew.ToMM(box.GetRight()) <= x1
+                            and y0 <= _pcbnew.ToMM(box.GetTop()) and _pcbnew.ToMM(box.GetBottom()) <= y1):
+                        gone.append(zone.GetZoneName() or "unnamed")
+                        b.Delete(zone)
+                done["removed"] = gone
             elif kind == "board_text":
                 # A part's reference or value text on the board: where, how big, turned, shown
                 # (17 Nov: silkscreen over pads after placement; C93's text too large).
