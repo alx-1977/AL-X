@@ -281,8 +281,11 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         clearance = _pcbnew.ToMM(board.GetDesignSettings().m_NetSettings.GetDefaultNetclass().GetClearance())
     except Exception:  # noqa: BLE001
         clearance = 0.2
-    reach = _pcbnew.FromMM(clearance + width / 2.0)
-    via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0)
+    # Copper is checked at grid points; a thin track between two points must not slip through,
+    # so the reach grows with the grid step (17 Nov: a 0.25 mm grid passed a ToF track).
+    slack = step * 0.75
+    reach = _pcbnew.FromMM(clearance + width / 2.0 + slack)
+    via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0 + slack)
     # The grid runs through the start point, so the first run leaves it exactly straight.
     x0 = start[0] - _math.ceil((start[0] - min(start[0], end[0]) + margin) / step) * step
     y0 = start[1] - _math.ceil((start[1] - min(start[1], end[1]) + margin) / step) * step

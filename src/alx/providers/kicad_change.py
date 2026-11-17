@@ -578,6 +578,18 @@ def apply_change(change):
                     add_track(b, net, corners, op["width"], name, op.get("radius"))
                 for spot in vias:
                     add_via(b, net, spot, 0.45, 0.2)
+                # A point end where this net's copper on another layer already ends gets the via
+                # that joins them (17 Nov: pieces routed layer by layer met at points, unjoined).
+                for spot, side, given in zip(ends, sides, (op["from"], op["to"])):
+                    if not isinstance(given, str):
+                        here = point(*spot)
+                        has_via = any(t.GetClass() == "PCB_VIA" and t.GetNetname() == net and t.GetPosition() == here
+                                      for t in b.GetTracks())
+                        other = any(t.GetClass() != "PCB_VIA" and t.GetNetname() == net and t.GetLayer() != layer(side)
+                                    and here in (t.GetStart(), t.GetEnd()) for t in b.GetTracks())
+                        if other and not has_via:
+                            add_via(b, net, spot, 0.45, 0.2)
+                            vias.append(spot)
                 import math as _m
                 length = sum(_m.hypot(q[0] - p[0], q[1] - p[1]) for _, pts in runs for p, q in zip(pts, pts[1:]))
                 done["route"] = {"net": net, "runs": [{"layer": n, "points": pts} for n, pts in runs],
