@@ -79,8 +79,13 @@ def validate_change(change: Any) -> dict[str, Any]:
         if missing:
             raise ChangeError('%s (%s) needs %s' % (where, op['op'], ', '.join(missing)))
         for field in ('from', 'to', 'pin'):
-            if op.get(field) is not None and not (isinstance(op[field], str) and PIN.match(op[field])):
-                raise ChangeError('%s: %s is REF.PIN, like U6.9' % (where, field))
+            value = op.get(field)
+            if op['op'] in ('route', 'track') and isinstance(value, (list, tuple)) and len(value) == 2 \
+                    and all(isinstance(v, (int, float)) for v in value):
+                continue  # a point [x, y] in mm, where a route or track may start or end
+            if value is not None and not (isinstance(value, str) and PIN.match(value)):
+                raise ChangeError('%s: %s is REF.PIN, like U6.9%s' % (
+                    where, field, ', or a point [x, y] in mm' if op['op'] in ('route', 'track') else ''))
         for field in ('pins',):
             if op.get(field) is not None and not all(isinstance(p, str) and PIN.match(p) for p in op[field]):
                 raise ChangeError('%s: pins are REF.PIN, like U6.4' % where)

@@ -244,7 +244,7 @@ def _refuse_touching(board, net, code, made, on_layer):
                                                 round(_pcbnew.ToMM(where.y), 3), round(_pcbnew.ToMM(clearance), 3)))
 
 
-def route(board, net, start, end, width, on="F", step=0.1, margin=None, bend_cost=2.0, layers=None,
+def route(board, net, start, end, width, on="F", step=None, margin=None, bend_cost=2.0, layers=None,
           via=(0.45, 0.2), via_cost=3.0, end_on=None):
     """A clean path for one connection, worked out by code (17 Nov, Friedl: the switch control
     lines drawn coordinate by coordinate were "horrible at best"): from start (on layer `on`) to
@@ -260,6 +260,10 @@ def route(board, net, start, end, width, on="F", step=0.1, margin=None, bend_cos
     end_on = end_on or on
     if end_on not in layers:
         layers.append(end_on)
+    span = max(abs(end[0] - start[0]), abs(end[1] - start[1]))
+    if step is None:
+        # A long connection on a coarser grid (17 Nov: a 60 mm control line ran out of time).
+        step = 0.1 if span < 15 else 0.2 if span < 40 else 0.25
     if margin is None:
         reason = None
         for wider in (4.0, 8.0, 14.0):
@@ -333,6 +337,25 @@ def route(board, net, start, end, width, on="F", step=0.1, margin=None, bend_cos
 
     def at(c, r):
         return point(x0 + c * step, y0 + r * step)
+    # Each obstacle filed under the 1 mm squares its reach covers, so a cell checks only its
+    # neighbours (17 Nov: every cell against every part timed out on a long route).
+    bucket = _pcbnew.FromMM(1.0)
+    ox, oy = _pcbnew.FromMM(x0), _pcbnew.FromMM(y0)
+
+    def filed(shapes, grow):
+        table = {}
+        for shape in shapes:
+            box = shape.BBox()
+            for bx in range(int((box.GetLeft() - grow - ox) // bucket), int((box.GetRight() + grow - ox) // bucket) + 1):
+                for by in range(int((box.GetTop() - grow - oy) // bucket), int((box.GetBottom() + grow - oy) // bucket) + 1):
+                    table.setdefault((bx, by), []).append(shape)
+        return table
+    track_table = {name: filed(obstacles[name], reach) for name in layers}
+    via_table = {name: filed(obstacles[name], via_reach) for name in layers}
+    small_table = filed(small_pads, _pcbnew.FromMM(via[0] / 2.0 + 0.05))
+
+    def near(table, here):
+        return table.get((int((here.x - ox) // bucket), int((here.y - oy) // bucket)), ())
     track_free, via_free = {}, {}
 
     def free(c, r, li):
@@ -343,7 +366,7 @@ def route(board, net, start, end, width, on="F", step=0.1, margin=None, bend_cos
             track_free[key] = (0 <= c < cols and 0 <= r < rows
                                and (inside is None or inside.Contains(here))
                                and not any(area.Contains(here) for area in banned[name])
-                               and not any(shape.Collide(here, reach) for shape in obstacles[name]))
+                               and not any(shape.Collide(here, reach) for shape in near(track_table[name], here)))
         return track_free[key]
 
     def via_ok(c, r):
@@ -351,8 +374,8 @@ def route(board, net, start, end, width, on="F", step=0.1, margin=None, bend_cos
             here = at(c, r)
             via_free[(c, r)] = (not any(area.Contains(here) for area in no_vias)
                                 and not any(shape.Collide(here, _pcbnew.FromMM(via[0] / 2.0 + 0.05))
-                                            for shape in small_pads)
-                                and all(not any(shape.Collide(here, via_reach) for shape in obstacles[name])
+                                            for shape in near(small_table, here))
+                                and all(not any(shape.Collide(here, via_reach) for shape in near(via_table[name], here))
                                         for name in layers))
         return via_free[(c, r)]
     sc, sr = int(round((start[0] - x0) / step)), int(round((start[1] - y0) / step))
@@ -385,7 +408,7 @@ def route(board, net, start, end, width, on="F", step=0.1, margin=None, bend_cos
             if total < best.get(nxt, 1e18):
                 best[nxt], came[nxt] = total, state
                 left = _math.hypot(ec - nxt[0], er - nxt[1]) * step
-                _heapq.heappush(frontier, (total + left, total, nxt))
+                _heapq.heappush(frontier, (total + 1.3 * left, total, nxt))
         if len(best) > 4000000:
             break
     if goal is None:
