@@ -134,8 +134,11 @@ def track_ends(item):
     return (xy(item.GetStart()), xy(item.GetEnd()))
 
 
-def _bends(points, radius):
-    """Straight runs and tangent arcs through the corners of a polyline, radius in mm."""
+def _bends(points, radius, fit=False):
+    """Straight runs and tangent arcs through the corners of a polyline, radius in mm.
+
+    fit: a corner too tight for the radius gets the largest arc that fits (half of each
+    neighbouring run) instead of being refused, as on a routed path."""
     import math as _math
     points = [tuple(map(float, p)) for p in points]
     runs, arcs, start = [], [], points[0]
@@ -150,6 +153,13 @@ def _bends(points, radius):
         if turn < 1e-6:
             continue
         cut = radius * _math.tan(turn / 2)
+        if fit:
+            room = min(lu if before == points[0] else lu / 2, lv if after == points[-1] else lv / 2)
+            if cut > room:
+                cut = room
+            if cut < 0.05:
+                continue
+        bend = cut / _math.tan(turn / 2)
         if cut > min(lu, lv) + 1e-6:
             raise ValueError("a %.2f mm bend does not fit at %s: shorten the radius or move the corner"
                              % (radius, corner))
@@ -158,17 +168,17 @@ def _bends(points, radius):
         nx, ny = -uy, ux
         if nx * vx + ny * vy < 0:
             nx, ny = -nx, -ny
-        cx, cy = t1[0] + nx * radius, t1[1] + ny * radius
+        cx, cy = t1[0] + nx * bend, t1[1] + ny * bend
         hx, hy = (t1[0] + t2[0]) / 2 - cx, (t1[1] + t2[1]) / 2 - cy
         length = _math.hypot(hx, hy)
         runs.append((start, t1))
-        arcs.append((t1, (cx + hx / length * radius, cy + hy / length * radius), t2))
+        arcs.append((t1, (cx + hx / length * bend, cy + hy / length * bend), t2))
         start = t2
     runs.append((start, points[-1]))
     return [r for r in runs if _math.hypot(r[1][0] - r[0][0], r[1][1] - r[0][1]) > 1e-6], arcs
 
 
-def add_track(board, net, points, width, on="F", radius=None):
+def add_track(board, net, points, width, on="F", radius=None, fit=False):
     """A track through points [(x, y), ...] on copper layer `on`, of `width` mm.
 
     radius (mm) makes every bend a tangent arc of that radius, as Friedl wants
@@ -181,7 +191,7 @@ def add_track(board, net, points, width, on="F", radius=None):
     points = [tuple(map(float, p)) for p in points]
     points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
     if radius:
-        runs, arcs = _bends(points, radius)
+        runs, arcs = _bends(points, radius, fit)
     else:
         runs, arcs = list(zip(points, points[1:])), []
     made = []
@@ -244,17 +254,53 @@ def _refuse_touching(board, net, code, made, on_layer):
                                                 round(_pcbnew.ToMM(where.y), 3), round(_pcbnew.ToMM(clearance), 3)))
 
 
+def style(board):
+    """Friedl's routing style as this board shows it (17 Nov: his taste lives in the tools, measured
+    from his own boards): the layers he routes on (each with at least a tenth of the board's track
+    pieces; never a plane layer) and his usual track width and via size. A board without tracks yet gets his rules: top and layer 3, 0.15 mm, 0.45/0.2 vias."""
+    from collections import Counter as _Counter
+    counts, widths, vias = _Counter(), _Counter(), _Counter()
+    names = {value: key for key, value in _LAYERS.items()}
+    for item in board.GetTracks():
+        if item.GetClass() == "PCB_VIA":
+            vias[(round(_pcbnew.ToMM(item.GetWidth(_pcbnew.F_Cu)), 3), round(_pcbnew.ToMM(item.GetDrillValue()), 3))] += 1
+            continue
+        counts[names.get(item.GetLayer(), "?")] += 1
+        widths[round(_pcbnew.ToMM(item.GetWidth()), 3)] += 1
+    total = sum(counts.values())
+    order = [name for name in _LAYERS if board.IsLayerEnabled(_LAYERS[name])]
+    order.sort(key=lambda name: (name != "F", name == "B", name))
+    layers = [name for name in order if total and counts[name] >= 0.1 * total]
+    if not layers:
+        inner = [name for name in order if name.startswith("In")]
+        layers = ["F"] + ([inner[-1]] if len(inner) >= 2 else ["B"])
+    return {"layers": layers,
+            "width": widths.most_common(1)[0][0] if widths else 0.15,
+            "via": list(vias.most_common(1)[0][0]) if vias else [0.45, 0.2]}
+
+
+def rf_radius(width):
+    """The bend radius for an RF track of this width: three times the width, to 0.1 mm below
+    (a bend that gentle keeps the line's impedance through the turn; his P0009 has 1.0 mm
+    arcs on 0.355 mm lines). A work copy's own arcs are not measured: they may be a model's."""
+    import math as _math
+    return max(0.5, _math.floor(3 * width * 10 + 1e-6) / 10)
+
+
 def route(board, net, start, end, width, on="F", step=None, margin=None, bend_cost=2.0, layers=None,
-          via=(0.45, 0.2), via_cost=3.0, end_on=None):
+          via=(0.45, 0.2), via_cost=15.0, end_on=None, follow=None):
     """A clean path for one connection, worked out by code (17 Nov, Friedl: the switch control
     lines drawn coordinate by coordinate were "horrible at best"): from start (on layer `on`) to
     end (on `end_on`, else `on`), straight runs and 45-degree bends, as few bends and vias and as
     short as it can, clear of every other net by the board's clearance, inside the board and out
     of keep-outs that forbid tracks. It may change layer through vias among `layers` (default
-    F and B). Returns [(layer, [points...]), ...] runs and the via points between them."""
+    the layers this board is routed on, style()). follow: nets already routed that this one runs
+    beside where it can, one clearance apart, so lines going the same way travel together
+    (his rule: bundled, not wherever there is space). Returns [(layer, [points...]), ...] runs
+    and the via points between them."""
     import heapq as _heapq
     import math as _math
-    layers = list(layers or ([on] if end_on in (None, on) and on not in ("F", "B") else ["F", "B"]))
+    layers = list(layers or style(board)["layers"])
     if on not in layers:
         layers.insert(0, on)
     end_on = end_on or on
@@ -268,7 +314,8 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         reason = None
         for wider in (4.0, 8.0, 14.0):
             try:
-                return route(board, net, start, end, width, on, step, wider, bend_cost, layers, via, via_cost, end_on)
+                return route(board, net, start, end, width, on, step, wider, bend_cost, layers, via, via_cost, end_on,
+                             follow)
             except ValueError as error:
                 if "no clear path" not in str(error):
                     raise
@@ -283,8 +330,14 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         clearance = 0.2
     # Copper is checked at grid points; a thin track between two points must not slip through,
     # so the reach grows with the grid step (17 Nov: a 0.25 mm grid passed a ToF track).
-    slack = 0.75 * (step - 0.1) if step > 0.1 else 0.0   # a fine grid near tight pins needs none
+    # A 45-degree run passes up to 0.354 of a step from the points it was checked at.
+    slack = 0.36 * step
     reach = _pcbnew.FromMM(clearance + width / 2.0 + slack)
+    # Within 1 mm of an end the grid runs straight out of the pin, so no slack there: a coarse
+    # grid's slack closed fine-pitch pins in (17 Nov, J2's 0.5 mm pins); add_track still
+    # checks the real copper exactly.
+    close_reach = _pcbnew.FromMM(clearance + width / 2.0)
+    close_via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0)
     via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0 + slack)
     # The grid runs through the start point, so the first run leaves it exactly straight.
     x0 = start[0] - _math.ceil((start[0] - min(start[0], end[0]) + margin) / step) * step
@@ -356,6 +409,23 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
     track_table = {name: filed(obstacles[name], reach) for name in layers}
     via_table = {name: filed(obstacles[name], via_reach) for name in layers}
     small_table = filed(small_pads, _pcbnew.FromMM(via[0] / 2.0 + 0.05))
+    # Beside a followed net: within one grid step of the closest a track may come to it.
+    hug = reach + _pcbnew.FromMM(step * 1.01)
+    beside = {name: [] for name in layers}
+    for name in layers:
+        for item in board.GetTracks():
+            if item.GetNetname() in (follow or ()) and item.GetClass() != "PCB_VIA" \
+                    and item.GetLayer() == layer(name) and window.Intersects(item.GetBoundingBox()):
+                beside[name].append(item.GetEffectiveShape(layer(name)))
+    beside_table = {name: filed(beside[name], hug) for name in layers}
+    hugging = {}
+
+    def alongside(c, r, li):
+        key = (c, r, li)
+        if key not in hugging:
+            here = at(c, r)
+            hugging[key] = any(shape.Collide(here, hug) for shape in near(beside_table[layers[li]], here))
+        return hugging[key]
 
     def near(table, here):
         return table.get((int((here.x - ox) // bucket), int((here.y - oy) // bucket)), ())
@@ -369,7 +439,9 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             track_free[key] = (0 <= c < cols and 0 <= r < rows
                                and (inside is None or inside.Contains(here))
                                and not any(area.Contains(here) for area in banned[name])
-                               and not any(shape.Collide(here, reach) for shape in near(track_table[name], here)))
+                               and not any(shape.Collide(here, close_reach if min(
+                                   abs(c - sc) + abs(r - sr), abs(c - ec) + abs(r - er)) * step <= 1.0 else reach)
+                                   for shape in near(track_table[name], here)))
         return track_free[key]
 
     def via_ok(c, r):
@@ -378,7 +450,9 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             via_free[(c, r)] = (not any(area.Contains(here) for area in no_vias)
                                 and not any(shape.Collide(here, _pcbnew.FromMM(via[0] / 2.0 + 0.05))
                                             for shape in near(small_table, here))
-                                and all(not any(shape.Collide(here, via_reach) for shape in near(via_table[name], here))
+                                and all(not any(shape.Collide(here, close_via_reach if min(
+                                            abs(c - sc) + abs(r - sr), abs(c - ec) + abs(r - er)) * step <= 1.0
+                                            else via_reach) for shape in near(via_table[name], here))
                                         for name in layers))
         return via_free[(c, r)]
     sc, sr = int(round((start[0] - x0) / step)), int(round((start[1] - y0) / step))
@@ -401,7 +475,10 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             if free(c + dc, r + dr, li):
                 turn = 0.0 if d in (-1, index) else (bend_cost * 2 if (moves[d][0] * dc + moves[d][1] * dr) <= 0
                                                       else bend_cost)
-                steps.append(((c + dc, r + dr, li, index), _math.hypot(dc, dr) * step + turn))
+                run = _math.hypot(dc, dr) * step
+                if follow and alongside(c, r, li) and alongside(c + dc, r + dr, li):
+                    run *= 0.3
+                steps.append(((c + dc, r + dr, li, index), run + turn))
         if d != -2 and (c, r) != (sc, sr) and (c, r) != (ec, er) and via_ok(c, r):
             for other in range(len(layers)):
                 if other != li and free(c, r, other):
@@ -433,6 +510,30 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         elif nxt is not None and nxt[3] == -2:
             current.append(place)
     current.append((end[0], end[1]))
+    # The end sits off the grid (the grid runs through the start), so the last run would come in
+    # at an odd angle; its corner moves along the run before it until the last run keeps its
+    # own 0/45/90-degree direction.
+    if len(current) >= 3 and goal[3] >= 0:
+        (ax, ay), (bx, by), (ex, ey) = current[-3], current[-2], current[-1]
+        dx, dy = moves[goal[3]]
+        ux, uy = bx - ax, by - ay
+        cross = ux * dy - uy * dx
+        if abs(cross) > 1e-9:
+            t = ((ex - ax) * dy - (ey - ay) * dx) / cross
+            moved = (round(ax + t * ux, 4), round(ay + t * uy, 4))
+            if _math.hypot(moved[0] - bx, moved[1] - by) <= step and 0 < t:
+                current[-2] = moved
+    elif len(current) == 2 and goal[3] >= 0 and vias and runs and current[0] == vias[-1]:
+        # Straight from a via into the pin: the via slides across so the run comes in square;
+        # the run before it ends at the via's new place (a long run, so its angle barely moves).
+        (vx, vy), (ex, ey) = current
+        dx, dy = moves[goal[3]]
+        k = ((ex - vx) * dx + (ey - vy) * dy) / float(dx * dx + dy * dy)
+        moved = (round(ex - k * dx, 4), round(ey - k * dy, 4))
+        if _math.hypot(moved[0] - vx, moved[1] - vy) <= step and k > 0:
+            vias[-1] = current[0] = moved
+            name, before = runs[-1]
+            runs[-1] = (name, before[:-1] + [moved])
     runs.append((layers[goal[2]], current))
     runs = [(name, [p for k, p in enumerate(points) if k == 0 or p != points[k - 1]]) for name, points in runs]
     return [(name, points) for name, points in runs if len(points) > 1], vias

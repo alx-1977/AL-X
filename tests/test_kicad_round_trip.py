@@ -40,7 +40,17 @@ class RealRoundTripTests(unittest.TestCase):
             runtime = build_kicad_runtime(lambda: "call", {"ALX_KICAD_DESIGN_ROOTS": str(root / "designs")},
                                           root / "storage")
 
+            provider = runtime.provider
+            provider.render_folder = root / "renders"
+            provider.viewer_settle_seconds = 0
+            provider.open_viewer = lambda what, path, index: type("V", (), {"terminate": lambda self: None})()
+            provider.capture_screen = lambda target: Path(target).write_bytes(b"png")
+
             def success(name, **arguments):
+                if name == "approve_step":
+                    # He approves what he was shown (D-082b): the copy is opened for him first.
+                    kicad_call(runtime.executors, "open_in_kicad",
+                               {"work_copy_id": arguments["work_copy_id"], "what": "board"})
                 result = kicad_call(runtime.executors, name, arguments)
                 self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
                 return result.values

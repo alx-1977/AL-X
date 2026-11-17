@@ -46,7 +46,8 @@ BOARD_OPS = {
     'keepout': ('outline',),
     'remove_keepouts': ('area',),
     'copper_shape': ('net', 'outline'),
-    'route': ('from', 'to', 'width'),
+    'route': ('from', 'to'),
+    'to_plane': ('pins',),
     'remove_copper_shapes': ('nets', 'area'),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
@@ -576,12 +577,20 @@ def apply_change(change):
                         sides.append(op.get("layer", "F"))
                 if not net:
                     raise ValueError("route %d: name its net, or start or end it on a pad" % (index + 1))
-                runs, vias = route(b, net, ends[0], ends[1], op["width"], sides[0], end_on=sides[1],
-                                   layers=op.get("layers"))
+                # His style (17 Nov), from his own board: its usual width and via, its routing layers;
+                # an RF-wide line (0.3 mm and up) stays on its own layer with arcs at his RF radius.
+                profile = style(b)
+                width = float(op.get("width") or profile["width"])
+                rf = width >= 0.3
+                route_layers = op.get("layers") or ([sides[0]] if rf and sides[0] == sides[1] else None)
+                radius = op.get("radius", rf_radius(width) if rf else None)
+                via_size = tuple(profile["via"])
+                runs, vias = route(b, net, ends[0], ends[1], width, sides[0], end_on=sides[1],
+                                   layers=route_layers, via=via_size, follow=op.get("follow"))
                 for name, corners in runs:
-                    add_track(b, net, corners, op["width"], name, op.get("radius"))
+                    add_track(b, net, corners, width, name, radius, fit=True)
                 for spot in vias:
-                    add_via(b, net, spot, 0.45, 0.2)
+                    add_via(b, net, spot, *via_size)
                 # A point end where this net's copper on another layer already ends gets the via
                 # that joins them (17 Nov: pieces routed layer by layer met at points, unjoined).
                 for spot, side, given in zip(ends, sides, (op["from"], op["to"])):
@@ -592,14 +601,101 @@ def apply_change(change):
                         other = any(t.GetClass() != "PCB_VIA" and t.GetNetname() == net and t.GetLayer() != layer(side)
                                     and here in (t.GetStart(), t.GetEnd()) for t in b.GetTracks())
                         if other and not has_via:
-                            add_via(b, net, spot, 0.45, 0.2)
+                            add_via(b, net, spot, *via_size)
                             vias.append(spot)
                 import math as _m
                 length = sum(_m.hypot(q[0] - p[0], q[1] - p[1]) for _, pts in runs for p, q in zip(pts, pts[1:]))
-                done["route"] = {"net": net, "runs": [{"layer": n, "points": pts} for n, pts in runs],
-                                 "vias": vias, "bends": sum(len(pts) - 2 for _, pts in runs),
-                                 "length_mm": round(length, 3),
-                                 "straight_mm": round(_m.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]), 3)}
+                # The neat score: what in this route goes against his style, for her to see.
+                odd = sum(1 for _, pts in runs for p, q in zip(pts, pts[1:])
+                          if _m.hypot(q[0] - p[0], q[1] - p[1]) > 0.2
+                          and abs(((_m.degrees(_m.atan2(q[1] - p[1], q[0] - p[0])) + 22.5) % 45) - 22.5) > 1)
+                neat = []
+                if odd:
+                    neat.append("%d run(s) not at 0/45/90 degrees" % odd)
+                strays = sorted({n for n, _ in runs} - set(route_layers or profile["layers"]) - set(sides))
+                if strays:
+                    neat.append("on %s, not one of this board's routing layers" % ", ".join(strays))
+                if rf and vias:
+                    neat.append("an RF line through %d via(s): keep it on one layer" % len(vias))
+                if vias and len(vias) > 2:
+                    neat.append("%d vias" % len(vias))
+                bends = sum(len(pts) - 2 for _, pts in runs)
+                if bends > 4 + 2 * len(vias):
+                    neat.append("%d bends" % bends)
+                straight = _m.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1])
+                if straight > 2 and length > 1.6 * straight:
+                    neat.append("%.0f%% longer than straight" % (100 * (length / straight - 1)))
+                done["route"] = {"net": net, "width": width, "radius": radius,
+                                 "runs": [{"layer": n, "points": pts} for n, pts in runs],
+                                 "vias": vias, "bends": bends, "length_mm": round(length, 3),
+                                 "straight_mm": round(straight, 3), "neat": neat or "clean"}
+            elif kind == "to_plane":
+                # His rule (17 Nov): a power or ground pin goes into its plane as quickly as it can, by a
+                # short stub and one via right at the pin, not a track wandering off to a via somewhere.
+                import math as _m
+                profile = style(b)
+                via_size = tuple(op.get("via") or profile["via"])
+                rules = [z for z in list(b.Zones()) + [z for fp in b.GetFootprints() for z in fp.Zones()]
+                         if z.GetIsRuleArea() and z.GetDoNotAllowVias()]
+                outline = _pcbnew.SHAPE_POLY_SET()
+                inside = outline if b.GetBoardPolygonOutlines(outline, False) and outline.OutlineCount() else None
+                if inside is not None:
+                    inside.Deflate(_pcbnew.FromMM(via_size[0] / 2 + 0.3), _pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS,
+                                   _pcbnew.FromMM(0.01))
+                made = []
+                for pin in op["pins"]:
+                    ref, number = _pin(pin)
+                    found = pad(b, ref, number)
+                    net = found.GetNetname()
+                    side = _pcbnew.F_Cu if found.IsOnLayer(_pcbnew.F_Cu) else _pcbnew.B_Cu
+                    planes = sorted({b.GetLayerName(on) for z in b.Zones() if not z.GetIsRuleArea()
+                                     and z.GetNetname() == net for on in z.GetLayerSet().CuStack()
+                                     if on != side})
+                    if not planes:
+                        raise ValueError("%s is on %s, which has no plane on another layer to go down to"
+                                         % (pin, net or "no net"))
+                    centre = xy(found.GetPosition())
+                    if found.GetAttribute() == _pcbnew.PAD_ATTRIB_PTH or any(
+                            t.GetClass() == "PCB_VIA" and t.GetNetname() == net
+                            and _m.hypot(*(a - c for a, c in zip(xy(t.GetPosition()), centre))) < 1.2
+                            for t in b.GetTracks()):
+                        made.append({"pin": pin, "already": "a hole or via of %s at the pin" % net})
+                        continue
+                    body = xy(found.GetParentFootprint().GetPosition())
+                    out = (centre[0] - body[0], centre[1] - body[1])
+                    size = found.GetSize(side)
+                    half = _pcbnew.ToMM(max(size.x, size.y)) / 2
+                    stub = max(0.15, min(0.4, _pcbnew.ToMM(min(size.x, size.y))))
+                    directions = [(_m.cos(a * _m.pi / 4), _m.sin(a * _m.pi / 4)) for a in range(8)]
+                    directions.sort(key=lambda d: -(d[0] * out[0] + d[1] * out[1]))
+                    placed = None
+                    for distance in [half + via_size[0] / 2 + 0.1 + 0.05 * k for k in range(25)]:
+                        for dx, dy in directions:
+                            spot = (round(centre[0] + dx * distance, 3), round(centre[1] + dy * distance, 3))
+                            here = point(*spot)
+                            if inside is not None and not inside.Contains(here):
+                                continue
+                            if any(z.Outline().Contains(here) for z in rules):
+                                continue
+                            try:
+                                via_item = add_via(b, net, spot, *via_size)
+                            except ValueError:
+                                continue
+                            try:
+                                add_track(b, net, [centre, spot], stub, "F" if side == _pcbnew.F_Cu else "B")
+                            except ValueError:
+                                b.Remove(via_item)
+                                continue
+                            placed = spot
+                            break
+                        if placed:
+                            break
+                    if not placed:
+                        raise ValueError("no room for a via within %.1f mm of %s clear of everything; move "
+                                         "what crowds it, or route it with route" % (half + 1.6, pin))
+                    made.append({"pin": pin, "net": net, "via": placed, "plane": planes,
+                                 "stub_mm": round(_m.hypot(placed[0] - centre[0], placed[1] - centre[1]), 3)})
+                done["to_plane"] = made
             elif kind == "copper_shape":
                 # A solid copper polygon on one net: a taper from a wide feed to a small pad, or feed
                 # copper (17 Nov, his rule: copper wider than its pad joins through a taper). Solid

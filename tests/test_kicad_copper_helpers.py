@@ -61,6 +61,42 @@ print("fields", fields(load(), "U1"))
             self.assertIn("'Datasheet': ''", done.stdout)
             self.assertIn("result 1 polygon [(14.4, 9.0), (14.7, 10.0), (15.3, 10.0), (15.6, 9.0)]", done.stdout)
 
+    def test_route_in_his_style_follows_a_line_and_fits_rf_arcs(self) -> None:
+        script = '''
+import math
+b = load()
+print("style", style(b))
+print("rf", rf_radius(0.355), rf_radius(0.5))
+runs, vias = route(b, "TAPER", (40.0, 20.0), (52.0, 26.0), 0.15, "F", layers=["F"])
+for name, points in runs:
+    add_track(b, name and "TAPER", points, 0.15, name)
+angles = set()
+for name, points in runs:
+    for p, q in zip(points, points[1:]):
+        angles.add(round(math.degrees(math.atan2(q[1] - p[1], q[0] - p[0])) % 45, 3))
+print("angles", sorted(angles))
+runs2, _ = route(b, "SIDE", (40.0, 20.6), (52.0, 26.6), 0.15, "F", layers=["F"], follow=["TAPER"])
+gaps = []
+for name, points in runs2:
+    for p in points[1:-1]:
+        gaps.append(min(math.hypot(p[0] - x, p[1] - y) for _, pts in runs for x, y in pts))
+print("bundled", max(gaps) < 1.0 if gaps else True)
+made = add_track(b, "ARC", [(40, 30), (44, 30), (44.4, 30.4)], 0.355, "F", radius=1.0, fit=True)
+print("arcs", sum(1 for m in made if m.GetClass() == "PCB_ARC"))
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "board.kicad_pcb"
+            board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
+            program = Path(folder) / "edit.py"
+            program.write_text(HELPERS + script_runner(script))
+            done = run(PYTHON, program, board)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("rf 1.0 1.5", done.stdout)
+            self.assertIn("angles [0.0]", done.stdout)
+            self.assertIn("bundled True", done.stdout)
+            # A corner too tight for the full radius gets the largest arc that fits, not a refusal.
+            self.assertIn("arcs 1", done.stdout)
+
     def test_a_part_swap_curved_tracks_lengths_and_teardrops(self) -> None:
         """14 Nov: the P0009 switch swap needed each of these, by hand."""
         footprint = (FIXTURES / "kicad" / "two_pad.kicad_mod").read_text()
