@@ -283,7 +283,7 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         clearance = 0.2
     # Copper is checked at grid points; a thin track between two points must not slip through,
     # so the reach grows with the grid step (17 Nov: a 0.25 mm grid passed a ToF track).
-    slack = step * 0.75
+    slack = 0.75 * (step - 0.1) if step > 0.1 else 0.0   # a fine grid near tight pins needs none
     reach = _pcbnew.FromMM(clearance + width / 2.0 + slack)
     via_reach = _pcbnew.FromMM(clearance + via[0] / 2.0 + slack)
     # The grid runs through the start point, so the first run leaves it exactly straight.
