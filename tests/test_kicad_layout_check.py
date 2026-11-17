@@ -252,3 +252,13 @@ class LibraryWorkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PointFormTests(unittest.TestCase):
+    def test_a_keepout_edge_and_a_net_copper_edge_are_points(self):
+        """17 Nov: Würth dimensions AE1 to its keep-out edges and to copper edges."""
+        from alx.providers.layout_check import _feature
+        self.assertEqual(_feature("AE1.keepout:bottom"), ("AE1", "keepout", "bottom"))
+        self.assertEqual(_feature("net=Net-(AE1-Feed)@-6.4,6.45:top"), ("@net", "Net-(AE1-Feed)", "top", [-6.4, 6.45]))
+        with self.assertRaises(ValueError):
+            _feature("net=GND@1,2:centre")

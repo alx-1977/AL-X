@@ -132,6 +132,14 @@ def _feature(point: Any) -> tuple:
     name, anchor = point.rsplit(":", 1)
     if anchor not in ANCHORS:
         raise ValueError("an anchor is one of " + ", ".join(ANCHORS))
+    if name.startswith("net="):
+        # net=NET@x,y:edge, the edge of that net's copper (tracks, shapes, pours, pads) on the line
+        # through the point, mm from the part's centre (17 Nov: Würth dimensions a ground strip
+        # and a feed interruption to their copper edges).
+        net, marker, at = name[4:].rpartition("@")
+        if not marker or not net or anchor == "centre":
+            raise ValueError("net=NET@x,y:left|right|top|bottom names the edge of a net's copper")
+        return "@net", net, anchor, _at(at)
     name, marker, at = name.partition("@")
     ref, _, pad = name.partition(".")
     if not ref:
@@ -244,6 +252,10 @@ def pad_shape(ref, number):
 
 def point(feature):
     ref, number, where = feature[:3]
+    if ref == "@net":
+        at = feature[3]
+        low, high = run_through(net_copper(number), at, "x" if where in ("left", "right") else "y")
+        return {"left": (low, at[1]), "right": (high, at[1]), "top": (at[0], low), "bottom": (at[0], high)}[where]
     if len(feature) == 4:
         # One arm of a shaped pad: its edge on the line through the point.
         at = feature[3]

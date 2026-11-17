@@ -46,6 +46,7 @@ BOARD_OPS = {
     'keepout': ('outline',),
     'remove_keepouts': ('area',),
     'copper_shape': ('net', 'outline'),
+    'remove_copper_shapes': ('nets', 'area'),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -564,6 +565,27 @@ def apply_change(change):
                 _refuse_touching(b, op["net"], code, [piece], on)
                 b.Add(piece)
                 done["copper_shape"] = {"net": op["net"], "corners": len(op["outline"])}
+            elif kind == "remove_copper_shapes":
+                # Copper shapes and pours of these nets lying wholly inside area: to redraw a taper
+                # or feed copper (17 Nov: pour-type shapes from an earlier version, empty in a keep-out).
+                x0, y0, x1, y1 = (min(op["area"][0], op["area"][2]), min(op["area"][1], op["area"][3]),
+                                  max(op["area"][0], op["area"][2]), max(op["area"][1], op["area"][3]))
+
+                def inside(box):
+                    return (x0 <= _pcbnew.ToMM(box.GetLeft()) and _pcbnew.ToMM(box.GetRight()) <= x1
+                            and y0 <= _pcbnew.ToMM(box.GetTop()) and _pcbnew.ToMM(box.GetBottom()) <= y1)
+                gone = 0
+                for zone in list(b.Zones()):
+                    if (not zone.GetIsRuleArea() and not zone.IsTeardropArea()
+                            and zone.GetNetname() in op["nets"] and inside(zone.GetBoundingBox())):
+                        b.Delete(zone)
+                        gone += 1
+                for item in list(b.GetDrawings()):
+                    if (item.GetClass() == "PCB_SHAPE" and item.IsOnCopperLayer()
+                            and item.GetNetname() in op["nets"] and inside(item.GetBoundingBox())):
+                        b.Delete(item)
+                        gone += 1
+                done["removed"] = gone
             elif kind == "remove_keepouts":
                 # Keep-out areas lying wholly inside area [x1, y1, x2, y2] (or only the one named),
                 # to resize or replace them (17 Nov: AE1's old clearance was the wrong size).
