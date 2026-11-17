@@ -2665,7 +2665,9 @@ class KiCadProvider:
                                                         'for him; open it again for his edit'})
             project = root / 'project'
             theirs, ours = design_inventory(folder), design_inventory(project)
-            changed = sorted(name for name in theirs if theirs[name] != ours.get(name))
+            # KiCad's lock files while his window is open are not the design.
+            changed = sorted(name for name in theirs if theirs[name] != ours.get(name)
+                             and not (Path(name).name.startswith('~') or name.endswith('.lck')))
             if not changed:
                 return {'changed': [], 'moved': [], 'work_copy_revision': before,
                         'note': 'nothing saved in that window differs from your copy'}

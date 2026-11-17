@@ -1270,6 +1270,7 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         # The window opened last is the one taken.
         taken_from = Path(again['opened'][0])
         taken_from.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        (taken_from.parent / ('~' + taken_from.name + '.lck')).write_text('{}')
         taken = self.success('take_edits', work_copy_id=checked['work_copy_id'])
         self.assertEqual(list(taken['changed']), [window_board.name])
         work = next(self.storage.rglob(checked['work_copy_id'] + '/project'))
