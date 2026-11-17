@@ -45,6 +45,7 @@ BOARD_OPS = {
     'board_text': ('ref', 'field'),
     'keepout': ('outline',),
     'remove_keepouts': ('area',),
+    'copper_shape': ('net', 'outline'),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -532,11 +533,11 @@ def apply_change(change):
                 layers = _pcbnew.LSET()
                 names = op.get("layers") or ["F", "B"] + ["In%d" % i for i in range(1, 31)]
                 for name in names:
-                    layer = {"F": _pcbnew.F_Cu, "B": _pcbnew.B_Cu}.get(name)
-                    if layer is None and name.startswith("In") and name[2:].isdigit():
-                        layer = _pcbnew.In1_Cu + 2 * (int(name[2:]) - 1)
-                    if layer is not None and b.IsLayerEnabled(layer):
-                        layers.AddLayer(layer)
+                    copper = {"F": _pcbnew.F_Cu, "B": _pcbnew.B_Cu}.get(name)
+                    if copper is None and name.startswith("In") and name[2:].isdigit():
+                        copper = _pcbnew.In1_Cu + 2 * (int(name[2:]) - 1)
+                    if copper is not None and b.IsLayerEnabled(copper):
+                        layers.AddLayer(copper)
                 area.SetLayerSet(layers)
                 if op.get("name"):
                     area.SetZoneName(op["name"])
@@ -546,6 +547,25 @@ def apply_change(change):
                     outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
                 b.Add(area)
                 done["keepout"] = {"corners": len(op["outline"]), "layers": layers.CuStack().size()}
+            elif kind == "copper_shape":
+                # A filled copper shape on one net: a taper from a wide feed to a small pad, or feed
+                # copper (17 Nov, his rule: copper wider than its pad joins through a taper). KiCad
+                # fills it clear of every other net, so it cannot short; it joins its own net's pads.
+                area = _pcbnew.ZONE(b)
+                area.SetNet(_net(b, op["net"]))
+                area.SetLayer(layer(op.get("layer", "F")))
+                area.SetAssignedPriority(int(op.get("priority", 50)))
+                area.SetPadConnection(_pcbnew.ZONE_CONNECTION_FULL)
+                area.SetMinThickness(_pcbnew.FromMM(0.1))
+                area.SetIslandRemovalMode(_pcbnew.ISLAND_REMOVAL_MODE_NEVER)
+                if op.get("name"):
+                    area.SetZoneName(op["name"])
+                outline = area.Outline()
+                outline.NewOutline()
+                for x, y in op["outline"]:
+                    outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
+                b.Add(area)
+                done["copper_shape"] = {"net": op["net"], "corners": len(op["outline"])}
             elif kind == "remove_keepouts":
                 # Keep-out areas lying wholly inside area [x1, y1, x2, y2] (or only the one named),
                 # to resize or replace them (17 Nov: AE1's old clearance was the wrong size).

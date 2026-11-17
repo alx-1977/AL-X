@@ -319,7 +319,8 @@ def run_through(shape, at, axis, name="pad"):
 
 def keepout_size(axis):
     best = None
-    for zone in board.Zones():
+    # A part's own keep-out (the antenna footprint's clearance, 17 Nov) is measured too.
+    for zone in list(board.Zones()) + [z for fp in board.GetFootprints() for z in fp.Zones()]:
         if not zone.GetIsRuleArea():
             continue
         x0, y0, x1, y1 = box_mm(zone.Outline())

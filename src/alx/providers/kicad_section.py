@@ -151,7 +151,8 @@ for footprint in footprints:
         pad.TransformShapeToPolygon(shape, side, 0, nm(0.005), pcbnew.ERROR_INSIDE)
         out["pads"].append({"ref": ref, "number": pad.GetNumber(), "name": pad.GetPinFunction(),
                             "net": pad.GetNetname(), "polygons": polys(shape)})
-for zone in board.Zones():
+# A part's own keep-out (an antenna's clearance, 17 Nov) counts with the board's.
+for zone in list(board.Zones()) + [z for fp in board.GetFootprints() for z in fp.Zones()]:
     for layer, name in COPPER.items():
         if not zone.IsOnLayer(layer):
             continue
@@ -305,7 +306,7 @@ zones = []
 # Teardrops are zones too, hundreds on a finished board; listed, they buried
 # the real pours and keep-outs (2026-11-10). They are counted instead.
 teardrops = 0
-for zone in board.Zones():
+for zone in list(board.Zones()) + [z for fp in board.GetFootprints() for z in fp.Zones()]:
     if zone.IsTeardropArea():
         teardrops += 1
         continue
