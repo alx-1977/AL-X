@@ -120,7 +120,8 @@ def _at(text: str) -> list[float]:
 
 
 def _feature(point: Any) -> tuple:
-    """REF.PAD:anchor, REF.PAD@x,y:edge or REF:centre, e.g. AE2.3:left or AE1.4@1.5,6.4:bottom.
+    """REF.PAD:anchor, REF.PAD@x,y:edge, REF.keepout:edge or REF:centre, e.g. AE2.3:left,
+    AE1.4@1.5,6.4:bottom or AE1.keepout:bottom (an edge of the part's own keep-out, 17 Nov).
 
     @x,y (mm from the part's centre) names one arm of a shaped pad: the edge
     of the pad's copper on the line through that point (14 Nov: Würth's
@@ -261,7 +262,21 @@ def point(feature):
         shape.AddOutline(chain)
         x0, y0, _, _ = box_mm(shape)
         return x0, y0
-    x0, y0, x1, y1 = box_mm(pad_shape(ref, number))
+    if number == "keepout":
+        # The part's own keep-out (in its footprint), else the board keep-out nearest it.
+        footprint = board.FindFootprintByReference(ref)
+        if footprint is None:
+            raise ValueError("no part %s on this board" % ref)
+        areas = [z for z in footprint.Zones() if z.GetIsRuleArea()]
+        if not areas:
+            middle = footprint.GetPosition()
+            areas = sorted((z for z in board.Zones() if z.GetIsRuleArea()),
+                           key=lambda z: z.GetBoundingBox().Distance(middle))[:1]
+        if not areas:
+            raise ValueError("no keep-out at %s" % ref)
+        x0, y0, x1, y1 = box_mm(areas[0].Outline())
+    else:
+        x0, y0, x1, y1 = box_mm(pad_shape(ref, number))
     return {"centre": ((x0 + x1) / 2, (y0 + y1) / 2), "left": (x0, (y0 + y1) / 2),
             "right": (x1, (y0 + y1) / 2), "top": ((x0 + x1) / 2, y0),
             "bottom": ((x0 + x1) / 2, y1)}[where]

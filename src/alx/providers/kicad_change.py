@@ -548,23 +548,21 @@ def apply_change(change):
                 b.Add(area)
                 done["keepout"] = {"corners": len(op["outline"]), "layers": layers.CuStack().size()}
             elif kind == "copper_shape":
-                # A filled copper shape on one net: a taper from a wide feed to a small pad, or feed
-                # copper (17 Nov, his rule: copper wider than its pad joins through a taper). KiCad
-                # fills it clear of every other net, so it cannot short; it joins its own net's pads.
-                area = _pcbnew.ZONE(b)
-                area.SetNet(_net(b, op["net"]))
-                area.SetLayer(layer(op.get("layer", "F")))
-                area.SetAssignedPriority(int(op.get("priority", 50)))
-                area.SetPadConnection(_pcbnew.ZONE_CONNECTION_FULL)
-                area.SetMinThickness(_pcbnew.FromMM(0.1))
-                area.SetIslandRemovalMode(_pcbnew.ISLAND_REMOVAL_MODE_NEVER)
-                if op.get("name"):
-                    area.SetZoneName(op["name"])
-                outline = area.Outline()
-                outline.NewOutline()
-                for x, y in op["outline"]:
-                    outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
-                b.Add(area)
+                # A solid copper polygon on one net: a taper from a wide feed to a small pad, or feed
+                # copper (17 Nov, his rule: copper wider than its pad joins through a taper). Solid
+                # copper, not a pour, so a no-pour keep-out (an antenna's clearance) keeps it; like a
+                # track it may touch nothing of another net.
+                piece = _pcbnew.PCB_SHAPE(b)
+                piece.SetShape(_pcbnew.SHAPE_T_POLY)
+                piece.SetPolyPoints([_pcbnew.VECTOR2I(_pcbnew.FromMM(x), _pcbnew.FromMM(y)) for x, y in op["outline"]])
+                piece.SetFilled(True)
+                piece.SetWidth(0)
+                on = layer(op.get("layer", "F"))
+                piece.SetLayer(on)
+                code = _net(b, op["net"])
+                piece.SetNet(code)
+                _refuse_touching(b, op["net"], code, [piece], on)
+                b.Add(piece)
                 done["copper_shape"] = {"net": op["net"], "corners": len(op["outline"])}
             elif kind == "remove_keepouts":
                 # Keep-out areas lying wholly inside area [x1, y1, x2, y2] (or only the one named),
