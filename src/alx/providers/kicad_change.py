@@ -41,6 +41,7 @@ BOARD_OPS = {
     'remove_tracks': ('nets',),
     'remove_teardrops': ('area',),
     'remove_dangling_tracks': ('area',),
+    'sync_from_schematic': (),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -272,6 +273,57 @@ def _power_template(s, port):
                                                                        ", ".join(ports) or "none"))
 
 
+def sync_from_schematic(b, data, place):
+    """The board takes the schematic as it is: each part's footprint (swapped in place where it
+    differs), value, fields and pad nets. A part new to the board goes where place says
+    ({ref: [x, y, rotation?]}); parts only on the board are named, never removed."""
+    out = {"replaced": [], "added": [], "fields_set": 0, "pads_renetted": 0, "needs_place": [],
+           "not_in_schematic": data.get("not_in_schematic", [])}
+    for ref, info in sorted(data["parts"].items()):
+        if not info["footprint"]:
+            continue
+        found = b.FindFootprintByReference(ref)
+        library_name = info["footprint"].replace(":", "/", 1)
+        if found is None:
+            if ref not in place:
+                out["needs_place"].append(ref)
+                continue
+            where = place[ref]
+            add_part(b, ref, library_name, (where[0], where[1]), where[2] if len(where) > 2 else 0,
+                     value=info["value"])
+            found = b.FindFootprintByReference(ref)
+            found.SetPath(_pcbnew.KIID_PATH(info["path"]))
+            out["added"].append(ref)
+        elif str(found.GetFPID().GetUniStringLibId()) != info["footprint"]:
+            replace_part(b, ref, library_name)
+            found = b.FindFootprintByReference(ref)
+            out["replaced"].append(ref)
+        if info["value"] and found.GetValue() != info["value"]:
+            found.SetValue(info["value"])
+        for name, text in info["fields"].items():
+            if name in ("Reference", "Value", "Footprint"):
+                continue
+            if found.HasField(name):
+                if found.GetField(name).GetText() != text:
+                    found.GetField(name).SetText(text)
+                    out["fields_set"] += 1
+            else:
+                field = _pcbnew.PCB_FIELD(found, _pcbnew.FIELD_T_USER, name)
+                field.SetText(text)
+                field.SetVisible(False)
+                field.SetLayer(_pcbnew.F_Fab if not found.IsFlipped() else _pcbnew.B_Fab)
+                field.SetPosition(found.GetPosition())
+                found.Add(field)
+                out["fields_set"] += 1
+        nets = data["nets"].get(ref, {})
+        for item in found.Pads():
+            name = nets.get(item.GetNumber())
+            if name and item.GetNetname() != name:
+                item.SetNet(_net(b, name))
+                out["pads_renetted"] += 1
+    return out
+
+
 def apply_change(change):
     """Carry out a structured change in order; every operation's outcome, in order."""
     sheets, board, report = {}, None, []
@@ -463,6 +515,8 @@ def apply_change(change):
                         remove(b, item)
                     total += len(gone)
                 done["removed"] = total
+            elif kind == "sync_from_schematic":
+                done.update(sync_from_schematic(b, op["_sync"], op.get("place") or {}))
             elif kind == "remove_teardrops":
                 gone = teardrops(b, op["area"])
                 for item in gone:

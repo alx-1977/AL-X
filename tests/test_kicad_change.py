@@ -102,6 +102,11 @@ class ChangeShapeTests(unittest.TestCase):
         shorted = {p: tx1 | gnd | {"C93.1", "C93.2"} for p in tx1 | gnd | {"C93.1", "C93.2"}}
         self.assertTrue(unmet(change[:2], before, shorted, names, {}, ["C93"], names))
 
+    def test_the_board_can_take_the_schematic_in_one_operation(self):
+        plan = validate_change([{"op": "sync_from_schematic", "place": {"C93": [170.0, 95.0, 90]}}])
+        self.assertTrue(plan["board"])
+        self.assertFalse(plan["schematic"])
+
     def test_labels_can_be_removed_on_every_sheet_at_once(self):
         self.assertEqual(validate_change([{"op": "remove_labels", "nets": ["V1"]}])["schematic"], True)
 

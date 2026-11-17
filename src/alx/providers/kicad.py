@@ -1289,6 +1289,12 @@ class KiCadProvider:
                     raise KiCadError('arguments_unusable', {'detail': 'revert_to goes alone, without change or script'})
                 return self._revert(arguments)
             change = plain(arguments.get('change'))
+            if isinstance(change, list):
+                # A footprint named as KiCad's Footprint field writes it (Library:Name) is taken
+                # as Library/Name (17 Nov: two refusals for the colon).
+                change = [dict(op, footprint=op['footprint'].replace(':', '/', 1))
+                          if isinstance(op, dict) and isinstance(op.get('footprint'), str)
+                          and ':' in op['footprint'] and '/' not in op['footprint'] else op for op in change]
             dry_run = bool(arguments.get('dry_run'))
             if (change is None) == (arguments.get('script') is None):
                 raise KiCadError('arguments_unusable', {'detail': 'give change (a structured change) or script'})
@@ -1310,6 +1316,14 @@ class KiCadProvider:
                 raise KiCadError('work_copy_tainted')
             revision_before = self._revision(root, meta)
             project = root / 'project'
+            if plan and any(op['op'] == 'sync_from_schematic' for op in change):
+                # The board takes the schematic as it now is (KiCad's Update PCB from
+                # Schematic, 17 Nov): its parts, fields and nets go in with the change.
+                sync = self._schematic_sync(root, meta)
+                change = [dict(op, _sync=sync) if op['op'] == 'sync_from_schematic' else op for op in change]
+                plan['footprints'] = sorted(set(plan['footprints']) | set(sync['footprints']))
+                script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
+                          "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
             wanted = (lambda kind: sorted(set(arguments.get(kind) or ()) | set((plan or {}).get(kind) or ())))
             footprints = self._library_parts(wanted('footprints'), project, 'footprints')
             # From his library even where a sheet already keeps a copy: that copy may be bare
@@ -2247,6 +2261,51 @@ class KiCadProvider:
                 names[pin] = name
         output.unlink(missing_ok=True)
         return groups, names
+
+    def _schematic_sync(self, root, meta):
+        """Every schematic part with its footprint, value, fields and sheet path, and each
+        pad's net, from KiCad's own netlist of the copy; and the library footprints the board
+        lacks for them (LIBRARY/NAME)."""
+        schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
+        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
+        output.parent.mkdir(exist_ok=True)
+        self._run('sch', 'export', 'netlist', '--format', 'kicadsexpr', '--output', output, schematic)
+        tree = sexpr(output.read_text(errors='replace'))
+        output.unlink(missing_ok=True)
+
+        def text_of(node, name):
+            found = node.named(name)
+            return str(found[0].children[1]) if found and len(found[0].children) > 1 else ''
+        parts, nets = {}, {}
+        for comp in tree.one('components').named('comp'):
+            ref = text_of(comp, 'ref')
+            fields = {}
+            for holder in comp.named('fields'):
+                for field in holder.named('field'):
+                    name = text_of(field, 'name')
+                    if name and len(field.children) > 2 and not isinstance(field.children[-1], Node):
+                        fields[name] = str(field.children[-1])
+            for name in ('datasheet', 'description'):
+                if text_of(comp, name):
+                    fields.setdefault(name.capitalize(), text_of(comp, name))
+            sheet = comp.named('sheetpath')
+            path = (text_of(sheet[0], 'tstamps') if sheet else '/') + text_of(comp, 'tstamps')
+            parts[ref] = {'footprint': text_of(comp, 'footprint'), 'value': text_of(comp, 'value'),
+                          'fields': fields, 'path': path}
+        for net in tree.one('nets').named('net'):
+            name = text_of(net, 'name')
+            for node in net.named('node'):
+                nets.setdefault(text_of(node, 'ref'), {})[text_of(node, 'pin')] = name
+        board_text = (root / 'project' / meta['board']).read_text(errors='replace')
+        on_board = {}
+        for item in sexpr(board_text).named('footprint'):
+            refs = [p.children[2] for p in item.named('property') if len(p.children) > 2 and p.children[1] == 'Reference']
+            if refs:
+                on_board[str(refs[0])] = str(item.children[1])
+        footprints = sorted({info['footprint'].replace(':', '/', 1) for ref, info in parts.items()
+                             if info['footprint'] and on_board.get(ref) != info['footprint']})
+        return {'parts': parts, 'nets': nets, 'footprints': footprints,
+                'not_in_schematic': sorted(set(on_board) - set(parts) - {''})}
 
     @staticmethod
     def _cached_symbol(project, lib_id):
