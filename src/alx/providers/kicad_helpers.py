@@ -177,6 +177,9 @@ def add_track(board, net, points, width, on="F", radius=None):
     code = board.FindNet(net)
     if code is None:
         raise KeyError("no net %s on this board" % net)
+    # A point given twice in a row (a track starting at its pad) is the same point.
+    points = [tuple(map(float, p)) for p in points]
+    points = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
     if radius:
         runs, arcs = _bends(points, radius)
     else:
@@ -189,7 +192,6 @@ def add_track(board, net, points, width, on="F", radius=None):
         segment.SetWidth(_pcbnew.FromMM(width))
         segment.SetLayer(layer(on))
         segment.SetNet(code)
-        board.Add(segment)
         made.append(segment)
     for start, middle, end in arcs:
         arc = _pcbnew.PCB_ARC(board)
@@ -199,9 +201,47 @@ def add_track(board, net, points, width, on="F", radius=None):
         arc.SetWidth(_pcbnew.FromMM(width))
         arc.SetLayer(layer(on))
         arc.SetNet(code)
-        board.Add(arc)
         made.append(arc)
+    # Nothing of another net may be touched, checked before anything is added (17 Nov: a V2
+    # track drawn over an I2C SCL via, found by DRC afterwards, undone and drawn again, four times).
+    _refuse_touching(board, net, code, made, layer(on))
+    for item in made:
+        board.Add(item)
     return made
+
+
+def _refuse_touching(board, net, code, made, on_layer):
+    try:
+        clearance = board.GetDesignSettings().m_NetSettings.GetDefaultNetclass().GetClearance()
+    except Exception:  # noqa: BLE001 - an older settings API: touching alone is refused
+        clearance = 0
+    mine = code.GetNetCode()
+    others = []
+    for item in board.GetTracks():
+        if item.GetNetCode() != mine and (item.GetClass() == "PCB_VIA" or item.GetLayer() == on_layer):
+            others.append(item)
+    for footprint in board.GetFootprints():
+        for item in footprint.Pads():
+            if item.GetNetCode() != mine and item.IsOnLayer(on_layer):
+                others.append(item)
+    for new in made:
+        shape = new.GetEffectiveShape(on_layer)
+        box = shape.BBox()
+        box.Inflate(clearance + 1)
+        for other in others:
+            if not box.Intersects(other.GetBoundingBox()):
+                continue
+            if other.GetEffectiveShape(on_layer).Collide(shape, clearance):
+                if other.GetClass() == "PAD":
+                    what = "pad %s.%s" % (other.GetParentFootprint().GetReference(), other.GetNumber())
+                    where = other.GetPosition()
+                elif other.GetClass() == "PCB_VIA":
+                    what, where = "a via", other.GetPosition()
+                else:
+                    what, where = "a track", other.GetStart()
+                raise ValueError("the %s track would touch %s of net %s at (%g, %g) within %g mm; route "
+                                 "around it" % (net, what, other.GetNetname(), round(_pcbnew.ToMM(where.x), 3),
+                                                round(_pcbnew.ToMM(where.y), 3), round(_pcbnew.ToMM(clearance), 3)))
 
 
 def track_length(board, net):

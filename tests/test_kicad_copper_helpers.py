@@ -71,13 +71,17 @@ swapped = replace_part(b, "U7", "Test/TwoPad", pin_nets={"1": "ARC", "2": "TURNE
 print("swapped", swapped["at"] == before["at"], swapped["rotation"], sorted(p["net"] for p in swapped["pads"]),
       swapped["unconnected"], part(b, "U7").GetFPID().GetUniStringLibItemName())
 already = track_length(b, "ARC")
-made = add_track(b, "ARC", [(0, 0), (5, 0), (5, 5)], 0.3, radius=1.0)
+made = add_track(b, "ARC", [(100, 100), (105, 100), (105, 105)], 0.3, radius=1.0)
 print("made", sorted(item.GetClass() for item in made))
 print("length", round(track_length(b, "ARC") - already, 3))
 try:
     add_track(b, "ARC", [(0, 0), (0.5, 0), (0.5, 5)], 0.3, radius=1.0)
 except ValueError as error:
     print("tight", "does not fit" in str(error))
+try:
+    add_track(b, "ARC", [(0, 0), (5, 0), (5, 5)], 0.3)
+except ValueError as error:
+    print("touch", "would touch pad U1.1 of net STEP" in str(error))
 added = add_part(b, "U99", "Test/TwoPad", (40, 40), 90, "B", "NEW", {"1": "BRAND_NEW", "2": "ARC"})
 print("added", added["side"], added["rotation"], added["at"], sorted(p["net"] for p in added["pads"]))
 save(b)
@@ -99,6 +103,8 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
             # Two 4 mm runs and a quarter circle of 1 mm: 8 + pi/2.
             self.assertIn("length 9.571", done.stdout)
             self.assertIn("tight True", done.stdout)
+            # A track onto another net's pad is refused before anything is drawn (17 Nov).
+            self.assertIn("touch True", done.stdout)
             self.assertIn("added B 90.0 (40.0, 40.0) ['ARC', 'BRAND_NEW']", done.stdout)
             self.assertNotIn(".alx-fp-", " ".join(p.name for p in Path(folder).iterdir()))
             self.assertRegex(done.stdout, r"teardrops [1-9]\d* 0")
