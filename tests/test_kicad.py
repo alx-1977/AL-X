@@ -1250,6 +1250,34 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
         self.assertEqual(len(closed), 3)
 
+    def test_his_edit_saved_in_the_kicad_window_is_taken_into_her_copy(self):
+        """17 Nov: he placed parts his way in the window and wanted her to go on from there."""
+        checked = self.check()
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        self.failure('arguments_unusable', 'take_edits', work_copy_id=checked['work_copy_id'])
+        shown = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        window_board = Path(shown['opened'][0])
+        self.assertEqual(list(self.success('take_edits', work_copy_id=checked['work_copy_id'])['changed']), [])
+        # He saves an edit in the window; a new window keeps his unsaved-to-her view.
+        window_board.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        again = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertTrue(window_board.is_file())
+        self.assertEqual(len(again['kept_unsaved_views']), 1)
+        # The window opened last is the one taken.
+        taken_from = Path(again['opened'][0])
+        taken_from.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        taken = self.success('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(list(taken['changed']), [window_board.name])
+        work = next(self.storage.rglob(checked['work_copy_id'] + '/project'))
+        self.assertEqual((work / window_board.name).read_text(), taken_from.read_text())
+        # It is a kept edit: revert_to goes back over it.
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertEqual((work / window_board.name).read_text(), BOARD)
+
     def test_her_copy_can_be_checked_again_against_his_original(self):
         checked = self.check()
         self.assertEqual(checked['compared_to_original']['new'], 0)

@@ -432,12 +432,24 @@ OPEN_IN_KICAD = CapabilityDefinition('open_in_kicad',
     "Show Friedl your copy in KiCad's own window on his screen, in front: what is schematic or "
     'board. beside_original true also opens his design as it is, for when he wants to compare '
     '(windows lists them in order). Each is a fresh copy made for looking, so nothing done in '
-    'those windows changes his project or your copy; windows from an earlier call are closed '
-    'first. A screenshot of his screen comes back as a path: look at it before you say anything '
+    'those windows changes his project or your copy (when he saves an edit there and asks, take_edits '
+    'brings it into your copy); windows from an earlier call are closed first. A screenshot of his screen comes back as a path: look at it before you say anything '
     'about it. This is how each step of a board job (schematic, placement, routing) is shown to '
     'him.',
     obj({'work_copy_id': S, 'what': S, 'beside_original': B}, ('work_copy_id', 'what')),
-    obj({'opened': array(S), 'windows': array(S), 'screenshot': S}), SideEffect.NONE, FAILURES)
+    obj({'opened': array(S), 'windows': array(S), 'screenshot': S, 'kept_unsaved_views': array(S)},
+        ('opened', 'windows', 'screenshot')),
+    SideEffect.NONE, FAILURES)
+
+TAKE_EDITS = CapabilityDefinition('take_edits',
+    "When Friedl has changed your copy himself in the KiCad window open_in_kicad showed him, and "
+    'saved it, and asks you to take his edits: they go into your copy as one kept edit (revert_to '
+    'can go back over it), and the parts he moved are listed. Only while your copy is as it was '
+    'when that window opened. Go on from his edit; do not redo it.',
+    obj({'work_copy_id': S}, ('work_copy_id',)),
+    obj({'changed': array(S), 'moved': array(S), 'moved_total': I, 'work_copy_revision': S, 'note': S},
+        ('changed', 'moved', 'work_copy_revision')),
+    SideEffect.NONE, FAILURES)
 
 
 MAKE_HIERARCHICAL = CapabilityDefinition('make_hierarchical',
@@ -486,6 +498,7 @@ class KiCadAction(str, Enum):
     RENDER = 'render'
     INSPECT_SCHEMATIC = 'inspect_schematic'
     OPEN_IN_KICAD = 'open_in_kicad'
+    TAKE_EDITS = 'take_edits'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -507,13 +520,14 @@ CONTRACTS = {
     KiCadAction.RENDER: RENDER,
     KiCadAction.INSPECT_SCHEMATIC: INSPECT_SCHEMATIC,
     KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
+    KiCadAction.TAKE_EDITS: TAKE_EDITS,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
-    KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC))
+    KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -573,7 +587,8 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.APPROVE_STEP: provider.approve_step,
                KiCadAction.RENDER: provider.render,
                KiCadAction.INSPECT_SCHEMATIC: provider.inspect_schematic,
-               KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad}
+               KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad,
+               KiCadAction.TAKE_EDITS: provider.take_edits}
 
     def invoke(arguments):
         code = 'arguments_unusable'

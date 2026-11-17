@@ -2607,8 +2607,15 @@ class KiCadProvider:
             with suppress(Exception):
                 viewer.terminate()
         self._viewers = []
-        # Their copies go with them; only the windows opened now keep theirs.
+        # Their copies go with them; only the windows opened now keep theirs. A view he saved
+        # changes in and that were not taken into the copy stays (17 Nov: his placement).
+        kept_views = []
+        seen = (meta.get('view') or {})
         for earlier in (root / 'views').glob('*') if (root / 'views').is_dir() else ():
+            if (earlier.name == seen.get('stamp') and (earlier / 'amended').is_dir()
+                    and design_inventory(earlier / 'amended') != seen.get('files')):
+                kept_views.append(earlier.name)
+                continue
             shutil.rmtree(earlier, ignore_errors=True)
         stamp = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6]
         views = root / 'views' / stamp
@@ -2619,6 +2626,9 @@ class KiCadProvider:
             folders.append(views / 'current')
         shutil.copytree(root / 'project', views / 'amended')
         folders.append(views / 'amended')
+        meta = dict(meta, view={'stamp': stamp, 'revision': self._revision(root, meta),
+                                'files': design_inventory(views / 'amended')})
+        self._save_metadata(root, meta)
         suffix = '.kicad_sch' if what == 'schematic' else '.kicad_pcb'
         files = [folder / Path(meta['board']).with_suffix(suffix).name for folder in folders]
         if not all(path.is_file() for path in files):
@@ -2632,7 +2642,64 @@ class KiCadProvider:
         self.capture_screen(shot)
         return {'opened': [str(path) for path in files],
                 'windows': (['current (his design)'] if len(files) == 2 else []) + ['amended (your copy)'],
-                'screenshot': str(shot) if shot.is_file() else ''}
+                'screenshot': str(shot) if shot.is_file() else '',
+                **({'kept_unsaved_views': kept_views} if kept_views else {})}
+
+    def take_edits(self, arguments):
+        """Friedl's own edit, made and saved in the KiCad window open_in_kicad showed him, taken
+        into her copy as one kept edit (17 Nov: he placed parts his way and wanted her to go on
+        from there). Only while her copy is as it was when the window opened."""
+        work_copy_id = arguments['work_copy_id']
+        root, meta = self._load(work_copy_id)
+        if meta.get('taint'):
+            raise KiCadError('work_copy_tainted')
+        view = meta.get('view') or {}
+        folder = root / 'views' / str(view.get('stamp', '')) / 'amended'
+        if not view or not folder.is_dir():
+            raise KiCadError('arguments_unusable', {'detail': 'no KiCad window of this copy was opened for him; '
+                                                    'open_in_kicad first'})
+        with self._locked(work_copy_id):
+            before = self._revision(root, meta)
+            if before != view.get('revision'):
+                raise KiCadError('arguments_unusable', {'detail': 'your copy changed after the window was opened '
+                                                        'for him; open it again for his edit'})
+            project = root / 'project'
+            theirs, ours = design_inventory(folder), design_inventory(project)
+            changed = sorted(name for name in theirs if theirs[name] != ours.get(name))
+            if not changed:
+                return {'changed': [], 'moved': [], 'work_copy_revision': before,
+                        'note': 'nothing saved in that window differs from your copy'}
+            moved = []
+            board = Path(meta.get('board') or '').name
+            if board in changed:
+                def places(text):
+                    found = {}
+                    for item in sexpr(text).named('footprint'):
+                        refs = [p.children[2] for p in item.named('property')
+                                if len(p.children) > 2 and p.children[1] == 'Reference']
+                        at = item.named('at')
+                        if refs and at:
+                            found[str(refs[0])] = [str(v) for v in at[0].children[1:]]
+                    return found
+                old, new = places((project / board).read_text()), places((folder / board).read_text())
+                moved = sorted(ref for ref in new if old.get(ref) != new[ref])
+            snapshot = root / ('before-take-' + uuid.uuid4().hex)
+            snapshot.mkdir()
+            try:
+                for name in changed:
+                    if (project / name).is_file():
+                        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(project / name, snapshot / name)
+                for name in changed:
+                    (project / name).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(folder / name, project / name)
+                after = self._revision(root, meta)
+                self._record_history(root, snapshot, set(ours), changed, before, after)
+            finally:
+                shutil.rmtree(snapshot, ignore_errors=True)
+            self._save_metadata(root, dict(meta, view=dict(view, revision=after, files=theirs)))
+            return {'changed': changed, 'moved': moved[:80], 'moved_total': len(moved),
+                    'work_copy_revision': after}
 
     def approve_step(self, arguments):
         """Friedl approved one step of her copy as he saw it (D-082)."""
