@@ -600,7 +600,15 @@ def apply_change(change):
                 runs, vias = route(b, net, ends[0], ends[1], width, sides[0], end_on=sides[1],
                                    layers=route_layers, via=via_size, follow=op.get("follow"))
                 for name, corners in runs:
-                    add_track(b, net, corners, width, name, radius, fit=True)
+                    # A curve sits inside its corner, nearer what is there; where the full RF radius
+                    # would touch something the curve tightens, and at worst stays a 45-degree corner.
+                    for tried in ([radius, radius / 2.0, None] if radius else [None]):
+                        try:
+                            add_track(b, net, corners, width, name, tried, fit=True)
+                            break
+                        except ValueError:
+                            if tried is None:
+                                raise
                 for spot in vias:
                     add_via(b, net, spot, *via_size)
                 # A point end where this net's copper on another layer already ends gets the via
@@ -622,6 +630,16 @@ def apply_change(change):
                           if _m.hypot(q[0] - p[0], q[1] - p[1]) > 0.2
                           and abs(((_m.degrees(_m.atan2(q[1] - p[1], q[0] - p[0])) + 22.5) % 45) - 22.5) > 1)
                 neat = []
+                square = 0
+                for _, pts in runs:
+                    for p, q, r in zip(pts, pts[1:], pts[2:]):
+                        a = _m.atan2(q[1] - p[1], q[0] - p[0])
+                        c = _m.atan2(r[1] - q[1], r[0] - q[0])
+                        if abs((_m.degrees(c - a) + 180) % 360 - 180) > 60:
+                            square += 1
+                if square:
+                    neat.append("%d corner(s) of 90 degrees or sharper (his rule: none); route from pad to "
+                                "pad, or put your in-between points where the line turns by 45" % square)
                 if odd:
                     neat.append("%d run(s) not at 0/45/90 degrees" % odd)
                 strays = sorted({n for n, _ in runs} - set(route_layers or profile["layers"]) - set(sides))

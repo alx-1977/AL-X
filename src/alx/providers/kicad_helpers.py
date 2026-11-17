@@ -158,6 +158,10 @@ def _bends(points, radius, fit=False):
             if cut > room:
                 cut = room
             if cut < 0.05:
+                # No room for a curve here: the corner stays a plain corner (17 Nov: skipping it
+                # cut the run straight across at an odd angle).
+                runs.append((start, corner))
+                start = corner
                 continue
         bend = cut / _math.tan(turn / 2)
         if cut > min(lu, lv) + 1e-6:
@@ -457,6 +461,21 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
                                 and all(not any(shape.Collide(here, via_reach) for shape in near(via_table[name], here))
                                         for name in layers))
         return via_free[(c, r)]
+    def clear(name, a, z):
+        # Every 1 mm square along the piece, not only its ends (a long last run passed a J5 pin).
+        count = int(_math.hypot(z[0] - a[0], z[1] - a[1]) / 0.4) + 1
+        shapes = {}
+        for k in range(count + 1):
+            here = point(a[0] + (z[0] - a[0]) * k / count, a[1] + (z[1] - a[1]) * k / count)
+            shapes.update((id(shape), shape) for shape in near(edge_table[name], here))
+        piece = _pcbnew.SEG(point(*a), point(*z))
+        return not any(shape.Collide(piece, reach) for shape in shapes.values())
+
+    def lined_up(c, r):
+        # A cell from which the end is reached by one straight 0/45/90-degree run.
+        dx, dy = abs(end[0] - (x0 + c * step)), abs(end[1] - (y0 + r * step))
+        return dx < 1e-3 or dy < 1e-3 or abs(dx - dy) < 1e-3
+    finish, fallback = {}, None
     sc, sr = int(round((start[0] - x0) / step)), int(round((start[1] - y0) / step))
     ec, er = int(round((end[0] - x0) / step)), int(round((end[1] - y0) / step))
     sl, el = layers.index(on), layers.index(end_on)
@@ -467,9 +486,17 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
     while frontier:
         _, spent, state = _heapq.heappop(frontier)
         c, r, li, d = state
-        if (c, r, li) == (ec, er, el):
-            goal = state
-            break
+        if li == el and lined_up(c, r) and (c, r) != (sc, sr) or (c, r) == (ec, er) and li == el:
+            # The pin sits off the grid, so the route ends from a cell lined up with it, its last
+            # run checked exactly (17 Nov: a last run bent to reach the pin grazed J5's next pin).
+            if (c, r) not in finish:
+                here = (x0 + c * step, y0 + r * step)
+                finish[(c, r)] = lined_up(c, r) and clear(layers[li], here, end)
+            if finish[(c, r)]:
+                goal = state
+                break
+            if (c, r) == (ec, er) and fallback is None:
+                fallback = state  # the old way in, if no lined-up cell reaches the pin
         if spent > best.get(state, 1e18):
             continue
         steps = []
@@ -493,13 +520,10 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
                 _heapq.heappush(frontier, (total + 1.3 * left, total, nxt))
         if len(best) > 4000000:
             break
+    goal = goal or fallback
     if goal is None:
         raise ValueError("no clear path for %s between (%g, %g) and (%g, %g); route it in parts"
                          % (net, start[0], start[1], end[0], end[1]))
-    def clear(name, a, z):
-        a, z = point(*a), point(*z)
-        shapes = {id(shape): shape for shape in list(near(edge_table[name], a)) + list(near(edge_table[name], z))}
-        return not any(shape.Collide(_pcbnew.SEG(a, z), reach) for shape in shapes.values())
     states = [goal]
     while states[-1] != start_state:
         states.append(came[states[-1]])
@@ -515,11 +539,18 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             current.append(place)
         elif nxt is not None and nxt[3] == -2:
             current.append(place)
+    last = (round(x0 + goal[0] * step, 4), round(y0 + goal[1] * step, 4))
+    lined = finish.get((goal[0], goal[1]))
+    if lined and last != current[-1] and _math.hypot(last[0] - end[0], last[1] - end[1]) > 1e-4:
+        dx, dy = moves[goal[3]] if goal[3] >= 0 else (0, 0)
+        ux, uy = end[0] - last[0], end[1] - last[1]
+        if goal[3] < 0 or abs(ux * dy - uy * dx) > 1e-6 * max(1.0, _math.hypot(ux, uy)):
+            current.append(last)
     current.append((end[0], end[1]))
     # The end sits off the grid (the grid runs through the start), so the last run would come in
     # at an odd angle; its corner moves along the run before it until the last run keeps its
     # own 0/45/90-degree direction.
-    if len(current) >= 3 and goal[3] >= 0:
+    if not lined and len(current) >= 3 and goal[3] >= 0:
         (ax, ay), (bx, by), (ex, ey) = current[-3], current[-2], current[-1]
         dx, dy = moves[goal[3]]
         ux, uy = bx - ax, by - ay
@@ -530,7 +561,7 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             if _math.hypot(moved[0] - bx, moved[1] - by) <= step and 0 < t \
                     and clear(layers[goal[2]], (ax, ay), moved) and clear(layers[goal[2]], moved, (ex, ey)):
                 current[-2] = moved
-    elif len(current) == 2 and goal[3] >= 0 and vias and runs and current[0] == vias[-1]:
+    elif not lined and len(current) == 2 and goal[3] >= 0 and vias and runs and current[0] == vias[-1]:
         # Straight from a via into the pin: the via slides across so the run comes in square;
         # the run before it ends at the via's new place (a long run, so its angle barely moves).
         (vx, vy), (ex, ey) = current
