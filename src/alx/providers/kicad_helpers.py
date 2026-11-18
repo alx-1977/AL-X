@@ -1046,6 +1046,7 @@ def add_teardrops(board, skip_nets=(), area=None):
             probe = (ex + ux * (base + along + 0.05), ey + uy * (base + along + 0.05))
             if any(code == net and layer_id == track.GetLayer()
                    and outline.Contains(point(*probe)) for code, layer_id, outline in have):
+                target.SetTeardropsEnabled(True)
                 skipped("has one")
                 continue  # one is there already
             corners = []
@@ -1078,6 +1079,9 @@ def add_teardrops(board, skip_nets=(), area=None):
             for x, y in corners:
                 outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
             board.Add(zone)
+            # KiCad drops a teardrop from a pad or via whose own teardrop setting is off, as soon as
+            # it opens or updates the board (18 Nov: 325 of his pads had it off; ours vanished).
+            target.SetTeardropsEnabled(True)
             have.append((net, track.GetLayer(), zone.Outline()))
             made += 1
     return made, why
