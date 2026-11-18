@@ -977,16 +977,16 @@ def add_teardrops(board, skip_nets=(), area=None):
     tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
 
     def in_other(net, layer_id, spot, target):
-        # The track's far end lands in another pad or via of its net: a pad-to-pad link, no teardrop.
+        # What the track's far end lands in: "pad" (another pad of its net), "via", or None.
         for other, centre_, size_, _a in targets:
             if other is target or other.GetNetCode() != net or not other.IsOnLayer(layer_id):
                 continue
             if other.GetClass() == "PAD":
                 if other.GetEffectiveShape(layer_id).Collide(spot, 0):
-                    return True
+                    return "pad"
             elif (spot - centre_).EuclideanNorm() <= size_.x / 2:
-                return True
-        return False
+                return "via"
+        return None
     for target, centre, size, angle in targets:
         net = target.GetNetCode()
         if net in curved or net in skip:
@@ -1036,7 +1036,9 @@ def add_teardrops(board, skip_nets=(), area=None):
             ex, ey = _pcbnew.ToMM(near_end.x), _pcbnew.ToMM(near_end.y)
             base = (cx - ex) * ux + (cy - ey) * uy  # where the pad centre sits along the track
             room = (run - base - along) * (0.45 if linked else 0.9)
-            if room < 0.15 or (linked and run - base - along < 1.0):
+            # Only a short link between two pads (a pin to its chip's centre pad) gets none; a pad's
+            # short track to a via gets one at both ends (18 Nov: GND pins to their vias had none).
+            if room < 0.15 or (linked == "pad" and run - base - along < 1.0):
                 skipped("pad-to-pad link" if linked else "straight run too short")
                 continue
             length = min(length, room)  # the straight run is too short for a teardrop
