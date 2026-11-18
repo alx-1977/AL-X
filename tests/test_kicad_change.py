@@ -372,5 +372,29 @@ class BriefInspectTests(unittest.TestCase):
         self.assertEqual(result["parts"], [{"ref": "C1", "value": "100n", "footprint": "F:C0402"}])
         self.assertEqual(result["nets"], [])
 
+
+class OneWayToChangeACopyTests(unittest.TestCase):
+    def test_only_change_snapshots_restores_and_records_history(self):
+        """Law 0, 18 Nov review: edit, hierarchy conversion, taking his edits and revert each had
+        their own copy-and-restore. Now one context manager does it; this fails if another returns."""
+        import ast
+        source = (Path(__file__).resolve().parents[1] / "src/alx/providers/kicad.py").read_text()
+        provider = next(node for node in ast.walk(ast.parse(source))
+                        if isinstance(node, ast.ClassDef) and node.name == "KiCadProvider")
+        owners = {}
+        for method in provider.body:
+            if not isinstance(method, ast.FunctionDef):
+                continue
+            for node in ast.walk(method):
+                if isinstance(node, ast.Constant) and node.value in ("snapshot-", "before-take-"):
+                    owners.setdefault("snapshot", set()).add(method.name)
+                if (isinstance(node, ast.Attribute) and node.attr == "_record_history"
+                        and isinstance(node.ctx, ast.Load)):
+                    owners.setdefault("history", set()).add(method.name)
+        self.assertEqual(owners, {"snapshot": {"_change"}, "history": {"_change"}})
+        users = {method.name for method in provider.body if isinstance(method, ast.FunctionDef)
+                 and "self._change(" in ast.get_source_segment(source, method)}
+        self.assertEqual(users, {"edit", "make_hierarchical", "take_edits", "_revert"})
+
 if __name__ == "__main__":
     unittest.main()

@@ -471,8 +471,8 @@ TAKE_EDITS = CapabilityDefinition('take_edits',
     'can go back over it), and the parts he moved are listed. Only while your copy is as it was '
     'when that window opened. Go on from his edit; do not redo it.',
     obj({'work_copy_id': S}, ('work_copy_id',)),
-    obj({'changed': array(S), 'moved': array(S), 'moved_total': I, 'work_copy_revision': S, 'note': S},
-        ('changed', 'moved', 'work_copy_revision')),
+    obj({'changed': array(S), 'deleted': array(S), 'moved': array(S), 'moved_total': I, 'work_copy_revision': S,
+         'note': S}, ('changed', 'moved', 'work_copy_revision')),
     SideEffect.NONE, FAILURES)
 
 

@@ -3,6 +3,7 @@ import sys as _sys, pathlib as _pl
 _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
 from kicad_actions import kicad_call  # noqa: E402
 import json
+import shutil
 import os
 import pwd
 from datetime import UTC, datetime, timedelta
@@ -709,6 +710,9 @@ class KiCadTests(unittest.TestCase):
         self.assertTrue(done['converted'] and done['netlist_identical'])
         self.assertEqual(done['top_sheet_crossings'], 0)
         self.assertTrue((root / 'A.kicad_sch').is_file())
+        # A kept change like any edit: revert_to goes back over it (18 Nov review: no history).
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
 
     def test_an_edited_schematic_gets_its_erc_again(self):
         """Review of #239: ERC ran only on the first copy, never after a schematic edit."""
@@ -1337,6 +1341,37 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         # It is a kept edit: revert_to goes back over it.
         self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
         self.assertEqual((work / window_board.name).read_text(), BOARD)
+
+    def test_taking_his_edits_is_all_or_nothing_and_includes_deletions(self):
+        """18 Nov review: a failure part-way left half his edit in; a file he deleted stayed."""
+        (self.project / 'notes.kicad_dru').write_text('(version 1)')
+        checked = self.check()
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        shown = Path(self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')['opened'][0])
+        shown.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        (shown.parent / 'notes.kicad_dru').unlink()
+        work = next(self.storage.rglob(checked['work_copy_id'] + '/project'))
+        real_copy = shutil.copy2
+
+        def failing(source, target, *args, **kwargs):
+            if Path(target).parent == work:
+                raise OSError('disk full')
+            return real_copy(source, target, *args, **kwargs)
+        with patch('alx.providers.kicad.shutil.copy2', side_effect=failing):
+            failed = self.call('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(failed.state, CapabilityResultState.FAILED)
+        self.assertEqual((work / shown.name).read_text(), BOARD)
+        self.assertTrue((work / 'notes.kicad_dru').is_file())
+        taken = self.success('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertEqual((list(taken['changed']), list(taken['deleted'])), ([shown.name], ['notes.kicad_dru']))
+        self.assertFalse((work / 'notes.kicad_dru').exists())
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertTrue((work / 'notes.kicad_dru').is_file())
+        self.assertEqual((work / shown.name).read_text(), BOARD)
 
     def test_her_copy_can_be_checked_again_against_his_original(self):
         checked = self.check()

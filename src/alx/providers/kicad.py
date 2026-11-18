@@ -21,6 +21,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager, suppress
+from types import SimpleNamespace
 import fcntl
 
 from alx.providers.credential_paths import denied
@@ -977,9 +978,9 @@ class KiCadProvider:
                 self._run('sch', 'export', 'netlist', '--output', output, schematic)
                 return netlist_nets(output.read_text(errors='replace'))
             before = netlist()
-            snapshot = root / ('snapshot-' + uuid.uuid4().hex)
-            shutil.copytree(project, snapshot)
-            try:
+            # One kept change, gone back over with revert_to like any edit (18 Nov review: it had its
+            # own copy-and-restore and left no history).
+            with self._change(root, meta) as copy_change:
                 keep = frozenset()
                 for _ in range(3):
                     try:
@@ -1000,7 +1001,7 @@ class KiCadProvider:
                         break
                     keep |= loose
                     shutil.rmtree(project)
-                    shutil.copytree(snapshot, project)
+                    shutil.copytree(copy_change.snapshot, project)
                 result = dict(result, connected=pins['connected'], carried_by_buses=pins.get('carried_by_buses', []),
                               reason=result['reason'] or pins['reason'])
                 if 'top_sheet_crossings' in pins:
@@ -1028,12 +1029,6 @@ class KiCadProvider:
                 # the undo, so a failed check never leaves the change unreported.
                 checked = self._drc(root, meta)
                 erc = self._erc(root, meta)
-            except BaseException:
-                shutil.rmtree(project)
-                shutil.copytree(snapshot, project)
-                raise
-            finally:
-                shutil.rmtree(snapshot, ignore_errors=True)
             return dict(result, nets=len(after), netlist_identical=True,
                         schematic_parity=checked['schematic_parity'], erc=erc,
                         work_copy_id=arguments['work_copy_id'], work_copy_revision=self._revision(root))
@@ -1358,186 +1353,161 @@ class KiCadProvider:
             library = bool(meta.get('library'))
             # A library copy has no board: the script's argument is its folder.
             board = project / ('.library' if library else meta['board'])
-            original = inventory(project)
-            snapshot = root / ('snapshot-' + uuid.uuid4().hex)
-            shutil.copytree(project, snapshot)
-            if inventory(snapshot) != original:
-                raise KiCadError('verification_failed')
-            self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
             empty = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
             script_path = root / ('edit-' + uuid.uuid4().hex + '.py')
             stage = 'before_drc'
-            evidence, kept = None, False
+            evidence, copy_change = None, None
             try:
-                before = empty if library else self._board_drc(root, meta)[0]
-                facts_before = board_facts('(kicad_pcb)' if library else board.read_text())
-                steps_before = None if library else fingerprints(project, meta['board'])
-                # Tested helpers first, then her script compiled on its own, so
-                # its own first lines (a __future__ import) and line numbers
-                # stay as she wrote them (2026-11-12).
-                pins_before, names_before = (self._pin_groups(root, meta)
-                                             if plan and plan['schematic'] and not library else ({}, {}))
-                script_path.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS
-                                       + '_LIBRARY_FOOTPRINTS.update(%r)\n' % footprints
-                                       + '_LIBRARY_SYMBOLS.update(%r)\n' % symbols
-                                       + script_runner(script))
-                stage = 'script'
-                executed = self.execute_python(str(self.settings.kicad_python), script_path, board)
-                stdout, stderr = (getattr(executed, key, '') or '' for key in ('stdout', 'stderr'))
-                if executed.returncode:
-                    detail = {'stdout': stdout[:16000], 'stderr': stderr[:16000]}
-                    # A signal is KiCad itself crashing, not a Python error
-                    # (2026-11-12: four segmentation faults in two minutes).
-                    if executed.returncode < 0 or executed.returncode >= 128:
-                        detail['crashed'] = (
-                            'KiCad crashed while running the script (exit %d). Usual causes: a pcbnew '
-                            'call on something that is not there (an outline index of an empty shape, '
-                            'a removed item) or an item removed with Remove; KiCad does not check. '
-                            'Use the helpers (remove, remove_graphic, copper_shapes, zone_corners).'
-                            % executed.returncode)
-                    hint = script_hint(stderr)
-                    if hint:
-                        detail['hint'] = hint
-                    raise KiCadError('script_failed', detail)
-                inventory(project)
-                stage = 'after_drc'
-                after, signatures = (empty, []) if library else self._board_drc(root, meta)
-                steps = {}
-                if not library:
-                    # Friedl's order (D-082): an edit that gets ahead of his
-                    # approvals is undone, and says which step he must see.
-                    steps_after = fingerprints(project, meta['board'])
-                    original_steps = self._original_steps(root, meta)
-                    refusal = edit_refusal(steps_before, steps_after, original_steps, meta.get('approvals', {}))
-                    if refusal and not dry_run:
-                        raise KiCadError('step_not_approved', refusal)
-                    steps = step_status(original_steps, meta.get('approvals', {}), steps_after)
-                change_result, problems = [], []
-                if plan is not None:
-                    marker = [line for line in stdout.splitlines() if line.startswith('CHANGE_RESULT ')]
-                    change_result = json.loads(marker[-1][len('CHANGE_RESULT '):]) if marker else []
-                    pins_after, names_after = (self._pin_groups(root, meta) if plan['schematic']
-                                               else ({}, {}))
-                    problems = unmet(change, pins_before, pins_after, names_after,
-                                     board_pad_nets(board.read_text()) if plan['board'] else {},
-                                     change_result, names_before)
-                    if problems and not dry_run:
-                        # Not what the change declared: undone, every unmet item named.
-                        raise KiCadError('change_unmet', {'unmet': problems[:30], 'change_result': change_result})
-                current = design_inventory(project)
-                facts_after = board_facts('(kicad_pcb)' if library else board.read_text())
-                changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
-                                 if original.get(name) != current.get(name))
-                report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
-                          'board': structural_diff(facts_before, facts_after)}
-                if plan is not None:
-                    # A removal's scope is for the check above, not for her to read.
-                    report['change_result'] = [{key: value for key, value in item.items() if key != 'scope'}
-                                               if isinstance(item, dict) else item for item in change_result]
-                    report['unmet'] = problems[:30]
-                if not library and changed:
-                    report['compared_to_original'] = self._compared(root, meta, signatures)
-                    if dry_run and refusal:
-                        report['step_refusal'] = refusal
-                # Friedl's taper rule on the edited board, so she sees a step
-                # before she shows anything (2026-11-12, finished 2026-11-13).
-                # A script that only read changed nothing to check (15 Nov: 26
-                # of the agent's 31 edits only read, each paying for every check).
-                report['layout_rules'] = ({'findings': [], 'omitted': 0, 'not_checked': 'a library has no board'}
-                                          if library else
-                                          {'findings': [], 'omitted': 0, 'not_checked': 'nothing changed'}
-                                          if not changed else self._layout_rules(board))
-                if not library and any(name.endswith('.kicad_sch') for name in changed) and (
-                        plan is None or arguments.get('checks')):
-                    # A schematic edit is checked like the first copy (review of #239). A
-                    # structured change is already proven against the netlist, so its ERC
-                    # waits for the step's check unless asked for (16 Nov, Friedl: ERC once,
-                    # at the end, not after every edit).
-                    report['erc'] = self._erc(root, meta, against_original=True)
-                # A structured change says what each operation did and is checked against
-                # the netlist; the raw text diff added ~24,000 characters to every one of the
-                # agent's edits and nothing it used (16 Nov). History keeps the before files.
-                diffs, budget = [], (0 if plan is not None else 24000)
-                for name in (changed[:200] if budget else ()):
-                    left = (snapshot / name).read_text(errors='replace') if name in original else ''
-                    right = (project / name).read_text(errors='replace') if name in current else ''
-                    # Stream the diff into a bounded report; retain the snapshot
-                    # and edited files as the full evidence behind a truncation.
-                    pieces, used, truncated = [], 0, False
-                    for line in difflib.unified_diff(left.splitlines(True), right.splitlines(True),
-                                                      fromfile=name + ':before', tofile=name + ':after'):
-                        take = min(len(line), max(0, budget - used))
-                        pieces.append(line[:take])
-                        used += take
-                        if take < len(line):
-                            truncated = True
+                with self._change(root, meta) as copy_change:
+                    snapshot, original = copy_change.snapshot, copy_change.original
+                    before = empty if library else self._board_drc(root, meta)[0]
+                    facts_before = board_facts('(kicad_pcb)' if library else board.read_text())
+                    steps_before = None if library else fingerprints(project, meta['board'])
+                    # Tested helpers first, then her script compiled on its own, so
+                    # its own first lines (a __future__ import) and line numbers
+                    # stay as she wrote them (2026-11-12).
+                    pins_before, names_before = (self._pin_groups(root, meta)
+                                                 if plan and plan['schematic'] and not library else ({}, {}))
+                    script_path.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS
+                                           + '_LIBRARY_FOOTPRINTS.update(%r)\n' % footprints
+                                           + '_LIBRARY_SYMBOLS.update(%r)\n' % symbols
+                                           + script_runner(script))
+                    stage = 'script'
+                    executed = self.execute_python(str(self.settings.kicad_python), script_path, board)
+                    stdout, stderr = (getattr(executed, key, '') or '' for key in ('stdout', 'stderr'))
+                    if executed.returncode:
+                        detail = {'stdout': stdout[:16000], 'stderr': stderr[:16000]}
+                        # A signal is KiCad itself crashing, not a Python error
+                        # (2026-11-12: four segmentation faults in two minutes).
+                        if executed.returncode < 0 or executed.returncode >= 128:
+                            detail['crashed'] = (
+                                'KiCad crashed while running the script (exit %d). Usual causes: a pcbnew '
+                                'call on something that is not there (an outline index of an empty shape, '
+                                'a removed item) or an item removed with Remove; KiCad does not check. '
+                                'Use the helpers (remove, remove_graphic, copper_shapes, zone_corners).'
+                                % executed.returncode)
+                        hint = script_hint(stderr)
+                        if hint:
+                            detail['hint'] = hint
+                        raise KiCadError('script_failed', detail)
+                    inventory(project)
+                    stage = 'after_drc'
+                    after, signatures = (empty, []) if library else self._board_drc(root, meta)
+                    steps = {}
+                    if not library:
+                        # Friedl's order (D-082): an edit that gets ahead of his
+                        # approvals is undone, and says which step he must see.
+                        steps_after = fingerprints(project, meta['board'])
+                        original_steps = self._original_steps(root, meta)
+                        refusal = edit_refusal(steps_before, steps_after, original_steps, meta.get('approvals', {}))
+                        if refusal and not dry_run:
+                            raise KiCadError('step_not_approved', refusal)
+                        steps = step_status(original_steps, meta.get('approvals', {}), steps_after)
+                    change_result, problems = [], []
+                    if plan is not None:
+                        marker = [line for line in stdout.splitlines() if line.startswith('CHANGE_RESULT ')]
+                        change_result = json.loads(marker[-1][len('CHANGE_RESULT '):]) if marker else []
+                        pins_after, names_after = (self._pin_groups(root, meta) if plan['schematic']
+                                                   else ({}, {}))
+                        problems = unmet(change, pins_before, pins_after, names_after,
+                                         board_pad_nets(board.read_text()) if plan['board'] else {},
+                                         change_result, names_before)
+                        if problems and not dry_run:
+                            # Not what the change declared: undone, every unmet item named.
+                            raise KiCadError('change_unmet', {'unmet': problems[:30], 'change_result': change_result})
+                    current = design_inventory(project)
+                    facts_after = board_facts('(kicad_pcb)' if library else board.read_text())
+                    changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
+                                     if original.get(name) != current.get(name))
+                    report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
+                              'board': structural_diff(facts_before, facts_after)}
+                    if plan is not None:
+                        # A removal's scope is for the check above, not for her to read.
+                        report['change_result'] = [{key: value for key, value in item.items() if key != 'scope'}
+                                                   if isinstance(item, dict) else item for item in change_result]
+                        report['unmet'] = problems[:30]
+                    if not library and changed:
+                        report['compared_to_original'] = self._compared(root, meta, signatures)
+                        if dry_run and refusal:
+                            report['step_refusal'] = refusal
+                    # Friedl's taper rule on the edited board, so she sees a step
+                    # before she shows anything (2026-11-12, finished 2026-11-13).
+                    # A script that only read changed nothing to check (15 Nov: 26
+                    # of the agent's 31 edits only read, each paying for every check).
+                    report['layout_rules'] = ({'findings': [], 'omitted': 0, 'not_checked': 'a library has no board'}
+                                              if library else
+                                              {'findings': [], 'omitted': 0, 'not_checked': 'nothing changed'}
+                                              if not changed else self._layout_rules(board))
+                    if not library and any(name.endswith('.kicad_sch') for name in changed) and (
+                            plan is None or arguments.get('checks')):
+                        # A schematic edit is checked like the first copy (review of #239). A
+                        # structured change is already proven against the netlist, so its ERC
+                        # waits for the step's check unless asked for (16 Nov, Friedl: ERC once,
+                        # at the end, not after every edit).
+                        report['erc'] = self._erc(root, meta, against_original=True)
+                    # A structured change says what each operation did and is checked against
+                    # the netlist; the raw text diff added ~24,000 characters to every one of the
+                    # agent's edits and nothing it used (16 Nov). History keeps the before files.
+                    diffs, budget = [], (0 if plan is not None else 24000)
+                    for name in (changed[:200] if budget else ()):
+                        left = (snapshot / name).read_text(errors='replace') if name in original else ''
+                        right = (project / name).read_text(errors='replace') if name in current else ''
+                        # Stream the diff into a bounded report; retain the snapshot
+                        # and edited files as the full evidence behind a truncation.
+                        pieces, used, truncated = [], 0, False
+                        for line in difflib.unified_diff(left.splitlines(True), right.splitlines(True),
+                                                          fromfile=name + ':before', tofile=name + ':after'):
+                            take = min(len(line), max(0, budget - used))
+                            pieces.append(line[:take])
+                            used += take
+                            if take < len(line):
+                                truncated = True
+                                break
+                        diffs.append({'name': name, 'diff': ''.join(pieces), 'truncated': truncated})
+                        budget -= used
+                        if budget <= 0:
                             break
-                    diffs.append({'name': name, 'diff': ''.join(pieces), 'truncated': truncated})
-                    budget -= used
-                    if budget <= 0:
-                        break
-                truncated = plan is None and (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
-                report.update(file_diffs=diffs, diffs_truncated=truncated)
-                if truncated:
-                    # The report is cut short: keep before and after copies and the
-                    # complete diff as evidence that later edits never delete.
-                    # The snapshot itself becomes the before copy, still under the taint.
-                    evidence = root / 'evidence' / ('edit-' + uuid.uuid4().hex)
-                    evidence.mkdir(parents=True)
-                    try:
-                        shutil.copytree(project, evidence / 'after')
-                        with (evidence / 'changes.diff').open('w') as stream:
-                            for name in changed:
-                                left = (snapshot / name).read_text(errors='replace') if name in original else ''
-                                right = (project / name).read_text(errors='replace') if name in current else ''
-                                stream.writelines(difflib.unified_diff(
-                                    left.splitlines(True), right.splitlines(True),
-                                    fromfile=name + ':before', tofile=name + ':after'))
-                        if evidence_bytes(root / 'evidence') + evidence_bytes(snapshot) > MAX_EVIDENCE_BYTES:
-                            raise KiCadError('evidence_full')
-                    except BaseException:
-                        shutil.rmtree(evidence, ignore_errors=True)
-                        raise
-                    report.update(full_diff_path=str(evidence / 'changes.diff'),
-                                  before_copy_path=str(evidence / 'before'),
-                                  after_copy_path=str(evidence / 'after'))
-                script_path.unlink(missing_ok=True)
-                if dry_run:
-                    # Seen, then undone: the copy goes back exactly as it was.
-                    raise _Preview({'work_copy_id': arguments['work_copy_id'], 'stdout': stdout[:16000],
-                                    'stderr': stderr[:16000], 'change_report': report, 'before': before,
-                                    'after': after, 'steps': steps, 'previewed': True})
-                revision = self._revision(root, meta)
-                if changed:
-                    # Each kept edit can be gone back over (revert_to), 15 Nov.
-                    self._record_history(root, snapshot, original, changed, revision_before, revision)
-                if evidence:
-                    # Restoring after this point uses the moved snapshot.
-                    snapshot.rename(evidence / 'before')
-                    snapshot = evidence / 'before'
-                # The pending taint is cleared last; nothing after it can fail the edit.
-                self._save_metadata(root, meta)
-                kept = bool(evidence)
-                return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision,
-                        'stdout': stdout[:16000], 'stderr': stderr[:16000],
-                        'change_report': report, 'before': before, 'after': after, 'steps': steps,
-                        'previewed': False}
+                    truncated = plan is None and (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
+                    report.update(file_diffs=diffs, diffs_truncated=truncated)
+                    if truncated:
+                        # The report is cut short: keep before and after copies and the
+                        # complete diff as evidence that later edits never delete.
+                        # The snapshot itself becomes the before copy, still under the taint.
+                        evidence = root / 'evidence' / ('edit-' + uuid.uuid4().hex)
+                        evidence.mkdir(parents=True)
+                        try:
+                            shutil.copytree(project, evidence / 'after')
+                            with (evidence / 'changes.diff').open('w') as stream:
+                                for name in changed:
+                                    left = (snapshot / name).read_text(errors='replace') if name in original else ''
+                                    right = (project / name).read_text(errors='replace') if name in current else ''
+                                    stream.writelines(difflib.unified_diff(
+                                        left.splitlines(True), right.splitlines(True),
+                                        fromfile=name + ':before', tofile=name + ':after'))
+                            if evidence_bytes(root / 'evidence') + evidence_bytes(snapshot) > MAX_EVIDENCE_BYTES:
+                                raise KiCadError('evidence_full')
+                        except BaseException:
+                            shutil.rmtree(evidence, ignore_errors=True)
+                            raise
+                        report.update(full_diff_path=str(evidence / 'changes.diff'),
+                                      before_copy_path=str(evidence / 'before'),
+                                      after_copy_path=str(evidence / 'after'))
+                    script_path.unlink(missing_ok=True)
+                    if dry_run:
+                        # Seen, then undone: the copy goes back exactly as it was.
+                        raise _Preview({'work_copy_id': arguments['work_copy_id'], 'stdout': stdout[:16000],
+                                        'stderr': stderr[:16000], 'change_report': report, 'before': before,
+                                        'after': after, 'steps': steps, 'previewed': True})
+                    if evidence:
+                        # The snapshot becomes the evidence's before copy.
+                        copy_change.keep_snapshot_at = evidence / 'before'
+                    result = {'work_copy_id': arguments['work_copy_id'],
+                              'stdout': stdout[:16000], 'stderr': stderr[:16000],
+                              'change_report': report, 'before': before, 'after': after, 'steps': steps,
+                              'previewed': False}
+                return dict(result, work_copy_revision=copy_change.revision)
             except BaseException as error:
-                restored = False
-                try:
-                    # Never follow a script-created symlink while restoring.
-                    if project.is_symlink():
-                        project.unlink()
-                    elif project.exists():
-                        shutil.rmtree(project)
-                    shutil.copytree(snapshot, project)
-                    restored = inventory(project) == original
-                    if getattr(error, 'details', {}).get('reason_code') == 'session_unstoppable':
-                        restored = False
-                    if restored:
-                        self._save_metadata(root, meta)
-                except (OSError, KiCadError):
-                    restored = False
+                restored = getattr(error, 'rollback_restored', copy_change is None)
                 if restored and evidence:
                     # The undone edit leaves no evidence; unverified recovery keeps it.
                     shutil.rmtree(evidence, ignore_errors=True)
@@ -1555,10 +1525,70 @@ class KiCadProvider:
                 # Best-effort cleanup only: the outcome is already decided.
                 with suppress(OSError):
                     script_path.unlink(missing_ok=True)
-                # Retained evidence and unverified recovery keep their snapshot.
-                with suppress(OSError, ValueError):
-                    if not kept and not json.loads((root / 'metadata.json').read_text()).get('taint'):
-                        shutil.rmtree(snapshot, ignore_errors=True)
+
+    @contextmanager
+    def _change(self, root, meta, *, record=True):
+        """The one way her work copy changes (18 Nov review: edit, hierarchy conversion, taking in
+        his saved edits and revert each had their own copy-and-restore).
+
+        Before: a verified snapshot of the copy and a durable pending taint. The caller changes
+        `project` inside the block and may set `change.meta` (the metadata to keep) and
+        `change.keep_snapshot_at` (a path the snapshot moves to as evidence). After: the change
+        is kept in history (unless record is False) and the taint cleared, last. On any failure the
+        copy is put back from the snapshot and checked; if that cannot be proven, the taint stays
+        and so does the snapshot. The failure carries `rollback_restored`.
+        """
+        project = root / 'project'
+        original = inventory(project)
+        revision_before = self._revision(root, meta)
+        snapshot = root / ('snapshot-' + uuid.uuid4().hex)
+        shutil.copytree(project, snapshot)
+        if inventory(snapshot) != original:
+            shutil.rmtree(snapshot, ignore_errors=True)
+            raise KiCadError('verification_failed')
+        self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
+        change = SimpleNamespace(project=project, snapshot=snapshot, original=original, meta=meta,
+                                 keep_snapshot_at=None, changed=[], revision=revision_before)
+        settled = False
+        try:
+            yield change
+            before_files = design_inventory(snapshot)
+            current = design_inventory(project)
+            change.changed = sorted(name for name in before_files.keys() | current.keys()
+                                    if before_files.get(name) != current.get(name))
+            change.revision = self._revision(root, change.meta)
+            if change.changed and record:
+                self._record_history(root, snapshot, original, change.changed, revision_before, change.revision)
+            if change.keep_snapshot_at is not None:
+                snapshot.rename(change.keep_snapshot_at)
+                change.snapshot = change.keep_snapshot_at
+            # The pending taint is cleared last; nothing after it can fail the change.
+            self._save_metadata(root, change.meta)
+            settled = True
+        except BaseException as error:
+            restored = False
+            try:
+                # Never follow a link a script made while restoring.
+                if project.is_symlink():
+                    project.unlink()
+                elif project.exists():
+                    shutil.rmtree(project)
+                shutil.copytree(change.snapshot, project)
+                restored = inventory(project) == original
+                # A session that could not be stopped may still write: unproven.
+                if getattr(error, 'details', {}).get('reason_code') == 'session_unstoppable':
+                    restored = False
+                if restored:
+                    self._save_metadata(root, meta)
+            except (OSError, KiCadError):
+                restored = False
+            settled = restored
+            error.rollback_restored = restored
+            raise
+        finally:
+            # A settled change never keeps its snapshot, except as evidence; unproven recovery does.
+            if settled and change.snapshot == snapshot:
+                shutil.rmtree(snapshot, ignore_errors=True)
 
     HISTORY_KEPT = 60
 
@@ -1608,9 +1638,9 @@ class KiCadProvider:
         library = bool(meta.get('library'))
         board_text = (lambda: '(kicad_pcb)' if library else (project / meta['board']).read_text())
         facts_before = board_facts(board_text())
-        snapshot = root / ('snapshot-' + uuid.uuid4().hex)
-        shutil.copytree(project, snapshot)
-        try:
+        # Inside one change: if putting the files back or reporting on them fails, the copy is as
+        # it was and so is its history (18 Nov review: history went before the reports finished).
+        with self._change(root, meta, record=False):
             changed = set()
             for path, manifest in reversed(entries[index:]):
                 for name in manifest['changed']:
@@ -1618,28 +1648,24 @@ class KiCadProvider:
                     if name in manifest['created']:
                         (project / name).unlink(missing_ok=True)
                     else:
+                        (project / name).parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(path / 'files' / name, project / name)
             revision = self._revision(root, meta)
             if revision != entries[index][1]['before']:
                 raise KiCadError('verification_failed', {'detail': 'the copy did not come back to that revision'})
-        except BaseException:
-            shutil.rmtree(project, ignore_errors=True)
-            shutil.copytree(snapshot, project)
-            raise
-        finally:
-            shutil.rmtree(snapshot, ignore_errors=True)
+            report = {'files_changed': sorted(changed), 'files_truncated': False, 'file_diffs': [],
+                      'diffs_truncated': False, 'board': structural_diff(facts_before, board_facts(board_text())),
+                      'reverted_edits': len(entries) - index}
+            steps, totals = {}, {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
+            if not library:
+                steps = step_status(self._original_steps(root, meta), meta.get('approvals', {}),
+                                    fingerprints(project, meta['board']))
+                totals = self._board_drc(root, meta)[0]
+                if any(name.endswith('.kicad_sch') for name in changed):
+                    report['erc'] = self._erc(root, meta, against_original=True)
+        # The edits gone back over leave history only once the copy is settled.
         for path, _ in entries[index:]:
             shutil.rmtree(path, ignore_errors=True)
-        report = {'files_changed': sorted(changed), 'files_truncated': False, 'file_diffs': [],
-                  'diffs_truncated': False, 'board': structural_diff(facts_before, board_facts(board_text())),
-                  'reverted_edits': len(entries) - index}
-        steps, totals = {}, {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
-        if not library:
-            steps = step_status(self._original_steps(root, meta), meta.get('approvals', {}),
-                                fingerprints(project, meta['board']))
-            totals = self._board_drc(root, meta)[0]
-            if any(name.endswith('.kicad_sch') for name in changed):
-                report['erc'] = self._erc(root, meta, against_original=True)
         return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision, 'stdout': '',
                 'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps,
                 'previewed': False}
@@ -2760,9 +2786,11 @@ class KiCadProvider:
             project = root / 'project'
             theirs, ours = design_inventory(folder, exclude={folder / '.history'}), design_inventory(project)
             # KiCad's lock files while his window is open are not the design.
-            changed = sorted(name for name in theirs if theirs[name] != ours.get(name)
-                             and not (Path(name).name.startswith('~') or name.endswith('.lck')))
-            if not changed:
+            ignored = (lambda name: Path(name).name.startswith('~') or name.endswith('.lck'))
+            changed = sorted(name for name in theirs if theirs[name] != ours.get(name) and not ignored(name))
+            # A file he deleted there goes here too (18 Nov review: deletions were ignored).
+            deleted = sorted(name for name in ours if name not in theirs and not ignored(name))
+            if not changed and not deleted:
                 return {'changed': [], 'moved': [], 'work_copy_revision': before,
                         'note': 'nothing saved in that window differs from your copy'}
             moved = []
@@ -2779,22 +2807,16 @@ class KiCadProvider:
                     return found
                 old, new = places((project / board).read_text()), places((folder / board).read_text())
                 moved = sorted(ref for ref in new if old.get(ref) != new[ref])
-            snapshot = root / ('before-take-' + uuid.uuid4().hex)
-            snapshot.mkdir()
-            try:
-                for name in changed:
-                    if (project / name).is_file():
-                        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(project / name, snapshot / name)
+            # One kept change: all of it or none of it (a failed copy no longer leaves half his edit).
+            with self._change(root, meta) as copy_change:
                 for name in changed:
                     (project / name).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(folder / name, project / name)
+                for name in deleted:
+                    (project / name).unlink()
                 after = self._revision(root, meta)
-                self._record_history(root, snapshot, set(ours), changed, before, after)
-            finally:
-                shutil.rmtree(snapshot, ignore_errors=True)
-            self._save_metadata(root, dict(meta, view=dict(view, revision=after, files=theirs)))
-            return {'changed': changed, 'moved': moved[:80], 'moved_total': len(moved),
+                copy_change.meta = dict(meta, view=dict(view, revision=after, files=theirs))
+            return {'changed': changed, 'deleted': deleted, 'moved': moved[:80], 'moved_total': len(moved),
                     'work_copy_revision': after}
 
     def approve_step(self, arguments):
