@@ -266,7 +266,21 @@ class WorkerLimitTests(unittest.TestCase):
                 self.assertFalse(refused.implementation_invoked)
         self.assertIsNotNone(worker_call_refusal(CapabilityCall("w-3", MAIL, {})))
         # A capability without a limit is left to the gate.
-        self.assertIsNone(worker_call_refusal(CapabilityCall("w-4", "kicad", {"action": "inspect"})))
+        self.assertIsNone(worker_call_refusal(CapabilityCall("w-4", "look", {"path": "a.pdf"})))
+
+    def test_the_worker_edits_kicad_copies_only_by_structured_change(self) -> None:
+        """18 Nov review: the worker could reach every kicad action, free scripts included."""
+        self.assertIsNone(worker_call_refusal(CapabilityCall("w-5", "kicad", {"action": "inspect"})))
+        self.assertIsNone(worker_call_refusal(CapabilityCall(
+            "w-6", "kicad", {"action": "edit", "work_copy_id": "c", "change": [{"op": "title_block"}]})))
+        scripted = worker_call_refusal(CapabilityCall(
+            "w-7", "kicad", {"action": "edit", "work_copy_id": "c", "script": "b = load()"}))
+        self.assertEqual(scripted.reason_code, "worker_script_not_allowed")
+        self.assertFalse(scripted.implementation_invoked)
+        for action in ("open_in_kicad", "approve_step", "write_back", "take_edits", "export"):
+            with self.subTest(action=action):
+                refused = worker_call_refusal(CapabilityCall("w-8", "kicad", {"action": action}))
+                self.assertEqual(refused.reason_code, "worker_action_not_allowed")
 
     def test_the_runtime_checks_the_limit_before_her_broker(self) -> None:
         source = (ROOT / "src/alx/bootstrap/live_voice.py").read_text(encoding="utf-8")

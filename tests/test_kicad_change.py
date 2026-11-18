@@ -35,10 +35,8 @@ class ChangeShapeTests(unittest.TestCase):
         ])
         self.assertEqual(plan["symbols"], ["FireFli_ICs:RFSW6024TR13"])
         self.assertEqual(plan["footprints"], ["FireFli_ICs/RFSW6024TR13"])
-        self.assertEqual(plan["touched"], ["C37", "U6"])
         validate_change([{"op": "set_text", "old": "Keepout", "by": [0, -1.5]}])
-        everything = validate_change([{"op": "board_text", "refs": "all", "field": "Reference", "size": 0.5}])
-        self.assertEqual(everything["touched"], [])
+        validate_change([{"op": "board_text", "refs": "all", "field": "Reference", "size": 0.5}])
         for wrong, said in (([], "1 to 200"), ([{"op": "draw"}], "op is one of"),
                             ([{"op": "wire", "sheet": "a", "from": "U6.9"}], "needs to"),
                             ([{"op": "wire", "sheet": "a", "from": "U6-9", "to": "C1.1"}], "REF.PIN"),
@@ -56,7 +54,7 @@ class ChangeShapeTests(unittest.TestCase):
         after = {"R1.1": frozenset({"R1.1"}), "R9.1": frozenset({"R9.1"}),
                  "R5.1": frozenset({"R5.1"}), "R6.1": frozenset({"R6.1"})}
         problems = unmet([{"op": "wire", "sheet": "a", "from": "R1.1", "to": "R9.1"}], before, after,
-                         {}, {}, ["R1", "R9"])
+                         {}, {}, ())
         self.assertIn("R1.1 is not joined to R9.1", problems)
         # R5 and R6 were never named, and came apart: that is reported too.
         self.assertTrue(any(p.startswith("R5.1 changed connection") for p in problems))
@@ -72,14 +70,14 @@ class ChangeShapeTests(unittest.TestCase):
                   {"op": "power", "sheet": "a", "pin": "U6.10", "port": "power:GND"},
                   {"op": "tidy_fields", "sheet": "a", "refs": ["U6", "C39"]}]
         names = {"R5.2": "GND", "R6.2": "GND", "U6.9": "Net-(U6-RF1)", "C39.1": "Net-(U6-RF1)"}
-        problems = unmet(change, before, after, {pin: "GND" for pin in shorted}, {}, ["U6", "C39"], names)
+        problems = unmet(change, before, after, {pin: "GND" for pin in shorted}, {}, (), names)
         self.assertTrue(any(p.startswith("C39.1 changed connection: gained R5.2, R6.2") for p in problems),
                         problems)
         # The same port, landing cleanly, is what was asked.
         clean = {"U6.9": rf1, "C39.1": rf1, "U6.10": gnd | {"U6.10"}, "R5.2": gnd | {"U6.10"},
                  "R6.2": gnd | {"U6.10"}}
         self.assertEqual(unmet(change, before, clean, {"U6.10": "GND", "R5.2": "GND", "R6.2": "GND"},
-                               {}, ["U6", "C39"], names), [])
+                               {}, (), names), [])
 
 
     def test_a_pin_on_a_whole_net_is_named_by_that_net(self):
@@ -91,7 +89,7 @@ class ChangeShapeTests(unittest.TestCase):
         problems = unmet([{"op": "no_connect", "sheet": "a", "pins": ["U6.11"]},
                           {"op": "swap_symbol", "sheet": "a", "ref": "U6", "lib_id": "X:Y"},
                           {"op": "label", "sheet": "a", "pin": "U6.11", "net": "RF"}],
-                         before, after, names, {}, ["U6"], {})
+                         before, after, names, {}, (), {})
         self.assertIn("U6.11 is joined to net GND (20 pins, e.g. C10.1, C11.1, C12.1), not left unconnected",
                       problems)
         self.assertTrue(any("unwire it first" in p for p in problems), problems)
@@ -105,9 +103,29 @@ class ChangeShapeTests(unittest.TestCase):
         change = [{"op": "add_symbol", "sheet": "a", "ref": "C93", "like": "C55", "at": [1, 2]},
                   {"op": "wire", "sheet": "a", "from": "C93.1", "to": "L6.2"},
                   {"op": "power", "sheet": "a", "pin": "C93.2", "port": "GND"}]
-        self.assertEqual(unmet(change, before, after, names, {}, ["C93"], names), [])
+        self.assertEqual(unmet(change, before, after, names, {}, (), names), [])
         shorted = {p: tx1 | gnd | {"C93.1", "C93.2"} for p in tx1 | gnd | {"C93.1", "C93.2"}}
-        self.assertTrue(unmet(change[:2], before, shorted, names, {}, ["C93"], names))
+        self.assertTrue(unmet(change[:2], before, shorted, names, {}, (), names))
+
+    def test_a_removal_may_split_only_what_it_targets(self):
+        """18 Nov review: one removal anywhere in a batch let an unrelated split through."""
+        ab, cd = frozenset({"R1.1", "R2.1"}), frozenset({"R5.1", "R6.1"})
+        before = {"R1.1": ab, "R2.1": ab, "R5.1": cd, "R6.1": cd}
+        names = {"R1.1": "A", "R2.1": "A", "R5.1": "C", "R6.1": "C"}
+        both = {pin: frozenset({pin}) for pin in before}
+        only_a = {"R1.1": frozenset({"R1.1"}), "R2.1": frozenset({"R2.1"}), "R5.1": cd, "R6.1": cd}
+        unwire = [{"op": "unwire", "sheet": "a", "pins": ["R1.1"]}]
+        self.assertEqual(unmet(unwire, before, only_a, names, {}, (), names), [])
+        problems = unmet(unwire, before, both, names, {}, (), names)
+        self.assertTrue(any(p.startswith("R5.1 changed connection: lost R6.1") for p in problems), problems)
+        labels = [{"op": "remove_labels", "nets": ["A"]}]
+        self.assertEqual(unmet(labels, before, only_a, names, {}, (), names), [])
+        self.assertTrue(unmet(labels, before, both, names, {}, (), names))
+        items = [{"op": "remove_items", "sheet": "a", "area": [0, 0, 1, 1]}]
+        self.assertEqual(unmet(items, before, only_a, names, {}, [{"scope": ["R1.1", "R2.1"]}], names), [])
+        self.assertTrue(unmet(items, before, both, names, {}, [{"scope": ["R1.1", "R2.1"]}], names))
+        # Removing what touches nothing parts no pins.
+        self.assertTrue(unmet([{"op": "remove_dangling", "sheet": "a"}], before, only_a, names, {}, (), names))
 
     def test_the_board_can_take_the_schematic_in_one_operation(self):
         plan = validate_change([{"op": "sync_from_schematic", "place": {"C93": [170.0, 95.0, 90]}}])

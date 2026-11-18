@@ -170,16 +170,38 @@ class KiCadTests(unittest.TestCase):
     def call(self, name, **arguments):
         if name == 'approve_step' and arguments.get('work_copy_id'):
             # He approves what he was shown (17 Nov): the copy is opened for him first.
-            self.shown(arguments['work_copy_id'])
+            self.shown(arguments['work_copy_id'], 'schematic' if arguments.get('step') == 'schematic' else 'board')
         return kicad_call(self.runtime.executors, name, arguments)
 
-    def shown(self, work_copy_id):
+    def shown(self, work_copy_id, what='board'):
         provider = self.runtime.provider
         provider.render_folder = self.root / 'renders'
         provider.viewer_settle_seconds = 0
         provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
         provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
-        return kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': work_copy_id, 'what': 'board'})
+        return kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': work_copy_id, 'what': what})
+
+    def test_a_step_is_approved_only_on_a_view_that_opened_and_shows_that_step(self):
+        """18 Nov review: a failed launch, or a schematic view, counted as showing him the board."""
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
+            EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        self.shown(edited['work_copy_id'], 'board')
+        wrong = kicad_call(self.runtime.executors, 'approve_step', {
+            'step': 'schematic', 'work_copy_id': edited['work_copy_id'],
+            'work_copy_revision': edited['work_copy_revision']})
+        self.assertEqual(wrong.state, CapabilityResultState.FAILED)
+        self.assertIn('approved on the schematic', wrong.failure['recovery']['detail'])
+        provider = self.runtime.provider
+
+        def broken(what, path, index):
+            raise OSError('KiCad did not start')
+        provider.open_viewer = broken
+        failed = kicad_call(self.runtime.executors, 'open_in_kicad',
+                            {'work_copy_id': edited['work_copy_id'], 'what': 'schematic'})
+        self.assertEqual(failed.state, CapabilityResultState.FAILED)
+        root, meta = provider._load(edited['work_copy_id'])
+        self.assertEqual(meta['view']['what'], 'board')
 
     def test_a_step_is_approved_only_once_he_was_shown_that_version(self):
         checked = self.check()
@@ -1159,6 +1181,8 @@ p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
                      work_copy_revision=routed['work_copy_revision'])
 
     def test_an_unchanged_step_needs_no_approval_and_approving_it_records_nothing(self):
+        # A schematic to show him: approval needs a view that actually opened (18 Nov review).
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
         self.assertEqual(set(edited['steps'].values()), {'unchanged'})
@@ -1183,6 +1207,7 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
 """)
         self.assertEqual(list(joined['change_report']['compared_to_original']['schematic_vs_board_new']),
                          ['board only: U1.1, U1.2'])
+        self.assertTrue(joined['change_report']['compared_to_original']['schematic_vs_board_available'])
         result = self.call('write_back_kicad_board', **self.write_args(joined))
         self.assertEqual(result.failure['code'], 'schematic_board_differ')
         self.assertEqual(list(result.failure['recovery']['new_mismatches']), ['board only: U1.1, U1.2'])
@@ -1195,6 +1220,8 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
                        'unconnected_items': [], 'schematic_parity': []}
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
         compared = edited['change_report']['compared_to_original']
+        # No schematic in this project: nothing compared, which is not "no differences" (18 Nov review).
+        self.assertFalse(compared['schematic_vs_board_available'])
         self.assertEqual(compared['new'], 1)
         self.assertEqual(compared['resolved'], 2)
         self.assertEqual(compared['new_findings'][0]['type'], 'clearance')

@@ -29,8 +29,6 @@ SCHEMATIC_OPS = {
     'remove_dangling': ('sheet',),
     'unwire': ('sheet', 'pins'),
 }
-# Removing labels and leftovers may split nets (that is what they are for); it never joins any.
-SPLITTING = ('remove_labels', 'remove_items', 'remove_dangling', 'unwire')
 BOARD_OPS = {
     'remove_parts': ('refs',),
     'replace_part': ('ref', 'footprint'),
@@ -74,7 +72,7 @@ def validate_change(change: Any) -> dict[str, Any]:
     """Check a change's shape; return the library parts it needs and the parts it touches."""
     if not isinstance(change, (list, tuple)) or not change or len(change) > 200:
         raise ChangeError('change is a list of 1 to 200 operations')
-    symbols, footprints, touched = set(), set(), set()
+    symbols, footprints = set(), set()
     for index, op in enumerate(change):
         where = 'operation %d' % (index + 1)
         if not isinstance(op, Mapping) or op.get('op') not in OPS:
@@ -119,17 +117,7 @@ def validate_change(change: Any) -> dict[str, Any]:
             raise ChangeError('%s (track) needs points, or from and to pads' % where)
         if op['op'] == 'track' and not (op.get('net') or op.get('from') or op.get('to')):
             raise ChangeError('%s (track) needs net, or a from or to pad to take it from' % where)
-        for field in ('ref',):
-            if isinstance(op.get(field), str):
-                touched.add(op[field])
-        for field in ('refs',):
-            if isinstance(op.get(field), (list, tuple)):
-                touched.update(r for r in op[field] if isinstance(r, str))
-        for field in ('from', 'to', 'pin'):
-            if isinstance(op.get(field), str) and PIN.match(op[field]):
-                touched.add(op[field].split('.')[0])
-        touched.update(p.split('.')[0] for p in op.get('pins') or () if isinstance(p, str))
-    return {'symbols': sorted(symbols), 'footprints': sorted(footprints), 'touched': sorted(touched),
+    return {'symbols': sorted(symbols), 'footprints': sorted(footprints),
             'schematic': any(op['op'] in SCHEMATIC_OPS for op in change),
             'board': any(op['op'] in BOARD_OPS for op in change)}
 
@@ -157,12 +145,13 @@ def _short(net: str) -> str:
 
 def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
           after: Mapping[str, frozenset], after_names: Mapping[str, str],
-          board_nets: Mapping[str, str], touched: Sequence[str],
+          board_nets: Mapping[str, str], change_result: Sequence[Mapping[str, Any]] = (),
           before_names: Mapping[str, str] | None = None) -> list[str]:
     """What the result does not do that the change declared, or does that it did not.
 
     before/after: each schematic pin ("U6.9") with the set of pins on its net;
-    after_names/before_names: each pin's net name; board_nets: each board pad's net name.
+    after_names/before_names: each pin's net name; board_nets: each board pad's net name;
+    change_result: what each operation reported, in order (a removal's scope).
     """
     problems = []
     swapped = {op['ref'] for op in change if op['op'] == 'swap_symbol'}
@@ -202,7 +191,7 @@ def unmet(change: Sequence[Mapping[str, Any]], before: Mapping[str, frozenset],
         elif kind == 'remove_parts':
             problems += ['%s is still on the board' % ref for ref in op['refs']
                          if any(pad.split('.')[0] == ref for pad in board_nets)]
-    problems += _unasked(change, before, after, before_names or {}, after_names)
+    problems += _unasked(change, before, after, before_names or {}, after_names, change_result)
     return problems
 
 
@@ -216,7 +205,7 @@ def _pins_text(pins, names) -> str:
     return 'net %s (%d pins, e.g. %s)' % ('/'.join(nets) or '?', len(pins), ', '.join(pins[:3]))
 
 
-def _unasked(change, before, after, before_names, after_names=None):
+def _unasked(change, before, after, before_names, after_names=None, change_result=()):
     """Pins joined or split that the change did not ask for.
 
     The nets the change should give are worked out from the nets before and
@@ -262,7 +251,19 @@ def _unasked(change, before, after, before_names, after_names=None):
                 if net in named:
                     join(pin, named[net])
                 named.setdefault(net, pin)
-    splitting = any(op['op'] in SPLITTING for op in change)
+    # What a removal may split: only the pins and nets it targets (18 Nov review: one removal
+    # anywhere in a batch let an unrelated broken connection through). remove_dangling takes
+    # only what touches nothing, so it may split nothing.
+    scope: set = set()
+    for index, op in enumerate(change):
+        if op['op'] == 'unwire':
+            scope.update(op['pins'])
+        elif op['op'] == 'remove_labels':
+            nets = {_short(net) for net in op['nets']}
+            scope.update(pin for pin, name in before_names.items() if _short(name) in nets)
+        elif op['op'] == 'remove_items':
+            done = change_result[index] if index < len(change_result) else {}
+            scope.update((done or {}).get('scope') or ())
     groups: dict[str, set] = {}
     # A part the change adds has pins only afterwards; what the change joins them to counts
     # (16 Nov: the added C93 was reported as joined unasked to L6, C44 and GND).
@@ -279,7 +280,7 @@ def _unasked(change, before, after, before_names, after_names=None):
         if gained:
             problems.append('%s changed connection: gained %s, which the change did not join'
                             % (pin, _pins_text(gained, after_names or {})))
-        elif lost and not splitting:
+        elif lost and not (pin in scope or lost <= scope):
             problems.append('%s changed connection: lost %s' % (pin, _pins_text(lost, before_names)))
     return problems[:30]
 
@@ -441,6 +442,9 @@ def apply_change(change):
             elif kind == "remove_labels":
                 done["removed"] = s.remove_labels(op["nets"], op.get("area"))
             elif kind == "remove_items":
+                # Its scope: the pins on this sheet, the only ones its wiring can part.
+                done["scope"] = sorted("%s.%s" % (item["ref"], number) for item in s.symbols()
+                                       for number in item["pins"])
                 done["removed"] = s.remove_items(op["area"], tuple(op.get("kinds") or
                                                               ("wire", "label", "no_connect", "junction", "power")))
             elif kind == "remove_dangling":
@@ -802,7 +806,7 @@ def apply_change(change):
                 # Parts' reference or value text on the board: where, how big, turned, shown
                 # (17 Nov: silkscreen over pads; 18 Nov: every designator 0.5 mm took 95 operations).
                 done["texts"] = part_texts(b, op["refs"], op["field"], op.get("at"), op.get("size"),
-                                           op.get("angle"), op.get("hide"))
+                                           op.get("angle"), op.get("hide"), op.get("thickness"))
             elif kind == "add_teardrops":
                 # Teardrops where tracks meet pads and vias and have none (18 Nov: KiCad makes them
                 # only in its own window). RF nets (curved tracks) and skip_nets get none.
@@ -855,4 +859,4 @@ def apply_change(change):
 # ---- end of structured changes ----
 '''
 
-__all__ = ['BOARD_OPS', 'SPLITTING', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'plain', 'unmet', 'validate_change']
+__all__ = ['BOARD_OPS', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'plain', 'unmet', 'validate_change']

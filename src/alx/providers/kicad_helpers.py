@@ -949,11 +949,12 @@ def save_footprint(library, item):
     _pcbnew.FootprintSave(folder, item)
 
 
-def part_texts(board, refs, field, at=None, size=None, angle=None, hide=None):
+def part_texts(board, refs, field, at=None, size=None, angle=None, hide=None, thickness=None):
     """Parts' Reference or Value (or another field's) text on the board, like Altium's select all,
     then font (18 Nov). refs is a list of references, or "all" for every part. at [x, y] mm places
-    one part's text; size mm sets height and width alike; angle in degrees; hide True or False.
-    Returns each text when there are few, else how many changed."""
+    one part's text; size mm sets height and width alike; thickness mm sets the stroke; angle in
+    degrees; hide True or False. Only what is named changes (18 Nov: a size change also thinned
+    every stroke to 0.075 mm). Returns each text when there are few, else how many changed."""
     names = None if refs == "all" else list(refs)
     if names is not None:
         missing = [r for r in names if board.FindFootprintByReference(r) is None]
@@ -973,14 +974,16 @@ def part_texts(board, refs, field, at=None, size=None, angle=None, hide=None):
         if size:
             height = _pcbnew.FromMM(size)
             text.SetTextSize(_pcbnew.VECTOR2I(height, height))
-            text.SetTextThickness(_pcbnew.FromMM(size * 0.15))
+        if thickness:
+            text.SetTextThickness(_pcbnew.FromMM(thickness))
         if angle is not None:
             text.SetTextAngleDegrees(angle)
         if hide is not None:
             text.SetVisible(not hide)
         report.append({"ref": found.GetReference(),
                        "at": [round(_pcbnew.ToMM(text.GetPosition().x), 3), round(_pcbnew.ToMM(text.GetPosition().y), 3)],
-                       "size": round(_pcbnew.ToMM(text.GetTextHeight()), 3), "shown": text.IsVisible()})
+                       "size": round(_pcbnew.ToMM(text.GetTextHeight()), 3),
+                       "thickness": round(_pcbnew.ToMM(text.GetTextThickness()), 3), "shown": text.IsVisible()})
     return report if len(report) <= 10 else {"changed": len(report), "refs": [r["ref"] for r in report]}
 
 

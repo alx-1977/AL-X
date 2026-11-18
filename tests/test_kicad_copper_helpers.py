@@ -156,7 +156,10 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
         script = """
 b = load()
 pb = _pcbnew.LoadBoard(BOARD_PATH.replace("board.kicad_pcb", "parts.kicad_pcb"))
+strokes = {f.GetReference(): f.Reference().GetTextThickness() for f in pb.GetFootprints()}
 every = part_texts(pb, "all", "Reference", size=0.5)
+print("strokes kept", all(f.Reference().GetTextThickness() == strokes[f.GetReference()] for f in pb.GetFootprints()))
+print("stroke set", part_texts(pb, ["U7"], "Reference", thickness=0.1)[0]["thickness"])
 refs = [t["ref"] for t in every] if isinstance(every, list) else every["refs"]
 print("every", len(refs) > 0, {round(_pcbnew.ToMM(part(pb, r).Reference().GetTextHeight()), 3) for r in refs})
 one = part_texts(pb, [refs[0]], "Reference", at=(120, 120), hide=True)[0]
@@ -182,6 +185,9 @@ except ValueError as error:
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("every True {0.5}", done.stdout)
+            # 18 Nov: a size change must not touch the stroke (P0009: 206 strokes thinned to 0.075 mm).
+            self.assertIn("strokes kept True", done.stdout)
+            self.assertIn("stroke set 0.1", done.stdout)
             self.assertIn("one [120.0, 120.0] False", done.stdout)
             self.assertIn("unknown True", done.stdout)
             self.assertIn("placed [110.0, 100.0]", done.stdout)

@@ -1406,7 +1406,7 @@ class KiCadProvider:
                                                else ({}, {}))
                     problems = unmet(change, pins_before, pins_after, names_after,
                                      board_pad_nets(board.read_text()) if plan['board'] else {},
-                                     plan['touched'], names_before)
+                                     change_result, names_before)
                     if problems and not dry_run:
                         # Not what the change declared: undone, every unmet item named.
                         raise KiCadError('change_unmet', {'unmet': problems[:30], 'change_result': change_result})
@@ -1417,7 +1417,9 @@ class KiCadProvider:
                 report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                           'board': structural_diff(facts_before, facts_after)}
                 if plan is not None:
-                    report['change_result'] = change_result
+                    # A removal's scope is for the check above, not for her to read.
+                    report['change_result'] = [{key: value for key, value in item.items() if key != 'scope'}
+                                               if isinstance(item, dict) else item for item in change_result]
                     report['unmet'] = problems[:30]
                 if not library and changed:
                     report['compared_to_original'] = self._compared(root, meta, signatures)
@@ -2360,10 +2362,14 @@ class KiCadProvider:
         return json.loads(path.read_text()) if path.is_file() else None
 
     def _compared_parity(self, root, meta):
-        now = self._parity(root, meta) or []
+        """Schematic-vs-board differences new since his original. available False: there was no
+        schematic to compare, which is not the same as no differences (18 Nov review: the flag
+        was tested after None had become an empty list, so it always read True)."""
+        now = self._parity(root, meta)
         base = (self._baseline(root) or {}).get('parity') or []
-        return {'new': sorted(set(now) - set(base)), 'fixed': len(set(base) - set(now)),
-                'schematic': now is not None}
+        found = now or []
+        return {'new': sorted(set(found) - set(base)), 'fixed': len(set(base) - set(found)),
+                'available': now is not None}
 
     def _new_faults(self, root, signatures):
         """DRC errors and unconnected items found now that his original did not have."""
@@ -2398,6 +2404,7 @@ class KiCadProvider:
         by_type = Counter(entry['type'] for entry in found)
         return {'available': True, 'new': sum(new.values()), 'resolved': sum(resolved.values()),
                 'new_by_type': dict(by_type), 'new_findings': found[:25],
+                'schematic_vs_board_available': parity['available'],
                 'schematic_vs_board_new': parity['new'][:20], 'schematic_vs_board_fixed': parity['fixed']}
 
     def _original_view(self, root, meta):
@@ -2634,15 +2641,18 @@ class KiCadProvider:
             folders.append(views / 'current')
         shutil.copytree(root / 'project', views / 'amended')
         folders.append(views / 'amended')
-        meta = dict(meta, view={'stamp': stamp, 'revision': self._revision(root, meta),
-                                'files': design_inventory(views / 'amended')})
-        self._save_metadata(root, meta)
         suffix = '.kicad_sch' if what == 'schematic' else '.kicad_pcb'
         files = [folder / Path(meta['board']).with_suffix(suffix).name for folder in folders]
         if not all(path.is_file() for path in files):
             raise KiCadError('unsupported_project', {'detail': 'no %s to open' % what})
+        view = {'stamp': stamp, 'revision': self._revision(root, meta), 'what': what,
+                'files': design_inventory(views / 'amended')}
         for index, path in enumerate(files):
             self._viewers.append(self.open_viewer(what, path, index))
+        # Recorded only once the windows opened, with what they show (18 Nov review: a failed
+        # launch, or a schematic view, could count as having shown him the board).
+        meta = dict(meta, view=view)
+        self._save_metadata(root, meta)
         time.sleep(self.viewer_settle_seconds)
         folder = self.render_folder / arguments['work_copy_id']
         folder.mkdir(parents=True, exist_ok=True)
@@ -2727,9 +2737,15 @@ class KiCadProvider:
                 raise KiCadError('work_copy_changed')
             # He approves what he has seen: this exact copy opened for him in KiCad (17 Nov: asked
             # three times about one capacitor without being shown it once).
-            if (meta.get('view') or {}).get('revision') != revision:
+            view = meta.get('view') or {}
+            if view.get('revision') != revision:
                 raise KiCadError('arguments_unusable', {'detail': 'he has not been shown this version: open it '
                                                         'for him with open_in_kicad first, then ask'})
+            shows = 'schematic' if step == 'schematic' else 'board'
+            if view.get('what') != shows:
+                raise KiCadError('arguments_unusable', {'detail': 'the %s step is approved on the %s: open the %s '
+                                                        'for him with open_in_kicad first, then ask'
+                                                        % (step, shows, shows)})
             current = fingerprints(root / 'project', meta['board'])
             original = self._original_steps(root, meta)
             approvals = dict(meta.get('approvals', {}))
