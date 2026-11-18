@@ -50,7 +50,7 @@ BOARD_OPS = {
     'to_plane': ('pins',),
     'remove_copper_shapes': ('nets', 'area'),
     'add_teardrops': (),
-    'set_text': ('old', 'new'),
+    'set_text': ('old',),
     'title_block': (),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
@@ -96,6 +96,13 @@ def validate_change(change: Any) -> dict[str, Any]:
         if op.get('area') is not None and not (isinstance(op['area'], (list, tuple)) and len(op['area']) == 4
                                                and all(isinstance(v, (int, float)) for v in op['area'])):
             raise ChangeError('%s: area is [x1, y1, x2, y2] in mm' % where)
+        if op['op'] == 'set_text':
+            for field in ('at', 'by'):
+                if op.get(field) is not None and not (isinstance(op[field], (list, tuple)) and len(op[field]) == 2
+                                                      and all(isinstance(v, (int, float)) for v in op[field])):
+                    raise ChangeError('%s: %s is [x, y] in mm' % (where, field))
+            if all(op.get(field) is None for field in ('new', 'at', 'by')):
+                raise ChangeError('%s (set_text) needs new, at or by' % where)
         if op['op'] == 'power' and not (op.get('pin') or op.get('pins')):
             raise ChangeError('%s (power) needs pin, or pins for a row of neighbouring pins' % where)
         if op['op'] == 'swap_symbol' or (op['op'] == 'add_symbol' and op.get('lib_id')):
@@ -812,18 +819,9 @@ def apply_change(change):
                     b, op.get("skip_nets") or (), op.get("area"))
                 refill(b)
             elif kind == "set_text":
-                # Board text on silkscreen, like the revision or date (18 Nov): every text that reads
-                # `old` exactly now reads `new`.
-                changed = 0
-                for item in b.GetDrawings():
-                    if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX") and item.GetText() == op["old"]:
-                        item.SetText(op["new"])
-                        changed += 1
-                if not changed:
-                    found = sorted({item.GetText() for item in b.GetDrawings()
-                                    if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX")})
-                    raise ValueError("no board text reads %r; the texts are: %s" % (op["old"], "; ".join(found)[:600]))
-                done["texts_changed"] = changed
+                # Board text on silkscreen (18 Nov): every text that reads `old` exactly is rewritten
+                # (new), placed (at) or shifted (by); revision and date, or words off a pad.
+                done["texts"] = board_texts(b, op["old"], op.get("new"), op.get("at"), op.get("by"))
             elif kind == "title_block":
                 block = b.GetTitleBlock()
                 if op.get("title") is not None:

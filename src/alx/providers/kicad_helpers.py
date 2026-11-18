@@ -949,6 +949,33 @@ def save_footprint(library, item):
     _pcbnew.FootprintSave(folder, item)
 
 
+def board_texts(board, old, new=None, at=None, by=None):
+    """Board silkscreen texts and text boxes that read `old` exactly (18 Nov: the revision, date and
+    the antenna's "Cellular"/"Keepout" words). new rewrites them; at [x, y] mm puts each one's
+    anchor there; by [dx, dy] mm shifts each one. Returns each text with its anchor and the
+    box it covers, so the next move can be judged."""
+    found = [item for item in board.GetDrawings()
+             if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX") and item.GetText() == old]
+    if not found:
+        texts = sorted({item.GetText() for item in board.GetDrawings()
+                        if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX")})
+        raise ValueError("no board text reads %r; the texts are: %s" % (old, "; ".join(texts)[:600]))
+    report = []
+    for item in found:
+        if at is not None:
+            here = item.GetPosition()
+            item.Move(_pcbnew.VECTOR2I(point(at[0], at[1]).x - here.x, point(at[0], at[1]).y - here.y))
+        if by is not None:
+            item.Move(_pcbnew.VECTOR2I(_pcbnew.FromMM(by[0]), _pcbnew.FromMM(by[1])))
+        if new is not None:
+            item.SetText(new)
+        box = item.GetBoundingBox()
+        report.append({"text": item.GetText(), "kind": "box" if item.GetClass() == "PCB_TEXTBOX" else "text",
+                       "at": [round(_pcbnew.ToMM(item.GetPosition().x), 3), round(_pcbnew.ToMM(item.GetPosition().y), 3)],
+                       "covers": [round(_pcbnew.ToMM(v), 3) for v in (box.GetLeft(), box.GetTop(), box.GetRight(), box.GetBottom())]})
+    return report
+
+
 def add_teardrops(board, skip_nets=(), area=None):
     """Teardrops where a track meets a pad or via and has none yet (18 Nov: KiCad makes them only in
     its window, so routed copper had none). Shaped like his board's own: curved, as wide as most

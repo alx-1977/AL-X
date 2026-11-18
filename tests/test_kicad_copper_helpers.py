@@ -151,5 +151,28 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
             self.assertNotIn(".alx-fp-", " ".join(p.name for p in Path(folder).iterdir()))
             self.assertRegex(done.stdout, r"teardrops [1-9]\d* 0")
 
+    def test_board_text_is_rewritten_placed_and_shifted(self) -> None:
+        """18 Nov: P0009's antenna words lay over AE1's pads and nothing could move them."""
+        script = """
+b = load()
+print("placed", board_texts(b, "DRC fixture", at=(110, 100))[0]["at"])
+moved = board_texts(b, "DRC fixture", new="Keepout", by=(0, -1.5))[0]
+print("moved", moved["text"], moved["at"], moved["covers"][1] < moved["covers"][3])
+try:
+    board_texts(b, "Nothing")
+except ValueError as error:
+    print("missing", "Keepout" in str(error))
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "board.kicad_pcb"
+            board.write_bytes((FIXTURES / "kicad" / "minimal.kicad_pcb").read_bytes())
+            program = Path(folder) / "edit.py"
+            program.write_text(HELPERS + script_runner(script))
+            done = run(PYTHON, program, board)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("placed [110.0, 100.0]", done.stdout)
+            self.assertIn("moved Keepout [110.0, 98.5] True", done.stdout)
+            self.assertIn("missing True", done.stdout)
+
 if __name__ == "__main__":
     unittest.main()

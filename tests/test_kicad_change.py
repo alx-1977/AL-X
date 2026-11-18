@@ -36,10 +36,13 @@ class ChangeShapeTests(unittest.TestCase):
         self.assertEqual(plan["symbols"], ["FireFli_ICs:RFSW6024TR13"])
         self.assertEqual(plan["footprints"], ["FireFli_ICs/RFSW6024TR13"])
         self.assertEqual(plan["touched"], ["C37", "U6"])
+        validate_change([{"op": "set_text", "old": "Keepout", "by": [0, -1.5]}])
         for wrong, said in (([], "1 to 200"), ([{"op": "draw"}], "op is one of"),
                             ([{"op": "wire", "sheet": "a", "from": "U6.9"}], "needs to"),
                             ([{"op": "wire", "sheet": "a", "from": "U6-9", "to": "C1.1"}], "REF.PIN"),
-                            ([{"op": "track", "width": 0.3}], "points, or from and to")):
+                            ([{"op": "track", "width": 0.3}], "points, or from and to"),
+                            ([{"op": "set_text", "old": "Keepout"}], "needs new, at or by"),
+                            ([{"op": "set_text", "old": "Keepout", "by": [1]}], r"by is \[x, y\]")):
             with self.subTest(said=said), self.assertRaisesRegex(ChangeError, said):
                 validate_change(wrong)
 
