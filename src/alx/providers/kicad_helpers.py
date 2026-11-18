@@ -949,6 +949,128 @@ def save_footprint(library, item):
     _pcbnew.FootprintSave(folder, item)
 
 
+def add_teardrops(board, skip_nets=(), area=None):
+    """Teardrops where a track meets a pad or via and has none yet (18 Nov: KiCad makes them only in
+    its window, so routed copper had none). Shaped like his board's own: curved, as wide as most
+    of the pad, copied from one of its teardrops; none on nets in skip_nets nor on nets with
+    curved (RF) tracks. area (x0, y0, x1, y1) mm limits where. Refill afterwards."""
+    import math as _math
+    models = [z for z in board.Zones() if z.IsTeardropArea()]
+    have = [(z.GetNetCode(), z.GetLayer(), z.Outline()) for z in models]
+    curved = {t.GetNetCode() for t in board.GetTracks() if t.GetClass() == "PCB_ARC"}
+    skip = {board.FindNet(n).GetNetCode() for n in skip_nets if board.FindNet(n) is not None}
+    targets = []
+    for footprint in board.GetFootprints():
+        for item in footprint.Pads():
+            if item.GetNetCode() > 0:
+                targets.append((item, item.GetPosition(), item.GetSize(_pcbnew.F_Cu if item.IsOnLayer(_pcbnew.F_Cu)
+                                                                           else _pcbnew.B_Cu), item.GetOrientation()))
+    for item in board.GetTracks():
+        if item.GetClass() == "PCB_VIA":
+            size = item.GetWidth(_pcbnew.F_Cu)
+            targets.append((item, item.GetPosition(), _pcbnew.VECTOR2I(size, size), None))
+    made = 0
+    tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
+
+    def in_other(net, layer_id, spot, target):
+        # The track's far end lands in another pad or via of its net: a pad-to-pad link, no teardrop.
+        for other, centre_, size_, _a in targets:
+            if other is target or other.GetNetCode() != net or not other.IsOnLayer(layer_id):
+                continue
+            if other.GetClass() == "PAD":
+                if other.GetEffectiveShape(layer_id).Collide(spot, 0):
+                    return True
+            elif (spot - centre_).EuclideanNorm() <= size_.x / 2:
+                return True
+        return False
+    for target, centre, size, angle in targets:
+        net = target.GetNetCode()
+        if net in curved or net in skip:
+            continue
+        cx, cy = _pcbnew.ToMM(centre.x), _pcbnew.ToMM(centre.y)
+        if area and not (area[0] <= cx <= area[2] and area[1] <= cy <= area[3]):
+            continue
+        for track in tracks:
+            if track.GetNetCode() != net or not target.IsOnLayer(track.GetLayer()):
+                continue
+            if target.GetClass() == "PAD":
+                inside = target.GetEffectiveShape(track.GetLayer())
+                ends = [e for e in (track.GetStart(), track.GetEnd()) if inside.Collide(e, 0)]
+            else:
+                ends = [e for e in (track.GetStart(), track.GetEnd())
+                        if (e - centre).EuclideanNorm() <= size.x / 2]
+            if len(ends) != 1:
+                continue
+            near_end = ends[0]
+            far_end = track.GetEnd() if near_end == track.GetStart() else track.GetStart()
+            if in_other(net, track.GetLayer(), far_end, target):
+                continue
+            ux, uy = _pcbnew.ToMM(far_end.x - near_end.x), _pcbnew.ToMM(far_end.y - near_end.y)
+            run = _math.hypot(ux, uy)
+            if run < 1e-6:
+                continue
+            ux, uy = ux / run, uy / run
+            vx, vy = -uy, ux
+            # The pad's size along the track and across it.
+            sx, sy = _pcbnew.ToMM(size.x) / 2, _pcbnew.ToMM(size.y) / 2
+            if angle is not None:
+                a = -angle.AsRadians()
+                px, py = ux * _math.cos(a) - uy * _math.sin(a), ux * _math.sin(a) + uy * _math.cos(a)
+            else:
+                px, py = ux, uy
+            along = abs(px) * sx + abs(py) * sy
+            across = abs(py) * sx + abs(px) * sy
+            width = _pcbnew.ToMM(track.GetWidth())
+            flare = min(2 * across * 0.9, 2.0)
+            if width >= flare * 0.9:
+                continue  # the track is about as wide as the pad already
+            length = min(max(along, 0.25), 1.0)
+            # From the pad's centre, past its edge by `length` along the track.
+            ex, ey = _pcbnew.ToMM(near_end.x), _pcbnew.ToMM(near_end.y)
+            base = (cx - ex) * ux + (cy - ey) * uy  # where the pad centre sits along the track
+            reach = base + along + length
+            if reach > run:
+                continue  # the straight run is too short for a teardrop
+            # Every teardrop covers the track just outside the pad's edge.
+            probe = (ex + ux * (base + along + 0.05), ey + uy * (base + along + 0.05))
+            if any(code == net and layer_id == track.GetLayer()
+                   and outline.Contains(point(*probe)) for code, layer_id, outline in have):
+                continue  # one is there already
+            corners = []
+            steps = 6
+            for side in (1, -1):
+                row = []
+                for k in range(steps + 1):
+                    s_ = k / float(steps)  # 0 at the track, 1 at the pad edge
+                    half = width / 2 + (flare / 2 - width / 2) * s_ * s_
+                    d = base + along + length * (1 - s_)
+                    row.append((ex + ux * d + vx * half * side, ey + uy * d + vy * half * side))
+                row.append((ex + ux * base + vx * (flare / 2) * side * 0.6, ey + uy * base + vy * (flare / 2) * side * 0.6))
+                corners.extend(row if side == 1 else row[::-1])
+            zone = _pcbnew.ZONE(board)
+            if models:
+                model = models[0]
+                zone.SetTeardropAreaType(model.GetTeardropAreaType())
+                zone.SetAssignedPriority(model.GetAssignedPriority())
+                zone.SetPadConnection(model.GetPadConnection())
+                zone.SetMinThickness(model.GetMinThickness())
+                zone.SetIslandRemovalMode(model.GetIslandRemovalMode())
+            else:
+                zone.SetTeardropAreaType(_pcbnew.TEARDROP_TYPE_TD_VIAPAD if hasattr(_pcbnew, "TEARDROP_TYPE_TD_VIAPAD")
+                                         else 1)
+                zone.SetPadConnection(_pcbnew.ZONE_CONNECTION_FULL)
+            zone.SetLayer(track.GetLayer())
+            zone.SetNetCode(net)
+            outline = zone.Outline()
+            outline.NewOutline()
+            for x, y in corners:
+                outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
+            board.Add(zone)
+            have.append((net, track.GetLayer(), zone.Outline()))
+            made += 1
+    return made
+
+
 def refill(board):
     """Repour every zone; do this after any change."""
     _pcbnew.ZONE_FILLER(board).Fill(board.Zones())

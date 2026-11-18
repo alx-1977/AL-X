@@ -49,6 +49,9 @@ BOARD_OPS = {
     'route': ('from', 'to'),
     'to_plane': ('pins',),
     'remove_copper_shapes': ('nets', 'area'),
+    'add_teardrops': (),
+    'set_text': ('old', 'new'),
+    'title_block': (),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
 
@@ -802,6 +805,37 @@ def apply_change(change):
                 done["text"] = {"at": [round(_pcbnew.ToMM(field.GetPosition().x), 3),
                                        round(_pcbnew.ToMM(field.GetPosition().y), 3)],
                                 "size": round(_pcbnew.ToMM(field.GetTextHeight()), 3), "shown": field.IsVisible()}
+            elif kind == "add_teardrops":
+                # Teardrops where tracks meet pads and vias and have none (18 Nov: KiCad makes them
+                # only in its own window). RF nets (curved tracks) and skip_nets get none.
+                done["teardrops_added"] = add_teardrops(b, op.get("skip_nets") or (), op.get("area"))
+                refill(b)
+            elif kind == "set_text":
+                # Board text on silkscreen, like the revision or date (18 Nov): every text that reads
+                # `old` exactly now reads `new`.
+                changed = 0
+                for item in b.GetDrawings():
+                    if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX") and item.GetText() == op["old"]:
+                        item.SetText(op["new"])
+                        changed += 1
+                if not changed:
+                    found = sorted({item.GetText() for item in b.GetDrawings()
+                                    if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX")})
+                    raise ValueError("no board text reads %r; the texts are: %s" % (op["old"], "; ".join(found)[:600]))
+                done["texts_changed"] = changed
+            elif kind == "title_block":
+                block = b.GetTitleBlock()
+                if op.get("title") is not None:
+                    block.SetTitle(op["title"])
+                if op.get("date") is not None:
+                    block.SetDate(op["date"])
+                if op.get("revision") is not None:
+                    block.SetRevision(op["revision"])
+                if op.get("company") is not None:
+                    block.SetCompany(op["company"])
+                b.SetTitleBlock(block)
+                done["title_block"] = {"title": block.GetTitle(), "date": block.GetDate(),
+                                       "revision": block.GetRevision()}
             elif kind == "sync_from_schematic":
                 done.update(sync_from_schematic(b, op["_sync"], op.get("place") or {}))
             elif kind == "remove_teardrops":
