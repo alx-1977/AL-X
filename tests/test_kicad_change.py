@@ -37,11 +37,15 @@ class ChangeShapeTests(unittest.TestCase):
         self.assertEqual(plan["footprints"], ["FireFli_ICs/RFSW6024TR13"])
         self.assertEqual(plan["touched"], ["C37", "U6"])
         validate_change([{"op": "set_text", "old": "Keepout", "by": [0, -1.5]}])
+        everything = validate_change([{"op": "board_text", "refs": "all", "field": "Reference", "size": 0.5}])
+        self.assertEqual(everything["touched"], [])
         for wrong, said in (([], "1 to 200"), ([{"op": "draw"}], "op is one of"),
                             ([{"op": "wire", "sheet": "a", "from": "U6.9"}], "needs to"),
                             ([{"op": "wire", "sheet": "a", "from": "U6-9", "to": "C1.1"}], "REF.PIN"),
                             ([{"op": "track", "width": 0.3}], "points, or from and to"),
                             ([{"op": "set_text", "old": "Keepout"}], "needs new, at or by"),
+                            ([{"op": "board_text", "refs": "C1", "field": "Reference"}], 'or "all"'),
+                            ([{"op": "board_text", "refs": "all", "field": "Reference", "at": [1, 2]}], "one reference"),
                             ([{"op": "set_text", "old": "Keepout", "by": [1]}], r"by is \[x, y\]")):
             with self.subTest(said=said), self.assertRaisesRegex(ChangeError, said):
                 validate_change(wrong)
@@ -331,6 +335,24 @@ class RealChangeTests(unittest.TestCase):
             self.assertEqual(result.failure["code"], "script_failed")
             self.assertIn("no GND port", result.failure["recovery"]["stderr"])
 
+
+
+class BriefInspectTests(unittest.TestCase):
+    def test_brief_lists_only_the_parts_names(self):
+        """18 Nov: the full reading of P0009 was too much, so references were guessed in sixes."""
+        from unittest import mock
+        from alx.providers.kicad import KiCadProvider
+        provider = KiCadProvider.__new__(KiCadProvider)
+        provider.execute_python, provider.work_root = object(), Path("/nonexistent")
+        provider.settings = mock.Mock(kicad_python="python")
+        full = {"board": {}, "parts": [{"ref": "C1", "value": "100n", "footprint": "F:C0402", "pads": [1, 2],
+                                        "fields": {"MPN": "x"}}], "nets": [{"net": "GND"}], "zones": [], "truncated": {}}
+        with mock.patch.object(KiCadProvider, "_board_for", return_value=Path("b.kicad_pcb")), \
+                mock.patch("alx.providers.kicad_section.read_overview", return_value=full) as overview:
+            result = provider.inspect({"work_copy_id": "w", "brief": True})
+        self.assertNotIn("brief", overview.call_args[0][1])
+        self.assertEqual(result["parts"], [{"ref": "C1", "value": "100n", "footprint": "F:C0402"}])
+        self.assertEqual(result["nets"], [])
 
 if __name__ == "__main__":
     unittest.main()

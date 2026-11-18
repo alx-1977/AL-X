@@ -949,6 +949,41 @@ def save_footprint(library, item):
     _pcbnew.FootprintSave(folder, item)
 
 
+def part_texts(board, refs, field, at=None, size=None, angle=None, hide=None):
+    """Parts' Reference or Value (or another field's) text on the board, like Altium's select all,
+    then font (18 Nov). refs is a list of references, or "all" for every part. at [x, y] mm places
+    one part's text; size mm sets height and width alike; angle in degrees; hide True or False.
+    Returns each text when there are few, else how many changed."""
+    names = None if refs == "all" else list(refs)
+    if names is not None:
+        missing = [r for r in names if board.FindFootprintByReference(r) is None]
+        if missing:
+            raise ValueError("not on this board: %s" % ", ".join(missing))
+    parts = list(board.GetFootprints()) if names is None else [part(board, r) for r in names]
+    report = []
+    for found in parts:
+        text = (found.Reference() if field == "Reference" else found.Value() if field == "Value"
+                else found.GetField(field))
+        if text is None:
+            if names is None:
+                continue
+            raise ValueError("%s has no field %s" % (found.GetReference(), field))
+        if at is not None:
+            text.SetPosition(point(at[0], at[1]))
+        if size:
+            height = _pcbnew.FromMM(size)
+            text.SetTextSize(_pcbnew.VECTOR2I(height, height))
+            text.SetTextThickness(_pcbnew.FromMM(size * 0.15))
+        if angle is not None:
+            text.SetTextAngleDegrees(angle)
+        if hide is not None:
+            text.SetVisible(not hide)
+        report.append({"ref": found.GetReference(),
+                       "at": [round(_pcbnew.ToMM(text.GetPosition().x), 3), round(_pcbnew.ToMM(text.GetPosition().y), 3)],
+                       "size": round(_pcbnew.ToMM(text.GetTextHeight()), 3), "shown": text.IsVisible()})
+    return report if len(report) <= 10 else {"changed": len(report), "refs": [r["ref"] for r in report]}
+
+
 def board_texts(board, old, new=None, at=None, by=None):
     """Board silkscreen texts and text boxes that read `old` exactly (18 Nov: the revision, date and
     the antenna's "Cellular"/"Keepout" words). new rewrites them; at [x, y] mm puts each one's

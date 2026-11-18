@@ -759,13 +759,18 @@ class KiCadProvider:
         if self.execute_python is None:
             raise KiCadError('engine_unavailable')
         board = self._board_for(arguments)
-        overview_args = {key: value for key, value in arguments.items() if key != 'window'}
+        overview_args = {key: value for key, value in arguments.items() if key not in ('window', 'brief')}
         try:
             result = read_overview(board, overview_args, scratch_root=self.work_root / 'sections',
                                    kicad_python=self.settings.kicad_python,
                                    execute_python=self.execute_python)
             if arguments.get('window') is not None:
                 result = dict(result, copper=self._copper_in(board, arguments))
+            if arguments.get('brief'):
+                # Just the parts' names (18 Nov: the full reading of P0009 was too much to take in,
+                # so every reference was guessed in sixes, C1 to C96, ANT1, X1 ...).
+                result = dict(result, parts=[{key: part.get(key) for key in ('ref', 'value', 'footprint')}
+                                             for part in result.get('parts') or ()], nets=[])
             return result
         except SectionError as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error

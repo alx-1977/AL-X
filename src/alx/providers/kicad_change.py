@@ -42,7 +42,7 @@ BOARD_OPS = {
     'remove_teardrops': ('area',),
     'remove_dangling_tracks': ('area',),
     'sync_from_schematic': (),
-    'board_text': ('ref', 'field'),
+    'board_text': ('refs', 'field'),
     'keepout': ('outline',),
     'remove_keepouts': ('area',),
     'copper_shape': ('net', 'outline'),
@@ -96,6 +96,12 @@ def validate_change(change: Any) -> dict[str, Any]:
         if op.get('area') is not None and not (isinstance(op['area'], (list, tuple)) and len(op['area']) == 4
                                                and all(isinstance(v, (int, float)) for v in op['area'])):
             raise ChangeError('%s: area is [x1, y1, x2, y2] in mm' % where)
+        if op['op'] == 'board_text':
+            refs = op['refs']
+            if not (refs == 'all' or (isinstance(refs, (list, tuple)) and all(isinstance(r, str) for r in refs))):
+                raise ChangeError('%s: refs is a list of references, or "all" for every part' % where)
+            if op.get('at') is not None and (refs == 'all' or len(refs) != 1):
+                raise ChangeError('%s (board_text): at places one part\'s text; give refs one reference' % where)
         if op['op'] == 'set_text':
             for field in ('at', 'by'):
                 if op.get(field) is not None and not (isinstance(op[field], (list, tuple)) and len(op[field]) == 2
@@ -117,7 +123,8 @@ def validate_change(change: Any) -> dict[str, Any]:
             if isinstance(op.get(field), str):
                 touched.add(op[field])
         for field in ('refs',):
-            touched.update(r for r in op.get(field) or () if isinstance(r, str))
+            if isinstance(op.get(field), (list, tuple)):
+                touched.update(r for r in op[field] if isinstance(r, str))
         for field in ('from', 'to', 'pin'):
             if isinstance(op.get(field), str) and PIN.match(op[field]):
                 touched.add(op[field].split('.')[0])
@@ -792,26 +799,10 @@ def apply_change(change):
                         b.Delete(zone)
                 done["removed"] = gone
             elif kind == "board_text":
-                # A part's reference or value text on the board: where, how big, turned, shown
-                # (17 Nov: silkscreen over pads after placement; C93's text too large).
-                found = part(b, op["ref"])
-                field = (found.Reference() if op["field"] == "Reference" else found.Value() if op["field"] == "Value"
-                         else found.GetField(op["field"]))
-                if field is None:
-                    raise ValueError("%s has no field %s" % (op["ref"], op["field"]))
-                if op.get("at"):
-                    field.SetPosition(point(op["at"][0], op["at"][1]))
-                if op.get("size"):
-                    height = _pcbnew.FromMM(op["size"])
-                    field.SetTextSize(_pcbnew.VECTOR2I(height, height))
-                    field.SetTextThickness(_pcbnew.FromMM(op["size"] * 0.15))
-                if op.get("angle") is not None:
-                    field.SetTextAngleDegrees(op["angle"])
-                if op.get("hide") is not None:
-                    field.SetVisible(not op["hide"])
-                done["text"] = {"at": [round(_pcbnew.ToMM(field.GetPosition().x), 3),
-                                       round(_pcbnew.ToMM(field.GetPosition().y), 3)],
-                                "size": round(_pcbnew.ToMM(field.GetTextHeight()), 3), "shown": field.IsVisible()}
+                # Parts' reference or value text on the board: where, how big, turned, shown
+                # (17 Nov: silkscreen over pads; 18 Nov: every designator 0.5 mm took 95 operations).
+                done["texts"] = part_texts(b, op["refs"], op["field"], op.get("at"), op.get("size"),
+                                           op.get("angle"), op.get("hide"))
             elif kind == "add_teardrops":
                 # Teardrops where tracks meet pads and vias and have none (18 Nov: KiCad makes them
                 # only in its own window). RF nets (curved tracks) and skip_nets get none.

@@ -140,8 +140,8 @@ _ACTION_DEFINITIONS = (
         'small pad, or feed copper); remove_copper_shapes {nets, area: [x1, y1, x2, y2]} (copper shapes and '
         'pours of those nets wholly inside, to redraw them); keepout {outline: [[x, y], ...], layers?: [F, In1, ..., B], no_tracks?, no_vias?, name?} (a '
         'keep-out area: pours pull back from it, e.g. an antenna clearance from its datasheet layout); '
-        'remove_keepouts {area: [x1, y1, x2, y2], name?} (keep-out areas wholly inside, to resize or replace one); board_text {ref, field: Reference|Value, at?: [x, y], size?: mm, angle?, hide?} (a part\'s text '
-        'on the board moved, sized, turned or hidden); sync_from_schematic {place?: {REF: [x, y, rotation?]}} (the board takes the schematic as it '
+        'remove_keepouts {area: [x1, y1, x2, y2], name?} (keep-out areas wholly inside, to resize or replace one); board_text {refs: [REF, ...] | "all", field: Reference|Value, at?: [x, y], size?: mm, angle?, hide?} '
+        '(parts\' text on the board sized, turned or hidden in one go, like select all then font; at moves one part\'s text); sync_from_schematic {place?: {REF: [x, y, rotation?]}} (the board takes the schematic as it '
         'is, like KiCad\'s Update PCB from Schematic: changed footprints swapped in place, values and fields '
         'such as MPN and LCSC copied, every pad on its schematic net; parts new to the board go where place '
         'says, else are listed in needs_place; parts only on the board are listed, never removed: remove_parts '
@@ -334,9 +334,10 @@ INSPECT = CapabilityDefinition('inspect',
     '(text in a reference, value, footprint or field) narrow the parts and nets; limit '
     '(default 300) bounds each list, with truncated saying when more exist. window [x0, y0, x1, y1] '
     '(mm) adds copper: the tracks (points, width, layer, net), vias and pads (ref, number, net, '
-    'centre, size) inside it, narrowed by nets and refs when given: what to route to.',
+    'centre, size) inside it, narrowed by nets and refs when given: what to route to. brief: '
+    'just each part\'s reference, value and footprint, and no nets: the list of what is on the board.',
     obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'refs': array(S), 'nets': array(S),
-         'contains': S, 'limit': I, 'window': array(N)}, ()),
+         'contains': S, 'limit': I, 'window': array(N), 'brief': B}, ()),
     obj({'board': MAP, 'parts': array(MAP), 'nets': array(MAP), 'zones': array(MAP),
          'truncated': MAP, 'copper': MAP}, ('board', 'parts', 'nets', 'zones', 'truncated')),
     SideEffect.NONE, FAILURES)

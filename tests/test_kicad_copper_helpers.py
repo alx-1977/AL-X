@@ -155,6 +155,16 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
         """18 Nov: P0009's antenna words lay over AE1's pads and nothing could move them."""
         script = """
 b = load()
+pb = _pcbnew.LoadBoard(BOARD_PATH.replace("board.kicad_pcb", "parts.kicad_pcb"))
+every = part_texts(pb, "all", "Reference", size=0.5)
+refs = [t["ref"] for t in every] if isinstance(every, list) else every["refs"]
+print("every", len(refs) > 0, {round(_pcbnew.ToMM(part(pb, r).Reference().GetTextHeight()), 3) for r in refs})
+one = part_texts(pb, [refs[0]], "Reference", at=(120, 120), hide=True)[0]
+print("one", one["at"], one["shown"])
+try:
+    part_texts(pb, ["NOPE9"], "Reference", size=0.5)
+except ValueError as error:
+    print("unknown", "NOPE9" in str(error))
 print("placed", board_texts(b, "DRC fixture", at=(110, 100))[0]["at"])
 moved = board_texts(b, "DRC fixture", new="Keepout", by=(0, -1.5))[0]
 print("moved", moved["text"], moved["at"], moved["covers"][1] < moved["covers"][3])
@@ -166,10 +176,14 @@ except ValueError as error:
         with tempfile.TemporaryDirectory() as folder:
             board = Path(folder) / "board.kicad_pcb"
             board.write_bytes((FIXTURES / "kicad" / "minimal.kicad_pcb").read_bytes())
+            (Path(folder) / "parts.kicad_pcb").write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
             program = Path(folder) / "edit.py"
             program.write_text(HELPERS + script_runner(script))
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("every True {0.5}", done.stdout)
+            self.assertIn("one [120.0, 120.0] False", done.stdout)
+            self.assertIn("unknown True", done.stdout)
             self.assertIn("placed [110.0, 100.0]", done.stdout)
             self.assertIn("moved Keepout [110.0, 98.5] True", done.stdout)
             self.assertIn("missing True", done.stdout)
