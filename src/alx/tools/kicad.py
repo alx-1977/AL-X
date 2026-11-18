@@ -238,8 +238,12 @@ _ACTION_DEFINITIONS = (
         'Export Gerbers and drill files from an untainted work copy through KiCad CLI. '
         'Gerbers use the board saved plot settings, including layer selection and Protel '
         'extensions. separate_drills (default false) separates plated and non-plated Excellon files. '
-        'drill_origin is absolute (default) or plot, the drill/aux origin the Gerbers use when the '
-        'board plot settings use it. '
+        'Gerbers, drill and positions share one origin: the board\'s drill/place origin when it has one, '
+        'else absolute. assembly true adds JLC\'s bom.csv (Comment, Designator, Footprint, LCSC Part #) '
+        'and positions.csv (Designator, Mid X, Mid Y, Layer, Rotation) beside the zip, from KiCad\'s own '
+        'exports, each part turned and shifted by its library footprint\'s JLC Rotation Offset and JLC '
+        'Position Offset; the result lists lines without an LCSC number, corrected parts and bottom-side '
+        'parts (check those in JLC\'s preview). work_copy_revision: the revision the files must be of. '
         'output_dir is relative to the original project. Optional renames map generated file '
         'or layer names to exact manufacturer filenames; ambiguous mappings return. Optional '
         'zip_name adds a zip. Publication only adds files and refuses existing targets before '
@@ -247,9 +251,10 @@ _ACTION_DEFINITIONS = (
         'deletes or overwrites. compare_with is a previous zip/folder under home; comparison '
         'by final filename ignores Gerber comments and creation/generator metadata.',
         obj({'work_copy_id': S, 'output_dir': S, 'renames': MAP, 'zip_name': S, 'compare_with': S,
-             'separate_drills': B, 'drill_origin': S},
+             'separate_drills': B, 'assembly': B, 'work_copy_revision': S},
             ('work_copy_id', 'output_dir')),
-        obj({'files_written': array(S), 'comparison': COMPARISON, 'staging_path': S}),
+        obj({'files_written': array(S), 'comparison': COMPARISON, 'staging_path': S, 'origin': S,
+             'assembly': MAP}, ('files_written', 'comparison', 'staging_path', 'origin')),
         SideEffect.EFFECTFUL, FAILURES),
     CapabilityDefinition('read_reference_file',
         'Read bounded structured reference facts from an absolute or tilde-relative path '

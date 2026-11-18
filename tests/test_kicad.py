@@ -1568,6 +1568,58 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', dict(args, separate_drills='yes'))
         self.assertEqual(result.failure['code'], 'arguments_unusable')
 
+    def test_assembly_files_share_the_gerbers_origin_and_apply_library_corrections(self):
+        """18 Nov: JLC BOM and positions from KiCad's own exports, beside the zip, with each part's
+        JLC correction from its library footprint, all on the board's drill/place origin."""
+        import zipfile
+        board = BOARD.replace('(kicad_pcb\n', '(kicad_pcb\n  (setup (aux_axis_origin 95 150) '
+                              '(pcbplotparams (useauxorigin no)))\n', 1)
+        (self.project / 'test.kicad_pcb').write_text(board)
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        (self.project / 'Test.pretty').mkdir()
+        (self.project / 'Test.pretty' / 'Small.kicad_mod').write_text(
+            '(footprint "Small"\n\t(property "JLC Rotation Offset" "90"))\n')
+        (self.project / 'fp-lib-table').write_text(
+            '(fp_lib_table\n\t(lib (name "Test") (type "KiCad") (uri "${KIPRJMOD}/Test.pretty") (options "") (descr ""))\n)\n')
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            if argv[2] == 'drc':
+                return self.run_cli(argv, **kwargs)
+            target = Path(argv[argv.index('--output') + 1])
+            if argv[3] == 'gerbers':
+                self.assertIn('(useauxorigin yes)', Path(argv[-1]).read_text())
+                (target / 'test-F_Cu.gbr').write_text('X1Y2D01*\n')
+            elif argv[3] == 'drill':
+                (target / 'test.drl').write_text('M48\n')
+            elif argv[3] == 'bom':
+                target.write_text('"Comment","Designator","Footprint","LCSC Part #","Quantity"\n'
+                                  '"10k","U1","Test:Small","","1"\n')
+            else:
+                target.write_text('Ref,Val,Package,PosX,PosY,Rot,Side\n"U1","10k","Small",1.0,2.0,0.0,top\n')
+            return SimpleNamespace(returncode=0)
+        runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
+        checked = self.check()
+        args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/jlc', 'zip_name': 'gerbers.zip',
+                'assembly': True, 'work_copy_revision': checked['work_copy_revision']}
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        drill = next(c for c in calls if c[3] == 'drill')
+        self.assertEqual(drill[drill.index('--drill-origin') + 1], 'plot')
+        self.assertIn('--use-drill-file-origin', next(c for c in calls if c[3] == 'pos'))
+        self.assertEqual(result.values['origin'], 'drill/place origin')
+        assembly = result.values['assembly']
+        self.assertEqual((list(assembly['missing_lcsc']), list(assembly['corrected'])), (['U1'], ['U1']))
+        dest = self.project / 'production/jlc'
+        self.assertIn('U1,1.0000,2.0000,Top,90', (dest / 'positions.csv').read_text())
+        self.assertEqual((dest / 'bom.csv').read_text().splitlines()[1], '10k,U1,Small,')
+        with zipfile.ZipFile(dest / 'gerbers.zip') as bundle:
+            self.assertEqual(set(bundle.namelist()), {'test-F_Cu.gbr', 'test.drl'})
+        stale = kicad_call(runtime.executors, 'export_kicad_manufacturing',
+                           dict(args, output_dir='production/again', work_copy_revision='0' * 64))
+        self.assertEqual(stale.failure['code'], 'work_copy_changed')
+
     def test_manufacturing_comparison_ignores_dates_comments_and_generator(self):
         from alx.providers.kicad import compare_manufacturing
         import zipfile

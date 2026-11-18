@@ -1,7 +1,9 @@
 """Bounded KiCad mechanics (D-061, amending D-058); never interprets user language."""
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import logging
 import math
@@ -1647,17 +1649,30 @@ class KiCadProvider:
             if not output.resolve().is_relative_to(source):
                 raise KiCadError('path_denied')
             self._source(output)
+            # The files are of the revision she names (18 Nov review: the copy could change
+            # between the request and the export).
+            if (arguments.get('work_copy_revision') is not None
+                    and self._revision(root, meta) != arguments['work_copy_revision']):
+                raise KiCadError('work_copy_changed')
             staging = root / 'artifacts' / ('manufacturing-' + uuid.uuid4().hex)
             staging.mkdir(parents=True)
             board = root / 'project' / meta['board']
-            layers = sexpr(board.read_text()).one('layers')
+            board_text = board.read_text()
+            layers = sexpr(board_text).one('layers')
+            # One origin for every file: the board's drill/place origin when it has one, else
+            # KiCad's absolute origin (18 Nov: drill and positions could disagree with the
+            # Gerbers; KiCad ignores its origin option when it plots with the board's settings).
+            aux = re.search(r'\(aux_axis_origin ([-0-9.]+) ([-0-9.]+)\)', board_text)
+            place_origin = bool(aux and (float(aux.group(1)), float(aux.group(2))) != (0.0, 0.0))
+            plotted = board
+            if place_origin:
+                plotted = staging.parent / ('plot-' + uuid.uuid4().hex) / board.name
+                plotted.parent.mkdir()
+                plotted.write_text(re.sub(r'\(useauxorigin (?:yes|no)\)', '(useauxorigin yes)', board_text))
             self._run('pcb', 'export', 'gerbers', '--board-plot-params',
-                      '--output', str(staging) + '/', board)
+                      '--output', str(staging) + '/', plotted)
             drill_options = ['--excellon-separate-th'] if arguments.get('separate_drills', False) else []
-            drill_origin = arguments.get('drill_origin', 'absolute')
-            if drill_origin not in ('absolute', 'plot'):
-                raise KiCadError('arguments_unusable')
-            drill_options += ['--drill-origin', drill_origin]
+            drill_options += ['--drill-origin', 'plot' if place_origin else 'absolute']
             self._run('pcb', 'export', 'drill', *drill_options, '--output', str(staging) + '/', board)
             generated = inventory(staging)
             if not generated:
@@ -1712,6 +1727,15 @@ class KiCadProvider:
                     for entry in files:
                         bundle.write(final_dir / entry, entry)
                 files[name] = read_bytes(final_dir / name)
+            assembly = None
+            if arguments.get('assembly'):
+                # BOM and positions go beside the zip, not in it: JLC takes them separately.
+                assembly, assembly_files = self._assembly_files(root, meta, board, board_text, place_origin)
+                for name, data in assembly_files.items():
+                    if unicodedata.normalize('NFC', name).casefold() in filename_keys or name in files:
+                        raise KiCadError('rename_ambiguous')
+                    (final_dir / name).write_bytes(data)
+                    files[name] = data
             # Directory descriptors exclude symlink substitution between validation
             # and publication. O_EXCL excludes replacement even after preflight.
             descriptor = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -1765,7 +1789,47 @@ class KiCadProvider:
                                  {'files_written': written, 'staging_path': str(staging)}) from error
             finally:
                 os.close(descriptor)
-            return {'files_written': written, 'comparison': comparison, 'staging_path': str(staging)}
+            return {'files_written': written, 'comparison': comparison, 'staging_path': str(staging),
+                    'origin': 'drill/place origin' if place_origin else 'absolute',
+                    **({'assembly': assembly} if assembly is not None else {})}
+
+    def _assembly_files(self, root, meta, board, board_text, place_origin):
+        """JLC's BOM and positions, from KiCad's own exports of this copy (18 Nov), with each
+        part's JLC correction read from its library footprint."""
+        from alx.providers.kicad_assembly import (BOM_FIELDS, BOM_GROUP, BOM_LABELS, correction,
+                                                  footprint_ids, jlc_bom, jlc_positions)
+        schematic = board.with_suffix('.kicad_sch')
+        if not schematic.is_file():
+            raise KiCadError('unsupported_project', {'detail': 'no schematic for a BOM'})
+        work = root / 'artifacts' / ('assembly-' + uuid.uuid4().hex)
+        work.mkdir(parents=True)
+        self._run('sch', 'export', 'bom', '--fields', BOM_FIELDS, '--labels', BOM_LABELS,
+                  '--group-by', BOM_GROUP, '--ref-range-delimiter', '', '--exclude-dnp',
+                  '--output', work / 'bom.csv', schematic)
+        self._run('pcb', 'export', 'pos', '--format', 'csv', '--units', 'mm', '--side', 'both',
+                  '--exclude-dnp', *(['--use-drill-file-origin'] if place_origin else []),
+                  '--output', work / 'pos.csv', board)
+        bom, missing = jlc_bom((work / 'bom.csv').read_text(encoding='utf-8-sig'))
+        ids = footprint_ids(board_text)
+        fixes, unread = {}, set()
+        for footprint in sorted(set(ids.values())):
+            try:
+                text = self._library_parts([footprint.replace(':', '/', 1)], root / 'project', 'footprints')
+            except KiCadError:
+                unread.add(footprint)
+                continue
+            fix = correction(next(iter(text.values())))
+            if fix:
+                fixes[footprint] = fix
+        positions, report = jlc_positions((work / 'pos.csv').read_text(encoding='utf-8-sig'),
+                                          {ref: fixes[fp] for ref, fp in ids.items() if fp in fixes})
+        bom_refs = {ref for line in csv.DictReader(io.StringIO(bom)) for ref in line['Designator'].split(',')}
+        placed = {line['Designator'] for line in csv.DictReader(io.StringIO(positions))}
+        return ({'bom_lines': bom.count('\n') - 1, 'missing_lcsc': missing, **report,
+                 'footprints_not_in_library': sorted(unread)[:30],
+                 'in_bom_not_placed': sorted(bom_refs - placed)[:30],
+                 'placed_not_in_bom': sorted(placed - bom_refs)[:30]},
+                {'bom.csv': bom.encode(), 'positions.csv': positions.encode()})
 
     def _run(self, *args):
         subcommand = ' '.join(args[:3]) if args[:2] == ('pcb', 'export') else ' '.join(args[:2])
