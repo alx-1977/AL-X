@@ -30,7 +30,7 @@ from alx.providers.credential_paths import denied
 MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
-from alx.providers.kicad_change import CHANGE_HELPERS, ChangeError, plain, unmet, validate_change
+from alx.providers.kicad_change import CHANGE_HELPERS, ChangeError, plain, set_check, unmet, validate_change
 from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.kicad_steps import (STEPS, board_pad_nets, edit_refusal, fingerprints, parity_mismatches, ready,
                                       step_status)
@@ -798,6 +798,24 @@ class KiCadProvider:
         except SectionError as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error
 
+    def select(self, arguments):
+        """Find Similar on a board: the objects of one kind matching every filter, from the board
+        index of this revision (18 Nov). Changes nothing."""
+        from alx.providers.kicad_index import select
+        board = self._board_for(arguments)
+        scratch = (self.work_root / arguments['work_copy_id'] / 'artifacts'
+                   if self._is_copy_id(arguments.get('work_copy_id')) else self.work_root / 'sections')
+        index = self._board_index(board, scratch)
+        filters = {key: arguments[key] for key in ('refs', 'nets', 'layer', 'name', 'value', 'footprint',
+                                                   'area', 'reads', 'ids') if arguments.get(key) is not None}
+        try:
+            found = select(index, arguments['kind'], **filters)
+        except (TypeError, ValueError) as error:
+            raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+        limit = max(1, min(int(arguments.get('limit') or 100), 500))
+        return {'kind': arguments['kind'], 'count': len(found), 'objects': found[:limit],
+                'truncated': len(found) > limit, 'board': board.name}
+
     def _copper_in(self, board, arguments):
         """The copper inside a window, compactly: what a route has to reach (16 Nov: the
         board view gave only counts, so nothing could be routed to an existing track)."""
@@ -1344,6 +1362,15 @@ class KiCadProvider:
                 plan['footprints'] = sorted(set(plan['footprints']) | set(sync['footprints']))
                 script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
                           "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
+            index_before = None
+            if plan and any(op['op'] == 'set' for op in change):
+                # Find Similar: the objects each set changes are picked from the board index of
+                # this revision before anything runs, and go in by address (18 Nov).
+                index_before = self._board_index(project / meta['board'], root / 'artifacts')
+                change = [dict(op, _ids=self._picked(index_before, op)) if op['op'] == 'set' else op
+                          for op in change]
+                script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
+                          "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
             wanted = (lambda kind: sorted(set(arguments.get(kind) or ()) | set((plan or {}).get(kind) or ())))
             footprints = self._library_parts(wanted('footprints'), project, 'footprints')
             # From his library even where a sheet already keeps a copy: that copy may be bare
@@ -1418,6 +1445,10 @@ class KiCadProvider:
                         problems = unmet(change, pins_before, pins_after, names_after,
                                          board_pad_nets(board.read_text()) if plan['board'] else {},
                                          change_result, names_before)
+                        if index_before is not None:
+                            from alx.providers.kicad_index import board_index
+                            receipts, wrong = set_check(change, index_before, board_index(board.read_text()))
+                            problems += wrong
                         if problems and not dry_run:
                             # Not what the change declared: undone, every unmet item named.
                             raise KiCadError('change_unmet', {'unmet': problems[:30], 'change_result': change_result})
@@ -1432,6 +1463,8 @@ class KiCadProvider:
                         report['change_result'] = [{key: value for key, value in item.items() if key != 'scope'}
                                                    if isinstance(item, dict) else item for item in change_result]
                         report['unmet'] = problems[:30]
+                        if index_before is not None:
+                            report['set'] = receipts
                     if not library and changed:
                         report['compared_to_original'] = self._compared(root, meta, signatures)
                         if dry_run and refusal:
@@ -1840,8 +1873,8 @@ class KiCadProvider:
     def _assembly_files(self, root, meta, board, board_text, place_origin):
         """JLC's BOM and positions, from KiCad's own exports of this copy (18 Nov), with each
         part's JLC correction read from its library footprint."""
-        from alx.providers.kicad_assembly import (BOM_FIELDS, BOM_GROUP, BOM_LABELS, correction,
-                                                  footprint_ids, jlc_bom, jlc_positions)
+        from alx.providers.kicad_assembly import BOM_FIELDS, BOM_GROUP, BOM_LABELS, correction, jlc_bom, jlc_positions
+        from alx.providers.kicad_index import select
         schematic = board.with_suffix('.kicad_sch')
         if not schematic.is_file():
             raise KiCadError('unsupported_project', {'detail': 'no schematic for a BOM'})
@@ -1854,7 +1887,7 @@ class KiCadProvider:
                   '--exclude-dnp', *(['--use-drill-file-origin'] if place_origin else []),
                   '--output', work / 'pos.csv', board)
         bom, missing = jlc_bom((work / 'bom.csv').read_text(encoding='utf-8-sig'))
-        ids = footprint_ids(board_text)
+        ids = {o['ref']: o['footprint'] for o in select(self._board_index(board, root / 'artifacts'), 'part') if o['ref']}
         fixes, unread = {}, set()
         for footprint in sorted(set(ids.values())):
             try:
@@ -2386,6 +2419,32 @@ class KiCadProvider:
             output.unlink(missing_ok=True)
         kept.write_text(json.dumps(model))
         return model
+
+    @staticmethod
+    def _picked(index, op):
+        """The addresses one set operation picks: exact filters over the board index, or all of
+        that kind. Ambiguity and stale addresses go back to her, never guessed (Law 3)."""
+        from alx.providers.kicad_index import select
+        filters = dict(op['where'])
+        every = bool(filters.pop('all', False))
+        ids = filters.pop('ids', None)
+        if not filters and ids is None and not every:
+            raise KiCadError('arguments_unusable', {'detail': 'set: say what to pick in where, or all: true '
+                                                    'for every %s' % op['kind']})
+        try:
+            found = select(index, op['kind'], ids=ids, **filters)
+        except (TypeError, ValueError) as error:
+            raise KiCadError('arguments_unusable', {'detail': 'set: %s' % error}) from error
+        if ids is not None:
+            gone = sorted(set(ids) - {o['id'] for o in found})
+            if gone:
+                raise KiCadError('arguments_unusable', {'detail': 'set: not on this revision or not a %s: %s'
+                                                        % (op['kind'], ', '.join(gone[:10]))})
+        if not found:
+            raise KiCadError('arguments_unusable', {'detail': 'set: no %s matches %s' % (op['kind'], dict(op['where']))})
+        if 'at' in op['to'] and len(found) != 1:
+            raise KiCadError('arguments_unusable', {'detail': 'set: at places one object; %d match' % len(found)})
+        return [o['id'] for o in found]
 
     def _board_index(self, board, scratch):
         """The one reading of a board (kicad_index), kept per board revision (18 Nov)."""

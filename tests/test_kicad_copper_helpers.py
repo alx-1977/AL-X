@@ -151,30 +151,33 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
             self.assertNotIn(".alx-fp-", " ".join(p.name for p in Path(folder).iterdir()))
             self.assertRegex(done.stdout, r"teardrops [1-9]\d* 0")
 
-    def test_board_text_is_rewritten_placed_and_shifted(self) -> None:
-        """18 Nov: P0009's antenna words lay over AE1's pads and nothing could move them."""
+    def test_set_properties_changes_only_what_is_named_by_address(self) -> None:
+        """18 Nov: Altium's Inspector. A size change keeps the stroke; vias, tracks and texts too."""
         script = """
-b = load()
 pb = _pcbnew.LoadBoard(BOARD_PATH.replace("board.kicad_pcb", "parts.kicad_pcb"))
-strokes = {f.GetReference(): f.Reference().GetTextThickness() for f in pb.GetFootprints()}
-every = part_texts(pb, "all", "Reference", size=0.5)
-print("strokes kept", all(f.Reference().GetTextThickness() == strokes[f.GetReference()] for f in pb.GetFootprints()))
-print("stroke set", part_texts(pb, ["U7"], "Reference", thickness=0.1)[0]["thickness"])
-refs = [t["ref"] for t in every] if isinstance(every, list) else every["refs"]
-print("every", len(refs) > 0, {round(_pcbnew.ToMM(part(pb, r).Reference().GetTextHeight()), 3) for r in refs})
-one = part_texts(pb, [refs[0]], "Reference", at=(120, 120), hide=True)[0]
-print("one", one["at"], one["shown"])
+items = items_by_id(pb)
+refs = [f.Reference() for f in pb.GetFootprints()]
+strokes = {f.m_Uuid.AsString(): f.GetTextThickness() for f in refs}
+print("set", set_properties(pb, list(strokes), {"size": 0.5}))
+print("strokes kept", all(f.GetTextThickness() == strokes[f.m_Uuid.AsString()] for f in refs),
+      {round(_pcbnew.ToMM(f.GetTextHeight()), 3) for f in refs})
+via = _pcbnew.PCB_VIA(pb)
+via.SetPosition(point(20, 20))
+pb.Add(via)
+set_properties(pb, [via.m_Uuid.AsString()], {"size": 0.6, "drill": 0.3})
+print("via", round(_pcbnew.ToMM(via.GetWidth(_pcbnew.F_Cu)), 3), round(_pcbnew.ToMM(via.GetDrill()), 3))
+track = next(t for t in pb.GetTracks() if t.GetClass() == "PCB_TRACK")
+set_properties(pb, [track.m_Uuid.AsString()], {"width": 0.25})
+print("track", round(_pcbnew.ToMM(track.GetWidth()), 3))
+b = load()
+text = next(d for d in b.GetDrawings() if d.GetClass() == "PCB_TEXT")
+set_properties(b, [text.m_Uuid.AsString()], {"text": "Keepout", "at": [110, 100]})
+set_properties(b, [text.m_Uuid.AsString()], {"move_by": [0, -1.5], "visible": False})
+print("text", text.GetText(), round(_pcbnew.ToMM(text.GetPosition().x), 3), round(_pcbnew.ToMM(text.GetPosition().y), 3), text.IsVisible())
 try:
-    part_texts(pb, ["NOPE9"], "Reference", size=0.5)
+    set_properties(b, ["no-such-id"], {"size": 1})
 except ValueError as error:
-    print("unknown", "NOPE9" in str(error))
-print("placed", board_texts(b, "DRC fixture", at=(110, 100))[0]["at"])
-moved = board_texts(b, "DRC fixture", new="Keepout", by=(0, -1.5))[0]
-print("moved", moved["text"], moved["at"], moved["covers"][1] < moved["covers"][3])
-try:
-    board_texts(b, "Nothing")
-except ValueError as error:
-    print("missing", "Keepout" in str(error))
+    print("missing", "no-such-id" in str(error))
 """
         with tempfile.TemporaryDirectory() as folder:
             board = Path(folder) / "board.kicad_pcb"
@@ -184,14 +187,10 @@ except ValueError as error:
             program.write_text(HELPERS + script_runner(script))
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
-            self.assertIn("every True {0.5}", done.stdout)
-            # 18 Nov: a size change must not touch the stroke (P0009: 206 strokes thinned to 0.075 mm).
-            self.assertIn("strokes kept True", done.stdout)
-            self.assertIn("stroke set 0.1", done.stdout)
-            self.assertIn("one [120.0, 120.0] False", done.stdout)
-            self.assertIn("unknown True", done.stdout)
-            self.assertIn("placed [110.0, 100.0]", done.stdout)
-            self.assertIn("moved Keepout [110.0, 98.5] True", done.stdout)
+            self.assertIn("strokes kept True {0.5}", done.stdout)
+            self.assertIn("via 0.6 0.3", done.stdout)
+            self.assertIn("track 0.25", done.stdout)
+            self.assertIn("text Keepout 110.0 98.5 False", done.stdout)
             self.assertIn("missing True", done.stdout)
 
 if __name__ == "__main__":

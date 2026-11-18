@@ -35,16 +35,16 @@ class ChangeShapeTests(unittest.TestCase):
         ])
         self.assertEqual(plan["symbols"], ["FireFli_ICs:RFSW6024TR13"])
         self.assertEqual(plan["footprints"], ["FireFli_ICs/RFSW6024TR13"])
-        validate_change([{"op": "set_text", "old": "Keepout", "by": [0, -1.5]}])
-        validate_change([{"op": "board_text", "refs": "all", "field": "Reference", "size": 0.5}])
+        validate_change([{"op": "set", "kind": "field", "where": {"name": "Reference"}, "to": {"size": 0.5}}])
+        validate_change([{"op": "set", "kind": "text", "where": {"reads": "Keepout"}, "to": {"move_by": [0, -1.5]}}])
         for wrong, said in (([], "1 to 200"), ([{"op": "draw"}], "op is one of"),
                             ([{"op": "wire", "sheet": "a", "from": "U6.9"}], "needs to"),
                             ([{"op": "wire", "sheet": "a", "from": "U6-9", "to": "C1.1"}], "REF.PIN"),
                             ([{"op": "track", "width": 0.3}], "points, or from and to"),
-                            ([{"op": "set_text", "old": "Keepout"}], "needs new, at or by"),
-                            ([{"op": "board_text", "refs": "C1", "field": "Reference"}], 'or "all"'),
-                            ([{"op": "board_text", "refs": "all", "field": "Reference", "at": [1, 2]}], "one reference"),
-                            ([{"op": "set_text", "old": "Keepout", "by": [1]}], r"by is \[x, y\]")):
+                            ([{"op": "set", "kind": "part", "where": {}, "to": {"x": 1}}], "kind is one of"),
+                            ([{"op": "set", "kind": "via", "where": {"nets": ["GND"]}, "to": {"width": 1}}], "to sets size, drill"),
+                            ([{"op": "set", "kind": "field", "where": {"colour": "red"}, "to": {"size": 1}}], "where takes"),
+                            ([{"op": "set", "kind": "text", "where": {"all": True}, "to": {"move_by": [1]}}], r"move_by is \[x, y\]")):
             with self.subTest(said=said), self.assertRaisesRegex(ChangeError, said):
                 validate_change(wrong)
 
@@ -151,6 +151,41 @@ class RealChangeTests(unittest.TestCase):
 
     def call(self, runtime, name, **arguments):
         return kicad_call(runtime.executors, name, arguments)
+
+    def test_set_changes_exactly_what_it_names_on_what_it_picks(self):
+        """18 Nov: every designator 0.5 mm took 95 operations and also thinned every stroke unseen.
+        Now one set, a receipt, and a check that nothing else of that kind changed."""
+        from alx.providers.kicad_index import board_index, select
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            checked = self.call(runtime, "check_kicad_board", project_dir=str(project)).values
+            found = kicad_call(runtime.executors, "select",
+                               {"work_copy_id": checked["work_copy_id"], "kind": "field", "name": "Reference"})
+            self.assertEqual(found.state, CapabilityResultState.SUCCEEDED, found.failure)
+            before = board_index((project / "board.kicad_pcb").read_text())
+            strokes = {o["id"]: o["thickness"] for o in select(before, "field", name="Reference")}
+            result = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+                {"op": "set", "kind": "field", "where": {"name": "Reference"}, "to": {"size": 0.5}},
+                {"op": "set", "kind": "field", "where": {"name": "Value"}, "to": {"visible": False}}])
+            self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+            refs, values = result.values["change_report"]["set"]
+            self.assertEqual(refs["matched"], found.values["count"])
+            self.assertEqual(refs["already"] + refs["changed"], refs["matched"])
+            self.assertEqual((list(refs["not_as_asked"]), list(refs["others_changed"])), ([], []))
+            after = board_index(next(Path(folder).rglob(checked["work_copy_id"] + "/project/board.kicad_pcb")).read_text())
+            for o in select(after, "field", name="Reference"):
+                self.assertEqual((o["size"], o["thickness"]), ([0.5, 0.5], strokes[o["id"]]))
+            self.assertTrue(all(not o["visible"] for o in select(after, "field", name="Value")))
+            # Ambiguity and nothing-matches go back to her, before anything runs.
+            many = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+                {"op": "set", "kind": "field", "where": {"name": "Reference"}, "to": {"at": [1, 2]}}])
+            self.assertIn("at places one object", many.failure["recovery"]["detail"])
+            none = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+                {"op": "set", "kind": "via", "where": {"nets": ["NO_SUCH_NET"]}, "to": {"size": 0.6}}])
+            self.assertIn("no via matches", none.failure["recovery"]["detail"])
+            unsaid = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+                {"op": "set", "kind": "track", "where": {}, "to": {"width": 0.2}}])
+            self.assertIn("all: true", unsaid.failure["recovery"]["detail"])
 
     def test_a_schematic_change_is_carried_out_and_verified_in_one_run(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.providers.kicad_assembly import correction, footprint_ids, jlc_bom, jlc_positions  # noqa: E402
+from alx.providers.kicad_assembly import correction, jlc_bom, jlc_positions  # noqa: E402
 
 KICAD_BOM = ('"Comment","Designator","Footprint","LCSC Part #","Quantity"\n'
              '"1u","C2,C15","FireFli_Capacitors:C_0603_1608Metric","C92848","2"\n'
@@ -50,11 +50,6 @@ class AssemblyTests(unittest.TestCase):
         self.assertIsNone(correction('(footprint "X" (property "Reference" "REF**"))'))
         with self.assertRaises(ValueError):
             correction('(footprint "X" (property "JLC Position Offset" "left"))')
-
-    def test_footprint_ids_by_designator(self):
-        board = ('(kicad_pcb\n\t(footprint "Lib:A"\n\t\t(property "Reference" "U1"))\n'
-                 '\t(footprint "Lib:B"\n\t\t(property "Reference" "R2")))')
-        self.assertEqual(footprint_ids(board), {"U1": "Lib:A", "R2": "Lib:B"})
 
 
 if __name__ == "__main__":

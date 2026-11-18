@@ -95,14 +95,5 @@ def jlc_positions(kicad_pos: str, corrections: Mapping[str, tuple[float, tuple[f
             {"parts": len(out), "corrected": corrected, "bottom": bottom})
 
 
-def footprint_ids(board_text: str) -> dict[str, str]:
-    """Each designator's footprint as LIBRARY:NAME, read from the board file."""
-    found = {}
-    for match in re.finditer(r'\(footprint "([^"]+)"(.*?)\(property "Reference" "([^"]*)"', board_text, re.S):
-        if '(footprint "' not in match.group(2):
-            found[match.group(3)] = match.group(1)
-    return found
-
-
 __all__ = ["BOM_FIELDS", "BOM_GROUP", "BOM_LABELS", "POSITION_FIELD", "ROTATION_FIELD", "correction",
-           "footprint_ids", "jlc_bom", "jlc_positions"]
+           "jlc_bom", "jlc_positions"]

@@ -135,6 +135,7 @@ def board_index(board_text: str) -> dict[str, Any]:
                             "text": str(node.children[1]) if len(node.children) > 1 else "",
                             "layer": _value(node, "layer", default=""),
                             "at": (_numbers(node, "at") or _numbers(node, "start"))[:2],
+                            "angle": (_numbers(node, "at")[2:3] or [0.0])[0],
                             "size": size, "thickness": thickness, "visible": not _hidden(node)})
         elif kind.startswith("gr_"):
             objects.append({"id": _uuid(node), "kind": "graphic", "shape": kind[3:],

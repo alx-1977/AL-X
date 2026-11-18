@@ -949,69 +949,63 @@ def save_footprint(library, item):
     _pcbnew.FootprintSave(folder, item)
 
 
-def part_texts(board, refs, field, at=None, size=None, angle=None, hide=None, thickness=None):
-    """Parts' Reference or Value (or another field's) text on the board, like Altium's select all,
-    then font (18 Nov). refs is a list of references, or "all" for every part. at [x, y] mm places
-    one part's text; size mm sets height and width alike; thickness mm sets the stroke; angle in
-    degrees; hide True or False. Only what is named changes (18 Nov: a size change also thinned
-    every stroke to 0.075 mm). Returns each text when there are few, else how many changed."""
-    names = None if refs == "all" else list(refs)
-    if names is not None:
-        missing = [r for r in names if board.FindFootprintByReference(r) is None]
-        if missing:
-            raise ValueError("not on this board: %s" % ", ".join(missing))
-    parts = list(board.GetFootprints()) if names is None else [part(board, r) for r in names]
-    report = []
-    for found in parts:
-        text = (found.Reference() if field == "Reference" else found.Value() if field == "Value"
-                else found.GetField(field))
-        if text is None:
-            if names is None:
-                continue
-            raise ValueError("%s has no field %s" % (found.GetReference(), field))
-        if at is not None:
-            text.SetPosition(point(at[0], at[1]))
-        if size:
-            height = _pcbnew.FromMM(size)
-            text.SetTextSize(_pcbnew.VECTOR2I(height, height))
-        if thickness:
-            text.SetTextThickness(_pcbnew.FromMM(thickness))
-        if angle is not None:
-            text.SetTextAngleDegrees(angle)
-        if hide is not None:
-            text.SetVisible(not hide)
-        report.append({"ref": found.GetReference(),
-                       "at": [round(_pcbnew.ToMM(text.GetPosition().x), 3), round(_pcbnew.ToMM(text.GetPosition().y), 3)],
-                       "size": round(_pcbnew.ToMM(text.GetTextHeight()), 3),
-                       "thickness": round(_pcbnew.ToMM(text.GetTextThickness()), 3), "shown": text.IsVisible()})
-    return report if len(report) <= 10 else {"changed": len(report), "refs": [r["ref"] for r in report]}
+def items_by_id(board):
+    """Every board object by the address the board index gives it (kicad_index): its uuid, and
+    a pad also as REF.NUMBER. KiCad has no lookup by uuid in its Python (18 Nov)."""
+    found = {}
+    for footprint in board.GetFootprints():
+        found[footprint.m_Uuid.AsString()] = footprint
+        ref = footprint.GetReference()
+        for field in footprint.GetFields():
+            found[field.m_Uuid.AsString()] = field
+        for pad in footprint.Pads():
+            found[pad.m_Uuid.AsString()] = pad
+            found.setdefault("%s.%s" % (ref, pad.GetNumber()), pad)
+    for item in list(board.GetTracks()) + list(board.GetDrawings()) + list(board.Zones()):
+        found[item.m_Uuid.AsString()] = item
+    return found
 
 
-def board_texts(board, old, new=None, at=None, by=None):
-    """Board silkscreen texts and text boxes that read `old` exactly (18 Nov: the revision, date and
-    the antenna's "Cellular"/"Keepout" words). new rewrites them; at [x, y] mm puts each one's
-    anchor there; by [dx, dy] mm shifts each one. Returns each text with its anchor and the
-    box it covers, so the next move can be judged."""
-    found = [item for item in board.GetDrawings()
-             if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX") and item.GetText() == old]
-    if not found:
-        texts = sorted({item.GetText() for item in board.GetDrawings()
-                        if item.GetClass() in ("PCB_TEXT", "PCB_TEXTBOX")})
-        raise ValueError("no board text reads %r; the texts are: %s" % (old, "; ".join(texts)[:600]))
-    report = []
-    for item in found:
-        if at is not None:
-            here = item.GetPosition()
-            item.Move(_pcbnew.VECTOR2I(point(at[0], at[1]).x - here.x, point(at[0], at[1]).y - here.y))
-        if by is not None:
-            item.Move(_pcbnew.VECTOR2I(_pcbnew.FromMM(by[0]), _pcbnew.FromMM(by[1])))
-        if new is not None:
-            item.SetText(new)
-        box = item.GetBoundingBox()
-        report.append({"text": item.GetText(), "kind": "box" if item.GetClass() == "PCB_TEXTBOX" else "text",
-                       "at": [round(_pcbnew.ToMM(item.GetPosition().x), 3), round(_pcbnew.ToMM(item.GetPosition().y), 3)],
-                       "covers": [round(_pcbnew.ToMM(v), 3) for v in (box.GetLeft(), box.GetTop(), box.GetRight(), box.GetBottom())]})
-    return report
+def set_properties(board, ids, values):
+    """Set exactly the named properties on the objects with these addresses, nothing else
+    (Altium's Inspector, 18 Nov). size: text height (and width alike), or [height, width] mm,
+    or a via's diameter; thickness: text stroke; visible; angle: degrees; at: [x, y] mm, one
+    object only; move_by: [dx, dy] mm; text: what a board text reads; drill: via drill; width:
+    track width. Returns how many objects it changed."""
+    items = items_by_id(board)
+    missing = [uid for uid in ids if uid not in items]
+    if missing:
+        raise ValueError("not on this board: %s" % ", ".join(missing[:20]))
+    mm = _pcbnew.FromMM
+    for uid in ids:
+        item = items[uid]
+        for key, value in values.items():
+            if key == "size" and item.GetClass() == "PCB_VIA":
+                item.SetWidth(mm(value))
+            elif key == "size":
+                height, width = (value, value) if isinstance(value, (int, float)) else (value[0], value[1])
+                item.SetTextSize(_pcbnew.VECTOR2I(mm(width), mm(height)))
+            elif key == "thickness":
+                item.SetTextThickness(mm(value))
+            elif key == "visible":
+                item.SetVisible(bool(value))
+            elif key == "angle":
+                item.SetTextAngleDegrees(value)
+            elif key == "at":
+                here = item.GetPosition()
+                target = point(value[0], value[1])
+                item.Move(_pcbnew.VECTOR2I(target.x - here.x, target.y - here.y))
+            elif key == "move_by":
+                item.Move(_pcbnew.VECTOR2I(mm(value[0]), mm(value[1])))
+            elif key == "text":
+                item.SetText(value)
+            elif key == "drill":
+                item.SetDrill(mm(value))
+            elif key == "width":
+                item.SetWidth(mm(value))
+            else:
+                raise ValueError("%s cannot be set here" % key)
+    return len(ids)
 
 
 def add_teardrops(board, skip_nets=(), area=None):

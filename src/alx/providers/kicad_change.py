@@ -40,7 +40,6 @@ BOARD_OPS = {
     'remove_teardrops': ('area',),
     'remove_dangling_tracks': ('area',),
     'sync_from_schematic': (),
-    'board_text': ('refs', 'field'),
     'keepout': ('outline',),
     'remove_keepouts': ('area',),
     'copper_shape': ('net', 'outline'),
@@ -48,10 +47,19 @@ BOARD_OPS = {
     'to_plane': ('pins',),
     'remove_copper_shapes': ('nets', 'area'),
     'add_teardrops': (),
-    'set_text': ('old',),
+    'set': ('kind', 'where', 'to'),
     'title_block': (),
 }
 OPS = {**SCHEMATIC_OPS, **BOARD_OPS}
+# What set may change, per kind of board object (Altium's Inspector), and how it picks them.
+SETTABLE = {
+    'field': ('size', 'thickness', 'visible', 'angle', 'at', 'move_by'),
+    'text': ('size', 'thickness', 'visible', 'angle', 'at', 'move_by', 'text'),
+    'via': ('size', 'drill'),
+    'track': ('width',),
+    'arc': ('width',),
+}
+FILTERS = ('refs', 'nets', 'layer', 'name', 'value', 'footprint', 'area', 'reads', 'ids', 'all')
 
 
 class ChangeError(ValueError):
@@ -81,6 +89,8 @@ def validate_change(change: Any) -> dict[str, Any]:
         if missing:
             raise ChangeError('%s (%s) needs %s' % (where, op['op'], ', '.join(missing)))
         for field in ('from', 'to', 'pin'):
+            if op['op'] == 'set':
+                break  # set's to is the properties it sets
             value = op.get(field)
             if op['op'] in ('route', 'track') and isinstance(value, (list, tuple)) and len(value) == 2 \
                     and all(isinstance(v, (int, float)) for v in value):
@@ -94,19 +104,18 @@ def validate_change(change: Any) -> dict[str, Any]:
         if op.get('area') is not None and not (isinstance(op['area'], (list, tuple)) and len(op['area']) == 4
                                                and all(isinstance(v, (int, float)) for v in op['area'])):
             raise ChangeError('%s: area is [x1, y1, x2, y2] in mm' % where)
-        if op['op'] == 'board_text':
-            refs = op['refs']
-            if not (refs == 'all' or (isinstance(refs, (list, tuple)) and all(isinstance(r, str) for r in refs))):
-                raise ChangeError('%s: refs is a list of references, or "all" for every part' % where)
-            if op.get('at') is not None and (refs == 'all' or len(refs) != 1):
-                raise ChangeError('%s (board_text): at places one part\'s text; give refs one reference' % where)
-        if op['op'] == 'set_text':
-            for field in ('at', 'by'):
-                if op.get(field) is not None and not (isinstance(op[field], (list, tuple)) and len(op[field]) == 2
-                                                      and all(isinstance(v, (int, float)) for v in op[field])):
-                    raise ChangeError('%s: %s is [x, y] in mm' % (where, field))
-            if all(op.get(field) is None for field in ('new', 'at', 'by')):
-                raise ChangeError('%s (set_text) needs new, at or by' % where)
+        if op['op'] == 'set':
+            if op['kind'] not in SETTABLE:
+                raise ChangeError('%s (set): kind is one of %s' % (where, ', '.join(SETTABLE)))
+            filters, values = op['where'], op['to']
+            if not isinstance(filters, Mapping) or not set(filters) <= set(FILTERS):
+                raise ChangeError('%s (set): where takes %s' % (where, ', '.join(FILTERS)))
+            if not isinstance(values, Mapping) or not values or not set(values) <= set(SETTABLE[op['kind']]):
+                raise ChangeError('%s (set): to sets %s of a %s' % (where, ', '.join(SETTABLE[op['kind']]), op['kind']))
+            for field in ('at', 'move_by'):
+                if field in values and not (isinstance(values[field], (list, tuple)) and len(values[field]) == 2
+                                            and all(isinstance(v, (int, float)) for v in values[field])):
+                    raise ChangeError('%s (set): %s is [x, y] in mm' % (where, field))
         if op['op'] == 'power' and not (op.get('pin') or op.get('pins')):
             raise ChangeError('%s (power) needs pin, or pins for a row of neighbouring pins' % where)
         if op['op'] == 'swap_symbol' or (op['op'] == 'add_symbol' and op.get('lib_id')):
@@ -283,6 +292,54 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
         elif lost and not (pin in scope or lost <= scope):
             problems.append('%s changed connection: lost %s' % (pin, _pins_text(lost, before_names)))
     return problems[:30]
+
+
+def _holds(item, key, value):
+    """Whether one indexed object has the value set asked for (positions are reported, not
+    compared: a field's place is stored relative to its part)."""
+    if item is None:
+        return False
+    if key == 'size' and item['kind'] in ('field', 'text'):
+        wanted = [value, value] if isinstance(value, (int, float)) else list(value)
+        return item.get('size') is not None and all(abs(a - b) < 1e-4 for a, b in zip(item['size'], wanted))
+    if key in ('size', 'thickness', 'angle', 'drill', 'width'):
+        have = item.get(key)
+        return have is not None and abs(float(have) - float(value)) < 1e-4
+    if key in ('visible', 'text'):
+        return item.get(key) == value
+    return True
+
+
+def set_check(change, before, after):
+    """For each set operation: a receipt (matched, already as asked, changed) and what does
+    not hold: an object not as asked, or an object of that kind it did not pick that changed
+    a property it names (18 Nov: the designator job also thinned 206 strokes, unseen)."""
+    old = {o['id']: o for o in before['objects']}
+    new = {o['id']: o for o in after['objects']}
+    picked = {}
+    for op in change:
+        if op['op'] == 'set':
+            picked.setdefault(op['kind'], set()).update(op['_ids'])
+    receipts, problems = [], []
+    for op in change:
+        if op['op'] != 'set':
+            continue
+        values = op['to']
+        holds = (lambda item: all(_holds(item, key, value) for key, value in values.items()))
+        already = [uid for uid in op['_ids'] if holds(old.get(uid))]
+        wrong = [uid for uid in op['_ids'] if not holds(new.get(uid))]
+        others = sorted(uid for uid, item in old.items() if item['kind'] == op['kind']
+                        and uid not in picked[op['kind']] and uid in new
+                        and any(item.get(key) != new[uid].get(key) for key in values
+                                if key not in ('at', 'move_by')))
+        receipts.append({'kind': op['kind'], 'matched': len(op['_ids']), 'already': len(already),
+                         'changed': len(op['_ids']) - len(already) - len(wrong), 'not_as_asked': wrong[:20],
+                         'others_changed': others[:20]})
+        if wrong:
+            problems.append('%d %s not as asked, e.g. %s' % (len(wrong), op['kind'], ', '.join(wrong[:5])))
+        if others:
+            problems.append('%d %s not picked changed too, e.g. %s' % (len(others), op['kind'], ', '.join(others[:5])))
+    return receipts, problems
 
 
 CHANGE_HELPERS = r'''
@@ -802,21 +859,17 @@ def apply_change(change):
                         gone.append(zone.GetZoneName() or "unnamed")
                         b.Delete(zone)
                 done["removed"] = gone
-            elif kind == "board_text":
-                # Parts' reference or value text on the board: where, how big, turned, shown
-                # (17 Nov: silkscreen over pads; 18 Nov: every designator 0.5 mm took 95 operations).
-                done["texts"] = part_texts(b, op["refs"], op["field"], op.get("at"), op.get("size"),
-                                           op.get("angle"), op.get("hide"), op.get("thickness"))
+            elif kind == "set":
+                # The objects picked from the board index before the script (provider), by address.
+                done["changed"] = set_properties(b, op["_ids"], op["to"])
+                if op["kind"] in ("via", "track", "arc"):
+                    refill(b)
             elif kind == "add_teardrops":
                 # Teardrops where tracks meet pads and vias and have none (18 Nov: KiCad makes them
                 # only in its own window). RF nets (curved tracks) and skip_nets get none.
                 done["teardrops_added"], done["teardrops_skipped"] = add_teardrops(
                     b, op.get("skip_nets") or (), op.get("area"))
                 refill(b)
-            elif kind == "set_text":
-                # Board text on silkscreen (18 Nov): every text that reads `old` exactly is rewritten
-                # (new), placed (at) or shifted (by); revision and date, or words off a pad.
-                done["texts"] = board_texts(b, op["old"], op.get("new"), op.get("at"), op.get("by"))
             elif kind == "title_block":
                 block = b.GetTitleBlock()
                 if op.get("title") is not None:
@@ -859,4 +912,4 @@ def apply_change(change):
 # ---- end of structured changes ----
 '''
 
-__all__ = ['BOARD_OPS', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'plain', 'unmet', 'validate_change']
+__all__ = ['BOARD_OPS', 'FILTERS', 'SETTABLE', 'set_check', 'CHANGE_HELPERS', 'ChangeError', 'OPS', 'SCHEMATIC_OPS', 'plain', 'unmet', 'validate_change']

@@ -60,7 +60,8 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'step_refusal': MAP, 'change_result': array(MAP), 'unmet': array(S), 'reverted_edits': I},
+    'step_refusal': MAP, 'change_result': array(MAP), 'unmet': array(S), 'reverted_edits': I,
+    'set': array(MAP)},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -132,16 +133,20 @@ _ACTION_DEFINITIONS = (
         'with follow); to_plane {pins: [REF.PAD, ...]} (a power or ground '
         'pin straight into its plane: a short stub and one via at the pin); add_teardrops {skip_nets?, area?} '
         '(teardrops where tracks meet pads and vias and have none, shaped like the board\'s own; RF nets with '
-        'curved tracks are skipped); set_text {old, new?, at?: [x, y], by?: [dx, dy]} (board silkscreen text or text box that reads old: '
-        'rewritten, put at a point or shifted, e.g. revision, date, or words lying over pads; reports where each '
-        'is and the box it covers); '
+        'curved tracks are skipped); set {kind: field|text|via|track|arc, where: {refs?, nets?, layer?: F|B|layer, '
+        'name?: field name, value?, footprint?, area?: [x0, y0, x1, y1], reads?: a text\'s exact words, ids?, all?: true}, '
+        'to: {...}} (Altium\'s Find Similar then Inspector: every object of that kind matching all of where, '
+        'from select\'s reading of this revision, gets exactly the properties in to and nothing else. field and '
+        'text: size (mm, or [height, width]), thickness, visible, angle, at [x, y] (one object), move_by [dx, dy]; '
+        'text also text; via: size, drill; track and arc: width. E.g. every designator 0.5 mm: {kind: field, '
+        'where: {name: Reference}, to: {size: 0.5}}. The report\'s set receipt says matched, already as asked, '
+        'changed; an object not as asked, or one not picked that changed, undoes the edit); '
         'title_block {title?, date?, revision?, company?}; copper_shape {net, outline: [[x, y], ...], layer?} (a solid copper polygon on one net, kept inside '
         'a no-pour keep-out like a track, touching nothing of another net: a taper from wide feed copper to a '
         'small pad, or feed copper); remove_copper_shapes {nets, area: [x1, y1, x2, y2]} (copper shapes and '
         'pours of those nets wholly inside, to redraw them); keepout {outline: [[x, y], ...], layers?: [F, In1, ..., B], no_tracks?, no_vias?, name?} (a '
         'keep-out area: pours pull back from it, e.g. an antenna clearance from its datasheet layout); '
-        'remove_keepouts {area: [x1, y1, x2, y2], name?} (keep-out areas wholly inside, to resize or replace one); board_text {refs: [REF, ...] | "all", field: Reference|Value, at?: [x, y], size?: mm, thickness?: mm, angle?, hide?} '
-        '(parts\' text on the board sized, turned or hidden in one go, like select all then font; only what is named changes; at moves one part\'s text); sync_from_schematic {place?: {REF: [x, y, rotation?]}} (the board takes the schematic as it '
+        'remove_keepouts {area: [x1, y1, x2, y2], name?} (keep-out areas wholly inside, to resize or replace one); sync_from_schematic {place?: {REF: [x, y, rotation?]}} (the board takes the schematic as it '
         'is, like KiCad\'s Update PCB from Schematic: changed footprints swapped in place, values and fields '
         'such as MPN and LCSC copied, every pad on its schematic net; parts new to the board go where place '
         'says, else are listed in needs_place; parts only on the board are listed, never removed: remove_parts '
@@ -429,6 +434,21 @@ APPROVE_STEP = CapabilityDefinition('approve_step',
     SideEffect.EFFECTFUL, FAILURES)
 
 
+SELECT = CapabilityDefinition('select',
+    'Find Similar on a board, without changing anything: every object of one kind that matches all '
+    'the filters given, with its address (id) and properties, from one reading of the board per '
+    'revision (no KiCad started). kind: part, field (a part\'s Reference, Value or other text on the '
+    'board), pad, track, arc, via, zone, keepout, teardrop, text, graphic. Filters: refs, nets, layer '
+    '(F, B or a layer name), name (a field\'s name), value, footprint (LIBRARY:NAME or NAME), area '
+    '[x0, y0, x1, y1] mm, reads (a board text\'s exact words), ids. count is how many match; objects '
+    'lists them up to limit (default 100). The same where in an edit\'s set changes exactly these.',
+    obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'kind': S, 'refs': array(S), 'nets': array(S),
+         'layer': S, 'name': S, 'value': S, 'footprint': S, 'area': array(N), 'reads': S, 'ids': array(S),
+         'limit': I}, ('kind',)),
+    obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S},
+        ('kind', 'count', 'objects', 'truncated')),
+    SideEffect.NONE, FAILURES)
+
 INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
     "Read a work copy's schematic (work_copy_id), or one of his projects where it is (project_dir, "
     "e.g. P0020), as facts, changing nothing: every part (reference, value, "
@@ -521,6 +541,7 @@ class KiCadAction(str, Enum):
     APPROVE_STEP = 'approve_step'
     RENDER = 'render'
     INSPECT_SCHEMATIC = 'inspect_schematic'
+    SELECT = 'select'
     OPEN_IN_KICAD = 'open_in_kicad'
     TAKE_EDITS = 'take_edits'
 
@@ -543,6 +564,7 @@ CONTRACTS = {
     KiCadAction.APPROVE_STEP: APPROVE_STEP,
     KiCadAction.RENDER: RENDER,
     KiCadAction.INSPECT_SCHEMATIC: INSPECT_SCHEMATIC,
+    KiCadAction.SELECT: SELECT,
     KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
     KiCadAction.TAKE_EDITS: TAKE_EDITS,
 }
@@ -551,7 +573,8 @@ FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
-    KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS))
+    KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS,
+    KiCadAction.SELECT))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -611,6 +634,7 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.APPROVE_STEP: provider.approve_step,
                KiCadAction.RENDER: provider.render,
                KiCadAction.INSPECT_SCHEMATIC: provider.inspect_schematic,
+               KiCadAction.SELECT: provider.select,
                KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad,
                KiCadAction.TAKE_EDITS: provider.take_edits}
 
