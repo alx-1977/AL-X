@@ -135,53 +135,17 @@ def edit_refusal(before: dict, after: dict, original: dict, approvals: dict):
 
 
 def board_pad_nets(board_text: str) -> dict:
-    """Each board pad as REF.PAD with its net's name."""
-    from alx.providers.kicad import references, sexpr
-    tree = sexpr(board_text)
-    names = {str(net.children[1]): str(net.children[2]) for net in tree.named('net') if len(net.children) > 2}
-    found = {}
-    for footprint in tree.named('footprint'):
-        refs = references(footprint)
-        if not refs or not refs[0]:
-            continue
-        for pad in footprint.named('pad'):
-            nets = pad.named('net')
-            values = [str(v) for v in nets[0].children[1:]] if nets else []
-            name = (values[-1] if len(values) > 1 else names.get(values[0], values[0])) if values else ''
-            found['%s.%s' % (refs[0], pad.children[1])] = name
-    return found
+    """Each board pad as REF.PAD with its net's name, from the one board index (18 Nov)."""
+    from alx.providers.kicad_index import board_index, pad_nets
+    return pad_nets(board_index(board_text))
 
 
 def board_groups(board_text: str, with_parts: bool = False):
-    """Every net of a board as its set of (reference, pad), for nets joining two or more pads.
-
-    with_parts also gives every part with a connected pad (not a logo or a hole).
-    """
-    from alx.providers.kicad import references, sexpr
-    tree = sexpr(board_text)
-    names = {}
-    for net in tree.named('net'):
-        if len(net.children) > 2:
-            names[str(net.children[1])] = str(net.children[2])
-    groups = {}
-    for footprint in tree.named('footprint'):
-        refs = references(footprint)
-        # A board item with no reference (a logo, a graphic) is not a part.
-        if not refs or not refs[0] or refs[0].startswith('#'):
-            continue
-        for pad in footprint.named('pad'):
-            nets = pad.named('net')
-            if not nets or len(nets[0].children) < 2:
-                continue
-            # KiCad 9 writes the name beside the number; KiCad 10 the name alone.
-            values = [str(v) for v in nets[0].children[1:]]
-            name = values[-1] if len(values) > 1 else names.get(values[0], values[0])
-            if name:
-                groups.setdefault(name, set()).add((refs[0], str(pad.children[1])))
-    joined = {frozenset(nodes) for nodes in groups.values() if len(nodes) > 1}
-    if with_parts:
-        return joined, {ref for nodes in groups.values() for ref, _ in nodes}
-    return joined
+    """Every net of a board as its set of (reference, pad), for nets joining two or more pads,
+    from the one board index (18 Nov). with_parts also gives every part with a connected pad
+    (not a logo or a hole)."""
+    from alx.providers.kicad_index import board_index, net_groups
+    return net_groups(board_index(board_text), with_parts)
 
 
 def parity_mismatches(schematic_nets: dict, board_text: str) -> list:

@@ -688,23 +688,31 @@ class KiCadTests(unittest.TestCase):
             {'filename': 'b.kicad_sch', 'name': 'B', 'uuid': 'b'}]})
         (self.project / 'test.kicad_pro').write_text(json.dumps(pro))
 
+    def forget_netlists(self, checked):
+        for kept in (self.settings.work_root / checked['work_copy_id'] / 'artifacts').glob('netlist-*.json'):
+            kept.unlink()
+
     def test_make_hierarchical_is_kept_only_when_the_netlist_is_unchanged(self):
         """2026-11-13: proven by KiCad's netlist; any change puts the copy back."""
         self.two_top_level_sheets()
         checked = self.check()
         root = self.settings.work_root / checked['work_copy_id'] / 'project'
         before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+        self.forget_netlists(checked)
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '2')]]
         result = self.call('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertEqual(result.failure['code'], 'verification_failed')
         self.assertEqual(list(result.failure['recovery']['nets_differing']), ['N1'])
         self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
-        # A failed check after converting puts the copy back too (review of #239).
+        # A failed check after converting puts the copy back too (review of #239). The fake KiCad
+        # gives other connections for the same files, which KiCad itself never does: forget them.
+        self.forget_netlists(checked)
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
         with patch.object(KiCadProvider, '_erc', side_effect=KiCadError('cli_failed')):
             failed = self.call('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertEqual(failed.failure['code'], 'cli_failed')
         self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
+        self.forget_netlists(checked)
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
         done = self.success('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertTrue(done['converted'] and done['netlist_identical'])
@@ -1424,13 +1432,27 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
 """)
         self.assertEqual(len([call for call in self.calls if call[1:3] == ['pcb', 'drc']]), 1)
 
+    def test_the_netlist_is_exported_once_per_schematic_revision(self):
+        """18 Nov review: five places exported and read the netlist their own way, each time."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        exports = (lambda: [c for c in self.calls if c[1:4] == ['sch', 'export', 'netlist']])
+        first = len(exports())
+        self.success('inspect_schematic', work_copy_id=checked['work_copy_id'])
+        self.success('check_kicad_board', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(len(exports()), first)
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC)
+        self.success('inspect_schematic', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(len(exports()), first + 1)
+
     def test_the_schematic_is_read_as_parts_pins_and_nets_in_one_call(self):
         """15 Nov: the board agent spent 26 previews reading its way around a schematic."""
         (self.project / 'test.kicad_sch').write_text(
             '(kicad_sch (symbol (lib_id "Device:R") (at 10 20 90) (property "Reference" "R1" (at 0 0 0)))'
             ' (label "OUT" (at 1 2 0)))\n')
-        checked = self.check()
+        # One netlist per schematic revision (18 Nov): the first check reads it, the rest reuse it.
         self.netlists = [[('OUT', 'R1', '1'), ('GND', 'R1', '2')]]
+        checked = self.check()
         read = self.success('inspect_schematic', work_copy_id=checked['work_copy_id'], refs=['R1'])
         part = read['parts'][0]
         self.assertEqual((part['ref'], part['sheet'], tuple(part['at']), part['rotation']),

@@ -17,7 +17,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from alx.providers.kicad_helpers import HELPERS, script_runner  # noqa: E402
-from alx.providers.kicad_hierarchy import netlist_nets  # noqa: E402
+from alx.providers.kicad_index import netlist_model, netlist_nets  # noqa: E402
 from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS  # noqa: E402
 
 APP = Path("/Applications/KiCad/KiCad.app/Contents")
@@ -75,7 +75,7 @@ class SchematicHelperTests(unittest.TestCase):
         done = subprocess.run([str(CLI), "sch", "export", "netlist", "--output", str(output),
                                str(Path(folder) / "t.kicad_sch")], capture_output=True, text=True, timeout=120)
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
-        return {name: nodes for nodes, name in netlist_nets(output.read_text()).items()}
+        return {name: nodes for nodes, name in netlist_nets(netlist_model(output.read_text())).items()}
 
     def test_wires_and_labels_at_pin_points_connect_in_kicads_netlist(self):
         with tempfile.TemporaryDirectory() as folder:

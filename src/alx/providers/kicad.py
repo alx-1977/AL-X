@@ -774,6 +774,19 @@ class KiCadProvider:
         if self.execute_python is None:
             raise KiCadError('engine_unavailable')
         board = self._board_for(arguments)
+        if arguments.get('brief') and arguments.get('window') is None:
+            # Just the parts' names, from the board index: no KiCad process (18 Nov: the full
+            # reading of P0009 was too much to take in, so references were guessed in sixes).
+            from alx.providers.kicad_index import select
+            index = self._board_index(board, self.work_root / 'sections')
+            refs = set(arguments.get('refs') or ()) or None
+            needle = str(arguments.get('contains') or '').lower()
+            parts = [{'ref': o['ref'], 'value': o['value'], 'footprint': o['footprint']}
+                     for o in select(index, 'part', refs=refs)
+                     if not needle or needle in ' '.join((o['ref'], o['value'], o['footprint'])).lower()]
+            limit = max(1, min(int(arguments.get('limit') or 300), 1000))
+            return {'board': {'file': board.name}, 'parts': parts[:limit], 'nets': [], 'zones': [],
+                    'truncated': {'parts': len(parts) > limit}}
         overview_args = {key: value for key, value in arguments.items() if key not in ('window', 'brief')}
         try:
             result = read_overview(board, overview_args, scratch_root=self.work_root / 'sections',
@@ -781,11 +794,6 @@ class KiCadProvider:
                                    execute_python=self.execute_python)
             if arguments.get('window') is not None:
                 result = dict(result, copper=self._copper_in(board, arguments))
-            if arguments.get('brief'):
-                # Just the parts' names (18 Nov: the full reading of P0009 was too much to take in,
-                # so every reference was guessed in sixes, C1 to C96, ANT1, X1 ...).
-                result = dict(result, parts=[{key: part.get(key) for key in ('ref', 'value', 'footprint')}
-                                             for part in result.get('parts') or ()], nets=[])
             return result
         except SectionError as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error
@@ -962,7 +970,8 @@ class KiCadProvider:
         connection or net name differs, the copy is put back as it was.
         """
         from alx.providers.kicad_hierarchy import (HierarchyError, connect_with_sheet_pins, make_hierarchical,
-                                                   netlist_nets, rename_nets)
+                                                   rename_nets)
+        from alx.providers.kicad_index import netlist_nets
         with self._locked(arguments['work_copy_id']):
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('taint'):
@@ -973,10 +982,7 @@ class KiCadProvider:
                 raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
 
             def netlist():
-                output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
-                output.parent.mkdir(exist_ok=True)
-                self._run('sch', 'export', 'netlist', '--output', output, schematic)
-                return netlist_nets(output.read_text(errors='replace'))
+                return netlist_nets(self._netlist(project, meta['board'], root / 'artifacts'))
             before = netlist()
             # One kept change, gone back over with revert_to like any edit (18 Nov review: it had its
             # own copy-and-restore and left no history).
@@ -2355,58 +2361,74 @@ class KiCadProvider:
         needle = '(symbol %s' % json.dumps(lib_id)
         return any(needle in path.read_text(errors='replace') for path in project.glob('*.kicad_sch'))
 
+    def _netlist(self, project, board_name, scratch):
+        """KiCad's netlist of a project's schematic as parts and nets, or None without one.
+
+        Exported once per schematic revision and kept beside the work (18 Nov review: five
+        places each exported and read it their own way)."""
+        from alx.providers.kicad_index import netlist_model
+        schematic = (project / board_name).with_suffix('.kicad_sch')
+        if not schematic.is_file():
+            return None
+        contents = {name: digest for name, digest in design_inventory(project).items()
+                    if name.endswith(('.kicad_sch', '.kicad_pro', 'sym-lib-table'))}
+        key = hashlib.sha256(json.dumps(contents, sort_keys=True).encode()).hexdigest()[:32]
+        scratch.mkdir(parents=True, exist_ok=True)
+        kept = scratch / ('netlist-%s.json' % key)
+        if kept.is_file():
+            with suppress(ValueError):
+                return json.loads(kept.read_text())
+        output = scratch / (uuid.uuid4().hex + '.net')
+        try:
+            self._run('sch', 'export', 'netlist', '--output', output, schematic)
+            model = netlist_model(output.read_text(errors='replace'))
+        finally:
+            output.unlink(missing_ok=True)
+        kept.write_text(json.dumps(model))
+        return model
+
+    def _board_index(self, board, scratch):
+        """The one reading of a board (kicad_index), kept per board revision (18 Nov)."""
+        from alx.providers.kicad_index import board_index
+        text = board.read_text(errors='replace')
+        key = hashlib.sha256(text.encode()).hexdigest()[:32]
+        scratch.mkdir(parents=True, exist_ok=True)
+        kept = scratch / ('index-%s.json' % key)
+        if kept.is_file():
+            with suppress(ValueError):
+                return json.loads(kept.read_text())
+        index = board_index(text)
+        kept.write_text(json.dumps(index))
+        return index
+
     def _pin_groups(self, root, meta):
         """Each schematic pin (REF.PIN) with the pins on its net, and its net's name, from KiCad's netlist."""
-        from alx.providers.kicad_hierarchy import netlist_nets
-        schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
-        if not schematic.is_file():
+        from alx.providers.kicad_index import netlist_nets
+        model = self._netlist(root / 'project', meta['board'], root / 'artifacts')
+        if model is None:
             return {}, {}
-        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
-        output.parent.mkdir(exist_ok=True)
-        self._run('sch', 'export', 'netlist', '--output', output, schematic)
         groups, names = {}, {}
-        for nodes, name in netlist_nets(output.read_text(errors='replace')).items():
+        for nodes, name in netlist_nets(model).items():
             pins = frozenset('%s.%s' % node for node in nodes)
             for pin in pins:
                 groups[pin] = pins
                 names[pin] = name
-        output.unlink(missing_ok=True)
         return groups, names
 
     def _schematic_sync(self, root, meta):
         """Every schematic part with its footprint, value, fields and sheet path, and each
         pad's net, from KiCad's own netlist of the copy; and the library footprints the board
         lacks for them (LIBRARY/NAME)."""
-        schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
-        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
-        output.parent.mkdir(exist_ok=True)
-        self._run('sch', 'export', 'netlist', '--format', 'kicadsexpr', '--output', output, schematic)
-        tree = sexpr(output.read_text(errors='replace'))
-        output.unlink(missing_ok=True)
-
-        def text_of(node, name):
-            found = node.named(name)
-            return str(found[0].children[1]) if found and len(found[0].children) > 1 else ''
+        model = self._netlist(root / 'project', meta['board'], root / 'artifacts')
+        if model is None:
+            raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
         parts, nets = {}, {}
-        for comp in tree.one('components').named('comp'):
-            ref = text_of(comp, 'ref')
-            fields = {}
-            for holder in comp.named('fields'):
-                for field in holder.named('field'):
-                    name = text_of(field, 'name')
-                    if name and len(field.children) > 2 and not isinstance(field.children[-1], Node):
-                        fields[name] = str(field.children[-1])
-            for name in ('datasheet', 'description'):
-                if text_of(comp, name):
-                    fields.setdefault(name.capitalize(), text_of(comp, name))
-            sheet = comp.named('sheetpath')
-            path = (text_of(sheet[0], 'tstamps') if sheet else '/') + text_of(comp, 'tstamps')
-            parts[ref] = {'footprint': text_of(comp, 'footprint'), 'value': text_of(comp, 'value'),
-                          'fields': fields, 'path': path}
-        for net in tree.one('nets').named('net'):
-            name = text_of(net, 'name')
-            for node in net.named('node'):
-                nets.setdefault(text_of(node, 'ref'), {})[text_of(node, 'pin')] = name
+        for comp in model['components']:
+            parts[comp['ref']] = {'footprint': comp['footprint'], 'value': comp['value'],
+                                  'fields': comp['fields'], 'path': comp['path']}
+        for net in model['nets']:
+            for node in net['nodes']:
+                nets.setdefault(node['ref'], {})[node['pin']] = net['name']
         board_text = (root / 'project' / meta['board']).read_text(errors='replace')
         on_board = {}
         for item in sexpr(board_text).named('footprint'):
@@ -2449,15 +2471,12 @@ class KiCadProvider:
 
     def _parity(self, root, meta):
         """Where the schematic and the board disagree, pin by pin, across every sheet; None without one."""
-        from alx.providers.kicad_hierarchy import netlist_nets
+        from alx.providers.kicad_index import netlist_nets
         board = root / 'project' / meta['board']
-        schematic = board.with_suffix('.kicad_sch')
-        if not schematic.is_file():
+        model = self._netlist(root / 'project', meta['board'], root / 'artifacts')
+        if model is None:
             return None
-        output = root / 'artifacts' / (uuid.uuid4().hex + '.net')
-        output.parent.mkdir(exist_ok=True)
-        self._run('sch', 'export', 'netlist', '--output', output, schematic)
-        return parity_mismatches(netlist_nets(output.read_text(errors='replace')), board.read_text())
+        return parity_mismatches(netlist_nets(model), board.read_text())
 
     def _baseline(self, root):
         path = root / 'baseline.json'
@@ -2548,26 +2567,18 @@ class KiCadProvider:
         schematic = (project / meta['board']).with_suffix('.kicad_sch')
         if not schematic.is_file():
             raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
-        output = scratch / (uuid.uuid4().hex + '.net')
-        output.parent.mkdir(exist_ok=True)
-        self._run('sch', 'export', 'netlist', '--output', output, schematic)
-        tree = sexpr(output.read_text(errors='replace'))
-        output.unlink(missing_ok=True)
-
-        def text(node, name):
-            found = node.named(name)
-            return str(found[0].children[1]) if found and len(found[0].children) > 1 else ''
+        model = self._netlist(project, meta['board'], scratch)
         refs = set(arguments.get('refs') or ())
         wanted_nets = set(arguments.get('nets') or ())
         needle = str(arguments.get('contains') or '').lower()
         limit = max(1, min(int(arguments.get('limit') or 200), 1000))
         pins, nets = {}, []
-        for net in (tree.named('nets')[0].named('net') if tree.named('nets') else ()):
-            name = text(net, 'name')
+        for net in model['nets']:
+            name = net['name']
             nodes = []
-            for node in net.named('node'):
-                ref, number = text(node, 'ref'), text(node, 'pin')
-                pins.setdefault(ref, []).append({'number': number, 'name': text(node, 'pinfunction'), 'net': name})
+            for node in net['nodes']:
+                ref, number = node['ref'], node['pin']
+                pins.setdefault(ref, []).append({'number': number, 'name': node['function'], 'net': name})
                 nodes.append('%s.%s' % (ref, number))
             nets.append({'name': name, 'nodes': nodes})
         places = {}
@@ -2588,9 +2599,9 @@ class KiCadProvider:
                                    'rotation': float(at[0].children[3]) if len(at[0].children) > 3 else 0.0}
             sheets.append({'file': path.name, 'symbols': count, 'labels': labels[:200]})
         parts = []
-        for comp in (tree.named('components')[0].named('comp') if tree.named('components') else ()):
-            ref = text(comp, 'ref')
-            item = {'ref': ref, 'value': text(comp, 'value'), 'footprint': text(comp, 'footprint'),
+        for comp in model['components']:
+            ref = comp['ref']
+            item = {'ref': ref, 'value': comp['value'], 'footprint': comp['footprint'],
                     **places.get(ref, {}), 'pins': sorted(pins.get(ref, []), key=lambda p: (len(p['number']), p['number']))}
             haystack = ' '.join([ref, item['value'], item['footprint']]).lower()
             if (refs and ref not in refs) or (needle and needle not in haystack) or (

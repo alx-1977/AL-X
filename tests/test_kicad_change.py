@@ -356,21 +356,24 @@ class RealChangeTests(unittest.TestCase):
 
 
 class BriefInspectTests(unittest.TestCase):
-    def test_brief_lists_only_the_parts_names(self):
-        """18 Nov: the full reading of P0009 was too much, so references were guessed in sixes."""
+    def test_brief_lists_only_the_parts_names_from_the_board_index(self):
+        """18 Nov: the full reading of P0009 was too much, so references were guessed in sixes.
+        The short list comes from the board index; KiCad is not started for it."""
+        import tempfile
         from unittest import mock
         from alx.providers.kicad import KiCadProvider
-        provider = KiCadProvider.__new__(KiCadProvider)
-        provider.execute_python, provider.work_root = object(), Path("/nonexistent")
-        provider.settings = mock.Mock(kicad_python="python")
-        full = {"board": {}, "parts": [{"ref": "C1", "value": "100n", "footprint": "F:C0402", "pads": [1, 2],
-                                        "fields": {"MPN": "x"}}], "nets": [{"net": "GND"}], "zones": [], "truncated": {}}
-        with mock.patch.object(KiCadProvider, "_board_for", return_value=Path("b.kicad_pcb")), \
-                mock.patch("alx.providers.kicad_section.read_overview", return_value=full) as overview:
-            result = provider.inspect({"work_copy_id": "w", "brief": True})
-        self.assertNotIn("brief", overview.call_args[0][1])
-        self.assertEqual(result["parts"], [{"ref": "C1", "value": "100n", "footprint": "F:C0402"}])
-        self.assertEqual(result["nets"], [])
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "b.kicad_pcb"
+            board.write_text('(kicad_pcb (footprint "Lib:C_0402" (layer "F.Cu") (uuid "u1") (at 1 2)'
+                             ' (property "Reference" "C1") (property "Value" "100n")))')
+            provider = KiCadProvider.__new__(KiCadProvider)
+            provider.execute_python, provider.work_root = object(), Path(folder) / "work"
+            with mock.patch.object(KiCadProvider, "_board_for", return_value=board), \
+                    mock.patch("alx.providers.kicad_section.read_overview") as overview:
+                result = provider.inspect({"work_copy_id": "w", "brief": True})
+            overview.assert_not_called()
+            self.assertEqual(result["parts"], [{"ref": "C1", "value": "100n", "footprint": "Lib:C_0402"}])
+            self.assertEqual(result["nets"], [])
 
 
 class OneWayToChangeACopyTests(unittest.TestCase):

@@ -500,16 +500,4 @@ def rename_nets(project: Path, renames: dict[str, str]) -> dict[str, int]:
     return counts
 
 
-def netlist_nets(netlist: str) -> dict[frozenset, str]:
-    """Each net of a KiCad netlist as its set of (reference, pin), with its name."""
-    nets = {}
-    start = netlist.find("(nets")
-    for block in netlist[start:].split("(net\n")[1:] if start >= 0 else ():
-        name = re.search(r'\(name "((?:[^"\\]|\\.)*)"\)', block)
-        nodes = frozenset(re.findall(r'\(ref "([^"]+)"\)\s*\(pin "([^"]+)"\)', block))
-        if nodes:
-            nets[nodes] = name.group(1) if name else ""
-    return nets
-
-
-__all__ = ["HierarchyError", "connect_with_sheet_pins", "make_hierarchical", "netlist_nets", "rename_nets"]
+__all__ = ["HierarchyError", "connect_with_sheet_pins", "make_hierarchical", "rename_nets"]
