@@ -808,7 +808,8 @@ def apply_change(change):
             elif kind == "add_teardrops":
                 # Teardrops where tracks meet pads and vias and have none (18 Nov: KiCad makes them
                 # only in its own window). RF nets (curved tracks) and skip_nets get none.
-                done["teardrops_added"] = add_teardrops(b, op.get("skip_nets") or (), op.get("area"))
+                done["teardrops_added"], done["teardrops_skipped"] = add_teardrops(
+                    b, op.get("skip_nets") or (), op.get("area"))
                 refill(b)
             elif kind == "set_text":
                 # Board text on silkscreen, like the revision or date (18 Nov): every text that reads

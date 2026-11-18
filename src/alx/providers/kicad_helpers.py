@@ -970,6 +970,10 @@ def add_teardrops(board, skip_nets=(), area=None):
             size = item.GetWidth(_pcbnew.F_Cu)
             targets.append((item, item.GetPosition(), _pcbnew.VECTOR2I(size, size), None))
     made = 0
+    why = {}
+
+    def skipped(reason):
+        why[reason] = why.get(reason, 0) + 1
     tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
 
     def in_other(net, layer_id, spot, target):
@@ -1000,11 +1004,12 @@ def add_teardrops(board, skip_nets=(), area=None):
                 ends = [e for e in (track.GetStart(), track.GetEnd())
                         if (e - centre).EuclideanNorm() <= size.x / 2]
             if len(ends) != 1:
+                if len(ends) == 2:
+                    skipped("track wholly inside the pad")
                 continue
             near_end = ends[0]
             far_end = track.GetEnd() if near_end == track.GetStart() else track.GetStart()
-            if in_other(net, track.GetLayer(), far_end, target):
-                continue
+            linked = in_other(net, track.GetLayer(), far_end, target)
             ux, uy = _pcbnew.ToMM(far_end.x - near_end.x), _pcbnew.ToMM(far_end.y - near_end.y)
             run = _math.hypot(ux, uy)
             if run < 1e-6:
@@ -1023,18 +1028,23 @@ def add_teardrops(board, skip_nets=(), area=None):
             width = _pcbnew.ToMM(track.GetWidth())
             flare = min(2 * across * 0.9, 2.0)
             if width >= flare * 0.9:
+                skipped("track as wide as the pad")
                 continue  # the track is about as wide as the pad already
             length = min(max(along, 0.25), 1.0)
-            # From the pad's centre, past its edge by `length` along the track.
+            # From the pad's centre, past its edge by `length` along the track; shorter where the
+            # track turns soon (KiCad's own fit), and only half the way when it ends in another pad.
             ex, ey = _pcbnew.ToMM(near_end.x), _pcbnew.ToMM(near_end.y)
             base = (cx - ex) * ux + (cy - ey) * uy  # where the pad centre sits along the track
-            reach = base + along + length
-            if reach > run:
-                continue  # the straight run is too short for a teardrop
+            room = (run - base - along) * (0.45 if linked else 0.9)
+            if room < 0.15 or (linked and run - base - along < 1.0):
+                skipped("pad-to-pad link" if linked else "straight run too short")
+                continue
+            length = min(length, room)  # the straight run is too short for a teardrop
             # Every teardrop covers the track just outside the pad's edge.
             probe = (ex + ux * (base + along + 0.05), ey + uy * (base + along + 0.05))
             if any(code == net and layer_id == track.GetLayer()
                    and outline.Contains(point(*probe)) for code, layer_id, outline in have):
+                skipped("has one")
                 continue  # one is there already
             corners = []
             steps = 6
@@ -1068,7 +1078,7 @@ def add_teardrops(board, skip_nets=(), area=None):
             board.Add(zone)
             have.append((net, track.GetLayer(), zone.Outline()))
             made += 1
-    return made
+    return made, why
 
 
 def refill(board):
