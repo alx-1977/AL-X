@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -113,6 +114,17 @@ def inventory(root, *, exclude=frozenset()):
                 raise KiCadError('project_too_large')
             result[path.relative_to(root).as_posix()] = sha(path)
     return result
+
+
+def staged_bytes(path):
+    """A file the export itself just generated in her own work copy (18 Nov: read through the
+    reference reader, whose credential check refuses every path under .alx, every export from
+    her real storage failed). Never a link; only a regular file."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise KiCadError('path_denied')
+        return stream.read()
 
 
 # KiCad keeps its own automatic save history in this folder at the top of a
@@ -1706,7 +1718,7 @@ class KiCadProvider:
                 if key in filename_keys:
                     raise KiCadError('rename_ambiguous')
                 filename_keys.add(key)
-                files[final] = read_bytes(staging / name)
+                files[final] = staged_bytes(staging / name)
             for name in jobs:
                 job = json.loads(files[name])
                 for entry in job.get('FilesAttributes', []):
@@ -1726,7 +1738,7 @@ class KiCadProvider:
                 with zipfile.ZipFile(final_dir / name, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:
                     for entry in files:
                         bundle.write(final_dir / entry, entry)
-                files[name] = read_bytes(final_dir / name)
+                files[name] = staged_bytes(final_dir / name)
             assembly = None
             if arguments.get('assembly'):
                 # BOM and positions go beside the zip, not in it: JLC takes them separately.

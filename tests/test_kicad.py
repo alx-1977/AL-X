@@ -1620,6 +1620,33 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
                            dict(args, output_dir='production/again', work_copy_revision='0' * 64))
         self.assertEqual(stale.failure['code'], 'work_copy_changed')
 
+    def test_export_works_from_her_real_storage_under_dot_alx(self):
+        """18 Nov: her work copies live under .alx/runtime/kicad; the export read its own staged
+        files through the reference reader, which refuses every path under .alx."""
+        storage = self.root / '.alx' / 'runtime'
+
+        def runner(argv, **kwargs):
+            if argv[2] == 'drc':
+                return self._drc_under(argv)
+            target = Path(argv[argv.index('--output') + 1])
+            if argv[3] == 'gerbers':
+                (target / 'test-F_Cu.gbr').write_text('X1Y2D01*\n')
+            else:
+                (target / 'test.drl').write_text('M48\n')
+            return SimpleNamespace(returncode=0)
+        runtime = build_kicad_runtime(lambda: 'export', self.environment, storage, runner)
+        checked = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(self.project)})
+        self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
+            'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production/jlc', 'zip_name': 'g.zip'})
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertTrue((self.project / 'production/jlc/g.zip').is_file())
+
+    def _drc_under(self, argv):
+        Path(argv[argv.index('--output') + 1]).write_text(json.dumps(
+            {'violations': [], 'unconnected_items': [], 'schematic_parity': []}))
+        return SimpleNamespace(returncode=0)
+
     def test_manufacturing_comparison_ignores_dates_comments_and_generator(self):
         from alx.providers.kicad import compare_manufacturing
         import zipfile
