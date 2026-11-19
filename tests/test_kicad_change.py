@@ -123,8 +123,10 @@ class ChangeShapeTests(unittest.TestCase):
         problems = unmet(unwire, before, both, names, {}, (), names)
         self.assertTrue(any(p.startswith("R5.1 changed connection: lost R6.1") for p in problems), problems)
         labels = [{"op": "remove_labels", "nets": ["A"]}]
-        self.assertEqual(unmet(labels, before, only_a, names, {}, (), names), [])
-        self.assertTrue(unmet(labels, before, both, names, {}, (), names))
+        self.assertEqual(unmet(labels, before, only_a, names, {}, [{"removed": 1}], names), [])
+        self.assertTrue(unmet(labels, before, both, names, {}, [{"removed": 1}], names))
+        # Removing no label excuses nothing (19 Nov recheck).
+        self.assertTrue(unmet(labels, before, only_a, names, {}, [{"removed": 0}], names))
         items = [{"op": "remove_items", "sheet": "a", "area": [0, 0, 1, 1]}]
         self.assertEqual(unmet(items, before, only_a, names, {}, [{"scope": ["R1.1", "R2.1"]}], names), [])
         self.assertTrue(unmet(items, before, both, names, {}, [{"scope": ["R1.1", "R2.1"]}], names))
@@ -139,8 +141,9 @@ class ChangeShapeTests(unittest.TestCase):
               "R5.1": frozenset({"R5.1", "R6.1"}), "R6.1": frozenset({"R5.1", "R6.1"})}
         en_names = {"R1.1": "/A/EN", "R2.1": "/A/EN", "R5.1": "/B/EN", "R6.1": "/B/EN"}
         split_b = {"R1.1": en["R1.1"], "R2.1": en["R2.1"], "R5.1": frozenset({"R5.1"}), "R6.1": frozenset({"R6.1"})}
-        self.assertTrue(unmet([{"op": "remove_labels", "nets": ["EN"]}], en, split_b, en_names, {}, (), en_names))
-        self.assertEqual(unmet([{"op": "remove_labels", "nets": ["/B/EN"]}], en, split_b, en_names, {}, (), en_names), [])
+        self.assertTrue(unmet([{"op": "remove_labels", "nets": ["EN"]}], en, split_b, en_names, {}, [{"removed": 1}], en_names))
+        self.assertEqual(unmet([{"op": "remove_labels", "nets": ["/B/EN"]}], en, split_b, en_names, {},
+                               [{"removed": 1}], en_names), [])
         # remove_items is excused only for the pins wired to what it removed.
         items = [{"op": "remove_items", "sheet": "a", "area": [0, 0, 1, 1]}]
         self.assertEqual(unmet(items, before, only_a, names, {}, [{"scope": ["R1.1"]}], names), [])
@@ -190,6 +193,22 @@ class SetCheckTests(unittest.TestCase):
         self.assertEqual((problems, receipts[0]["changed"]), ([], 1))
         _, problems = set_check(change, self.board(text, other), self.board(moved, dict(other, at=[0.0, 0.0])))
         self.assertTrue(any("u (text: at)" in p for p in problems), problems)
+
+    def test_another_operation_in_the_batch_does_not_hide_an_outline_move(self):
+        """19 Nov recheck: a title-block edit switched the comparison off; an Edge.Cuts move passed."""
+        from alx.providers.kicad_change import set_check
+        a = self.field("a", "R1", (1, 1), 0.2)
+        edge = {"id": "e", "kind": "graphic", "shape": "line", "layer": "Edge.Cuts", "start": [0, 0], "end": [4, 0]}
+        change = [{"op": "set", "kind": "field", "to": {"size": 0.5}, "_ids": ["a"]}, {"op": "title_block"}]
+        _, problems = set_check(change, self.board(a, edge),
+                                self.board(dict(a, size=[0.5, 0.5]), dict(edge, end=[14, 0])))
+        self.assertTrue(any("e (graphic: end)" in p for p in problems), problems)
+        # A placed part's fields may move with it when place is in the batch.
+        moved = dict(self.field("b", "R2", (1, 1), 0.2), at=[5.0, 5.0])
+        change = [{"op": "set", "kind": "field", "to": {"size": 0.5}, "_ids": ["a"]}, {"op": "place", "ref": "R2"}]
+        _, problems = set_check(change, self.board(a, self.field("b", "R2", (1, 1), 0.2)),
+                                self.board(dict(a, size=[0.5, 0.5]), moved))
+        self.assertEqual(problems, [])
 
     def test_objects_may_not_appear_or_go(self):
         from alx.providers.kicad_change import set_check

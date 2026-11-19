@@ -1667,6 +1667,7 @@ class KiCadProvider:
             restored = False
             if pending is not None:
                 shutil.rmtree(pending, ignore_errors=True)
+            history_back = pending is None or not pending.exists()
             try:
                 for action in reversed(change.on_rollback):
                     action()
@@ -1676,7 +1677,8 @@ class KiCadProvider:
                 elif project.exists():
                     shutil.rmtree(project)
                 shutil.copytree(change.snapshot, project)
-                restored = inventory(project) == original
+                # Restored means the files and the undo history: an entry left for an undone edit is not.
+                restored = inventory(project) == original and history_back
                 # A session that could not be stopped may still write: unproven.
                 if getattr(error, 'details', {}).get('reason_code') == 'session_unstoppable':
                     restored = False
@@ -1832,7 +1834,7 @@ class KiCadProvider:
             # One origin for every file: the board's drill/place origin when it has one, else
             # KiCad's absolute origin (18 Nov: drill and positions could disagree with the
             # Gerbers; KiCad ignores its origin option when it plots with the board's settings).
-            aux = re.search(r'\(aux_axis_origin ([-0-9.]+) ([-0-9.]+)\)', board_text)
+            aux = re.search(r'\(aux_axis_origin\s+([-0-9.]+)\s+([-0-9.]+)\s*\)', board_text)
             place_origin = bool(aux and (float(aux.group(1)), float(aux.group(2))) != (0.0, 0.0))
             plotted = board
             aux_setting = re.compile(r'\(useauxorigin\s+(?:yes|no)\s*\)')
@@ -2508,7 +2510,7 @@ class KiCadProvider:
         # (19 Nov recheck: a sheet outside it could change unseen).
         for name in contents:
             if name.endswith('.kicad_sch'):
-                for file in re.findall(r'\(property "Sheetfile" "((?:[^"\\]|\\.)*)"',
+                for file in re.findall(r'\(property\s+"Sheetfile"\s+"((?:[^"\\]|\\.)*)"',
                                        (project / name).read_text(errors='replace')):
                     # KiCad reads a sheet's file relative to the sheet that names it.
                     target = ((project / name).parent / file).resolve()
@@ -2936,8 +2938,7 @@ class KiCadProvider:
         # saved view was kept once, then deleted by the next window).
         seen = (meta.get('view') or {})
         last = root / 'views' / str(seen.get('stamp', '')) / 'amended'
-        if (seen and last.is_dir() and not arguments.get('discard_saved_edits')
-                and design_inventory(last, exclude={last / '.history'}) != seen.get('files')):
+        if seen and last.is_dir() and not arguments.get('discard_saved_edits') and self._saved_in_view(last, seen):
             raise KiCadError('arguments_unusable', {'detail': 'he saved an edit in the last KiCad window that is '
                                                     'not in your copy: take_edits first, or open with '
                                                     'discard_saved_edits true if he wants it dropped'})
@@ -2972,6 +2973,9 @@ class KiCadProvider:
         folder.mkdir(parents=True, exist_ok=True)
         shot = folder / ('screen-%s-%s.png' % (what, stamp))
         self.capture_screen(shot)
+        if not shot.is_file():
+            raise KiCadError('unavailable', {'detail': 'the screen could not be taken, so it is not known what he '
+                                             'saw; check screen-recording permission'})
         # Recorded only once the windows opened and the screen was taken, with what they show
         # (18 Nov review: a failed launch, or a schematic view, could count as showing him the board).
         meta = dict(meta, view=view)
@@ -2979,6 +2983,15 @@ class KiCadProvider:
         return {'opened': [str(path) for path in files],
                 'windows': (['current (his design)'] if len(files) == 2 else []) + ['amended (your copy)'],
                 'screenshot': str(shot) if shot.is_file() else ''}
+
+    @staticmethod
+    def _saved_in_view(folder, view):
+        """Whether he saved something in a KiCad window's copy since it opened; KiCad's lock files
+        while the window is open are not the design (19 Nov recheck: a lock file alone counted)."""
+        ignored = (lambda name: Path(name).name.startswith('~') or name.endswith('.lck'))
+        now = {k: v for k, v in design_inventory(folder, exclude={folder / '.history'}).items() if not ignored(k)}
+        then = {k: v for k, v in (view.get('files') or {}).items() if not ignored(k)}
+        return now != then
 
     def take_edits(self, arguments):
         """Friedl's own edit, made and saved in the KiCad window open_in_kicad showed him, taken
@@ -3058,6 +3071,12 @@ class KiCadProvider:
             # He approves what he has seen: this exact copy opened for him in KiCad (17 Nov: asked
             # three times about one capacitor without being shown it once).
             view = meta.get('view') or {}
+            shown = root / 'views' / str(view.get('stamp', '')) / 'amended'
+            if view and shown.is_dir() and self._saved_in_view(shown, view):
+                # He approves what is in front of him: an edit he saved there is taken first (19 Nov
+                # recheck: the approval covered the board before his adjustment).
+                raise KiCadError('arguments_unusable', {'detail': 'he saved an edit in the KiCad window: take_edits '
+                                                        'first, then show him again and ask'})
             if view.get('revision') != revision:
                 raise KiCadError('arguments_unusable', {'detail': 'he has not been shown this version: open it '
                                                         'for him with open_in_kicad first, then ask'})

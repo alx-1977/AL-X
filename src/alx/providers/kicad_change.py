@@ -285,8 +285,12 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
         if op['op'] == 'unwire':
             scope.update(op['pins'])
         elif op['op'] == 'remove_labels':
-            # A net named in full, or by a short name only one net has: /A/EN and /B/EN are not
-            # both excused for "EN" (19 Nov recheck).
+            # Only if it removed a label at all (19 Nov recheck: removing nothing excused a split),
+            # and a net named in full, or by a short name only one net has.
+            done = change_result[index] if index < len(change_result) else {}
+            removed = (done or {}).get('removed')
+            if not (sum(removed.values()) if isinstance(removed, dict) else removed):
+                continue
             for wanted in op['nets']:
                 full = {name for name in set(before_names.values()) if name == wanted}
                 if not full:
@@ -324,6 +328,23 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
     return problems[:30]
 
 
+# The kinds of board object each other board operation may change; any not listed may change any.
+ALL_KINDS = ('part', 'field', 'pad', 'track', 'arc', 'via', 'zone', 'keepout', 'teardrop', 'text', 'graphic')
+AFFECTS = {
+    'title_block': (),
+    'add_teardrops': ('teardrop', 'pad', 'via'),
+    'remove_teardrops': ('teardrop', 'pad', 'via'),
+    'keepout': ('keepout', 'zone'),
+    'remove_keepouts': ('keepout', 'zone'),
+    'track': ('track', 'arc', 'teardrop', 'zone'),
+    'route': ('track', 'arc', 'via', 'teardrop', 'zone'),
+    'via': ('via', 'teardrop', 'zone'),
+    'to_plane': ('track', 'arc', 'via', 'teardrop', 'zone'),
+    'remove_tracks': ('track', 'arc', 'via', 'teardrop', 'zone'),
+    'remove_dangling_tracks': ('track', 'arc', 'via', 'teardrop', 'zone'),
+    'copper_shape': ('zone', 'graphic', 'teardrop'),
+    'remove_copper_shapes': ('zone', 'graphic', 'teardrop'),
+}
 # Which indexed properties each settable property may change (positions are absolute).
 _TOUCHES = {'size': ('size',), 'thickness': ('thickness',), 'visible': ('visible',), 'angle': ('angle',),
             'at': ('at', 'offset'), 'move_by': ('at', 'offset'), 'text': ('text',), 'drill': ('drill',),
@@ -383,37 +404,31 @@ def set_check(change, before, after):
                          'ids_changed': [uid for uid in op['_ids'] if uid not in already and uid not in wrong][:50]})
         if wrong:
             problems.append('%d %s not as asked, e.g. %s' % (len(wrong), op['kind'], ', '.join(wrong[:5])))
-    if all(op['op'] == 'set' or op['op'] in SCHEMATIC_OPS for op in change):
-        appeared, gone = sorted(set(new) - set(old)), sorted(set(old) - set(new))
-        others = []
-        for uid in sorted(set(old) & set(new)):
-            differing = {key for key in set(old[uid]) | set(new[uid])
-                         if not _close(old[uid].get(key), new[uid].get(key))}
-            # A part's own record lists its fields' values; a field's offset follows its place.
-            differing -= allowed.get(uid, set())
-            if differing:
-                others.append('%s (%s: %s)' % (uid, old[uid]['kind'], ', '.join(sorted(differing))))
-        if appeared or gone:
-            problems.append('objects appeared (%d) or went (%d), e.g. %s' % (
-                len(appeared), len(gone), ', '.join((appeared + gone)[:5])))
-        if others:
-            problems.append('%d objects changed that no set asked for, e.g. %s' % (len(others), '; '.join(others[:5])))
-        for receipt in receipts:
-            receipt['others_changed'] = len(others) + len(appeared) + len(gone)
-    else:
-        # With other board operations in the batch, objects of each set's kind that no set picked
-        # still keep the properties those sets name (19 Nov recheck: this check had gone).
-        kinds = {}
-        for op in change:
-            if op['op'] == 'set':
-                kinds.setdefault(op['kind'], set()).update(k for key in op['to'] for k in _TOUCHES[key])
-        others = sorted(uid for uid, item in old.items() if item['kind'] in kinds and uid not in allowed
-                        and uid in new and any(not _close(item.get(key), new[uid].get(key))
-                                               for key in kinds[item['kind']]))
-        if others:
-            problems.append('%d objects changed that no set picked, e.g. %s' % (len(others), ', '.join(others[:5])))
-        for receipt in receipts:
-            receipt['others_changed'] = len(others)
+    # Kinds of board object the other operations in the batch may change; every other object on
+    # the board must stay exactly as it was (19 Nov recheck: a title-block edit switched the whole
+    # comparison off, and an Edge.Cuts move passed).
+    affected = set()
+    for op in change:
+        if op['op'] != 'set' and op['op'] not in SCHEMATIC_OPS:
+            affected |= set(AFFECTS.get(op['op'], ALL_KINDS))
+    appeared = sorted(uid for uid in set(new) - set(old) if new[uid]['kind'] not in affected)
+    gone = sorted(uid for uid in set(old) - set(new) if old[uid]['kind'] not in affected)
+    others = []
+    for uid in sorted(set(old) & set(new)):
+        if old[uid]['kind'] in affected:
+            continue
+        differing = {key for key in set(old[uid]) | set(new[uid])
+                     if not _close(old[uid].get(key), new[uid].get(key))}
+        differing -= allowed.get(uid, set())
+        if differing:
+            others.append('%s (%s: %s)' % (uid, old[uid]['kind'], ', '.join(sorted(differing))))
+    if appeared or gone:
+        problems.append('objects appeared (%d) or went (%d), e.g. %s' % (
+            len(appeared), len(gone), ', '.join((appeared + gone)[:5])))
+    if others:
+        problems.append('%d objects changed that no set asked for, e.g. %s' % (len(others), '; '.join(others[:5])))
+    for receipt in receipts:
+        receipt['others_changed'] = len(others) + len(appeared) + len(gone)
     return receipts, problems
 
 

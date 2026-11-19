@@ -204,6 +204,29 @@ class KiCadTests(unittest.TestCase):
         root, meta = provider._load(edited['work_copy_id'])
         self.assertEqual(meta['view']['what'], 'board')
 
+    def test_a_view_counts_only_once_the_screen_was_taken(self):
+        """19 Nov recheck: a failed screen capture still marked the revision as shown."""
+        checked = self.check()
+        self.shown(checked['work_copy_id'], 'board')
+        self.runtime.provider.capture_screen = lambda target: None
+        failed = kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': checked['work_copy_id'],
+                                                                      'what': 'board'})
+        self.assertIn('screen could not be taken', failed.failure['recovery']['detail'])
+
+    def test_an_edit_he_saved_in_the_window_is_taken_before_approval(self):
+        """19 Nov recheck: the approval covered the board before his saved adjustment; a KiCad lock
+        file alone counted as an edit."""
+        checked = self.check()
+        window = Path(self.shown(checked['work_copy_id'], 'board').values['opened'][0])
+        # A lock file while the window is open is not an edit: a new window opens.
+        (window.parent / ('~' + window.name + '.lck')).write_text('{}')
+        window = Path(self.shown(checked['work_copy_id'], 'board').values['opened'][0])
+        window.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        refused = kicad_call(self.runtime.executors, 'approve_step', {
+            'step': 'placement', 'work_copy_id': checked['work_copy_id'],
+            'work_copy_revision': checked['work_copy_revision']})
+        self.assertIn('take_edits first', refused.failure['recovery']['detail'])
+
     def test_a_step_is_approved_only_once_he_was_shown_that_version(self):
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
@@ -1211,7 +1234,7 @@ p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
 
     def test_the_drill_place_origin_needs_its_plot_setting_whatever_its_spacing(self):
         """19 Nov recheck: '(useauxorigin  no)' passed the guard and escaped the rewrite."""
-        board = BOARD.replace('(kicad_pcb\n', '(kicad_pcb\n  (setup (aux_axis_origin 95 150) '
+        board = BOARD.replace('(kicad_pcb\n', '(kicad_pcb\n  (setup (aux_axis_origin  95 150) '
                               '(pcbplotparams (useauxorigin  no)))\n', 1)
         (self.project / 'test.kicad_pcb').write_text(board)
         plotted = []

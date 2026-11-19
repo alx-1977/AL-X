@@ -17,7 +17,7 @@ from typing import Any
 
 # Bumped whenever an object gains or changes a property, so a kept index of an older shape is
 # never used (18 Nov review: text angle was added while step-2 indexes of the same bytes remained).
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 KINDS = ("part", "field", "pad", "track", "arc", "via", "zone", "keepout", "teardrop", "text", "graphic")
 
 
@@ -161,6 +161,7 @@ def board_index(board_text: str) -> dict[str, Any]:
             objects.append({"id": _uuid(node), "kind": "track" if kind == "segment" else "arc",
                             "net": _net(node, names), "layer": _value(node, "layer", default=""),
                             "width": (_numbers(node, "width") or [None])[0], "start": start, "end": end,
+                            **({"mid": _numbers(node, "mid")[:2]} if kind == "arc" else {}),
                             "length": (_arc_length(start, _numbers(node, "mid")[:2], end) if kind == "arc" else
                                        round(math.dist(start, end), 4) if len(start) == len(end) == 2 else None)})
         elif kind == "via":
