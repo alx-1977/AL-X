@@ -483,12 +483,22 @@ ADD_PART = CapabilityDefinition('add_part',
     '[left, bottom], pitch, pad_width, pad_length, row_spacing_x, row_spacing_y) | pads (every pad from the '
     'datasheet table: [{number, x, y, width, height, shape?, rotation?, drill?, kind?}], x right, y down, '
     'origin the package centre), body: [width, height], exposed_pad?: {width, height, number?}, shape?: '
-    'rect|roundrect}; pin 1 at the top of the left side, numbered counter-clockwise from above. '
+    'rect|roundrect, height?: package height in mm}; pin 1 at the top of the left side, numbered '
+    'counter-clockwise from above. 3D body (needed for his enclosure design): files names a maker or '
+    'SamacSys download in Parts-Inbox (a zip or folder Friedl saved there; ask him for one when the '
+    'maker\'s site will not give it to you); its STEP is used when its size matches the datasheet body '
+    '(model_file picks one, model_placement {offset: [x, y, z], rotate: [x, y, z]} places it when the '
+    'download does not), otherwise footprint height generates a body from the datasheet. SPICE (needed '
+    'for simulation): spice {file (in the download or Parts-Inbox), model (its .model or .subckt name), '
+    'pins: {symbol pin number: model node (A/K for a diode, D/G/S for a MOSFET, C/B/E for a BJT, the '
+    'subcircuit node names)}}, loaded in ngspice before the part is written; or spice_none: why the '
+    'maker publishes none (logic chips often have only IBIS). A part is not added without both. '
     'share_footprint instead of footprint uses a footprint already in that library (a reel variant of the '
     'same package). Then measure the footprint against the datasheet drawing with check_kicad_layout, '
     'correct it if it differs, and write the library back with his approval.',
     obj({'work_copy_id': S, 'library': S, 'mpn': S, 'manufacturer': S, 'description': S, 'datasheet': S,
-         'reference': S, 'lcsc': S, 'note': S, 'pins': array(MAP), 'footprint': MAP, 'share_footprint': S},
+         'reference': S, 'lcsc': S, 'note': S, 'pins': array(MAP), 'footprint': MAP, 'share_footprint': S,
+         'files': S, 'model_file': S, 'model_placement': MAP, 'spice': MAP, 'spice_none': S},
         ('work_copy_id', 'library', 'mpn', 'manufacturer', 'description', 'datasheet', 'reference', 'pins')),
     obj({'symbol': S, 'footprint': S, 'catalogue': MAP, 'built': MAP, 'work_copy_id': S, 'work_copy_revision': S,
          'next': S},

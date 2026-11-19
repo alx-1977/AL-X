@@ -28,7 +28,7 @@ PINS8 = [{"number": str(i), "name": name, "type": kind} for i, (name, kind) in e
     [("A", "input"), ("B", "input"), ("~{CLR}", "input"), ("GND", "power_in"), ("Q", "output"),
      ("CEXT", "passive"), ("RCEXT", "passive"), ("VCC", "power_in")], 1)]
 DFN8 = {"package": "two_row", "pins": 8, "pitch": 0.5, "pad_width": 0.25, "pad_length": 0.7, "row_spacing": 2.9,
-        "body": [2.0, 3.0], "exposed_pad": {"width": 0.9, "height": 2.3, "number": "9"}}
+        "body": [2.0, 3.0], "height": 0.5, "exposed_pad": {"width": 0.9, "height": 2.3, "number": "9"}}
 
 
 def pads(footprint: str) -> dict[str, tuple[float, float, float, float]]:
@@ -130,7 +130,7 @@ class LibraryCopyTests(unittest.TestCase):
                     "manufacturer": "Texas Instruments", "description": "Monostable, DFN-8",
                     "datasheet": "https://www.ti.com/lit/ds/symlink/sn74lvc1g123.pdf", "reference": "U",
                     "pins": PINS8 + [{"number": "9", "name": "EP", "type": "passive", "side": "bottom"}],
-                    "footprint": DFN8}
+                    "footprint": DFN8, "spice_none": "TI publishes IBIS only for this logic family"}
             added = provider.add_part(part)
             self.assertEqual(added["symbol"], "FireFli_ICs:SN74LVC1G123DQER")
             self.assertEqual(added["built"]["pads"], 9)
@@ -141,9 +141,20 @@ class LibraryCopyTests(unittest.TestCase):
                           str(project / "footprints" / "FireFli_ICs.pretty")]):
                 done = subprocess.run([str(CLI), *argv], capture_output=True, text=True, timeout=120)
                 self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertIn("SN74LVC1G123DQER", (project / "catalogue" / "FireFli_ICs.csv").read_text())
+            catalogue = (project / "catalogue" / "FireFli_ICs.csv").read_text()
+            self.assertIn("SN74LVC1G123DQER", catalogue)
+            self.assertIn("no SPICE model from the maker", catalogue)
+            # The generated body is a file in the library, named by the footprint (Fusion needs it).
+            self.assertTrue((project / "3dmodels" / "FireFli_ICs.3dshapes" / "SN74LVC1G123DQER.step").is_file())
+            footprint = (project / "footprints" / "FireFli_ICs.pretty" / "SN74LVC1G123DQER.kicad_mod").read_text()
+            self.assertIn('${FIREFLI_KICAD_LIB}/3dmodels/FireFli_ICs.3dshapes/SN74LVC1G123DQER.step', footprint)
+            self.assertIn("3dmodels/FireFli_ICs.3dshapes/SN74LVC1G123DQER.step", library_inventory(project))
             with self.assertRaises(KiCadError):
                 provider.add_part(part)
+            # Without its SPICE model or a reason there is none, a part is not added.
+            with self.assertRaises(KiCadError) as refused:
+                provider.add_part({k: v for k, v in dict(part, mpn="OTHER").items() if k != "spice_none"})
+            self.assertIn("spice", refused.exception.recovery["detail"])
 
 
 if __name__ == "__main__":

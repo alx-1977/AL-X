@@ -221,6 +221,27 @@ def library_inventory(source, *, exclude=frozenset()):
     return result
 
 
+def _placed_extent(extent, offset, rotate):
+    """A STEP model's bounding box as KiCad places it: rotated about x, y then z (KiCad turns by
+    the negative of the stored angles), then offset; in mm, z up."""
+    corners = [(x, y, z) for x in (extent[0][0], extent[1][0]) for y in (extent[0][1], extent[1][1])
+               for z in (extent[0][2], extent[1][2])]
+    for axis, angle in enumerate(rotate):
+        a = math.radians(-angle)
+        c, s = math.cos(a), math.sin(a)
+        turned = []
+        for x, y, z in corners:
+            if axis == 0:
+                turned.append((x, y * c - z * s, y * s + z * c))
+            elif axis == 1:
+                turned.append((x * c + z * s, y, -x * s + z * c))
+            else:
+                turned.append((x * c - y * s, x * s + y * c, z))
+        corners = turned
+    corners = [(x + offset[0], y + offset[1], z + offset[2]) for x, y, z in corners]
+    return (tuple(min(p[i] for p in corners) for i in range(3)), tuple(max(p[i] for p in corners) for i in range(3)))
+
+
 def _non_library_parts(folder):
     """(reference, lib_id) of every placed symbol in a folder's schematics that is not a FireFli
     library part; power symbols and flags (#PWR, #FLG) are not parts."""
@@ -239,9 +260,13 @@ def _non_library_parts(folder):
 
 
 def _library_file(folder, name):
-    """A library's own file: KiCad's, or its catalogue (catalogue/*.csv: every part's maker, MPN
-    and LCSC number; 19 Nov 2026, add_part found no catalogue in its copy)."""
-    return is_design_file(name) or (Path(folder).name == 'catalogue' and name.endswith('.csv'))
+    """A library's own file: KiCad's, its catalogue (catalogue/*.csv: every part's maker, MPN and
+    LCSC number), its 3D models (3dmodels/*.3dshapes/*.step) and SPICE models (spice/*)."""
+    folder, lower = Path(folder), name.lower()
+    return (is_design_file(name) or (folder.name == 'catalogue' and lower.endswith('.csv'))
+            or (folder.name.endswith('.3dshapes') and lower.endswith(('.step', '.stp')))
+            or (folder.name == 'spice' and lower.endswith(('.lib', '.cir', '.mod', '.sp', '.spi', '.spice', '.txt',
+                                                         '.sub', '.ckt'))))
 
 
 def _library_files(source):
@@ -2457,6 +2482,110 @@ class KiCadProvider:
                                         for name in pretty],
                 'symbol_libraries': symbols}
 
+    def _part_package(self, given):
+        """A maker or SamacSys download in Parts-Inbox (a zip, folder or file), as its files."""
+        from alx.providers.kicad_models import package_files
+        inbox = getattr(self, 'parts_inbox', None)
+        if inbox is None:
+            raise KiCadError('unavailable', {'detail': 'no Parts-Inbox folder is configured'})
+        name = Path(str(given).strip()).name
+        source = Path(inbox) / name
+        if not name or source.is_symlink() or not source.exists():
+            present = sorted(p.name for p in Path(inbox).iterdir()) if Path(inbox).is_dir() else []
+            raise KiCadError('arguments_unusable', {'detail': 'no %r in Parts-Inbox; it holds: %s'
+                                                    % (name, ', '.join(present[:30]) or 'nothing')})
+        return package_files(source)
+
+    def _part_model(self, stem, name, spec, footprint_text, package, model_file, placement):
+        """The part's 3D body: the download's STEP when its size is the datasheet's, else one
+        generated from the datasheet's package size and height. Placed on the footprint."""
+        from alx.providers.kicad_models import body_boxes, box_step, model_placement, step_extent, with_model
+        path = '${FIREFLI_KICAD_LIB}/3dmodels/%s.3dshapes/%s.step' % (stem, name)
+        steps = (package or {}).get('model', {})
+        if model_file or steps:
+            chosen = Path(str(model_file)).name if model_file else (next(iter(steps)) if len(steps) == 1 else None)
+            if chosen not in steps:
+                raise KiCadError('arguments_unusable', {'detail': 'model_file is one of: %s' % ', '.join(steps)})
+            step = steps[chosen]
+            extent = step_extent(step)
+            if extent is None:
+                raise KiCadError('arguments_unusable', {'detail': '%s is not a STEP model in mm' % chosen})
+            if placement:
+                offset = tuple(float(v) for v in placement.get('offset', (0, 0, 0)))
+                rotate = tuple(float(v) for v in placement.get('rotate', (0, 0, 0)))
+            else:
+                found = next((model_placement(t.decode('utf-8', 'replace'))
+                              for t in (package or {}).get('footprint', {}).values()), None)
+                offset, rotate = found or ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+            size = _placed_extent(extent, offset, rotate)
+            width, depth = (float(v) for v in spec['body'])
+            fits = (abs((size[1][0] - size[0][0]) - width) <= max(0.3, width * 0.1)
+                    and abs((size[1][1] - size[0][1]) - depth) <= max(0.3, depth * 0.1)
+                    and -0.3 <= size[0][2] <= 0.3)
+            if not fits:
+                raise KiCadError('arguments_unusable', {'detail': (
+                    '%s placed with offset %s and rotate %s spans x %.2f..%.2f, y %.2f..%.2f, z %.2f..%.2f mm; the '
+                    'datasheet body is %.2f x %.2f mm on the board: give model_placement {offset, rotate} that puts '
+                    'it there, or leave the STEP out and give footprint height for a generated body'
+                    % ((chosen, list(offset), list(rotate)) + tuple(v for pair in zip(*size) for v in pair)
+                       + (width, depth)))})
+            return {'footprint': with_model(footprint_text, path, offset, rotate), 'step': step,
+                    'source': chosen, 'size_mm': [round(size[1][i] - size[0][i], 3) for i in range(3)]}
+        if 'height' not in spec:
+            raise KiCadError('arguments_unusable', {'detail': 'no STEP in the download: give footprint height (the '
+                                                    'package height from the datasheet) for a generated body'})
+        try:
+            pads = [(float(x), float(y), float(w), float(h)) for x, y, w, h in re.findall(
+                r'\(pad "[^"]*" smd \w+\n\t\t\(at ([-\d.]+) ([-\d.]+)\)\n\t\t\(size ([\d.]+) ([\d.]+)\)', footprint_text)]
+            boxes = body_boxes({'body': spec['body'], 'height': float(spec['height'])},
+                               [(x - w / 2, y - h / 2, x + w / 2, y + h / 2) for x, y, w, h in pads])
+        except (TypeError, ValueError) as error:
+            raise KiCadError('arguments_unusable', {'detail': 'footprint height is a number in mm'}) from error
+        return {'footprint': with_model(footprint_text, path), 'step': box_step(name, boxes), 'source': 'generated',
+                'size_mm': [float(spec['body'][0]), float(spec['body'][1]), float(spec['height'])]}
+
+    def _part_spice(self, root, project, name, spec, package):
+        """The maker's SPICE model in the library, named by the symbol (KiCad's Sim fields), after
+        ngspice has loaded it: {file, model, pins: {symbol pin: model node}}."""
+        from alx.providers.kicad_models import DEVICE_NODES, KICAD_DEVICE, check_deck, spice_models
+        if not isinstance(spec, dict) or not spec.get('model') or not isinstance(spec.get('pins'), dict):
+            raise KiCadError('arguments_unusable', {'detail': 'spice is {file, model, pins: {symbol pin: model node}}'})
+        files = (package or {}).get('spice', {})
+        wanted = Path(str(spec.get('file') or '')).name
+        if not wanted and len(files) == 1:
+            wanted = next(iter(files))
+        if wanted in files:
+            source = files[wanted]
+        else:
+            inbox = getattr(self, 'parts_inbox', None)
+            candidate = Path(inbox) / wanted if inbox and wanted else None
+            if candidate is None or not candidate.is_file() or candidate.is_symlink():
+                raise KiCadError('arguments_unusable', {'detail': 'spice file is one of: %s, or a file in Parts-Inbox'
+                                                        % (', '.join(files) or 'none in the download')})
+            source = candidate.read_bytes()
+        models = spice_models(source.decode('latin-1', 'replace'))
+        model = models.get(str(spec['model']))
+        if model is None:
+            raise KiCadError('arguments_unusable', {'detail': '%s defines %s, not %s' % (
+                wanted, ', '.join(models) or 'no model', spec['model'])})
+        nodes = model['nodes'] if model['kind'] == 'subckt' else list(DEVICE_NODES.get(model['kind'], ()))
+        pins = {str(k): str(v) for k, v in spec['pins'].items()}
+        if sorted(pins.values()) != sorted(nodes):
+            raise KiCadError('arguments_unusable', {'detail': 'pins must give each model node once: %s'
+                                                    % ', '.join(nodes)})
+        library_file = re.sub(r'[^A-Za-z0-9._+-]+', '_', name) + Path(wanted).suffix.lower()
+        with tempfile.TemporaryDirectory(prefix='ngspice-', dir=root) as temporary:
+            (Path(temporary) / library_file).write_bytes(source)
+            (Path(temporary) / 'check.cir').write_text(check_deck(library_file, model, str(spec['model'])))
+            log = self._engine('ngspice', ['-b', 'check.cir'], temporary)
+        if re.search(r"(?i)\berror\b|unknown subckt|could not find|can't find|no such|unrecognized", log):
+            raise KiCadError('arguments_unusable', {'detail': 'ngspice could not load %s from %s' % (spec['model'], wanted),
+                                                    'log': log[-1500:]})
+        return {'file': library_file, 'source': source, 'model': str(spec['model']), 'kind': model['kind'],
+                'fields': {'Sim.Library': '${FIREFLI_KICAD_LIB}/spice/' + library_file,
+                           'Sim.Name': str(spec['model']), 'Sim.Device': KICAD_DEVICE[model['kind']],
+                           'Sim.Pins': ' '.join('%s=%s' % (k, v) for k, v in sorted(pins.items()))}}
+
     def add_part(self, arguments):
         """A new part in a library work copy, built from its datasheet (19 Nov 2026): the symbol from
         the pin table, the footprint from the land pattern, named after its part number, with
@@ -2478,6 +2607,10 @@ class KiCadProvider:
             shared = str(arguments.get('share_footprint') or '').strip()
             if not arguments.get('footprint') and not shared:
                 missing.append('footprint (or share_footprint)')
+            # A part is complete with its 3D body (Fusion) and its SPICE model or a stated reason
+            # there is none from the maker (19 Nov 2026).
+            if not arguments.get('spice') and not str(arguments.get('spice_none') or '').strip():
+                missing.append('spice (the maker\'s model) or spice_none (why the maker publishes none)')
             if missing:
                 raise KiCadError('arguments_unusable', {'detail': 'add_part needs ' + ', '.join(missing)})
             stem = 'FireFli_' + re.sub(r'^FireFli_', '', library)
@@ -2506,12 +2639,22 @@ class KiCadProvider:
                       'Description': str(arguments['description']).strip(),
                       'Manufacturer': str(arguments['manufacturer']).strip(), 'MPN': mpn,
                       'LCSC': str(arguments.get('lcsc') or '').strip()}
+            package = self._part_package(arguments.get('files')) if arguments.get('files') else None
+            spice = self._part_spice(root, project, name, plain(arguments.get('spice')), package) \
+                if arguments.get('spice') else None
+            if spice is not None:
+                fields.update(spice['fields'])
             try:
                 block = build_symbol(name, fields, plain(arguments['pins']))
                 footprint_text, built = (None, None) if shared else build_footprint(
                     name, plain(arguments['footprint']), fields)
             except PartSpecError as error:
                 raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+            model = None
+            if footprint_text is not None:
+                model = self._part_model(stem, name, plain(arguments['footprint']), footprint_text, package,
+                                         arguments.get('model_file'), plain(arguments.get('model_placement')))
+                footprint_text = model.pop('footprint')
             new_library = with_symbol(library_text, block)
             try:
                 sexpr(new_library)
@@ -2519,14 +2662,25 @@ class KiCadProvider:
                     sexpr(footprint_text)
             except Exception as error:  # noqa: BLE001 - a part KiCad could not read is never written
                 raise KiCadError('arguments_unusable', {'detail': 'the new part does not read back: %s' % error})
-            row = {**fields, 'Note': str(arguments.get('note') or '').strip()}
+            note = str(arguments.get('note') or '').strip()
+            if spice is None:
+                note = '; '.join(filter(None, (note, 'no SPICE model from the maker: '
+                                               + str(arguments['spice_none']).strip())))
+            row = {**{k: v for k, v in fields.items() if not k.startswith('Sim.')}, 'Note': note}
             new_catalogue = with_catalogue_row(catalogue.read_text(), row)
             symbols_file.write_text(new_library)
             if footprint_text is not None:
                 (pretty / (name + '.kicad_mod')).write_text(footprint_text)
+                shapes = project / '3dmodels' / (stem + '.3dshapes')
+                shapes.mkdir(parents=True, exist_ok=True)
+                (shapes / (name + '.step')).write_bytes(model.pop('step'))
+            if spice is not None:
+                (project / 'spice').mkdir(exist_ok=True)
+                (project / 'spice' / spice['file']).write_bytes(spice.pop('source'))
             catalogue.write_text(new_catalogue)
             return {'symbol': '%s:%s' % (stem, name), 'footprint': footprint_field, 'catalogue': row,
-                    'built': built or {'shared': footprint_field},
+                    'built': dict(built or {'shared': footprint_field}, **({'model': model} if model else {}),
+                                  **({'spice': {k: v for k, v in spice.items() if k != 'fields'}} if spice else {})),
                     'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': self._revision(root),
                     'next': ('measure the footprint against the datasheet land pattern with check_kicad_layout '
                              '(footprint %s/%s), correct it if it differs, then write_back with his approval'

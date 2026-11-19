@@ -48,6 +48,8 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
     storage = Path(environment.get('ALX_STORAGE_ROOT', ALX_STORAGE)).expanduser().resolve()
     provider.reference_roots = tuple(dict.fromkeys((*provider.design_roots, storage)))
     provider.datasheet_folder = storage / 'Datasheets'
+    # Maker and SamacSys downloads Friedl drops for a new part (3D and SPICE models; 19 Nov 2026).
+    provider.parts_inbox = storage / 'Parts-Inbox'
     # Drawings she and her board agent look at (render), and KiCad's own windows (open_in_kicad).
     provider.render_folder = storage / 'Whiteboard' / 'alx-renders'
     applications = Path(environment.get('ALX_KICAD_APPLICATIONS', '/Applications/KiCad/KiCad.app/Contents/Applications'))
