@@ -62,6 +62,7 @@ RECOVERABLE_TRANSPORT_REASONS = frozenset(
         "speech_transcription_error",
         "reasoner_error",
         "memory_persistence_error",
+        "speech_synthesis_error",
     }
 )
 

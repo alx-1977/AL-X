@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from time import monotonic
 from typing import Any
@@ -20,14 +21,16 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _refusal(body: bytes) -> str:
-    """ElevenLabs' own reason for a refused request: detail status and message, shortened."""
+    """ElevenLabs' status code for a refused request (quota_exceeded, invalid_api_key...).
+
+    Only that machine code is kept: the message text is untrusted and may quote the
+    request back (errors.py), so it is never logged or shown."""
     try:
         detail = json.loads(body).get("detail")
     except (ValueError, AttributeError):
-        return body[:200].decode("utf-8", "replace") or "no reason given"
-    if isinstance(detail, dict):
-        return " ".join(str(detail.get(key, "")) for key in ("status", "message")).strip()[:300]
-    return str(detail)[:300]
+        return ""
+    status = detail.get("status") if isinstance(detail, dict) else None
+    return status if isinstance(status, str) and re.fullmatch(r"[a-z_]{1,60}", status) else ""
 
 
 def _media_type(output_format: str) -> str:
@@ -134,13 +137,15 @@ class ElevenLabsSynthesizer:
                 },
             ) as provider_response:
                 if provider_response.status_code >= 400:
-                    # ElevenLabs says why in the body (quota_exceeded, invalid_api_key,
-                    # detected_unusual_activity...). 19 Nov 2026: three 401s showed only as
-                    # speech_synthesis_error. The key itself is never logged.
-                    LOGGER.warning("ElevenLabs refused speech: HTTP %s, %s",
-                                   provider_response.status_code,
-                                   _refusal(await provider_response.aread()))
-                provider_response.raise_for_status()
+                    # ElevenLabs says why (quota_exceeded, invalid_api_key, ...). 19 Nov 2026:
+                    # four 401s showed only as speech_synthesis_error; the cause was credit.
+                    # Raised here, outside any except block, so no request is attached.
+                    status = provider_response.status_code
+                    reason = _refusal(await provider_response.aread()) or "http_%d" % status
+                    LOGGER.warning("ElevenLabs refused speech: HTTP %s %s", status, reason)
+                    self._emit_telemetry(correlation_id, "tts.refused", started_at,
+                                         status_code=status, reason=reason)
+                    raise_provider_failure("elevenlabs", reason, status_code=status)
                 self._emit_telemetry(
                     correlation_id,
                     "tts.stream_connected",

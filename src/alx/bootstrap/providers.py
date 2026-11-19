@@ -26,6 +26,7 @@ from alx.providers import (
     OpenAIReasoningModel,
     XAIReasoningModel,
 )
+from alx.providers.cartesia_tts import CartesiaSynthesizer
 from alx.providers.claude_subscription import (
     SubscriptionIdentityError, subscription_cli_present,
 )
@@ -320,7 +321,7 @@ def build_runtime_providers(
     # would make being heard a precondition for thinking, and telling the Core
     # about it would let a missing speaker change what she says.
     speech_configured = settings.text_to_speech.provider.strip().lower() != "none"
-    if speech_configured and settings.text_to_speech.provider != "elevenlabs":
+    if speech_configured and settings.text_to_speech.provider not in ("elevenlabs", "cartesia"):
         raise ConfigurationError(
             f"text-to-speech provider adapter is not installed: {settings.text_to_speech.provider}"
         )
@@ -352,7 +353,16 @@ def build_runtime_providers(
             ),
             settings.speech_to_text.sample_rate_hz,
         ),
-        text_to_speech=None if not speech_configured else ElevenLabsSynthesizer(
+        text_to_speech=None if not speech_configured else CartesiaSynthesizer(
+            settings.text_to_speech.model,
+            settings.text_to_speech.api_key,
+            settings.text_to_speech.voice_id,
+            settings.text_to_speech.base_url,
+            settings.text_to_speech.api_version,
+            settings.text_to_speech.output_format,
+            settings.text_to_speech.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+        ) if settings.text_to_speech.provider == "cartesia" else ElevenLabsSynthesizer(
             settings.text_to_speech.model,
             settings.text_to_speech.api_key,
             settings.text_to_speech.voice_id,

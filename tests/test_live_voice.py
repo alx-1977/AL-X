@@ -675,6 +675,30 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
         from alx.interfaces.server import MID_EXCHANGE_RECOVERABLE_REASONS
         self.assertIn("speech_synthesis_error", MID_EXCHANGE_RECOVERABLE_REASONS)
 
+    async def test_refusal_cause_reaches_the_console_before_the_error(self) -> None:
+        diagnostics = VoiceDiagnosticFeed()
+
+        class QuotaSynthesizer:
+            async def synthesize(self, response, correlation_id=None):
+                diagnostics.publish(correlation_id, {"code": "tts.refused", "provider": "elevenlabs",
+                                                     "reason": "quota_exceeded", "status_code": 401})
+                raise RuntimeError("refused")
+                yield  # pragma: no cover - an async generator
+
+        session = VoiceSession(
+            FakeGateway((outcome(GoalStatus.ACTIVE),)),
+            FakeTranscriber((transcription("final", TranscriptionState.FINAL, "Hello"),)),
+            QuotaSynthesizer(), "friedl", 8, 3650,
+            clock=lambda: NOW, identifier_factory=lambda: "turn-1", diagnostics=diagnostics,
+        )
+        events = [event async for event in session.exchange("conversation-1", incoming_audio())]
+        kinds = [event.kind for event in events]
+        error = kinds.index(VoiceEventKind.ERROR)
+        refused = [i for i, event in enumerate(events) if event.kind is VoiceEventKind.DIAGNOSTIC
+                   and event.diagnostic.get("code") == "tts.refused"]
+        self.assertTrue(refused and refused[0] < error)
+        self.assertIs(kinds[error + 1], VoiceEventKind.LISTENING)
+
     async def test_tts_transport_diagnostics_arrive_before_audio(self) -> None:
         diagnostics = VoiceDiagnosticFeed()
 

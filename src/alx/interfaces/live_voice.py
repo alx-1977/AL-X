@@ -866,6 +866,10 @@ class VoiceSession:
             if close is not None:
                 await close()
         if failed:
+            # The provider's refusal (tts.refused, with its status code) is published
+            # just before the failure: show it before the error, so the cause is visible.
+            for event in () if feed is None else feed.take():
+                yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=event)
             yield VoiceEvent(VoiceEventKind.ERROR, reason="speech_synthesis_error")
         else:
             LOGGER.info("Speech synthesis completed")

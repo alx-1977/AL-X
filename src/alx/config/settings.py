@@ -211,6 +211,52 @@ class TextToSpeechSettings:
     stability: float
     similarity_boost: float
     speaker_boost: bool
+    api_version: str = ""
+
+
+def _text_to_speech_settings(environment: Mapping[str, str]) -> TextToSpeechSettings:
+    """Her voice, from whichever provider ALX_TTS_PROVIDER names (19 Nov 2026).
+
+    Each provider reads its own key, voice and model, so switching is one line:
+    ElevenLabs: ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, ALX_TTS_MODEL and the
+    pronunciation dictionary. Cartesia: CARTESIA_API_KEY, CARTESIA_VOICE_ID,
+    CARTESIA_TTS_MODEL (default sonic-2) and the Cartesia API version shared with
+    hearing. ALX_TTS_API_KEY / ALX_TTS_VOICE_ID still override either when set.
+    """
+    provider = _required(environment, "ALX_TTS_PROVIDER")
+    common = dict(
+        output_format=environment.get("ALX_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
+        timeout_seconds=_positive_integer(environment, "ALX_TTS_TIMEOUT_SECONDS", 60),
+        speed=_number_in_range(environment, "ALX_TTS_SPEED", 0.7, 1.2, 1.0),
+        stability=_number_in_range(environment, "ALX_TTS_STABILITY", 0.0, 1.0, 0.5),
+        similarity_boost=_number_in_range(environment, "ALX_TTS_SIMILARITY_BOOST", 0.0, 1.0, 0.75),
+        speaker_boost=_boolean(environment, "ALX_TTS_SPEAKER_BOOST", True),
+    )
+    if provider.strip().lower() == "cartesia":
+        return TextToSpeechSettings(
+            provider="cartesia",
+            model=environment.get("CARTESIA_TTS_MODEL", "").strip() or "sonic-2",
+            api_key=_credential(environment, "ALX_TTS_API_KEY", "CARTESIA_API_KEY"),
+            voice_id=_configured(environment, "ALX_TTS_VOICE_ID", "CARTESIA_VOICE_ID"),
+            base_url=_configured(environment, "CARTESIA_TTS_BASE_URL", "CARTESIA_BASE_URL",
+                                 "https://api.cartesia.ai").rstrip("/"),
+            pronunciation_dictionary_id="",
+            pronunciation_dictionary_version_id="",
+            api_version=_configured(environment, "CARTESIA_API_VERSION", "ALX_STT_API_VERSION"),
+            **common,
+        )
+    return TextToSpeechSettings(
+        provider=provider,
+        model=_required(environment, "ALX_TTS_MODEL"),
+        api_key=_credential(environment, "ALX_TTS_API_KEY", "ELEVENLABS_API_KEY"),
+        voice_id=_configured(environment, "ALX_TTS_VOICE_ID", "ELEVENLABS_VOICE_ID"),
+        base_url=_configured(environment, "ALX_TTS_BASE_URL", "ELEVENLABS_BASE_URL",
+                             "https://api.elevenlabs.io").rstrip("/"),
+        pronunciation_dictionary_id=_required(environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_ID"),
+        pronunciation_dictionary_version_id=_required(
+            environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID"),
+        **common,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1309,40 +1355,7 @@ class RuntimeSettings:
                     environment, "ALX_STT_TURN_END_TIMEOUT_MS", 640, 11200
                 ),
             ),
-            text_to_speech=TextToSpeechSettings(
-                provider=_required(environment, "ALX_TTS_PROVIDER"),
-                model=_required(environment, "ALX_TTS_MODEL"),
-                api_key=_credential(environment, "ALX_TTS_API_KEY", "ELEVENLABS_API_KEY"),
-                voice_id=_configured(
-                    environment, "ALX_TTS_VOICE_ID", "ELEVENLABS_VOICE_ID"
-                ),
-                base_url=_configured(
-                    environment,
-                    "ALX_TTS_BASE_URL",
-                    "ELEVENLABS_BASE_URL",
-                    "https://api.elevenlabs.io",
-                ).rstrip("/"),
-                output_format=environment.get("ALX_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
-                timeout_seconds=_positive_integer(environment, "ALX_TTS_TIMEOUT_SECONDS", 60),
-                pronunciation_dictionary_id=_required(
-                    environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_ID"
-                ),
-                pronunciation_dictionary_version_id=_required(
-                    environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID"
-                ),
-                speed=_number_in_range(
-                    environment, "ALX_TTS_SPEED", 0.7, 1.2, 1.0
-                ),
-                stability=_number_in_range(
-                    environment, "ALX_TTS_STABILITY", 0.0, 1.0, 0.5
-                ),
-                similarity_boost=_number_in_range(
-                    environment, "ALX_TTS_SIMILARITY_BOOST", 0.0, 1.0, 0.75
-                ),
-                speaker_boost=_boolean(
-                    environment, "ALX_TTS_SPEAKER_BOOST", True
-                ),
-            ),
+            text_to_speech=_text_to_speech_settings(environment),
         )
 
 

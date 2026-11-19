@@ -296,7 +296,7 @@ _SERVICES: dict[str, tuple[str, str]] = {
     "grok_subscription": ("Grok", "src/alx/providers/grok_subscription.py"),
     "elevenlabs": ("ElevenLabs", "src/alx/providers/elevenlabs.py, "
                    "src/alx/providers/elevenlabs_pronunciation.py"),
-    "cartesia": ("Cartesia", "src/alx/providers/cartesia.py"),
+    "cartesia": ("Cartesia", "src/alx/providers/cartesia.py, src/alx/providers/cartesia_tts.py"),
 }
 
 

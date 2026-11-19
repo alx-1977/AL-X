@@ -639,7 +639,15 @@ function handleControl(message) {
       const transport = message.transport === "websocket" ? "WebSocket" : "HTTP stream";
       detail(`TTS ${transport} connected · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
     } else if (message.code === "tts.first_audio_byte") {
-      detail(`First audio byte received from ElevenLabs · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
+      const speaker = message.provider === "cartesia" ? "Cartesia" : "ElevenLabs";
+      detail(`First audio byte received from ${speaker} · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
+    } else if (message.code === "tts.refused") {
+      // The provider's own status code (quota_exceeded, invalid_api_key, ...): a
+      // technical cause, not AL/X speaking. 19 Nov 2026 the console showed only
+      // speech_synthesis_error while ElevenLabs credit had run out.
+      const speaker = message.provider === "cartesia" ? "Cartesia" : "ElevenLabs";
+      diagnostic(`Speech provider refused · ${speaker} · ${message.reason ?? "unknown"} (HTTP ${message.status_code ?? "?"})`,
+        "error", "SYSTEM", { subsystem: "VOICE", at });
 
     } else if (message.code === "task.status") {
       // A live row rather than a log line: an outstanding task is a state the
