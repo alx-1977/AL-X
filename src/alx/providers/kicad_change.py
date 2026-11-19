@@ -573,8 +573,19 @@ def apply_change(change):
             elif kind == "wire":
                 ref, number = _pin(op["from"])
                 to_ref, to_number = _pin(op["to"])
-                done["points"] = s.wire_pin_to(ref, number, s.symbol(to_ref)["pins"][to_number],
-                                               via=[tuple(p) for p in op.get("via") or ()] or None)
+                via = [tuple(p) for p in op.get("via") or ()] or None
+                try:
+                    done["points"] = s.wire_pin_to(ref, number, s.symbol(to_ref)["pins"][to_number], via=via)
+                except ValueError as first:
+                    # A pin already wired cannot start a new wire (its stub runs along its own
+                    # wiring): drawn from the other end it lands on that wiring (19 Nov 2026).
+                    if via:
+                        raise
+                    try:
+                        done["points"] = s.wire_pin_to(to_ref, to_number, s.symbol(ref)["pins"][number])
+                    except ValueError:
+                        raise first
+                    done["drawn_from"] = op["to"]
                 if not done["points"]:
                     done["already_joined"] = "%s and %s were already wired together; nothing drawn" % (
                         op["from"], op["to"])

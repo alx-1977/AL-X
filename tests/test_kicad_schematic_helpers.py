@@ -244,6 +244,26 @@ for segment in (((127.0, 95.25), (127.0, 107.95)), ((180.34, 190.5), (190.5, 190
             self.assertIn("refused test: the new wire would run into the title block", out)
             self.assertIn("clear", out)
 
+    def test_a_wire_finds_its_own_way_round_a_part_in_the_way(self):
+        """19 Nov 2026: twenty refused edits in one job, each a guessed via point. With R5 lying
+        across both simple turns, the wire finds a clear grid path and never doubles back."""
+        with tempfile.TemporaryDirectory() as folder:
+            blocked = schematic().replace(
+                "\t(sheet_instances", placed("R5", (127, 107.95), "r5", rotation=90) + "\t(sheet_instances", 1)
+            (Path(folder) / "t.kicad_sch").write_text(blocked)
+            out = self.run_script(folder, """
+s = sheet("t.kicad_sch")
+print("path", s.wire_pin_to("R1", "2", s.symbol("R3")["pins"]["2"]))
+s.save()
+""")
+            path = eval(out.split("path ", 1)[1].strip())
+            self.assertGreater(len(path), 4)
+            # Never through R5's body or along its leads (y 107.95 between its pins).
+            for a, b in zip(path, path[1:]):
+                self.assertFalse(a[1] == b[1] == 107.95 and min(a[0], b[0]) < 130.81 and max(a[0], b[0]) > 123.19)
+            nets = self.netlist(folder)
+            self.assertIn(frozenset({("R1", "2"), ("R3", "2")}), nets.values())
+
     def test_a_missing_symbol_names_the_sheet_it_is_on(self):
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / "t.kicad_sch").write_text(schematic())

@@ -144,6 +144,16 @@ def _straight(points):
     return [p for i, p in enumerate(out) if i == 0 or p != out[i - 1]]
 
 
+def _backtracks(points):
+    """The path turns straight back over itself somewhere (19 Nov 2026: a fallback route ran
+    out of a pin's stub and back along it; the checks only see wiring already drawn)."""
+    for a, b, c in zip(points, points[1:], points[2:]):
+        u, v = (b[0] - a[0], b[1] - a[1]), (c[0] - b[0], c[1] - b[1])
+        if abs(u[0] * v[1] - u[1] * v[0]) < 1e-9 and u[0] * v[0] + u[1] * v[1] < 0:
+            return True
+    return False
+
+
 def _on(point, a, b):
     """The point lies on the wire a-b, ends included."""
     (x, y), (x1, y1), (x2, y2) = point, a, b
@@ -519,9 +529,14 @@ class Sheet:
                 if a[0] != b[0] and a[1] != b[1]:
                     raise ValueError("%s.%s: via (%g, %g) to (%g, %g) is neither straight across nor straight up "
                                      "and down" % (ref, pin, a[0], a[1], b[0], b[1]))
-            self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
-            self.add_wire(*_straight([start] + points))
-            return [start] + points
+            try:
+                self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
+            except ValueError:
+                # A guessed via that is not clear: find the way round instead (19 Nov 2026).
+                via = None
+            else:
+                self.add_wire(*_straight([start] + points))
+                return [start] + points
         # Straight out of the pin to the target's line, then one turn into it: the wire leaves
         # the part's side at once (16 Nov: turning right after the stub ran the RFC wire up the
         # switch's side across where pins 1 and 2 come out). A target behind the pin turns
@@ -569,6 +584,8 @@ class Sheet:
                       ((target[0], end[1]), (end[0], target[1]))]
         reason = None
         for points in tries:
+            if _backtracks([start] + points):
+                continue
             try:
                 self.check_clear(ref, pin, [start] + points, allow=(target,), joined_to=target)
             except ValueError as error:
@@ -576,7 +593,143 @@ class Sheet:
                 continue
             self.add_wire(*_straight([start] + points))
             return [start] + points
-        raise reason
+        # Neither turn is clear: find the way round (19 Nov 2026: twenty refused edits in one
+        # job, each a guessed via point; a clear path has one right answer, so code finds it).
+        # A target already wired is reached anywhere on its wiring, a T with a junction, as he
+        # draws a second part onto a net; its own pin lead is taken by that wiring.
+        tees = set()
+        for pts in group:
+            for a, b in zip(pts, pts[1:]):
+                steps = int(round(max(abs(b[0] - a[0]), abs(b[1] - a[1])) / 1.27))
+                for k in range(1, steps):
+                    tees.add(_r((a[0] + (b[0] - a[0]) * k / steps, a[1] + (b[1] - a[1]) * k / steps)))
+        routed = self._route(ref, pin, end, [entry, target] if entry != target else [target],
+                             target, heading=(dx, dy), tees=tees)
+        if routed is not None:
+            last = routed[-1]
+            tee = last if last in tees else None
+            points = [end] + routed + ([target] if tee is None and last != target else [])
+            self.check_clear(ref, pin, [start] + points, allow=(target,) + ((tee,) if tee else ()),
+                             joined_to=target)
+            self.add_wire(*_straight([start] + points))
+            if tee:
+                self.add_junction(tee)
+            return [start] + points
+        raise ValueError("%s; and no clear way round within 30 mm either: move a part or join the "
+                         "pins by label" % reason)
+
+    def _route(self, ref, pin, begin, goals, target, margin=30.48, heading=None, tees=()):
+        """A clear grid path from begin to the first of goals that it reaches, or None.
+
+        On the 1.27 mm grid, straight runs and as few turns as possible, kept within
+        margin of the two ends. Every step obeys the same rules as _check_segments
+        (no part or port body, no wire end, label, no-connect or other pin, never along a
+        wire, never across where an unwired pin comes out, never into the title block, and
+        no turn on top of another wire), and the caller checks the whole path again.
+        """
+        grid = 1.27
+
+        def on_grid(p):
+            return all(abs(round(v / grid) * grid - v) < 0.006 for v in p)
+        goal = next((g for g in goals if on_grid(g)), None)
+        if goal is None or not on_grid(begin):
+            return None
+        arrive = {_r(goal)} | {t for t in tees if on_grid(t)}
+        scene = self._scene()
+        if scene["orphans"] is None:
+            scene["orphans"] = self._orphan_wires(scene["root"], scene["libs"])
+        own = self.symbol(ref)["pins"][str(pin)]
+        same, ends = self._wired_to(target)
+        allowed = {own, _r(target)} | arrive | ends
+        skip = set(same) | scene["orphans"]
+        x0, x1 = min(begin[0], goal[0]) - margin, max(begin[0], goal[0]) + margin
+        y0, y1 = min(begin[1], goal[1]) - margin, max(begin[1], goal[1]) + margin
+
+        def near(*pts):
+            return any(x0 - 3 <= p[0] <= x1 + 3 and y0 - 3 <= p[1] <= y1 + 3 for p in pts)
+        segments = [(c, d) for pts in scene["wires"] for c, d in zip(pts, pts[1:]) if near(c, d)]
+        live = [(c, d) for pts in scene["wires"] if tuple(pts) not in skip
+                for c, d in zip(pts, pts[1:]) if near(c, d)]
+        wired_ends = {p for pts in scene["wires"] if tuple(pts) not in skip for p in (pts[0], pts[-1])}
+        points = {p for p in wired_ends | {i["at"] for i in scene["labels"]} | set(scene["no_connects"])
+                  | {point for _, point, _, _ in scene["pins"]} if p not in allowed and near(p)}
+        all_ends = {p for pts in scene["wires"] for p in (pts[0], pts[-1])} | {i["at"] for i in scene["labels"]}
+        stubs = [(point, _r((point[0] + d[0] * 2.54, point[1] + d[1] * 2.54)))
+                 for _, point, power, d in scene["pins"]
+                 if not power and d is not None and point not in allowed and point not in all_ends and near(point)]
+        boxes = [b for _, b in scene["parts"] if near((b[0], b[1]), (b[2], b[3]))]
+        bodies = scene["bodies"]
+        block = scene["title_block"]
+        cache = {}
+
+        def step_ok(a, b):
+            key = (a, b) if a <= b else (b, a)
+            if key in cache:
+                return cache[key]
+            ok = True
+            if block and max(a[0], b[0]) > block[0] and max(a[1], b[1]) > block[1]:
+                ok = False
+            for bx0, by0, bx1, by1 in boxes if ok else ():
+                if (max(a[0], b[0]) > bx0 + 0.2 and min(a[0], b[0]) < bx1 - 0.2
+                        and max(a[1], b[1]) > by0 + 0.2 and min(a[1], b[1]) < by1 - 0.2):
+                    ok = False
+                    break
+            for origin, (bx0, by0, bx1, by1) in bodies if ok else ():
+                if origin not in (a, b) and max(a[0], b[0]) >= bx0 and min(a[0], b[0]) <= bx1 \
+                        and max(a[1], b[1]) >= by0 and min(a[1], b[1]) <= by1:
+                    ok = False
+                    break
+            if ok and any(_on(p, a, b) for p in points):
+                ok = False
+            for p, q in stubs if ok else ():
+                along = (_on(a, p, q) and _on(b, p, q)) or (_on(p, a, b) and _on(q, a, b)) or \
+                    ((_on(a, p, q) or _on(b, p, q)) and (a[0] == b[0] == p[0] == q[0] or a[1] == b[1] == p[1] == q[1]))
+                if along or _on(q, a, b):
+                    ok = False
+                    break
+            if ok and any(_overlap(a, b, c, d) for c, d in segments):
+                ok = False
+            cache[key] = ok
+            return ok
+
+        def on_live_wire(p):
+            return p not in allowed and any(_on(p, c, d) for c, d in live)
+        import heapq
+        start = _r(begin)
+        target_pt = _r(goal)
+        moves = ((grid, 0.0), (-grid, 0.0), (0.0, grid), (0.0, -grid))
+        # Leaving the pin's stub the way the pin points: never back over the stub itself.
+        first = (heading[0] * grid, heading[1] * grid) if heading else None
+        frontier = [(0.0, 0, start, first)]
+        best = {(start, first): 0.0}
+        came = {}
+        counter = 0
+        while frontier:
+            _, _, here, heading = heapq.heappop(frontier)
+            if here in arrive:
+                path, state = [here], (here, heading)
+                while state in came:
+                    state = came[state]
+                    path.append(state[0])
+                return _straight(path[::-1])[1:]
+            cost = best[(here, heading)]
+            for move in moves:
+                if heading is not None and move == (-heading[0], -heading[1]):
+                    continue
+                nxt = _r((here[0] + move[0], here[1] + move[1]))
+                if not (x0 <= nxt[0] <= x1 and y0 <= nxt[1] <= y1) or not step_ok(here, nxt):
+                    continue
+                turning = heading is not None and move != heading
+                if turning and on_live_wire(here):
+                    continue
+                total = cost + 1.0 + (6.0 if turning else 0.0)
+                if total < best.get((nxt, move), float("inf")):
+                    best[(nxt, move)] = total
+                    came[(nxt, move)] = (here, heading)
+                    counter += 1
+                    guess = (abs(nxt[0] - target_pt[0]) + abs(nxt[1] - target_pt[1])) / grid
+                    heapq.heappush(frontier, (total + guess, counter, nxt, move))
+        return None
 
     def label_pin(self, ref, pin, name, kind="label", length=2.54):
         """A net label at the end of a short wire straight out of the pin; on a pin already
