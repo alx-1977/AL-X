@@ -221,6 +221,23 @@ def library_inventory(source, *, exclude=frozenset()):
     return result
 
 
+def _non_library_parts(folder):
+    """(reference, lib_id) of every placed symbol in a folder's schematics that is not a FireFli
+    library part; power symbols and flags (#PWR, #FLG) are not parts."""
+    found = []
+    for sheet in sorted(Path(folder).glob('*.kicad_sch')):
+        try:
+            source = sheet.read_text(errors='replace')
+        except OSError:
+            continue
+        for match in re.finditer(r'\n\t\(symbol\n\t\t\(lib_id "((?:[^"\\]|\\.)*)"\)(.*?)\n\t\)', source, re.S):
+            reference = re.search(r'\(property "Reference" "((?:[^"\\]|\\.)*)"', match.group(2))
+            reference = reference.group(1) if reference else '?'
+            if not reference.startswith('#') and not match.group(1).startswith('FireFli_'):
+                found.append((reference, match.group(1)))
+    return found
+
+
 def _library_file(folder, name):
     """A library's own file: KiCad's, or its catalogue (catalogue/*.csv: every part's maker, MPN
     and LCSC number; 19 Nov 2026, add_part found no catalogue in its copy)."""
@@ -1642,6 +1659,21 @@ class KiCadProvider:
                               'stdout': stdout[:16000], 'stderr': stderr[:16000],
                               'change_report': report, 'before': before, 'after': after, 'steps': steps,
                               'previewed': False}
+                    if not library:
+                        # Seen as it happens, not first at write-back: parts new to his project that are
+                        # not FireFli library parts, which write_back will refuse (19 Nov 2026).
+                        try:
+                            original = set(_non_library_parts(Path(meta['source']).parent
+                                                              if Path(meta['source']).is_file()
+                                                              else Path(meta['source'])))
+                        except (KeyError, OSError):
+                            original = set()
+                        new = sorted(set(_non_library_parts(project)) - original)
+                        if new:
+                            result['not_library_parts'] = {
+                                'parts': ['%s (%s)' % item for item in new[:30]],
+                                'detail': 'write_back refuses these: use a FireFli part (find_part), or add_part '
+                                          'from the datasheet first'}
                 return dict(result, work_copy_revision=copy_change.revision)
             except BaseException as error:
                 restored = getattr(error, 'rollback_restored', copy_change is None)
@@ -2426,11 +2458,12 @@ class KiCadProvider:
                 'symbol_libraries': symbols}
 
     def add_part(self, arguments):
-        """A new part in a library work copy (19 Nov 2026), from the symbol and footprint AL/X chose:
-        named after its part number, with FireFli's fields and a catalogue row. Changes only the copy;
-        the footprint is measured against the datasheet with check_kicad_layout before write_back."""
-        from alx.providers.kicad_library_parts import (part_name, renamed_footprint, renamed_symbol,
-                                                       with_catalogue_row, with_symbol)
+        """A new part in a library work copy, built from its datasheet (19 Nov 2026): the symbol from
+        the pin table, the footprint from the land pattern, named after its part number, with
+        FireFli's fields and a catalogue row. Changes only the copy; the footprint is then measured
+        against the datasheet drawing with check_kicad_layout before write_back."""
+        from alx.providers.kicad_library_parts import part_name, with_catalogue_row, with_symbol
+        from alx.providers.kicad_part_builder import PartSpecError, build_footprint, build_symbol
         with self._locked(arguments['work_copy_id']):
             root, meta = self._load(arguments['work_copy_id'])
             if not meta.get('library'):
@@ -2438,13 +2471,13 @@ class KiCadProvider:
             project = root / 'project'
             library = str(arguments.get('library') or '').strip()
             mpn = str(arguments.get('mpn') or '').strip()
-            symbol_from = str(arguments.get('symbol_from') or '').strip()
-            footprint_from = str(arguments.get('footprint_from') or '').strip().replace(':', '/', 1)
-            missing = [k for k, v in (('library', library), ('mpn', mpn), ('symbol_from', symbol_from),
-                                      ('footprint_from', footprint_from)) if not v]
-            for key in ('manufacturer', 'description', 'datasheet', 'reference'):
-                if not str(arguments.get(key) or '').strip():
-                    missing.append(key)
+            missing = [key for key in ('library', 'mpn', 'manufacturer', 'description', 'datasheet', 'reference')
+                       if not str(arguments.get(key) or '').strip()]
+            if not arguments.get('pins'):
+                missing.append('pins')
+            shared = str(arguments.get('share_footprint') or '').strip()
+            if not arguments.get('footprint') and not shared:
+                missing.append('footprint (or share_footprint)')
             if missing:
                 raise KiCadError('arguments_unusable', {'detail': 'add_part needs ' + ', '.join(missing)})
             stem = 'FireFli_' + re.sub(r'^FireFli_', '', library)
@@ -2460,46 +2493,40 @@ class KiCadProvider:
                     or any(row.get('MPN') == mpn for row in csv.DictReader(io.StringIO(catalogue.read_text()))):
                 raise KiCadError('arguments_unusable', {'detail': '%s is already in %s: find_part gives its name'
                                                         % (mpn, stem)})
-            # The chosen symbol and footprint, from KiCad's own libraries or his (this copy first).
-            source_symbol = symbol_from.split(':', 1)
-            if len(source_symbol) != 2:
-                raise KiCadError('arguments_unusable', {'detail': 'symbol_from is LIBRARY:NAME'})
-            symbol_block = self._library_parts([symbol_from], project, 'symbols')[symbol_from]
-            shared = bool(arguments.get('share_footprint'))
-            footprint_library, footprint_name = footprint_from.split('/', 1) if '/' in footprint_from else ('', '')
-            if not footprint_name:
-                raise KiCadError('arguments_unusable', {'detail': 'footprint_from is LIBRARY/NAME'})
             if shared:
-                if footprint_library != stem or not (pretty / (footprint_name + '.kicad_mod')).is_file():
+                # A reel variant of a package already in this library uses that footprint as it is.
+                if not (pretty / (shared.split(':')[-1].split('/')[-1] + '.kicad_mod')).is_file():
                     raise KiCadError('arguments_unusable', {'detail': 'share_footprint names a footprint already '
-                                                            'in %s (a reel variant of the same package)' % stem})
-                footprint_field = '%s:%s' % (stem, footprint_name)
+                                                            'in %s' % stem})
+                footprint_field = '%s:%s' % (stem, shared.split(':')[-1].split('/')[-1])
             else:
-                local = project / 'footprints' / (footprint_library + '.pretty') / (footprint_name + '.kicad_mod')
-                footprint_text = (local.read_text() if local.is_file() else
-                                  self._library_parts([footprint_from], project, 'footprints')[footprint_from])
                 footprint_field = '%s:%s' % (stem, name)
             fields = {'Reference': str(arguments['reference']).strip(), 'Value': mpn, 'Footprint': footprint_field,
                       'Datasheet': str(arguments['datasheet']).strip(),
                       'Description': str(arguments['description']).strip(),
                       'Manufacturer': str(arguments['manufacturer']).strip(), 'MPN': mpn,
                       'LCSC': str(arguments.get('lcsc') or '').strip()}
-            block = renamed_symbol(symbol_block, source_symbol[1], name, fields)
+            try:
+                block = build_symbol(name, fields, plain(arguments['pins']))
+                footprint_text, built = (None, None) if shared else build_footprint(
+                    name, plain(arguments['footprint']), fields)
+            except PartSpecError as error:
+                raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
             new_library = with_symbol(library_text, block)
             try:
                 sexpr(new_library)
-                if not shared:
-                    new_footprint = renamed_footprint(footprint_text, name)
-                    sexpr(new_footprint)
+                if footprint_text is not None:
+                    sexpr(footprint_text)
             except Exception as error:  # noqa: BLE001 - a part KiCad could not read is never written
                 raise KiCadError('arguments_unusable', {'detail': 'the new part does not read back: %s' % error})
             row = {**fields, 'Note': str(arguments.get('note') or '').strip()}
             new_catalogue = with_catalogue_row(catalogue.read_text(), row)
             symbols_file.write_text(new_library)
-            if not shared:
-                (pretty / (name + '.kicad_mod')).write_text(new_footprint)
+            if footprint_text is not None:
+                (pretty / (name + '.kicad_mod')).write_text(footprint_text)
             catalogue.write_text(new_catalogue)
             return {'symbol': '%s:%s' % (stem, name), 'footprint': footprint_field, 'catalogue': row,
+                    'built': built or {'shared': footprint_field},
                     'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': self._revision(root),
                     'next': ('measure the footprint against the datasheet land pattern with check_kicad_layout '
                              '(footprint %s/%s), correct it if it differs, then write_back with his approval'
@@ -3365,6 +3392,16 @@ class KiCadProvider:
         if other or missing:
             raise KiCadError('unsupported_project', {
                 'not_design_files': other[:20], 'removed_files': missing[:20]})
+        if not meta.get('library'):
+            # Every part on his boards comes from the FireFli library, built from its datasheet with
+            # its part number (19 Nov 2026: the LED circuit was drawn with KiCad's generic parts).
+            # Parts already in his project stay as they are; a new one must be a library part.
+            added = sorted(set(_non_library_parts(root / 'project')) - set(_non_library_parts(source)))
+            if added:
+                raise KiCadError('library_parts_required', {
+                    'detail': 'these parts are not FireFli library parts: find_part, or add_part from the '
+                              'datasheet in a copy_library work copy and write that back first, then swap them',
+                    'parts': ['%s (%s)' % item for item in added[:30]]})
         backup = root / 'backups' / uuid.uuid4().hex
         backup.mkdir(parents=True)
 

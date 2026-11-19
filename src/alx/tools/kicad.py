@@ -38,7 +38,7 @@ FAILURES = ('arguments_unusable', 'path_denied', 'unsupported_project', 'invalid
             'script_failed', 'export_would_overwrite', 'rename_ambiguous', 'unsupported_file',
             'project_too_large', 'evidence_full', 'verification_failed', 'unavailable')
 FAILURES += ('engine_unavailable', 'engine_timeout', 'engine_failed', 'step_not_approved',
-             'schematic_board_differ', 'board_not_clean', 'change_unmet')
+             'schematic_board_differ', 'board_not_clean', 'change_unmet', 'library_parts_required')
 
 MAP = StructuredSchema(ValueKind.OBJECT)
 SECTION = obj({'before': S, 'after': S, 'changed': B, 'truncated': B})
@@ -238,7 +238,9 @@ _ACTION_DEFINITIONS = (
              'dry_run': B, 'revert_to': S, 'checks': B, 'work_copy_revision': S}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
-             'previewed': B}),
+             'previewed': B, 'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
+            ('work_copy_id', 'work_copy_revision', 'stdout', 'stderr', 'change_report', 'before', 'after',
+             'steps', 'previewed')),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('export_kicad_manufacturing',
         'Export Gerbers and drill files from an untainted work copy through KiCad CLI. '
@@ -469,21 +471,27 @@ FIND_PART = CapabilityDefinition('find_part',
     SideEffect.NONE, FAILURES)
 
 ADD_PART = CapabilityDefinition('add_part',
-    'Add a part that is not in the FireFli library to a copy_library work copy (work_copy_id): the symbol '
-    'and footprint you chose for it, copied under its part number with its fields and a catalogue row. '
-    'library: FireFli library name (ICs, Semiconductors, Connectors, Misc, ...); mpn, manufacturer, '
-    'description, datasheet (URL), reference (letter: U, IC, D, Q, ...), lcsc (when JLC stocks it), note; '
-    'symbol_from: LIBRARY:NAME of a symbol whose pins and numbering match the datasheet (KiCad\'s own, e.g. '
-    '74xGxx:74LVC1G123, or a FireFli part); footprint_from: LIBRARY/NAME of the matching package footprint '
-    '(KiCad\'s IPC footprints, e.g. Package_DFN_QFN/..., or a FireFli one); share_footprint true uses that '
-    'FireFli footprint as it is (a reel variant of the same package). Check the pin numbering of symbol and '
-    'footprint against the datasheet first. Then measure the footprint against the datasheet land pattern '
-    'with check_kicad_layout, correct it if it differs, and write the library back with his approval.',
+    'Add a part that is not in the FireFli library to a copy_library work copy (work_copy_id), built from '
+    'its datasheet, the source of truth: never from another library. library: FireFli library name (ICs, '
+    'Semiconductors, Connectors, Misc, ...); mpn (exact orderable part number), manufacturer, description, '
+    'datasheet (URL), reference (letter: U, IC, D, Q, ...), lcsc (when JLC stocks it), note. pins: the '
+    'datasheet pin table, [{number, name, type, side?}]; type: input, output, bidirectional, tri_state, '
+    'passive, power_in, power_out, open_collector, no_connect ...; side left/right/top/bottom only where '
+    'the datasheet groups them (default: first half down the left, rest up the right); one symbol, one unit. '
+    'footprint: the datasheet land pattern in mm, {package: two_row (SOIC, SOT, SON, DFN: pins, pitch, '
+    'pad_width, pad_length, row_spacing = pad centre to pad centre across) | quad (QFN: pins, pins_per_side? '
+    '[left, bottom], pitch, pad_width, pad_length, row_spacing_x, row_spacing_y) | pads (every pad from the '
+    'datasheet table: [{number, x, y, width, height, shape?, rotation?, drill?, kind?}], x right, y down, '
+    'origin the package centre), body: [width, height], exposed_pad?: {width, height, number?}, shape?: '
+    'rect|roundrect}; pin 1 at the top of the left side, numbered counter-clockwise from above. '
+    'share_footprint instead of footprint uses a footprint already in that library (a reel variant of the '
+    'same package). Then measure the footprint against the datasheet drawing with check_kicad_layout, '
+    'correct it if it differs, and write the library back with his approval.',
     obj({'work_copy_id': S, 'library': S, 'mpn': S, 'manufacturer': S, 'description': S, 'datasheet': S,
-         'reference': S, 'lcsc': S, 'note': S, 'symbol_from': S, 'footprint_from': S, 'share_footprint': B},
-        ('work_copy_id', 'library', 'mpn', 'manufacturer', 'description', 'datasheet', 'reference',
-         'symbol_from', 'footprint_from')),
-    obj({'symbol': S, 'footprint': S, 'catalogue': MAP, 'work_copy_id': S, 'work_copy_revision': S, 'next': S},
+         'reference': S, 'lcsc': S, 'note': S, 'pins': array(MAP), 'footprint': MAP, 'share_footprint': S},
+        ('work_copy_id', 'library', 'mpn', 'manufacturer', 'description', 'datasheet', 'reference', 'pins')),
+    obj({'symbol': S, 'footprint': S, 'catalogue': MAP, 'built': MAP, 'work_copy_id': S, 'work_copy_revision': S,
+         'next': S},
         ('symbol', 'footprint', 'work_copy_id', 'work_copy_revision')),
     SideEffect.EFFECTFUL, FAILURES)
 
