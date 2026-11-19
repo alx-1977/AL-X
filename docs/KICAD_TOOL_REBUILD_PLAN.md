@@ -71,6 +71,8 @@ path comes back.
    Delete each old setter as it's replaced.
 4. **Drawing, hierarchy, update-PCB and library work** moved over. The free-script route is
    deleted at the end of this step.
+   Altium import as an AL/X capability follows `ALTIUM_TO_KICAD_PROCEDURE.md` (P0005).
+   Detail below, under "Step 4 design".
 5. **JLC outputs:** BOM and pick-and-place, checked against your last order. This can move to
    the front if the P0009 order is urgent.
 6. **Hard engineering jobs, routing and RF, each proven separately** on P0009 and then on an
@@ -80,6 +82,72 @@ path comes back.
 real milestone is this: you ask for the designator change, get exactly the six right edits
 with a report that nothing else changed, and see it in KiCad. Each step after that is proven
 before the next.
+
+## Step 4 design (19 Nov 2026, with the Altium import added)
+
+Code does the mechanics and AL/X decides meaning (Laws 1–3). Every step works on a work copy
+and is proven by the connection check. Friedl approves the write-back to his folder and to the
+library, as now.
+
+**A. Altium import: one action, `convert_import`, in stages.** Each stage runs the library's
+`convert/` scripts on the copy and reports what it found and what it changed.
+
+1. **survey** (reads only) reports:
+   - pages that came in, and the KiCad same-file bug;
+   - the baseline netlist;
+   - every difference between the schematic and the Altium board's pad nets, across all
+     pages, each with its location (the import breaks);
+   - every part classified: passive mapped to a library value, existing library part, new part
+     needed, no LCSC number;
+   - Altium facts from the PcbDoc: rules, neck width and outline;
+   - the dates of the Altium Gerbers against the PcbDoc.
+2. **repair_breaks:** AL/X names the breaks to repair. Code applies the fixes that each have
+   one correct result: end a wire on the wire it misses, snap an off-grid symbol and its wires,
+   move a label onto its wire. The board comparison proves each one.
+3. **convert_parts:**
+   - Passives are mapped and swapped.
+   - AL/X gives the data for each new part: maker, MPN, description, datasheet, LCSC number,
+     library, and shared footprint or rename.
+   - Code adds the parts to a library work copy, then relinks, updates the board from the
+     schematic and refreshes footprints.
+   - It refuses if any connection changed.
+   - The datasheet check uses the existing `fetch_datasheet` and `check_kicad_layout` on the
+     library copy. A new part isn't finished until it passes.
+4. **repair_board:** layers, outline from the PcbDoc, via tenting from Altium's mask, zones
+   with Altium's neck width, text boxes to text, FireFli font, one hierarchical design with
+   sheet pins, and the ALX title block. AL/X gives the project code, title and sheet names.
+5. **write_rules:** Altium's Rules6 become the `.kicad_dru`. AL/X adds each as-built exception
+   as data: kind, footprints, reason.
+6. **prove:**
+   - connections against the import and the board;
+   - DRC, ERC and parity;
+   - Gerbers against the import's (written to scratch, never the project folder);
+   - a report.
+
+   Then the existing `write_back` asks Friedl.
+
+**B. Schematic edits as structured operations.** These are the same ones the import and the
+ERC tidy-up need:
+- add a no-connect mark;
+- add a power flag on a short wire to its net's power symbol;
+- move a label onto its wire;
+- join a wire end;
+- snap a symbol with its wires.
+
+Hierarchy (`make_hierarchical`) stays. Update-PCB (link, nets, fields) becomes one operation.
+
+**C. Library work as structured operations on a library copy:**
+- add a part from data;
+- set a footprint's pads from a `check_kicad_layout` measurement;
+- set a catalogue note.
+
+**D. Delete the free-script route** for board, schematic and library once A–C cover the jobs
+that used it.
+
+**E. Fourth Inspector job:** a field on the 0402 capacitors.
+
+**Proof:** convert P0005's original import again with AL/X's actions alone. The result must
+match today's conversion, apart from file ids.
 
 ## What I need from you
 
