@@ -49,8 +49,15 @@ def _digikey_candidates(client: Any, token: str, client_id: str, part: str, manu
         return []
     if response.status_code != 200:
         return []
-    found = []
-    for product in (response.json().get("Products") or [])[:25]:
+    found, seen = [], set()
+    answer = response.json()
+    # DigiKey puts parts whose number matches exactly in ExactMatches and the rest in Products
+    # (19 Nov 2026: BAT54WS came back as "not found" with its matches in ExactMatches).
+    for product in ((answer.get("ExactMatches") or []) + (answer.get("Products") or []))[:40]:
+        number = str(product.get("ManufacturerProductNumber", ""))
+        if number in seen:
+            continue
+        seen.add(number)
         maker = str((product.get("Manufacturer") or {}).get("Name", ""))
         if manufacturer and not _same_maker(manufacturer, maker):
             continue

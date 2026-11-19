@@ -1360,6 +1360,10 @@ class KiCadProvider:
                     ' AL/X storage: %s.' % storage if storage else ''))
 
     def read_reference(self, arguments):
+        if Path(str(arguments.get('path', ''))).name.startswith(('alx-native-', 'alx-claude-')):
+            # The model session's own working folder (19 Nov 2026: read twice by the board agent).
+            raise KiCadError('path_denied', {'detail': 'that is your session\'s own scratch folder; nothing of '
+                                                       'his design is there. ' + self._where_things_are()})
         location = self._reference_location(arguments['path'])
         placeholder = location.with_name('.' + location.name + '.icloud')
         if not location.exists() and not placeholder.is_file():
