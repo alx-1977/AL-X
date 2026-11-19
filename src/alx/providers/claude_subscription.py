@@ -640,6 +640,7 @@ class ClaudeSubscriptionReasoningModel:
         retry_policy: SubscriptionRetryPolicy | None = None,
         launcher: "Callable[..., subprocess.Popen] | None" = None,
         session_record_dir: str | Path | None = None,
+        effort: str = "",
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -648,6 +649,8 @@ class ClaudeSubscriptionReasoningModel:
         # session that pauses. Bound here once; used only by _NativeSession.
         self._launcher = launcher or subprocess.Popen
         self._model = model
+        # How hard the model thinks (low, medium, high, max); empty keeps the CLI's own.
+        self._effort = effort.strip()
         self._timeout_seconds = timeout_seconds
         self._executable = executable
         self._telemetry_sink = telemetry_sink
@@ -907,7 +910,7 @@ class ClaudeSubscriptionReasoningModel:
             "",
             "--tools",
             "",
-        ]
+        ] + (["--effort", self._effort] if self._effort else [])
 
     @staticmethod
     def _system_prompt(request: ModelRequest) -> str:

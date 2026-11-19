@@ -11,6 +11,7 @@ from alx.contracts import (
 )
 from alx.contracts.capabilities import ArgumentAlternatives, arguments_match
 from alx.specialists.worker import MechanicalWorker, WorkerError
+from alx.tools.kicad import KICAD, KiCadAction
 from alx.tools.mail import MAIL, MailAction
 
 DELEGATE_MECHANICAL_WORK = "delegate_mechanical_work"
@@ -36,8 +37,15 @@ WORKER_CAPABILITIES = (
 # exact argument alternatives it may call. Mail needs no approval, so holding
 # no approvals would not keep the worker from searching, acknowledging, marking,
 # flagging, filing or trashing; it may only read an attachment.
+# KiCad: reads, checks, analyses and edits of her copies; no windows on his screen, no
+# approvals, no write-back (18 Nov review: the worker could reach every kicad action).
+WORKER_KICAD_ACTIONS = tuple(item.value for item in (
+    KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
+    KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
+    KiCadAction.FETCH_DATASHEET, KiCadAction.RENDER, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.SELECT))
 WORKER_LIMITS: tuple[tuple[str, ArgumentAlternatives], ...] = (
     (MAIL, ((("action", MailAction.READ_ATTACHMENT.value),),)),
+    (KICAD, tuple((("action", name),) for name in WORKER_KICAD_ACTIONS)),
 )
 
 
@@ -51,6 +59,11 @@ def worker_call_refusal(call: CapabilityCall) -> CapabilityAttempt | None:
         if call.capability_id == capability_id and not arguments_match(allowed, call.arguments):
             return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
                                      reason_code="worker_action_not_allowed")
+    # D-084: edits of a copy only as a structured change; free scripts are not the worker's
+    # (18 Nov review: only the board agent refused them).
+    if call.capability_id == KICAD and call.arguments.get("script") is not None:
+        return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
+                                 reason_code="worker_script_not_allowed")
     return None
 
 

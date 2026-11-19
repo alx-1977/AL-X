@@ -155,10 +155,16 @@ class MechanicalWorker:
     def capability_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._definitions))
 
+    def _new_run(self) -> None:
+        """Repeated-refusal counting covers one run: a call refused before an approval may succeed
+        after it (review of #247: the last refusal carried over into the next job and stretch)."""
+        self._last_refused, self._repeats = None, 0
+
     def run(self, brief: str, job_id: str, max_calls: int) -> dict[str, Any]:
         if not self._busy.acquire(blocking=False):
             raise WorkerError("worker_busy")
         try:
+            self._new_run()
             return self._run(brief, job_id, max_calls)
         finally:
             self._busy.release()
@@ -214,8 +220,17 @@ class MechanicalWorker:
         summary: dict[str, Any] = {"call_id": call_id, "capability_id": capability_id}
         if tool_use.get("name") != CALL_TOOL or capability_id not in self._definitions:
             summary["outcome"] = "not_listed"
-            return json.dumps({"refused": "capability_not_listed",
-                               "listed": list(self.capability_ids)}), summary, ()
+            refusal: dict[str, Any] = {"refused": "capability_not_listed", "listed": list(self.capability_ids)}
+            # An action named as if it were a capability (16 Nov: fetch_datasheet, read_reference):
+            # say which capability takes it.
+            owner = next((item.capability_id for item in self._definitions.values()
+                          if isinstance(capability_id, str) and capability_id
+                          and capability_id in "".join(
+                              c if c.isalnum() or c == "_" else " " for c in item.purpose).split()), None)
+            if owner is not None:
+                refusal["hint"] = "%s is an action of %s: call %s with action %s" % (
+                    capability_id, owner, owner, capability_id)
+            return json.dumps(refusal), summary, ()
         try:
             parsed = json.loads(arguments.get("arguments_json") or "{}")
             if not isinstance(parsed, dict):
@@ -223,8 +238,23 @@ class MechanicalWorker:
         except (TypeError, ValueError):
             summary["outcome"] = "arguments_unusable"
             return json.dumps({"refused": "arguments_json must be a JSON object"}), summary, ()
+        # The same call again, unchanged, right after it was refused, is not run (17 Nov: one
+        # refused inspect was sent 33 times in a row). Three such repeats end the job.
+        key = json.dumps([capability_id, parsed], sort_keys=True, default=str)
+        if key == getattr(self, "_last_refused", None):
+            self._repeats = getattr(self, "_repeats", 0) + 1
+            summary["outcome"] = "repeated_refused_call"
+            if self._repeats >= 3:
+                raise WorkerError("stuck_on_refused_call")
+            return json.dumps({"refused": "same_call_as_just_refused",
+                               "hint": "this exact call was refused a moment ago; read that refusal and "
+                                       "change the call, or do something else"}), summary, ()
         attempt = self._dispatch(CapabilityCall(call_id, capability_id, parsed))
         result = attempt.result
+        refused_now = result is None or result.state.value != "succeeded"
+        self._last_refused = key if refused_now else None
+        if not refused_now:
+            self._repeats = 0
         summary["outcome"] = (attempt.reason_code if result is None
                               else result.state.value)
         return json.dumps(bound_result({

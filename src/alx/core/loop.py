@@ -190,9 +190,12 @@ def _validate_response_length(decision: AgentDecision) -> None:
     """Refuse a reply longer than Friedl wants to hear, unless she judged he asked for detail."""
     if (decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT
             and not decision.detail_asked):
+        # Her count with it, so one correction is enough (15 Nov: a board
+        # agent's report was refused twice and never reached him).
         raise DecisionValidationError(
-            "response_over_%d_words: say the outcome and anything he must decide; "
-            "figures, checks and background go in detail" % RESPONSE_WORD_LIMIT)
+            "response_over_%d_words: yours has %d; say the outcome and anything he must decide in "
+            "%d words or fewer; figures, checks and background go in detail"
+            % (RESPONSE_WORD_LIMIT, len(decision.response.split()), RESPONSE_WORD_LIMIT))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2648,6 +2651,19 @@ class CoreAgent:
         self._evidence_scheduled.intersection_update(current_evidence)
         self._evidence_settled.intersection_update(current_evidence)
         return tuple(jobs)
+
+    def planned_dispatch_withdrawn(self, job: PlannedDispatch) -> bool:
+        """Whether a started planned call's plan is gone: cancelled, finished or replaced.
+
+        Read only. A running call cannot be undone by the plan, so its worker
+        is asked to stop through the capability's own cancel (15 Nov: she
+        cancelled a board job's plan and the agent ran on).
+        """
+        try:
+            plan = self._store.load(job.goal_id).state.execution_plan
+        except Exception:  # noqa: BLE001 - unknown is not withdrawn
+            return False
+        return plan is None or plan.plan_id != job.plan_id or plan.status in PLAN_TERMINAL
 
     def begin_planned_dispatch(self, job: PlannedDispatch) -> PlannedDispatch | None:
         """Cross the dispatch boundary, or decline to. Under the lock.

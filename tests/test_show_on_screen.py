@@ -74,6 +74,16 @@ class ShowOnScreenTests(unittest.TestCase):
         self.assertEqual(self.read[0]["board"], "/designs/P0020/board.kicad_pcb")
         self.assertEqual(self.read[0]["refs"], ["C61"])
 
+    def test_a_placement_view_asks_for_the_parts_alone(self) -> None:
+        """D-082: the placement step is shown with no copper, pins marked."""
+        view = {"label": "Placement", "board": "/designs/P0020/board.kicad_pcb", "refs": ["C61"],
+                "placement": True}
+        result = self.show(display(views=[view]))
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertIs(self.read[0]["placement"], True)
+        self.show(display())
+        self.assertFalse(self.read[-1].get("placement"))
+
     def test_a_library_footprint_is_drawn_alone_as_fp(self) -> None:
         """14 Nov: a library footprint could not be drawn, so she showed none."""
         view = {"label": "Library", "work_copy_id": "lib1", "footprint": "FireFli_Misc/7488918022",

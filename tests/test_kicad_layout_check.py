@@ -250,5 +250,16 @@ class LibraryWorkTests(unittest.TestCase):
                  work_copy_revision=edited["work_copy_revision"], project_dir=str(library))
             self.assertIn("0.6", (pretty / "PAD1.kicad_mod").read_text())
 
+
+class PointFormTests(unittest.TestCase):
+    def test_a_keepout_edge_and_a_net_copper_edge_are_points(self):
+        """17 Nov: Würth dimensions AE1 to its keep-out edges and to copper edges."""
+        from alx.providers.layout_check import _feature
+        self.assertEqual(_feature("AE1.keepout:bottom"), ("AE1", "keepout", "bottom"))
+        self.assertEqual(_feature("net=Net-(AE1-Feed)@-6.4,6.45:top"), ("@net", "Net-(AE1-Feed)", "top", [-6.4, 6.45]))
+        with self.assertRaises(ValueError):
+            _feature("net=GND@1,2:centre")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,17 @@ inadequate.
 
 Not yet usable.
 
+- [ ] **What AL/X can do, and what she actually uses (Friedl, 15 Nov).**
+  A plain list of every tool and action, grouped the way Friedl thinks
+  of them (mail, Xero, DHL, KiCad, readers, coding, ...), each with when
+  she last used it, taken from her logs and goal records. Unused or
+  replaced ones go to Friedl for a keep/remove decision, with their code
+  and tests removed together (Law 0). Found during the test audit of the
+  same day: 5,558 tests, almost all real; the dead `alx.projects` store
+  (Stage 1, never wired in, about 45 tests) is the first candidate. Also
+  from that audit: run the tests in parallel (10 min locally, 7-8 min on
+  GitHub, mostly one test at a time) and remove 5 duplicated tests.
+
 - [ ] **Board-design tool: what is left** after #239 and #240 (13 Nov
   2026), which built the layout check against the drawing, ERC and the
   board-against-schematic check, the taper rule, one hierarchical design

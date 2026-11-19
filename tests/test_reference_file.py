@@ -98,4 +98,31 @@ class ReferenceFileTests(unittest.TestCase):
         self.assertEqual(facts['page_count'], 1)
         self.assertEqual(facts['pages'][0]['page'], 1)
         self.assertIn('Coverlay', facts['pages'][0]['text'])
+        # 15 Nov: a later page of a long datasheet could not be reached; an
+        # offset continues PDF text as it does plain text.
+        later = self.read(pdf, offset=3)
+        self.assertEqual(later['pages'][0]['text'], 'erlay')
+        done = self.read(pdf, offset=len(facts['pages'][0]['text']))
+        self.assertEqual((done['pages'], done['truncated']), ([], False))
         self.assertFalse(facts['truncated'])
+
+    def test_pdf_reading_stops_at_a_cut_page_and_carries_on_after_it(self):
+        """Review of #247: later pages followed a page cut at 4000 characters, and the next offset
+        then skipped that page's unread rest."""
+        from unittest.mock import patch
+        long_page, second = 'A' * 6000, 'B' * 4000
+        pages = [type('P', (), {'extract_text': (lambda self, t=t: t), 'get': (lambda self, k, d=None: []),
+                                'get_contents': (lambda self: None)})() for t in (long_page, second)]
+        reader = type('R', (), {'pages': pages})()
+        pdf = self.home / 'long.pdf'
+        pdf.write_bytes(b'%PDF-1.4 stand-in')
+        with patch('pypdf.PdfReader', return_value=reader):
+            first = self.read(pdf)
+            read = ''.join(p['text'] for p in first['pages'])
+            self.assertEqual((len(first['pages']), first['next_offset']), (1, 4000))
+            rest = self.read(pdf, offset=first['next_offset'])
+            read += ''.join(p['text'] for p in rest['pages'])
+            while rest['truncated']:
+                rest = self.read(pdf, offset=rest['next_offset'])
+                read += ''.join(p['text'] for p in rest['pages'])
+        self.assertEqual(read, long_page + second)

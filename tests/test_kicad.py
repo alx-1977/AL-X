@@ -3,6 +3,7 @@ import sys as _sys, pathlib as _pl
 _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
 from kicad_actions import kicad_call  # noqa: E402
 import json
+import shutil
 import os
 import pwd
 from datetime import UTC, datetime, timedelta
@@ -127,9 +128,15 @@ class KiCadTests(unittest.TestCase):
         if argv[1:4] == ['sch', 'export', 'netlist']:
             target = Path(argv[argv.index('--output') + 1])
             nets = self.netlists.pop(0) if getattr(self, 'netlists', None) else [('N1', 'R1', '1')]
-            target.write_text('(export (nets ' + ' '.join(
+            target.write_text('(export (components ' + ' '.join(
+                f'(comp (ref "{ref}") (value "10k") (footprint "R_0603"))'
+                for ref in sorted({ref for _name, ref, _pin in nets})) + ') (nets ' + ' '.join(
                 f'(net\n(code "1") (name "{name}") (node (ref "{ref}") (pin "{pin}")))'
                 for name, ref, pin in nets) + '))')
+            return SimpleNamespace(returncode=0)
+        if argv[2:4] == ['export', 'pdf']:
+            self.exported = getattr(self, 'exported', []) + [argv]
+            Path(argv[argv.index('--output') + 1]).write_bytes(b'%PDF-1.7 /Type /Pages /Type /Page /Type /Page')
             return SimpleNamespace(returncode=0)
         if argv[1:3] == ['sch', 'erc']:
             target = Path(argv[argv.index('--output') + 1])
@@ -162,7 +169,83 @@ class KiCadTests(unittest.TestCase):
         return SimpleNamespace(returncode=0)
 
     def call(self, name, **arguments):
+        if name == 'approve_step' and arguments.get('work_copy_id'):
+            # He approves what he was shown (17 Nov): the copy is opened for him first.
+            self.shown(arguments['work_copy_id'], 'schematic' if arguments.get('step') == 'schematic' else 'board')
         return kicad_call(self.runtime.executors, name, arguments)
+
+    def shown(self, work_copy_id, what='board'):
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        return kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': work_copy_id, 'what': what})
+
+    def test_a_step_is_approved_only_on_a_view_that_opened_and_shows_that_step(self):
+        """18 Nov review: a failed launch, or a schematic view, counted as showing him the board."""
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
+            EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        self.shown(edited['work_copy_id'], 'board')
+        wrong = kicad_call(self.runtime.executors, 'approve_step', {
+            'step': 'schematic', 'work_copy_id': edited['work_copy_id'],
+            'work_copy_revision': edited['work_copy_revision']})
+        self.assertEqual(wrong.state, CapabilityResultState.FAILED)
+        self.assertIn('approved on the schematic', wrong.failure['recovery']['detail'])
+        provider = self.runtime.provider
+
+        def broken(what, path, index):
+            raise OSError('KiCad did not start')
+        provider.open_viewer = broken
+        failed = kicad_call(self.runtime.executors, 'open_in_kicad',
+                            {'work_copy_id': edited['work_copy_id'], 'what': 'schematic'})
+        self.assertEqual(failed.state, CapabilityResultState.FAILED)
+        root, meta = provider._load(edited['work_copy_id'])
+        self.assertEqual(meta['view']['what'], 'board')
+
+    def test_a_view_counts_only_once_the_screen_was_taken(self):
+        """19 Nov recheck: a failed screen capture still marked the revision as shown."""
+        checked = self.check()
+        self.shown(checked['work_copy_id'], 'board')
+        self.runtime.provider.capture_screen = lambda target: None
+        failed = kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': checked['work_copy_id'],
+                                                                      'what': 'board'})
+        self.assertIn('screen could not be taken', failed.failure['recovery']['detail'])
+        # The window is still tracked: an edit he saves there is protected, but it is not "shown".
+        root = self.runtime.provider._load(checked['work_copy_id'])[0]
+        window = next((root / 'views').glob('*/amended/test.kicad_pcb'))
+        window.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        self.runtime.provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        again = kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': checked['work_copy_id'],
+                                                                     'what': 'board'})
+        self.assertIn('take_edits first', again.failure['recovery']['detail'])
+
+    def test_an_edit_he_saved_in_the_window_is_taken_before_approval(self):
+        """19 Nov recheck: the approval covered the board before his saved adjustment; a KiCad lock
+        file alone counted as an edit."""
+        checked = self.check()
+        window = Path(self.shown(checked['work_copy_id'], 'board').values['opened'][0])
+        # A lock file while the window is open is not an edit: a new window opens.
+        (window.parent / ('~' + window.name + '.lck')).write_text('{}')
+        window = Path(self.shown(checked['work_copy_id'], 'board').values['opened'][0])
+        window.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        refused = kicad_call(self.runtime.executors, 'approve_step', {
+            'step': 'placement', 'work_copy_id': checked['work_copy_id'],
+            'work_copy_revision': checked['work_copy_revision']})
+        self.assertIn('take_edits first', refused.failure['recovery']['detail'])
+
+    def test_a_step_is_approved_only_once_he_was_shown_that_version(self):
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
+            EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        unshown = kicad_call(self.runtime.executors, 'approve_step', {
+            'step': 'schematic', 'work_copy_id': edited['work_copy_id'],
+            'work_copy_revision': edited['work_copy_revision']})
+        self.assertEqual(unshown.state, CapabilityResultState.FAILED)
+        self.assertIn('open_in_kicad', unshown.failure['recovery']['detail'])
+        self.success('approve_step', step='schematic', work_copy_id=edited['work_copy_id'],
+                     work_copy_revision=edited['work_copy_revision'])
 
     def success(self, name, **arguments):
         result = self.call(name, **arguments)
@@ -294,8 +377,8 @@ class KiCadTests(unittest.TestCase):
         (history / 'HEAD').write_text('ref: refs/heads/master')
         self.success('write_back_kicad_board', **self.write_args(fixed))
         # Exports cannot be put into it (review of #208), and it is never entered.
-        self.failure('path_denied', 'export_kicad_manufacturing',
-                     work_copy_id=checked['work_copy_id'], output_dir='.history/gerbers')
+        self.failure('path_denied', 'export_kicad_manufacturing', work_copy_id=checked['work_copy_id'],
+                     work_copy_revision=fixed['work_copy_revision'], output_dir='.history/gerbers')
         from unittest.mock import patch as patched
         import os as os_module
         entered = []
@@ -636,28 +719,39 @@ class KiCadTests(unittest.TestCase):
             {'filename': 'b.kicad_sch', 'name': 'B', 'uuid': 'b'}]})
         (self.project / 'test.kicad_pro').write_text(json.dumps(pro))
 
+    def forget_netlists(self, checked):
+        for kept in (self.settings.work_root / checked['work_copy_id'] / 'artifacts').glob('netlist-*.json'):
+            kept.unlink()
+
     def test_make_hierarchical_is_kept_only_when_the_netlist_is_unchanged(self):
         """2026-11-13: proven by KiCad's netlist; any change puts the copy back."""
         self.two_top_level_sheets()
         checked = self.check()
         root = self.settings.work_root / checked['work_copy_id'] / 'project'
         before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+        self.forget_netlists(checked)
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '2')]]
         result = self.call('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertEqual(result.failure['code'], 'verification_failed')
         self.assertEqual(list(result.failure['recovery']['nets_differing']), ['N1'])
         self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
-        # A failed check after converting puts the copy back too (review of #239).
+        # A failed check after converting puts the copy back too (review of #239). The fake KiCad
+        # gives other connections for the same files, which KiCad itself never does: forget them.
+        self.forget_netlists(checked)
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
         with patch.object(KiCadProvider, '_erc', side_effect=KiCadError('cli_failed')):
             failed = self.call('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertEqual(failed.failure['code'], 'cli_failed')
         self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
+        self.forget_netlists(checked)
         self.netlists = [[('N1', 'R1', '1')], [('N1', 'R1', '1')]]
         done = self.success('make_hierarchical', work_copy_id=checked['work_copy_id'])
         self.assertTrue(done['converted'] and done['netlist_identical'])
         self.assertEqual(done['top_sheet_crossings'], 0)
         self.assertTrue((root / 'A.kicad_sch').is_file())
+        # A kept change like any edit: revert_to goes back over it (18 Nov review: no history).
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
 
     def test_an_edited_schematic_gets_its_erc_again(self):
         """Review of #239: ERC ran only on the first copy, never after a schematic edit."""
@@ -694,6 +788,9 @@ class KiCadTests(unittest.TestCase):
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
             EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(edited))
+        self.success('approve_step', step='schematic', work_copy_id=edited['work_copy_id'],
+                     work_copy_revision=edited['work_copy_revision'])
         written = self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn(str(self.project / 'test.kicad_sch'), written['written'])
         self.assertIn('version 2', (self.project / 'test.kicad_sch').read_text())
@@ -1038,6 +1135,511 @@ class KiCadTests(unittest.TestCase):
         self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn('(layer "User.1")', (self.project / 'test.kicad_pcb').read_text())
 
+    # D-082: schematic, placement, routing, each approved by Friedl before the next.
+    MOVE_U1 = """
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('(uuid "footprint-id")', '(at 5 5) (uuid "footprint-id")', 1))
+"""
+    ADD_TRACK = """
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text()[:-1] + ' (segment (start 3 4) (end 6 4) (width 0.25) (layer "F.Cu")))')
+"""
+    CHANGE_SCHEMATIC = """
+import sys
+from pathlib import Path
+Path(sys.argv[1]).with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')
+"""
+
+    def approve(self, result, step):
+        return self.success('approve_step', step=step, work_copy_id=result['work_copy_id'],
+                            work_copy_revision=result['work_copy_revision'])
+
+    def test_board_work_goes_placement_then_routing_then_write_back(self):
+        checked = self.check()
+        copy = checked['work_copy_id']
+        # The schematic is unchanged, so the parts may move at once; copper may not be added.
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.assertEqual(dict(moved['steps']), {'schematic': 'unchanged', 'placement': 'needs_approval',
+                                                'routing': 'unchanged'})
+        result = self.call('edit_kicad_work_copy', work_copy_id=copy, script=self.ADD_TRACK)
+        self.assertEqual(result.failure['code'], 'step_not_approved')
+        self.assertEqual(result.failure['recovery']['needs'], 'placement')
+        self.assertEqual(result.failure['recovery']['rollback_status'], 'restored')
+        self.assertNotIn('(start 3 4) (end 6 4)', next(self.storage.rglob('project/test.kicad_pcb')).read_text())
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(moved))
+        self.approve(moved, 'placement')
+        routed = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.ADD_TRACK)
+        self.assertEqual(routed['steps']['routing'], 'needs_approval')
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(routed))
+        self.approve(routed, 'routing')
+        self.success('write_back_kicad_board', **self.write_args(routed))
+        board = (self.project / 'test.kicad_pcb').read_text()
+        self.assertIn('(at 5 5)', board)
+        self.assertIn('(start 3 4) (end 6 4)', board)
+
+    def test_nothing_on_the_board_changes_before_the_schematic_is_approved(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        copy = checked['work_copy_id']
+        result = self.call('edit_kicad_work_copy', work_copy_id=copy, script=self.CHANGE_SCHEMATIC + self.MOVE_U1)
+        self.assertEqual(result.failure['code'], 'step_not_approved')
+        self.assertEqual(result.failure['recovery']['needs'], 'schematic')
+        drawn = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.CHANGE_SCHEMATIC)
+        self.assertEqual(drawn['steps']['schematic'], 'needs_approval')
+        # A later step cannot be approved before the one he must see first.
+        self.failure('step_not_approved', 'approve_step', step='placement', work_copy_id=copy,
+                     work_copy_revision=drawn['work_copy_revision'])
+        self.approve(drawn, 'schematic')
+        self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+
+    def test_changing_an_approved_step_needs_it_and_every_later_one_again(self):
+        checked = self.check()
+        copy = checked['work_copy_id']
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.approve(moved, 'placement')
+        routed = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.ADD_TRACK)
+        approved = self.approve(routed, 'routing')
+        self.assertEqual(dict(approved['steps']), {'schematic': 'unchanged', 'placement': 'approved',
+                                                   'routing': 'approved'})
+        again = self.success('edit_kicad_work_copy', work_copy_id=copy, script="""
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
+""")
+        # A part nudged after the placement was approved (17 Nov) does not reopen the placement:
+        # it is adjusted, and the routing he approves next, seeing it, covers it.
+        self.assertEqual(dict(again['steps']), {'schematic': 'unchanged', 'placement': 'adjusted',
+                                                'routing': 'needs_approval'})
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(again))
+        covered = self.approve(again, 'routing')
+        self.assertEqual(dict(covered['steps']), {'schematic': 'unchanged', 'placement': 'approved',
+                                                  'routing': 'approved'})
+        # An approval is of the revision he saw.
+        self.failure('work_copy_changed', 'approve_step', step='placement', work_copy_id=copy,
+                     work_copy_revision=routed['work_copy_revision'])
+
+    def test_a_schematic_only_change_is_compared_afresh_before_write_back(self):
+        """Review of #247: the board DRC is reused after a schematic-only edit; the schematic
+        comparison is not, so a break the edit made still stops write-back."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        self.netlists = [[('A', 'U1', '1')]]
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC)
+        # KiCad's netlist of the edited schematic: it now has a part the board does not.
+        self.netlists = [[('A', 'U1', '1'), ('A', 'U9', '1')]] * 4
+        drc_runs = len([c for c in self.calls if c[1:3] == ['pcb', 'drc']])
+        result = self.call('write_back_kicad_board', **self.write_args(edited))
+        self.assertIn(result.failure['code'], ('schematic_board_differ', 'step_not_approved'))
+        if result.failure['code'] == 'step_not_approved':
+            self.approve(edited, 'schematic')
+            result = self.call('write_back_kicad_board', **self.write_args(edited))
+            self.assertEqual(result.failure['code'], 'schematic_board_differ')
+        self.assertTrue(result.failure['recovery']['new_mismatches'])
+        self.assertEqual(len([c for c in self.calls if c[1:3] == ['pcb', 'drc']]), drc_runs)
+
+    def test_a_board_not_compared_with_its_schematic_is_not_written(self):
+        """18 Nov review: an unavailable comparison passed write-back as "nothing new"."""
+        (self.project / 'other.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        result = self.call('write_back_kicad_board', **self.write_args(edited))
+        self.assertEqual(result.failure['code'], 'schematic_board_differ')
+        self.assertIn('could not be compared', result.failure['recovery']['detail'])
+
+    def test_a_sheet_outside_the_project_stops_the_comparison(self):
+        """19 Nov recheck: a sheet outside the project could change while the netlist was reused."""
+        (self.project / 'test.kicad_sch').write_text(
+            '(kicad_sch (sheet (property "Sheetname" "X") (property "Sheetfile" "../elsewhere.kicad_sch")))\n')
+        checked = self.call('check_kicad_board', project_dir=str(self.project))
+        self.assertEqual(checked.failure['code'], 'unsupported_project')
+        self.assertIn('outside the project', checked.failure['recovery']['detail'])
+
+    def test_the_drill_place_origin_needs_its_plot_setting_whatever_its_spacing(self):
+        """19 Nov recheck: '(useauxorigin  no)' passed the guard and escaped the rewrite."""
+        board = BOARD.replace('(kicad_pcb\n', '(kicad_pcb\n  (setup (aux_axis_origin  95 150) '
+                              '(pcbplotparams (useauxorigin  no)))\n', 1)
+        (self.project / 'test.kicad_pcb').write_text(board)
+        plotted = []
+
+        def runner(argv, **kwargs):
+            if argv[2] == 'drc':
+                return self._drc_under(argv)
+            target = Path(argv[argv.index('--output') + 1])
+            if argv[3] == 'gerbers':
+                plotted.append(Path(argv[-1]).read_text())
+                (target / 'test-F_Cu.gbr').write_text('X1Y2D01*\n')
+            else:
+                (target / 'test.drl').write_text('M48\n')
+            return SimpleNamespace(returncode=0)
+        runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
+        checked = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(self.project)}).values
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
+            'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'],
+            'output_dir': 'production/o'})
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertIn('(useauxorigin yes)', plotted[0])
+
+    def test_an_unchanged_step_needs_no_approval_and_approving_it_records_nothing(self):
+        # A schematic to show him: approval needs a view that actually opened (18 Nov review).
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertEqual(set(edited['steps'].values()), {'unchanged'})
+        self.assertEqual(self.approve(edited, 'schematic')['steps']['schematic'], 'unchanged')
+        self.success('write_back_kicad_board', **self.write_args(edited))
+
+    def test_a_board_that_disagrees_with_the_schematic_is_not_written(self):
+        board = BOARD.replace('(pad "1" smd rect (at 1 2) (size 1 1) (layers "F.Cu") (uuid "pad-id")))',
+                              '(pad "1" smd rect (at 1 2) (size 1 1) (layers "F.Cu") (net 1 "A") (uuid "pad-id"))'
+                              ' (pad "2" smd rect (at 3 2) (size 1 1) (layers "F.Cu") (net 2 "B")))')
+        (self.project / 'test.kicad_pcb').write_text(board)
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        # Original and copy: U1 pins 1 and 2 on nets of their own in the schematic.
+        self.netlists = [[('A', 'U1', '1'), ('B', 'U1', '2')] for _ in range(6)]
+        checked = self.check()
+        # Her copy joins them on the board.
+        joined = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="""
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
+""")
+        self.assertEqual(list(joined['change_report']['compared_to_original']['schematic_vs_board_new']),
+                         ['board only: U1.1, U1.2'])
+        self.assertTrue(joined['change_report']['compared_to_original']['schematic_vs_board_available'])
+        result = self.call('write_back_kicad_board', **self.write_args(joined))
+        self.assertEqual(result.failure['code'], 'schematic_board_differ')
+        self.assertEqual(list(result.failure['recovery']['new_mismatches']), ['board only: U1.1, U1.2'])
+        self.assertIn('(net 2 "B")', (self.project / 'test.kicad_pcb').read_text())
+
+    def test_an_edit_reports_what_the_drc_finds_that_his_original_did_not(self):
+        checked = self.check()
+        self.report = {'violations': [{'type': 'clearance', 'severity': 'error', 'description': 'Clearance',
+                                       'items': [{'description': 'Track [A] on F.Cu'}]}],
+                       'unconnected_items': [], 'schematic_parity': []}
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        compared = edited['change_report']['compared_to_original']
+        # No schematic in this project: nothing compared, which is not "no differences" (18 Nov review).
+        self.assertFalse(compared['schematic_vs_board_available'])
+        self.assertEqual(compared['new'], 1)
+        self.assertEqual(compared['resolved'], 2)
+        self.assertEqual(compared['new_findings'][0]['type'], 'clearance')
+
+    def test_an_edit_gets_the_library_footprints_it_names(self):
+        """Her script cannot read his library; the footprints it names go in with it."""
+        (self.project / 'local.pretty').mkdir()
+        (self.project / 'local.pretty' / 'TwoPad.kicad_mod').write_text('(footprint "TwoPad")\n')
+        (self.project / 'fp-lib-table').write_text(
+            '(fp_lib_table\n\t(lib (name "Local") (type "KiCad") (uri "${KIPRJMOD}/local.pretty") (options "") (descr ""))\n)\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              footprints=['Local/TwoPad'], script='print(sorted(_LIBRARY_FOOTPRINTS))')
+        self.assertIn("['Local/TwoPad']", edited['stdout'])
+        for wrong in (['Nowhere/TwoPad'], ['Local/Missing'], ['Local/../x'], ['no-slash']):
+            self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                         footprints=wrong, script='pass')
+
+    def test_an_edit_gets_the_library_symbols_it_names(self):
+        (self.project / 'local.kicad_sym').write_text(
+            '(kicad_symbol_lib\n\t(version 20251024)\n\t(symbol "Other"\n\t)\n\t(symbol "TwoPin"\n\t\t(pin_numbers)\n\t)\n)\n')
+        (self.project / 'sym-lib-table').write_text(
+            '(sym_lib_table\n\t(lib (name "Local") (type "KiCad") (uri "${KIPRJMOD}/local.kicad_sym") (options "") (descr ""))\n)\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], symbols=['Local:TwoPin'],
+                              script='print(_LIBRARY_SYMBOLS)')
+        self.assertIn("{'Local:TwoPin': '(symbol \"TwoPin\"\\n\\t\\t(pin_numbers)\\n\\t)'}", edited['stdout'])
+        for wrong in (['Local:Missing'], ['Nowhere:TwoPin'], ['Local/TwoPin']):
+            self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                         symbols=wrong, script='pass')
+
+    def test_render_draws_the_copy_or_his_original_for_looking(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        self.runtime.provider.render_folder = self.root / 'renders'
+        placed = self.success('render', work_copy_id=checked['work_copy_id'], what='placement')
+        self.assertTrue(Path(placed['path']).is_file())
+        self.assertEqual(placed['pages'], 2)
+        argv = self.exported[-1]
+        layers = argv[argv.index('--layers') + 1].split(',')
+        self.assertNotIn('F.Cu', layers)
+        self.assertIn('F.Fab', layers)
+        self.assertIn('--sketch-pads-on-fab-layers', argv)
+        board = self.success('render', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertIn('F.Cu', self.exported[-1][self.exported[-1].index('--layers') + 1].split(','))
+        original = self.success('render', work_copy_id=checked['work_copy_id'], what='schematic', original=True)
+        self.assertTrue(original['path'].endswith('schematic-original.pdf'))
+        self.assertIn('original-view', self.exported[-1][-1])
+        self.assertNotEqual(board['path'], placed['path'])
+        self.failure('arguments_unusable', 'render', work_copy_id=checked['work_copy_id'], what='gerber')
+
+    def test_open_in_kicad_shows_his_design_beside_her_copy_and_takes_a_screenshot(self):
+        checked = self.check()
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        opened, closed = [], []
+
+        class Viewer:
+            def __init__(self, path):
+                self.path = path
+
+            def terminate(self):
+                closed.append(self.path)
+
+        def open_viewer(what, path, index):
+            opened.append((what, Path(path).parent.name))
+            return Viewer(path)
+        provider.open_viewer = open_viewer
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        alone = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertEqual(opened, [('board', 'amended')])
+        self.assertEqual(list(alone['windows']), ['amended (your copy)'])
+        opened.clear()
+        shown = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board',
+                             beside_original=True)
+        self.assertEqual(opened, [('board', 'current'), ('board', 'amended')])
+        self.assertTrue(Path(shown['screenshot']).is_file())
+        self.assertEqual(Path(shown['opened'][0]).read_text(), BOARD)
+        # The windows of an earlier call are closed first.
+        self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertEqual(len(closed), 3)
+
+    def test_his_edit_saved_in_the_kicad_window_is_taken_into_her_copy(self):
+        """17 Nov: he placed parts his way in the window and wanted her to go on from there."""
+        checked = self.check()
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        self.failure('arguments_unusable', 'take_edits', work_copy_id=checked['work_copy_id'])
+        shown = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        window_board = Path(shown['opened'][0])
+        self.assertEqual(list(self.success('take_edits', work_copy_id=checked['work_copy_id'])['changed']), [])
+        # He saves an edit in the window: a new window waits until it is taken or dropped
+        # (19 Nov recheck: a kept view was deleted by the window after next).
+        window_board.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        refused = self.call('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')
+        self.assertIn('take_edits first', refused.failure['recovery']['detail'])
+        self.assertTrue(window_board.is_file())
+        again = self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board',
+                             discard_saved_edits=True)
+        self.assertFalse(window_board.is_file())
+        taken_from = Path(again['opened'][0])
+        taken_from.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        (taken_from.parent / ('~' + taken_from.name + '.lck')).write_text('{}')
+        # KiCad keeps its own history, a git store, beside a file it saves.
+        (taken_from.parent / '.history' / '.git').mkdir(parents=True)
+        (taken_from.parent / '.history' / '.git' / 'HEAD').write_text('ref')
+        self.success('check_kicad_board', work_copy_id=checked['work_copy_id'])
+        taken = self.success('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(list(taken['changed']), [window_board.name])
+        work = next(self.storage.rglob(checked['work_copy_id'] + '/project'))
+        self.assertEqual((work / window_board.name).read_text(), taken_from.read_text())
+        # It is a kept edit: revert_to goes back over it.
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertEqual((work / window_board.name).read_text(), BOARD)
+
+    def test_taking_his_edits_is_all_or_nothing_and_includes_deletions(self):
+        """18 Nov review: a failure part-way left half his edit in; a file he deleted stayed."""
+        (self.project / 'notes.kicad_dru').write_text('(version 1)')
+        checked = self.check()
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        shown = Path(self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')['opened'][0])
+        shown.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        (shown.parent / 'notes.kicad_dru').unlink()
+        work = next(self.storage.rglob(checked['work_copy_id'] + '/project'))
+        real_copy = shutil.copy2
+
+        def failing(source, target, *args, **kwargs):
+            if Path(target).parent == work:
+                raise OSError('disk full')
+            return real_copy(source, target, *args, **kwargs)
+        with patch('alx.providers.kicad.shutil.copy2', side_effect=failing):
+            failed = self.call('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(failed.state, CapabilityResultState.FAILED)
+        self.assertEqual((work / shown.name).read_text(), BOARD)
+        self.assertTrue((work / 'notes.kicad_dru').is_file())
+        # KiCad saving again during the copy: what was taken would not be what he saved.
+        def saving_again(source, target, *args, **kwargs):
+            done = real_copy(source, target, *args, **kwargs)
+            if Path(target).parent == work:
+                Path(source).write_text(Path(source).read_text() + ' ')
+            return done
+        with patch('alx.providers.kicad.shutil.copy2', side_effect=saving_again):
+            raced = self.call('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertIn('saved again', raced.failure['recovery']['detail'])
+        self.assertEqual((work / shown.name).read_text(), BOARD)
+        shown.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        taken = self.success('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertEqual((list(taken['changed']), list(taken['deleted'])), ([shown.name], ['notes.kicad_dru']))
+        self.assertFalse((work / 'notes.kicad_dru').exists())
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertTrue((work / 'notes.kicad_dru').is_file())
+        self.assertEqual((work / shown.name).read_text(), BOARD)
+
+    def test_her_copy_can_be_checked_again_against_his_original(self):
+        checked = self.check()
+        self.assertEqual(checked['compared_to_original']['new'], 0)
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.report = {'violations': [{'type': 'clearance', 'severity': 'error', 'description': 'Clearance',
+                                       'items': [{'description': 'Track [A] on F.Cu'}]}],
+                       'unconnected_items': [], 'schematic_parity': []}
+        again = self.success('check_kicad_board', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(again['work_copy_id'], checked['work_copy_id'])
+        self.assertEqual(again['compared_to_original']['new'], 1)
+        self.failure('arguments_unusable', 'check_kicad_board')
+        self.failure('arguments_unusable', 'check_kicad_board', work_copy_id=checked['work_copy_id'],
+                     project_dir=str(self.project))
+
+    def test_a_dry_run_shows_the_change_and_puts_the_copy_back(self):
+        """15 Nov: the board agent crashed six scripts on purpose to see a change undone."""
+        checked = self.check()
+        copy = next(self.storage.rglob(checked['work_copy_id'] + '/project/test.kicad_pcb'))
+        seen = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                            script=EDIT_SCRIPT + "print('would move')", dry_run=True)
+        self.assertTrue(seen['previewed'])
+        self.assertIn('would move', seen['stdout'])
+        self.assertEqual(seen['change_report']['files_changed'], ('test.kicad_pcb',))
+        self.assertEqual(seen['work_copy_revision'], checked['work_copy_revision'])
+        self.assertEqual(copy.read_text(), BOARD)
+        # Copper before the placement is approved: shown as refused, nothing kept, no error.
+        refused = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                               script=self.MOVE_U1 + self.ADD_TRACK.split('\n', 3)[3], dry_run=True)
+        self.assertEqual(refused['change_report']['step_refusal']['needs'], 'placement')
+        self.assertEqual(copy.read_text(), BOARD)
+        kept = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertFalse(kept['previewed'])
+
+    def test_an_edit_that_leaves_the_board_alone_runs_no_drc(self):
+        """15 Nov: each schematic edit ran the whole-board DRC twice, 25 s an edit."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.calls.clear()
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC,
+                     dry_run=True)
+        self.assertEqual([call for call in self.calls if call[1:3] == ['pcb', 'drc']], [])
+        self.calls.clear()
+        # A change to the rules is a change to the result.
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="""
+import sys
+from pathlib import Path
+Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
+""")
+        self.assertEqual(len([call for call in self.calls if call[1:3] == ['pcb', 'drc']]), 1)
+
+    def test_the_netlist_is_exported_once_per_schematic_revision(self):
+        """18 Nov review: five places exported and read the netlist their own way, each time."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        exports = (lambda: [c for c in self.calls if c[1:4] == ['sch', 'export', 'netlist']])
+        first = len(exports())
+        self.success('inspect_schematic', work_copy_id=checked['work_copy_id'])
+        self.success('check_kicad_board', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(len(exports()), first)
+        self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC)
+        self.success('inspect_schematic', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(len(exports()), first + 1)
+
+    def test_the_schematic_is_read_as_parts_pins_and_nets_in_one_call(self):
+        """15 Nov: the board agent spent 26 previews reading its way around a schematic."""
+        (self.project / 'test.kicad_sch').write_text(
+            '(kicad_sch (symbol (lib_id "Device:R") (at 10 20 90) (property "Reference" "R1" (at 0 0 0)))'
+            ' (label "OUT" (at 1 2 0)))\n')
+        # One netlist per schematic revision (18 Nov): the first check reads it, the rest reuse it.
+        self.netlists = [[('OUT', 'R1', '1'), ('GND', 'R1', '2')]]
+        checked = self.check()
+        read = self.success('inspect_schematic', work_copy_id=checked['work_copy_id'], refs=['R1'])
+        part = read['parts'][0]
+        self.assertEqual((part['ref'], part['sheet'], tuple(part['at']), part['rotation']),
+                         ('R1', 'test.kicad_sch', (10.0, 20.0), 90.0))
+        self.assertEqual([(pin['number'], pin['net']) for pin in part['pins']], [('1', 'OUT'), ('2', 'GND')])
+        self.assertEqual(list(read['sheets'][0]['labels']), ['OUT'])
+
+    def test_a_script_that_only_reads_pays_for_no_checks(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        self.calls.clear()
+        read = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="print('look')",
+                            dry_run=True)
+        self.assertEqual(read['change_report']['files_changed'], ())
+        self.assertEqual([call[1:4] for call in self.calls if call[0] != '/usr/bin/sandbox-exec'], [])
+
+    def test_symbols_are_found_in_kicads_own_libraries_and_among_the_projects_own(self):
+        """15 Nov: the agent guessed five library names for a GND symbol; every one was refused."""
+        shared = self.root / 'kicad-shared'
+        (shared / 'symbols').mkdir(parents=True)
+        (shared / 'symbols' / 'power.kicad_sym').write_text('(kicad_symbol_lib (symbol "GND" (power)))\n')
+        self.runtime.provider.kicad_shared = shared
+        (self.project / 'test.kicad_sch').write_text(
+            '(kicad_sch (lib_symbols (symbol "Import:GND_POWER_GROUND" (power))) (symbol (lib_id "Import:GND_POWER_GROUND")))\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              symbols=['power:GND', 'Import:GND_POWER_GROUND'], script='print(sorted(_LIBRARY_SYMBOLS.items()))')
+        # One already on a sheet needs nothing copied in; one from KiCad's own library does.
+        # A symbol only the project keeps goes in as the sheet keeps it (16 Nov: library
+        # parts are now always read fresh from the library, so a bare stored copy is replaced).
+        self.assertIn("('Import:GND_POWER_GROUND', '(symbol \"GND_POWER_GROUND\" (power))')", edited['stdout'])
+        self.assertIn("('power:GND', '(symbol \"GND\" (power))')", edited['stdout'])
+        self.assertEqual(self.runtime.provider._cached_symbol(
+            next(self.storage.rglob(checked['work_copy_id'] + '/project')), 'Import:GND_POWER_GROUND'),
+            '(symbol "GND_POWER_GROUND" (power))')
+        result = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], symbols=['Nowhere:GND'],
+                           script='pass')
+        self.assertIn('inspect_schematic', result.failure['recovery']['detail'])
+
+    def test_a_copy_made_before_the_steps_takes_his_project_as_its_original(self):
+        checked = self.check()
+        metadata = next(self.storage.rglob(checked['work_copy_id'] + '/metadata.json'))
+        meta = json.loads(metadata.read_text())
+        meta.pop('original_steps')
+        metadata.write_text(json.dumps(meta))
+        moved = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.MOVE_U1)
+        self.assertEqual(moved['steps']['placement'], 'needs_approval')
+
+    def test_history_is_kept_only_for_a_settled_change(self):
+        """18 Nov review: a history entry written before the taint was cleared stayed for a change
+        that was undone; a revert lost its history if it failed after deleting it."""
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        first = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        entries = (lambda: sorted(p.name for p in (root / 'history').iterdir()))
+        self.assertEqual(len(entries()), 1)
+        real_save = KiCadProvider._save_metadata
+        failures = [1]
+
+        def failing(provider, where, meta):
+            # Once: the save that would settle the change fails; the undo's own save works.
+            if not meta.get('taint') and failures:
+                failures.pop()
+                raise OSError('disk full')
+            return real_save(provider, where, meta)
+        with patch.object(KiCadProvider, '_save_metadata', failing):
+            failed = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                               script=EDIT_SCRIPT.replace("'(kicad_pcb ", "'(kicad_pcb  "))
+        self.assertEqual(failed.state, CapabilityResultState.FAILED)
+        self.assertEqual(len(entries()), 1)
+        # A revert that fails puts its history back.
+        with patch.object(KiCadProvider, '_board_drc', side_effect=KiCadError('cli_failed')):
+            reverted = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertEqual(reverted.state, CapabilityResultState.FAILED)
+        self.assertEqual(len(entries()), 1)
+        self.assertEqual(KiCadProvider(self.settings, self.execute_cli)._revision(root), first['work_copy_revision'])
+        # A preview of a revert is refused, never carried out.
+        self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                     revert_to='start', dry_run=True)
+        self.assertEqual(len(entries()), 1)
+
     def test_failed_edit_restores_entire_copy_and_absent_files(self):
         checked = self.check()
         root = self.settings.work_root / checked['work_copy_id']
@@ -1116,7 +1718,7 @@ class KiCadTests(unittest.TestCase):
         import zipfile
         runtime = self.manufacturing_runtime()
         checked = self.check()
-        args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/test',
+        args = {'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production/test',
                 'renames': {'User.1': 'pib_0.15.gbr', 'test-F_Cu.gbr': 'top.gbr'}, 'zip_name': 'maker.zip'}
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
@@ -1146,7 +1748,7 @@ class KiCadTests(unittest.TestCase):
                         (target / name).write_text('M48\nT1C0.25\n')
                 return SimpleNamespace(returncode=0)
             runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
-            args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/' + str(option),
+            args = {'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production/' + str(option),
                     'renames': {'F.Cu': 'top.gbr'}}
             if option is not None:
                 args['separate_drills'] = option
@@ -1161,6 +1763,85 @@ class KiCadTests(unittest.TestCase):
             self.assertEqual({Path(p).name for p in result.values['files_written']}, expected)
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', dict(args, separate_drills='yes'))
         self.assertEqual(result.failure['code'], 'arguments_unusable')
+
+    def test_assembly_files_share_the_gerbers_origin_and_apply_library_corrections(self):
+        """18 Nov: JLC BOM and positions from KiCad's own exports, beside the zip, with each part's
+        JLC correction from its library footprint, all on the board's drill/place origin."""
+        import zipfile
+        board = BOARD.replace('(kicad_pcb\n', '(kicad_pcb\n  (setup (aux_axis_origin 95 150) '
+                              '(pcbplotparams (useauxorigin no)))\n', 1)
+        (self.project / 'test.kicad_pcb').write_text(board)
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        (self.project / 'Test.pretty').mkdir()
+        (self.project / 'Test.pretty' / 'Small.kicad_mod').write_text(
+            '(footprint "Small"\n\t(property "JLC Rotation Offset" "90"))\n')
+        (self.project / 'fp-lib-table').write_text(
+            '(fp_lib_table\n\t(lib (name "Test") (type "KiCad") (uri "${KIPRJMOD}/Test.pretty") (options "") (descr ""))\n)\n')
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            if argv[2] == 'drc':
+                return self.run_cli(argv, **kwargs)
+            target = Path(argv[argv.index('--output') + 1])
+            if argv[3] == 'gerbers':
+                self.assertIn('(useauxorigin yes)', Path(argv[-1]).read_text())
+                (target / 'test-F_Cu.gbr').write_text('X1Y2D01*\n')
+            elif argv[3] == 'drill':
+                (target / 'test.drl').write_text('M48\n')
+            elif argv[3] == 'bom':
+                target.write_text('"Comment","Designator","Footprint","LCSC Part #","Quantity"\n'
+                                  '"10k","U1","Test:Small","","1"\n')
+            else:
+                target.write_text('Ref,Val,Package,PosX,PosY,Rot,Side\n"U1","10k","Small",1.0,2.0,0.0,top\n')
+            return SimpleNamespace(returncode=0)
+        runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
+        checked = self.check()
+        args = {'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production/jlc', 'zip_name': 'gerbers.zip',
+                'assembly': True, 'work_copy_revision': checked['work_copy_revision']}
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        drill = next(c for c in calls if c[3] == 'drill')
+        self.assertEqual(drill[drill.index('--drill-origin') + 1], 'plot')
+        self.assertIn('--use-drill-file-origin', next(c for c in calls if c[3] == 'pos'))
+        self.assertEqual(result.values['origin'], 'drill/place origin')
+        assembly = result.values['assembly']
+        self.assertEqual((list(assembly['missing_lcsc']), list(assembly['corrected'])), (['U1'], ['U1']))
+        dest = self.project / 'production/jlc'
+        self.assertIn('U1,1.0000,2.0000,Top,90', (dest / 'positions.csv').read_text())
+        self.assertEqual((dest / 'bom.csv').read_text().splitlines()[1], '10k,U1,Small,')
+        with zipfile.ZipFile(dest / 'gerbers.zip') as bundle:
+            self.assertEqual(set(bundle.namelist()), {'test-F_Cu.gbr', 'test.drl'})
+        stale = kicad_call(runtime.executors, 'export_kicad_manufacturing',
+                           dict(args, output_dir='production/again', work_copy_revision='0' * 64))
+        self.assertEqual(stale.failure['code'], 'work_copy_changed')
+
+    def test_export_works_from_her_real_storage_under_dot_alx(self):
+        """18 Nov: her work copies live under .alx/runtime/kicad; the export read its own staged
+        files through the reference reader, which refuses every path under .alx."""
+        storage = self.root / '.alx' / 'runtime'
+
+        def runner(argv, **kwargs):
+            if argv[2] == 'drc':
+                return self._drc_under(argv)
+            target = Path(argv[argv.index('--output') + 1])
+            if argv[3] == 'gerbers':
+                (target / 'test-F_Cu.gbr').write_text('X1Y2D01*\n')
+            else:
+                (target / 'test.drl').write_text('M48\n')
+            return SimpleNamespace(returncode=0)
+        runtime = build_kicad_runtime(lambda: 'export', self.environment, storage, runner)
+        checked = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(self.project)})
+        self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
+        result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
+            'work_copy_id': checked.values['work_copy_id'], 'work_copy_revision': checked.values['work_copy_revision'], 'output_dir': 'production/jlc', 'zip_name': 'g.zip'})
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertTrue((self.project / 'production/jlc/g.zip').is_file())
+
+    def _drc_under(self, argv):
+        Path(argv[argv.index('--output') + 1]).write_text(json.dumps(
+            {'violations': [], 'unconnected_items': [], 'schematic_parity': []}))
+        return SimpleNamespace(returncode=0)
 
     def test_manufacturing_comparison_ignores_dates_comments_and_generator(self):
         from alx.providers.kicad import compare_manufacturing
@@ -1190,11 +1871,11 @@ class KiCadTests(unittest.TestCase):
         for output, renames in (('../escape', {}), ('/absolute', {}), ('production', {'User.1': '../escape'}),
                                 ('production', {'User.1': 'test-F_Cu.gbr'})):
             result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-                'work_copy_id': checked['work_copy_id'], 'output_dir': output, 'renames': renames})
+                'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': output, 'renames': renames})
             self.assertEqual(result.state, CapabilityResultState.FAILED)
         (self.project / 'linked').symlink_to(self.root)
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-            'work_copy_id': checked['work_copy_id'], 'output_dir': 'linked/production'})
+            'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'linked/production'})
         self.assertEqual(result.failure['code'], 'path_denied')
 
     def test_references_text_zip_folder_pdf_image_altium_and_icloud(self):
@@ -1275,7 +1956,7 @@ class KiCadTests(unittest.TestCase):
         edited = self.fixed()
         runtime = self.manufacturing_runtime()
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-            'work_copy_id': edited['work_copy_id'], 'output_dir': 'production'})
+            'work_copy_id': edited['work_copy_id'], 'work_copy_revision': edited['work_copy_revision'], 'output_dir': 'production'})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn('(layer "User.1")', (self.project / 'test.kicad_pcb').read_text())
@@ -1396,7 +2077,7 @@ class KiCadTests(unittest.TestCase):
             return SimpleNamespace(returncode=0)
         runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-            'work_copy_id': checked['work_copy_id'], 'output_dir': 'production',
+            'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production',
             'renames': {'test-job.gbrjob': 'maker.json', 'test-F_Cu.gbr': 'top.gbr',
                         'test-B_Cu.gbr': 'bottom.gbrjob'}})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
@@ -1416,7 +2097,7 @@ class KiCadTests(unittest.TestCase):
             return real_fsync(fd)
         with patch('alx.providers.kicad.os.fsync', fsync):
             result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-                'work_copy_id': checked['work_copy_id'], 'output_dir': 'production'})
+                'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production'})
         self.assertEqual(result.state, CapabilityResultState.FAILED)
         metadata = json.loads((self.storage / 'kicad' / checked['work_copy_id'] / 'metadata.json').read_text())
         self.assertEqual(len(metadata['exports']), 1)
@@ -1486,6 +2167,31 @@ class KiCadTests(unittest.TestCase):
             private.write_text('never read')
             (self.root / 'innocent.txt').symlink_to(private)
             self.failure('path_denied', 'read_reference_file', path='~/innocent.txt')
+
+
+class FlatSymbolTests(unittest.TestCase):
+    def test_a_derived_library_part_is_stored_whole_under_its_own_name(self):
+        from alx.providers.kicad import flat_symbol, sexpr
+        library = (
+            '(kicad_symbol_lib (version 20241209)\n'
+            '\t(symbol "C" (pin_names (offset 0.254)) (in_bom yes) (on_board yes)\n'
+            '\t\t(property "Reference" "C" (at 0 0 0))\n\t\t(property "Value" "C" (at 0 0 0))\n'
+            '\t\t(property "ki_keywords" "cap" (at 0 0 0))\n'
+            '\t\t(symbol "C_0_1" (polyline (pts (xy -2 -0.7) (xy 2 -0.7))))\n'
+            '\t\t(symbol "C_1_1" (pin passive line (at 0 3.8 270) (length 3) (name "~") (number "1"))))\n'
+            '\t(symbol "CC36" (extends "C")\n\t\t(property "Reference" "C" (at 0 0 0))\n'
+            '\t\t(property "Value" "36p" (at 0 0 0))\n\t\t(property "MPN" "CC36" (at 0 0 0)))\n)\n')
+        tree = sexpr(library)
+        node = [n for n in tree.named('symbol') if n.children[1] == 'CC36'][0]
+        flat = flat_symbol(library, tree, node, 'CC36')
+        self.assertNotIn('extends', flat)
+        self.assertIn('(symbol "CC36_0_1"', flat)
+        self.assertIn('(symbol "CC36_1_1"', flat)
+        self.assertIn('"MPN" "CC36"', flat)
+        self.assertIn('"Value" "36p"', flat)
+        self.assertNotIn('"Value" "C"', flat)
+        self.assertIn('"ki_keywords" "cap"', flat)
+        self.assertEqual(sexpr(flat).children[1], 'CC36')
 
 
 if __name__ == '__main__':

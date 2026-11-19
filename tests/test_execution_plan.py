@@ -1642,6 +1642,35 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase, PlanHarness):
         await stopping
         self.assertEqual(self.plan_of().attention.reason, "plan_steps_done")
 
+    async def test_a_board_job_whose_plan_she_cancels_is_asked_to_stop_once(self):
+        """15 Nov: she cancelled a board job's plan, said it had stopped, and the agent ran on.
+
+        Which capabilities a withdrawal stops is the runtime's cancel_withdrawn; any started
+        call is offered to it once.
+        """
+        release, started = threading.Event(), threading.Event()
+        self.long("coding", release, started)
+        agent = self.installed(step("coding"))
+        withdrawn, shutdown = [], []
+
+        def cancel_withdrawn(job):
+            withdrawn.append(job.call.capability_id)
+            release.set()
+        workers = PlanWorkers(agent, asyncio.Lock(), cancel_dispatch=lambda job: shutdown.append(job),
+                              cancel_withdrawn=cancel_withdrawn)
+        await workers.advance()
+        self.assertTrue(await asyncio.to_thread(started.wait, 5))
+        # Still current: nothing is asked to stop.
+        await workers.advance()
+        self.assertEqual(withdrawn, [])
+        # Replaced by another plan: the started call belongs to a plan that is gone.
+        self.set_goal(execution_plan=replace(self.plan_of(), plan_id="replacement"))
+        await workers.advance()
+        await workers.advance()
+        self.assertEqual(withdrawn, ["coding"])
+        await workers.drain()
+        self.assertEqual(shutdown, [])
+
     async def test_a_step_not_yet_started_at_shutdown_never_starts(self):
         agent = self.installed(step("coding"))
         lock = asyncio.Lock()

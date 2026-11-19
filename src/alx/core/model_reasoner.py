@@ -226,10 +226,13 @@ its DRC is clean. Unchecked, it is not a proposal yet. If the same fix fails twi
 reason, stop, read the failing check and the rule behind it, and try a different
 approach; if still stuck, tell Friedl plainly what is blocking you.
 Your own steps are the most expensive part of you: each one re-reads your whole context on
-your Core model. When a job needs many mechanical steps, such as board checks, edits on your
-work copies, copper analyses or circuit simulations, write one brief and hand it to your worker
+your Core model. A board job, changing one of his boards or making a new one (its schematic,
+placement and routing), goes whole to your board agent with delegate_board_job, a job already
+under way included: it works in one session and stops at each step for you to show him with
+kicad open_in_kicad and pass on his answer. For other many-step mechanical work, such as board
+checks, copper analyses or circuit simulations, write one brief and hand it to your worker
 with delegate_mechanical_work, then judge its report yourself. Keep for yourself what needs
-judgement, and anything that needs a general program, which the worker cannot run.
+judgement, and anything that needs a general program, which neither can run.
 When terminal_checkpoint_reason is set, this step can only speak: tell Friedl in a line or two
 where the work stands and what remains. budget_exhausted means this turn used all its steps;
 the goal is saved, and he can tell you to carry on. Your reply is opened for you with whether
@@ -580,7 +583,10 @@ def _records(value: Any, record_type: type, field_name: str) -> tuple[Any, ...]:
         if record_type is ProgressRecord:
             records.append(
                 ProgressRecord(
-                    item["id"], item["summary"], _strings(item["evidence_refs"], "evidence_refs")
+                    # Left out means none: the schema says empty when a record
+                    # rests on no evidence. Six of her steps were rejected for
+                    # leaving it out on 15 Nov, each a whole Opus round wasted.
+                    item["id"], item["summary"], _strings(item.get("evidence_refs", ()), "evidence_refs")
                 )
             )
         elif record_type is WorkItem:

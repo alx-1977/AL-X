@@ -307,6 +307,8 @@ class XeroSettings:
     # supplied to the import capability. It is a name, not a Xero identifier:
     # the contact is resolved by exact name at run time, as V1 did.
     dhl_supplier_name: str
+    # D-022a: DHL freight (export carriage) posts to Freight & Courier, No VAT.
+    freight_account: str = "425"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
@@ -345,6 +347,9 @@ class XeroSettings:
             ).strip(),
             clearance_account=environment.get(
                 "ALX_XERO_CLEARANCE_ACCOUNT", "425"
+            ).strip(),
+            freight_account=environment.get(
+                "ALX_XERO_FREIGHT_ACCOUNT", "425"
             ).strip(),
             dhl_supplier_name=environment.get(
                 "ALX_XERO_DHL_SUPPLIER_NAME", "DHL International (Pty) Ltd"
@@ -855,6 +860,32 @@ def worker_settings(
     return replace(reasoning, model=model)
 
 
+# D-083: the board agent's model. Judgement on a layout is Opus's (D-070).
+BOARD_AGENT_DEFAULT_MODEL = "claude-opus-5-5"
+
+
+BOARD_AGENT_CODEX_DEFAULT_MODEL = "gpt-6-astra"
+
+
+def board_agent_settings(
+    environment: Mapping[str, str], reasoning: "ReasoningSettings",
+) -> "ReasoningSettings":
+    """The board agent's model: the Core's login and transport, Opus by default (D-083);
+    ALX_BOARD_AGENT_PROVIDER=codex_subscription runs it on Codex (Astra by default) through
+    Friedl's ChatGPT login (16 Nov)."""
+    provider = environment.get("ALX_BOARD_AGENT_PROVIDER", "").strip() or reasoning.provider
+    # ALX_BOARD_AGENT_EFFORT: low, medium, high or max (16 Nov: models benchmarked at set efforts).
+    effort = environment.get("ALX_BOARD_AGENT_EFFORT", "").strip().lower()
+    if effort and effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigurationError("ALX_BOARD_AGENT_EFFORT must be low, medium, high, xhigh or max")
+    if provider == CODEX_SUBSCRIPTION_PROVIDER:
+        model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_CODEX_DEFAULT_MODEL
+        return replace(reasoning, provider=provider, model=model, effort=effort or "high")
+    model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_DEFAULT_MODEL
+    # "none": the CLI's own effort, as the Core's subscription turn has no dial.
+    return replace(reasoning, model=model, effort=effort or "none")
+
+
 def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:
     """How promptly a matured request is noticed. Not a cognition cadence.
 
@@ -1209,6 +1240,8 @@ class RuntimeSettings:
     autonomous_first_pass: "ReasoningSettings | None"
     # D-070: the worker that carries out mechanical briefs for her.
     worker: "ReasoningSettings"
+    # D-083: the board agent that does a whole KiCad board job for her.
+    board_agent: "ReasoningSettings"
     # D-028 coding jobs. Independent of the conversational Core.
     coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
@@ -1246,6 +1279,7 @@ class RuntimeSettings:
             autonomous=autonomous,
             autonomous_first_pass=autonomous_first_pass_settings(environment, autonomous),
             worker=worker_settings(environment, reasoning),
+            board_agent=board_agent_settings(environment, reasoning),
             coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),

@@ -628,9 +628,10 @@ class SingleExecutionSiteTest(unittest.TestCase):
                 dynamic_references.append(node)
 
         # D-065: the Claude transport binds exactly one more launcher, for a
-        # native session that pauses on tool calls. Nothing else may appear.
+        # native session that pauses on tool calls; D-083a the same for the
+        # Codex agent model. Nothing else may appear.
         expected = [("subprocess", "run")]
-        if model_class_name == "ClaudeSubscriptionReasoningModel":
+        if model_class_name in ("ClaudeSubscriptionReasoningModel", "CodexSubscriptionReasoningModel"):
             expected.append(("subprocess", "Popen"))
         self.assertEqual(sorted((item.value.id, item.attr) for item in process_references),
                          sorted(expected))

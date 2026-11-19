@@ -481,6 +481,25 @@ def parse_mybill_invoice(payload: bytes) -> dict[str, Any]:
         )
     ]
     charges = tuple(line for row in rows for line in _charge_lines(row))
+    if kind == "dhl_freight_invoice":
+        # D-022a: the carriage itself is a line of its own, ahead of the extras, and each
+        # shipment-level amount DHL states beside it is a line too: other charges, the
+        # invoice fee and each discount, as a negative line (16 Nov: a weight discount of
+        # -3,297.15 was left out, so the lines exceeded the 6,561.25 total and it was refused).
+        carriage = []
+        for row in rows:
+            for code, name, field in (("WEIGHT", "Weight charge", "Weight Charge"),
+                                      ("FEE", "Invoice fee", "Invoice Fee"),
+                                      *((f"OC{n}", f"Other charge {n}", f"Other Charges {n} Amount") for n in (1, 2)),
+                                      *((f"DISC{n}", f"Discount {n}", f"Discount {n} Amount") for n in (1, 2, 3))):
+                amount = _csv_money(row.get(field))
+                if not amount:
+                    continue
+                label = str(row.get(field.replace(" Amount", "")) or "").strip() if field.endswith(" Amount") else ""
+                if code.startswith("DISC") and amount > 0:
+                    amount = -amount
+                carriage.append((code, f"{name} ({label})" if label else name, amount))
+        charges = tuple(carriage) + charges
     components = sum((amount for _code, _name, amount in charges), Decimal("0"))
     problems: list[str] = []
     if total <= 0:

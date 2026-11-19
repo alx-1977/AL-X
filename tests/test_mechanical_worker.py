@@ -93,6 +93,49 @@ class WorkerLoopTests(unittest.TestCase):
         self.assertIn('"id": "run_program"', first.messages[0].content)
         self.assertNotIn("send_mail_reply", first.messages[0].content)
 
+    def test_the_same_refused_call_is_not_run_again_and_a_loop_ends_the_job(self) -> None:
+        """17 Nov: one refused inspect was sent 33 times in a row."""
+        def refuse(call):
+            self.dispatched.append(call)
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.FAILED, {},
+                                                      failure={"code": "arguments_unusable"}))
+        model = ScriptedModel([tool("run_program", {"argv": ["x"]})] * 6)
+        with self.assertRaises(WorkerError) as raised:
+            MechanicalWorker(model, refuse, (RUN,)).run("Run x.", "job", 10)
+        self.assertEqual(raised.exception.code, "stuck_on_refused_call")
+        self.assertEqual(len(self.dispatched), 1)
+        answers = [json.loads(r.tool_result) for r in model.requests[1:]]
+        self.assertEqual(answers[1]["refused"], "same_call_as_just_refused")
+
+    def test_a_refusal_does_not_carry_over_into_the_next_run(self) -> None:
+        """Review of #247: a call refused before an approval was still blocked after it."""
+        outcomes = iter(["arguments_unusable", "succeeded"])
+
+        def answer(call):
+            self.dispatched.append(call)
+            state = next(outcomes)
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(call.call_id, call.capability_id,
+                                                      CapabilityResultState.FAILED if state != "succeeded"
+                                                      else CapabilityResultState.SUCCEEDED, {},
+                                                      failure={"code": state} if state != "succeeded" else None))
+        worker = MechanicalWorker(ScriptedModel([tool("run_program", {"argv": ["x"]})]), answer, (RUN,))
+        worker.run("Run x.", "job-1", 10)
+        worker._model = ScriptedModel([tool("run_program", {"argv": ["x"]})])
+        worker.run("Run x again.", "job-2", 10)
+        self.assertEqual(len(self.dispatched), 2)
+
+    def test_an_action_called_as_a_capability_is_pointed_to_its_tool(self) -> None:
+        kicad = CapabilityDefinition("kicad", "Board work. Actions: inspect, fetch_datasheet.", OBJECT,
+                                     OBJECT, SideEffect.EFFECTFUL)
+        model = ScriptedModel([tool("fetch_datasheet", {}), tool("send_mail_reply", {})])
+        MechanicalWorker(model, self.dispatch, (kicad,)).run("Get the datasheet.", "job", 10)
+        answers = [json.loads(r.tool_result) for r in model.requests[1:]]
+        self.assertIn("call kicad with action fetch_datasheet", answers[0]["hint"])
+        self.assertNotIn("hint", answers[1])
+
     def test_a_look_picture_goes_with_the_next_step_only(self) -> None:
         """14 Nov: the worker read datasheet drawings as text alone; now the
         picture a look call made reaches its next step, and only that one."""
