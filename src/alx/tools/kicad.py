@@ -482,10 +482,10 @@ OPEN_IN_KICAD = CapabilityDefinition('open_in_kicad',
     'those windows changes his project or your copy (when he saves an edit there and asks, take_edits '
     'brings it into your copy); windows from an earlier call are closed first. A screenshot of his screen comes back as a path: look at it before you say anything '
     'about it. This is how each step of a board job (schematic, placement, routing) is shown to '
-    'him.',
-    obj({'work_copy_id': S, 'what': S, 'beside_original': B}, ('work_copy_id', 'what')),
-    obj({'opened': array(S), 'windows': array(S), 'screenshot': S, 'kept_unsaved_views': array(S)},
-        ('opened', 'windows', 'screenshot')),
+    'him. If he saved an edit in the last window that is not in your copy, a new window is refused '
+    'until you take_edits, or he says to drop it (discard_saved_edits true).',
+    obj({'work_copy_id': S, 'what': S, 'beside_original': B, 'discard_saved_edits': B}, ('work_copy_id', 'what')),
+    obj({'opened': array(S), 'windows': array(S), 'screenshot': S}, ('opened', 'windows', 'screenshot')),
     SideEffect.NONE, FAILURES)
 
 TAKE_EDITS = CapabilityDefinition('take_edits',

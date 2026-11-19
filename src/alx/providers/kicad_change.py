@@ -285,14 +285,19 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
         if op['op'] == 'unwire':
             scope.update(op['pins'])
         elif op['op'] == 'remove_labels':
-            nets = {_short(net) for net in op['nets']}
-            scope.update(pin for pin, name in before_names.items() if _short(name) in nets)
+            # A net named in full, or by a short name only one net has: /A/EN and /B/EN are not
+            # both excused for "EN" (19 Nov recheck).
+            for wanted in op['nets']:
+                full = {name for name in set(before_names.values()) if name == wanted}
+                if not full:
+                    full = {name for name in set(before_names.values()) if _short(name) == _short(wanted)}
+                    if len(full) > 1:
+                        continue
+                scope.update(pin for pin, name in before_names.items() if name in full)
         elif op['op'] == 'remove_items':
             done = change_result[index] if index < len(change_result) else {}
-            # The pins wired to what went, and every pin that shared a net with them before.
-            for pin in (done or {}).get('scope') or ():
-                scope.add(pin)
-                scope.update(before.get(pin, ()))
+            # Only the pins wired to what went (19 Nov recheck: their whole net hid another split).
+            scope.update((done or {}).get('scope') or ())
     groups: dict[str, set] = {}
     # A part the change adds has pins only afterwards; what the change joins them to counts
     # (16 Nov: the added C93 was reported as joined unasked to L6, C44 and GND).
@@ -368,10 +373,10 @@ def set_check(change, before, after):
     for op in change:
         if op['op'] != 'set':
             continue
-        moves = [key for key in op['to'] if key in ('at', 'move_by')]
+        relative = 'move_by' in op['to']
         holds = (lambda b, a: all(_holds(b, a, key, value) for key, value in op['to'].items()))
-        # A move is never "already as asked": it is checked against where the object was.
-        already = [uid for uid in op['_ids'] if not moves and holds(None, old.get(uid))]
+        # A relative move is never "already as asked"; an object already at its at is.
+        already = [uid for uid in op['_ids'] if not relative and holds(None, old.get(uid))]
         wrong = [uid for uid in op['_ids'] if not holds(old.get(uid), new.get(uid))]
         receipts.append({'kind': op['kind'], 'matched': len(op['_ids']), 'already': len(already),
                          'changed': len(op['_ids']) - len(already) - len(wrong), 'not_as_asked': wrong[:20],
@@ -395,6 +400,20 @@ def set_check(change, before, after):
             problems.append('%d objects changed that no set asked for, e.g. %s' % (len(others), '; '.join(others[:5])))
         for receipt in receipts:
             receipt['others_changed'] = len(others) + len(appeared) + len(gone)
+    else:
+        # With other board operations in the batch, objects of each set's kind that no set picked
+        # still keep the properties those sets name (19 Nov recheck: this check had gone).
+        kinds = {}
+        for op in change:
+            if op['op'] == 'set':
+                kinds.setdefault(op['kind'], set()).update(k for key in op['to'] for k in _TOUCHES[key])
+        others = sorted(uid for uid, item in old.items() if item['kind'] in kinds and uid not in allowed
+                        and uid in new and any(not _close(item.get(key), new[uid].get(key))
+                                               for key in kinds[item['kind']]))
+        if others:
+            problems.append('%d objects changed that no set picked, e.g. %s' % (len(others), ', '.join(others[:5])))
+        for receipt in receipts:
+            receipt['others_changed'] = len(others)
     return receipts, problems
 
 

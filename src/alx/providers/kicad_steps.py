@@ -101,7 +101,10 @@ def step_status(original: dict, approvals: dict, current: dict) -> dict:
             state = 'adjusted'
         else:
             state = 'needs_approval'
-        if step == 'routing' and state == 'unchanged' and status.get('placement') == 'adjusted':
+        if step == 'routing' and state == 'unchanged' and (
+                status.get('placement') == 'adjusted'
+                or (approvals.get('routing_due') and not all(later.get(name) == current[name]
+                                                            for name in ('schematic', 'placement')))):
             # D-082b: a part nudged after his placement approval is covered by his routing sign-off,
             # so the routing is shown and approved again even if no copper changed (18 Nov review:
             # an adjusted placement reached write-back with no sign-off of it at all).

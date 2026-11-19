@@ -17,7 +17,7 @@ from typing import Any
 
 # Bumped whenever an object gains or changes a property, so a kept index of an older shape is
 # never used (18 Nov review: text angle was added while step-2 indexes of the same bytes remained).
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 KINDS = ("part", "field", "pad", "track", "arc", "via", "zone", "keepout", "teardrop", "text", "graphic")
 
 
@@ -32,6 +32,16 @@ def _numbers(node, name):
     found = node.named(name)
     out = []
     for value in (found[0].children[1:] if found else ()):
+        try:
+            out.append(float(value))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _numbers_of(node):
+    out = []
+    for value in node.children[1:]:
         try:
             out.append(float(value))
         except (TypeError, ValueError):
@@ -167,7 +177,9 @@ def board_index(board_text: str) -> dict[str, Any]:
             outline = "".join(board_text[p.start:p.end] for p in node.named("polygon"))
             uid = _uuid(node) or "teardrop:" + hashlib.sha256(
                 (_net(node, names) + "|" + str(_value(node, "layer", default="")) + "|" + outline).encode()).hexdigest()[:16]
-            objects.append({"id": uid, "kind": ("teardrop" if teardrop else
+            outline_points = [_numbers_of(p) for poly in node.named("polygon") for pts in poly.named("pts")
+                              for p in pts.named("xy")]
+            objects.append({"id": uid, "outline": outline_points, "kind": ("teardrop" if teardrop else
                                                         "keepout" if node.named("keepout") else "zone"),
                             "net": _net(node, names), "name": _value(node, "name", default=""),
                             "layers": [str(v) for v in (layers[0].children[1:] if layers else ())]})
@@ -180,10 +192,16 @@ def board_index(board_text: str) -> dict[str, Any]:
                             "angle": (_numbers(node, "at")[2:3] or [0.0])[0],
                             "size": size, "thickness": thickness, "visible": not _hidden(node)})
         elif kind.startswith("gr_"):
+            stroke = node.named("stroke")
+            width = (_numbers(stroke[0], "width") if stroke else _numbers(node, "width")) or [None]
+            # Its geometry too, so a moved outline or drawing is seen (19 Nov recheck: an Edge.Cuts
+            # endpoint moved 10 mm unseen): the defining points, and every point of a polygon.
+            points = node.named("pts")
             objects.append({"id": _uuid(node), "kind": "graphic", "shape": kind[3:],
-                            "layer": _value(node, "layer", default=""),
-                            "width": (_numbers(node.named("stroke")[0], "width") if node.named("stroke") else
-                                      _numbers(node, "width") or [None])[0] if (node.named("stroke") or node.named("width")) else None})
+                            "layer": _value(node, "layer", default=""), "width": width[0],
+                            "start": _numbers(node, "start")[:2], "end": _numbers(node, "end")[:2],
+                            "mid": _numbers(node, "mid")[:2], "center": _numbers(node, "center")[:2],
+                            "points": [_numbers_of(p) for p in points[0].named("xy")] if points else []})
     # Every address is unique: a repeated one (two uuid-less pads with one number) gets #2, #3.
     seen: dict[str, int] = {}
     for o in objects:

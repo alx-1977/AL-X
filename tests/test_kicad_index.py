@@ -73,6 +73,14 @@ class BoardIndexTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             select(self.index, "everything")
 
+    def test_outline_geometry_is_part_of_the_index(self):
+        """19 Nov recheck: an Edge.Cuts endpoint moved 10 mm passed the whole-board check."""
+        board = BOARD.replace(')\n)', ')\n\t(gr_line (start 0 0) (end 4 0) (stroke (width 0.1)) (layer "Edge.Cuts") (uuid "edge-1"))\n)')
+        edge = select(board_index(board), "graphic", layer="Edge.Cuts")[0]
+        self.assertEqual((edge["start"], edge["end"], edge["width"]), ([0.0, 0.0], [4.0, 0.0], 0.1))
+        moved = select(board_index(board.replace("(end 4 0)", "(end 14 0)")), "graphic", layer="Edge.Cuts")[0]
+        self.assertNotEqual(edge, moved)
+
     def test_pad_nets_and_groups_come_from_the_index(self):
         self.assertEqual(pad_nets(self.index), {"R1.1": "GND", "R1.2": "VCC", "C1.1": "GND", "C1.2": "VCC"})
         self.assertEqual(net_groups(self.index), {frozenset({("R1", "1"), ("C1", "1")}),

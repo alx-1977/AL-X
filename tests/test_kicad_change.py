@@ -134,7 +134,14 @@ class ChangeShapeTests(unittest.TestCase):
         vanished = {"R1.1": ab, "R2.1": ab}
         problems = unmet([{"op": "remove_dangling", "sheet": "a"}], before, vanished, names, {}, (), names)
         self.assertTrue(any("R5.1 is gone from the schematic" in p for p in problems), problems)
-        # remove_items is excused only for the pins wired to what it removed, and their nets.
+        # Removing "EN" labels does not excuse a split of another sheet's EN.
+        en = {"R1.1": frozenset({"R1.1", "R2.1"}), "R2.1": frozenset({"R1.1", "R2.1"}),
+              "R5.1": frozenset({"R5.1", "R6.1"}), "R6.1": frozenset({"R5.1", "R6.1"})}
+        en_names = {"R1.1": "/A/EN", "R2.1": "/A/EN", "R5.1": "/B/EN", "R6.1": "/B/EN"}
+        split_b = {"R1.1": en["R1.1"], "R2.1": en["R2.1"], "R5.1": frozenset({"R5.1"}), "R6.1": frozenset({"R6.1"})}
+        self.assertTrue(unmet([{"op": "remove_labels", "nets": ["EN"]}], en, split_b, en_names, {}, (), en_names))
+        self.assertEqual(unmet([{"op": "remove_labels", "nets": ["/B/EN"]}], en, split_b, en_names, {}, (), en_names), [])
+        # remove_items is excused only for the pins wired to what it removed.
         items = [{"op": "remove_items", "sheet": "a", "area": [0, 0, 1, 1]}]
         self.assertEqual(unmet(items, before, only_a, names, {}, [{"scope": ["R1.1"]}], names), [])
         self.assertTrue(unmet(items, before, both, names, {}, [{"scope": ["R1.1"]}], names))
@@ -148,7 +155,6 @@ class ChangeShapeTests(unittest.TestCase):
         self.assertEqual(validate_change([{"op": "remove_labels", "nets": ["V1"]}])["schematic"], True)
 
 
-@unittest.skipUnless(PYTHON.is_file() and CLI.is_file() and DEVICE.is_file(), "KiCad is not installed")
 class SetCheckTests(unittest.TestCase):
     """18 Nov review: the first set_check passed P0009's 206 thinned designator strokes."""
 
@@ -193,6 +199,7 @@ class SetCheckTests(unittest.TestCase):
         self.assertTrue(any("appeared (1)" in p for p in problems), problems)
 
 
+@unittest.skipUnless(PYTHON.is_file() and CLI.is_file() and DEVICE.is_file(), "KiCad is not installed")
 class RealChangeTests(unittest.TestCase):
     def runtime(self, folder):
         root = Path(folder).resolve()
@@ -220,7 +227,11 @@ class RealChangeTests(unittest.TestCase):
             self.assertEqual(found.state, CapabilityResultState.SUCCEEDED, found.failure)
             before = board_index((project / "board.kicad_pcb").read_text())
             strokes = {o["id"]: o["thickness"] for o in select(before, "field", name="Reference")}
-            result = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+            unbound = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+                {"op": "set", "kind": "field", "where": {"name": "Reference"}, "to": {"size": 0.5}}])
+            self.assertIn("pass work_copy_revision", unbound.failure["recovery"]["detail"])
+            result = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"],
+                               work_copy_revision=found.values["work_copy_revision"], change=[
                 {"op": "set", "kind": "field", "where": {"name": "Reference"}, "to": {"size": 0.5}},
                 {"op": "set", "kind": "field", "where": {"name": "Value"}, "to": {"visible": False}}])
             self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
@@ -238,13 +249,14 @@ class RealChangeTests(unittest.TestCase):
                 {"op": "set", "kind": "field", "where": {"name": "Value"}, "to": {"visible": True}}])
             self.assertEqual(stale.failure["code"], "work_copy_changed")
             # Ambiguity and nothing-matches go back to her, before anything runs.
-            many = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+            now = result.values["work_copy_revision"]
+            many = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], work_copy_revision=now, change=[
                 {"op": "set", "kind": "field", "where": {"name": "Reference"}, "to": {"at": [1, 2]}}])
             self.assertIn("at places one object", many.failure["recovery"]["detail"])
-            none = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+            none = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], work_copy_revision=now, change=[
                 {"op": "set", "kind": "via", "where": {"nets": ["NO_SUCH_NET"]}, "to": {"size": 0.6}}])
             self.assertIn("no via matches", none.failure["recovery"]["detail"])
-            unsaid = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
+            unsaid = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], work_copy_revision=now, change=[
                 {"op": "set", "kind": "track", "where": {}, "to": {"width": 0.2}}])
             self.assertIn("all: true", unsaid.failure["recovery"]["detail"])
 
@@ -492,6 +504,9 @@ class KeptReadingTests(unittest.TestCase):
             index = provider._board_index(board, scratch)
             self.assertEqual(index["version"], INDEX_VERSION)
             self.assertEqual(index["objects"][0]["angle"], 90.0)
+            # Something that is not an index at all is read again too.
+            (scratch / ("index-%s.json" % key)).write_text('[1, 2]')
+            self.assertEqual(provider._board_index(board, scratch)["version"], INDEX_VERSION)
             for n in range(12):
                 (scratch / ("index-old%d.json" % n)).write_text("{}")
             provider._keep_latest(scratch, "index-")

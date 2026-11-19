@@ -812,23 +812,32 @@ class KiCadProvider:
         """Find Similar on a board: the objects of one kind matching every filter, from the board
         index of this revision (18 Nov). Changes nothing."""
         from alx.providers.kicad_index import select
-        # footprint here filters parts; for _board_for it would mean a library preview (review).
-        board = self._board_for({key: value for key, value in arguments.items() if key != 'footprint'})
-        revision = None
+        revision, library = None, False
         if self._is_copy_id(arguments.get('work_copy_id')):
-            root, meta = self._load(arguments['work_copy_id'])
-            scratch, revision = root / 'artifacts', self._revision(root, meta)
+            # Read under the copy's lock, so the revision it reports is the one it read (19 Nov recheck).
+            with self._locked(arguments['work_copy_id']):
+                root, meta = self._load(arguments['work_copy_id'])
+                library = bool(meta.get('library'))
+                board = self._board_for(arguments if library else
+                                        {key: value for key, value in arguments.items() if key != 'footprint'})
+                scratch, revision = root / 'artifacts', self._revision(root, meta)
+                index = self._board_index(board, scratch)
         else:
-            scratch = self.work_root / 'sections'
-        index = self._board_index(board, scratch)
+            # footprint here filters parts; for _board_for it would mean a library preview (review).
+            board = self._board_for({key: value for key, value in arguments.items() if key != 'footprint'})
+            index = self._board_index(board, self.work_root / 'sections')
         filters = {key: arguments[key] for key in ('refs', 'nets', 'layer', 'name', 'value', 'footprint',
-                                                   'area', 'reads', 'ids', 'named') if arguments.get(key) is not None}
+                                                   'area', 'reads', 'ids', 'named') if arguments.get(key) is not None
+                   and not (library and key == 'footprint')}
         try:
             found = select(index, arguments['kind'], **filters)
         except (TypeError, ValueError) as error:
             raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
         limit = max(1, min(int(arguments.get('limit') or 100), 500))
-        return {'kind': arguments['kind'], 'count': len(found), 'objects': found[:limit],
+        # Polygon outlines can run to thousands of points: shown as their count.
+        shown = [{key: (len(value) if key in ('outline', 'points') else value) for key, value in item.items()}
+                 for item in found[:limit]]
+        return {'kind': arguments['kind'], 'count': len(found), 'objects': shown,
                 'truncated': len(found) > limit, 'board': board.name,
                 **({'work_copy_revision': revision} if revision else {})}
 
@@ -1385,12 +1394,22 @@ class KiCadProvider:
                 script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
                           "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
             index_before = None
+            if plan and any(op['op'] == 'set' for op in change) and arguments.get('work_copy_revision') is None:
+                # Find Similar then change: what changes is what she saw (19 Nov recheck: a via added
+                # since her select would have been included).
+                raise KiCadError('arguments_unusable', {'detail': 'set: pass work_copy_revision from the select '
+                                                        'that showed what this changes'})
             if plan and any(op['op'] == 'set' for op in change):
                 # Find Similar: the objects each set changes are picked from the board index of
                 # this revision before anything runs, and go in by address (18 Nov).
                 index_before = self._board_index(project / meta['board'], root / 'artifacts')
                 change = [dict(op, _ids=self._picked(index_before, op)) if op['op'] == 'set' else op
                           for op in change]
+                moved = [uid for op in change if op['op'] == 'set' and {'at', 'move_by'} & set(op['to'])
+                         for uid in op['_ids']]
+                if len(moved) != len(set(moved)):
+                    raise KiCadError('arguments_unusable', {'detail': 'set: one object is moved by two operations; '
+                                                            'give it one at or one move_by'})
                 script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
                           "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
             wanted = (lambda kind: sorted(set(arguments.get(kind) or ()) | set((plan or {}).get(kind) or ())))
@@ -1628,17 +1647,20 @@ class KiCadProvider:
             if change.changed and record:
                 pending = self._record_history(root, snapshot, original, change.changed, revision_before,
                                                change.revision)
+                # Published (one rename) while the taint still stands: if anything after fails, the
+                # entry is taken back with the change, so a settled edit always has its undo entry and
+                # an undone one never does (19 Nov recheck).
+                pending = self._publish_history(root, pending)
             if change.keep_snapshot_at is not None:
                 snapshot.rename(change.keep_snapshot_at)
                 change.snapshot = change.keep_snapshot_at
             # The pending taint is cleared last; nothing after it can fail the change.
             self._save_metadata(root, change.meta)
             settled = True
-            # Then its history is published and what it retired goes; a failure here leaves the
-            # copy settled with one kept edit fewer, never a kept edit it does not have.
+            # Only tidying follows: old entries beyond the limit, and what a revert retired.
             with suppress(OSError):
-                if pending is not None:
-                    self._publish_history(root, pending)
+                for old in self._history_entries(root)[:-self.HISTORY_KEPT]:
+                    shutil.rmtree(old, ignore_errors=True)
                 for action in change.on_commit:
                     action()
         except BaseException as error:
@@ -1686,24 +1708,28 @@ class KiCadProvider:
         history = root / 'history'
         history.mkdir(exist_ok=True)
         pending = history / ('.pending-' + uuid.uuid4().hex)
-        (pending / 'files').mkdir(parents=True)
-        created = [name for name in changed if name not in original]
-        for name in changed:
-            if name in original:
-                (pending / 'files' / name).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(snapshot / name, pending / 'files' / name)
-        (pending / 'manifest.json').write_text(json.dumps(
-            {'before': before, 'after': after, 'changed': changed, 'created': created}))
+        try:
+            (pending / 'files').mkdir(parents=True)
+            created = [name for name in changed if name not in original]
+            for name in changed:
+                if name in original:
+                    (pending / 'files' / name).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(snapshot / name, pending / 'files' / name)
+            (pending / 'manifest.json').write_text(json.dumps(
+                {'before': before, 'after': after, 'changed': changed, 'created': created}))
+        except BaseException:
+            shutil.rmtree(pending, ignore_errors=True)
+            raise
         return pending
 
     def _publish_history(self, root, pending):
-        """A settled change's pending entry becomes the newest kept edit; the oldest beyond the
-        limit go."""
+        """A change's pending entry becomes the newest kept edit, in one rename; returns its path,
+        so a change that then fails takes it back."""
         entries = self._history_entries(root)
         number = int(entries[-1].name.split('-', 1)[0]) + 1 if entries else 1
-        pending.rename(root / 'history' / ('%05d-%s' % (number, uuid.uuid4().hex[:8])))
-        for old in self._history_entries(root)[:-self.HISTORY_KEPT]:
-            shutil.rmtree(old, ignore_errors=True)
+        entry = root / 'history' / ('%05d-%s' % (number, uuid.uuid4().hex[:8]))
+        pending.rename(entry)
+        return entry
 
     def _revert(self, arguments):
         """Put the copy back as it was at an earlier revision of its kept edits.
@@ -1741,12 +1767,13 @@ class KiCadProvider:
             # it fails, removed only once it is settled (18 Nov review).
             retired = root / 'history' / ('.retired-' + uuid.uuid4().hex)
             retired.mkdir()
-            for path, _ in entries[index:]:
-                path.rename(retired / path.name)
+            # Registered before anything moves, so a failure part-way puts back what did move.
             # Rollback runs these last first: put the entries back, then drop the empty holder.
             copy_change.on_rollback.append(lambda: shutil.rmtree(retired, ignore_errors=True))
             copy_change.on_rollback.append(lambda: [moved.rename(root / 'history' / moved.name)
                                                     for moved in sorted(retired.iterdir())])
+            for path, _ in entries[index:]:
+                path.rename(retired / path.name)
             copy_change.on_commit.append(lambda: shutil.rmtree(retired, ignore_errors=True))
             entries = [(retired / path.name, manifest) if i >= index else (path, manifest)
                        for i, (path, manifest) in enumerate(entries)]
@@ -1808,14 +1835,15 @@ class KiCadProvider:
             aux = re.search(r'\(aux_axis_origin ([-0-9.]+) ([-0-9.]+)\)', board_text)
             place_origin = bool(aux and (float(aux.group(1)), float(aux.group(2))) != (0.0, 0.0))
             plotted = board
-            if place_origin and '(useauxorigin ' not in board_text:
+            aux_setting = re.compile(r'\(useauxorigin\s+(?:yes|no)\s*\)')
+            if place_origin and not aux_setting.search(board_text):
                 # 18 Nov review: the rewrite silently did nothing, while drill and positions moved.
                 raise KiCadError('unsupported_project', {'detail': 'the board has a drill/place origin but no '
                                                          'plot setting for it; save the board once in KiCad'})
             if place_origin:
                 plotted = staging.parent / ('plot-' + uuid.uuid4().hex) / board.name
                 plotted.parent.mkdir()
-                plotted.write_text(re.sub(r'\(useauxorigin (?:yes|no)\)', '(useauxorigin yes)', board_text))
+                plotted.write_text(aux_setting.sub('(useauxorigin yes)', board_text))
             self._run('pcb', 'export', 'gerbers', '--board-plot-params',
                       '--output', str(staging) + '/', plotted)
             drill_options = ['--excellon-separate-th'] if arguments.get('separate_drills', False) else []
@@ -2476,6 +2504,18 @@ class KiCadProvider:
             return None
         contents = {name: digest for name, digest in design_inventory(project).items()
                     if name.endswith(('.kicad_sch', '.kicad_pro', 'sym-lib-table'))}
+        # Every sheet must be inside the project, so the key covers what the netlist depends on
+        # (19 Nov recheck: a sheet outside it could change unseen).
+        for name in contents:
+            if name.endswith('.kicad_sch'):
+                for file in re.findall(r'\(property "Sheetfile" "((?:[^"\\]|\\.)*)"',
+                                       (project / name).read_text(errors='replace')):
+                    # KiCad reads a sheet's file relative to the sheet that names it.
+                    target = ((project / name).parent / file).resolve()
+                    if (file.startswith(('/', '~')) or not target.is_relative_to(project.resolve())
+                            or not target.is_file()):
+                        raise KiCadError('unsupported_project', {'detail': 'sheet %s is outside the project or '
+                                                                 'missing; the schematic cannot be compared' % file})
         # The key is everything the result depends on: which root, every sheet, the reader's own
         # version and KiCad's (18 Nov review: the root and versions were missing).
         kicad = Path(self.settings.kicad_cli)
@@ -2485,9 +2525,10 @@ class KiCadProvider:
         scratch.mkdir(parents=True, exist_ok=True)
         kept = scratch / ('netlist-%s.json' % key)
         if kept.is_file():
-            with suppress(ValueError, KeyError, TypeError):
+            with suppress(ValueError, KeyError, TypeError, AttributeError):
                 model = json.loads(kept.read_text())
-                if model.get('version') == NETLIST_VERSION and isinstance(model.get('nets'), list):
+                if (isinstance(model, dict) and model.get('version') == NETLIST_VERSION
+                        and isinstance(model.get('nets'), list) and isinstance(model.get('components'), list)):
                     return model
         output = scratch / (uuid.uuid4().hex + '.net')
         try:
@@ -2541,10 +2582,11 @@ class KiCadProvider:
         scratch.mkdir(parents=True, exist_ok=True)
         kept = scratch / ('index-%s.json' % key)
         if kept.is_file():
-            with suppress(ValueError, KeyError, TypeError):
+            with suppress(ValueError, KeyError, TypeError, AttributeError):
                 index = json.loads(kept.read_text())
                 # An index of an older shape is never used (18 Nov review).
-                if index.get('version') == INDEX_VERSION and isinstance(index.get('objects'), list):
+                if (isinstance(index, dict) and index.get('version') == INDEX_VERSION
+                        and isinstance(index.get('objects'), list) and isinstance(index.get('nets'), list)):
                     return index
         index = board_index(text)
         kept.write_text(json.dumps(index))
@@ -2643,7 +2685,7 @@ class KiCadProvider:
             # No comparison on his original: nothing can be called fixed, and everything found now
             # is new (18 Nov review: an unavailable baseline became an empty one).
             return {'new': sorted(set(found)), 'fixed': 0, 'available': now is not None, 'baseline': False}
-        return {'new': sorted(set(found) - set(base)), 'fixed': len(set(base) - set(found)),
+        return {'new': sorted(set(found) - set(base)), 'fixed': len(set(base) - set(found)) if now is not None else 0,
                 'available': now is not None, 'baseline': True}
 
     def _new_faults(self, root, signatures):
@@ -2889,20 +2931,21 @@ class KiCadProvider:
         root, meta = self._load(arguments['work_copy_id'])
         if meta.get('library'):
             raise KiCadError('arguments_unusable', {'detail': 'a library copy has no board or schematic'})
+        # An edit he saved in the last window and that is not in her copy yet is never lost: a new
+        # window waits until it is taken (take_edits) or he says to drop it (19 Nov recheck: the
+        # saved view was kept once, then deleted by the next window).
+        seen = (meta.get('view') or {})
+        last = root / 'views' / str(seen.get('stamp', '')) / 'amended'
+        if (seen and last.is_dir() and not arguments.get('discard_saved_edits')
+                and design_inventory(last, exclude={last / '.history'}) != seen.get('files')):
+            raise KiCadError('arguments_unusable', {'detail': 'he saved an edit in the last KiCad window that is '
+                                                    'not in your copy: take_edits first, or open with '
+                                                    'discard_saved_edits true if he wants it dropped'})
         for viewer in self._viewers:
             with suppress(Exception):
                 viewer.terminate()
         self._viewers = []
-        # Their copies go with them; only the windows opened now keep theirs. A view he saved
-        # changes in and that were not taken into the copy stays (17 Nov: his placement).
-        kept_views = []
-        seen = (meta.get('view') or {})
         for earlier in (root / 'views').glob('*') if (root / 'views').is_dir() else ():
-            if (earlier.name == seen.get('stamp') and (earlier / 'amended').is_dir()
-                    and design_inventory(earlier / 'amended', exclude={earlier / 'amended' / '.history'})
-                    != seen.get('files')):
-                kept_views.append(earlier.name)
-                continue
             shutil.rmtree(earlier, ignore_errors=True)
         stamp = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6]
         views = root / 'views' / stamp
@@ -2924,19 +2967,18 @@ class KiCadProvider:
                 self._viewers.append(self.open_viewer(what, path, index))
         except OSError as error:
             raise KiCadError('unavailable', {'detail': 'KiCad did not open: %s' % error}) from error
-        # Recorded only once the windows opened, with what they show (18 Nov review: a failed
-        # launch, or a schematic view, could count as having shown him the board).
-        meta = dict(meta, view=view)
-        self._save_metadata(root, meta)
         time.sleep(self.viewer_settle_seconds)
         folder = self.render_folder / arguments['work_copy_id']
         folder.mkdir(parents=True, exist_ok=True)
         shot = folder / ('screen-%s-%s.png' % (what, stamp))
         self.capture_screen(shot)
+        # Recorded only once the windows opened and the screen was taken, with what they show
+        # (18 Nov review: a failed launch, or a schematic view, could count as showing him the board).
+        meta = dict(meta, view=view)
+        self._save_metadata(root, meta)
         return {'opened': [str(path) for path in files],
                 'windows': (['current (his design)'] if len(files) == 2 else []) + ['amended (your copy)'],
-                'screenshot': str(shot) if shot.is_file() else '',
-                **({'kept_unsaved_views': kept_views} if kept_views else {})}
+                'screenshot': str(shot) if shot.is_file() else ''}
 
     def take_edits(self, arguments):
         """Friedl's own edit, made and saved in the KiCad window open_in_kicad showed him, taken
@@ -2988,6 +3030,12 @@ class KiCadProvider:
                     shutil.copy2(folder / name, project / name)
                 for name in deleted:
                     (project / name).unlink()
+                # What was taken is what he saved: KiCad may save again during the copy (19 Nov recheck).
+                taken = design_inventory(project)
+                if any(taken.get(name) != theirs[name] for name in changed) or \
+                        design_inventory(folder, exclude={folder / '.history'}) != theirs:
+                    raise KiCadError('verification_failed', {'detail': 'his window saved again while his edit was '
+                                                             'being taken; take it again'})
                 after = self._revision(root, meta)
                 copy_change.meta = dict(meta, view=dict(view, revision=after, files=theirs))
             return {'changed': changed, 'deleted': deleted, 'moved': moved[:80], 'moved_total': len(moved),
@@ -3028,7 +3076,15 @@ class KiCadProvider:
                     'needs': next(name for name in STEPS if status[name] not in ('unchanged', 'approved')),
                     'steps': status})
             if status[step] != 'unchanged':
+                previous = approvals.get(step) or {}
                 approvals[step] = {name: current[name] for name in STEPS[:index + 1]}
+                # D-082b: approving a placement again, after it moved from what he approved, does not
+                # stand in for the routing sign-off; routing stays due until he approves it seeing this
+                # placement (19 Nov recheck: a second placement approval cleared the need).
+                if step == 'placement' and previous and previous.get('placement') != current['placement']:
+                    approvals['routing_due'] = True
+                if step == 'routing':
+                    approvals.pop('routing_due', None)
                 self._save_metadata(root, dict(meta, approvals=approvals))
             return {'step': step, 'steps': step_status(original, approvals, current),
                     'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision}
@@ -3102,7 +3158,8 @@ class KiCadProvider:
                     'needs': next(step for step in STEPS if status[step] not in ('unchanged', 'approved')),
                     'steps': status})
             parity = self._compared_parity(root, meta)
-            if not parity['available'] and any((root / 'project').glob('*.kicad_sch')):
+            if not parity['available'] and any(name.endswith('.kicad_sch')
+                                               for name in design_inventory(root / 'project')):
                 # A project with a schematic is written back only once the board is compared with it
                 # (18 Nov review: an unavailable comparison passed as "nothing new").
                 raise KiCadError('schematic_board_differ', {'detail': 'the board could not be compared with '
