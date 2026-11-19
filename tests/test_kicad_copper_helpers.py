@@ -165,9 +165,13 @@ outline.NewOutline()
 for x, y in ((119, 105), (121, 105), (121, 115), (119, 115)):
     outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
 b.Add(zone)
-runs, vias = route(b, "ARC", (110, 110), (130, 110), 0.2, "F", layers=["F"])
-crosses = any(119 < x < 121 and 105 < y < 115 for _, pts in runs for x, y in
-              [((p[0] + q[0]) / 2, (p[1] + q[1]) / 2) for p, q in zip(pts, pts[1:])] + [pt for pt in pts])
+runs, vias = route(b, "ARC", (110, 110), (130, 110), 0.4, "F", layers=["F"])
+# The track's whole width (0.4 mm) stays out of the keep-out: no point of it within 0.2 mm.
+import math as _tm
+def inside_keepout(x, y, margin):
+    return 119 - margin < x < 121 + margin and 105 - margin < y < 115 + margin
+crosses = any(inside_keepout(p[0] + (q[0] - p[0]) * k / 50, p[1] + (q[1] - p[1]) * k / 50, 0.199)
+              for _, pts in runs for p, q in zip(pts, pts[1:]) for k in range(51))
 print("crosses", crosses)
 """
         with tempfile.TemporaryDirectory() as folder:
@@ -218,6 +222,22 @@ print("vias", sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA") - befor
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("vias 1", done.stdout, done.stdout)
+        # Joined to that via through two tracks, the pin is already in its plane.
+        chained = script.replace("save(b)\nreport", "mid = _pcbnew.VECTOR2I(here.x + _pcbnew.FromMM(0.5), here.y)\n"
+                                 "for a, z in ((here, mid), (mid, near.GetPosition())):\n"
+                                 "    t = _pcbnew.PCB_TRACK(b)\n    t.SetStart(a)\n    t.SetEnd(z)\n"
+                                 "    t.SetWidth(_pcbnew.FromMM(0.2))\n    t.SetLayer(_pcbnew.F_Cu)\n"
+                                 "    t.SetNetCode(pin.GetNetCode())\n    b.Add(t)\nsave(b)\nreport")
+        self.assertNotEqual(chained, script)
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "board.kicad_pcb"
+            board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
+            program = Path(folder) / "edit.py"
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS + script_runner(chained))
+            done = run(PYTHON, program, board)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("vias 0", done.stdout, done.stdout)
+            self.assertIn("joined to the pin", done.stdout)
 
     def test_set_properties_changes_only_what_is_named_by_address(self) -> None:
         """18 Nov: Altium's Inspector. A size change keeps the stroke; vias, tracks and texts too."""

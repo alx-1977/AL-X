@@ -389,6 +389,8 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         except Exception:  # noqa: BLE001
             inside = outline
 
+    half_width = _pcbnew.FromMM(width / 2.0)
+
     def at(c, r):
         return point(x0 + c * step, y0 + r * step)
     # Each obstacle filed under the 1 mm squares its reach covers, so a cell checks only its
@@ -437,7 +439,8 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             name = layers[li]
             track_free[key] = (0 <= c < cols and 0 <= r < rows
                                and (inside is None or inside.Contains(here))
-                               and not any(area.Contains(here) for area in banned[name])
+                               # The track's whole width out of keep-outs, not its centre line (review of #247).
+                               and not any(area.Collide(here, half_width) for area in banned[name])
                                and not any(shape.Collide(here, reach) for shape in near(track_table[name], here)))
         return track_free[key]
     edge_free = {}
@@ -449,7 +452,8 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             piece = _pcbnew.SEG(a, z)
             shapes = {id(shape): shape for shape in list(near(edge_table[layers[li]], a))
                       + list(near(edge_table[layers[li]], z))}.values()
-            edge_free[key] = not any(shape.Collide(piece, reach) for shape in shapes)
+            edge_free[key] = (not any(shape.Collide(piece, reach) for shape in shapes)
+                              and not any(area.Collide(piece, half_width) for area in banned[layers[li]]))
         return edge_free[key]
 
     def via_ok(c, r):
@@ -471,7 +475,7 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
             # Inside the board and out of keep-outs along its length, its two ends (pads, which
             # may sit by the edge) aside (review of #247: a last run crossed a keep-out).
             if 0 < k < count and ((inside is not None and not inside.Contains(here))
-                                  or any(area.Contains(here) for area in banned[name])):
+                                  or any(area.Collide(here, half_width) for area in banned[name])):
                 return False
         piece = _pcbnew.SEG(point(*a), point(*z))
         return not any(shape.Collide(piece, reach) for shape in shapes.values())

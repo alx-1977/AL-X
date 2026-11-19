@@ -867,11 +867,23 @@ def apply_change(change):
                     def at_via(spot):
                         return any(_m.hypot(*(a - c for a, c in zip(xy(spot), xy(v.GetPosition()))))
                                    <= _pcbnew.ToMM(v.GetWidth(_pcbnew.F_Cu)) / 2 + 1e-3 for v in vias)
-                    joined = any(found.HitTest(v.GetPosition()) for v in vias) or any(
-                        t.GetClass() == "PCB_TRACK" and t.GetNetname() == net
-                        and ((found.HitTest(t.GetStart()) and at_via(t.GetEnd()))
-                             or (found.HitTest(t.GetEnd()) and at_via(t.GetStart())))
-                        for t in b.GetTracks())
+                    # Followed through any number of its net's tracks and arcs, not just one.
+                    pieces = [t for t in b.GetTracks() if t.GetClass() in ("PCB_TRACK", "PCB_ARC")
+                              and t.GetNetname() == net]
+                    reached, ends, grown = set(), [], True
+                    while grown:
+                        grown = False
+                        for t in pieces:
+                            if id(t) in reached:
+                                continue
+                            tips = (t.GetStart(), t.GetEnd())
+                            if any(found.HitTest(tip) or any(_m.hypot(*(a - c for a, c in zip(xy(tip), e))) < 1e-3
+                                                             for e in ends) for tip in tips):
+                                reached.add(id(t))
+                                ends.extend(xy(tip) for tip in tips)
+                                grown = True
+                    joined = any(found.HitTest(v.GetPosition()) for v in vias) or any(at_via(_pcbnew.VECTOR2I(
+                        _pcbnew.FromMM(e[0]), _pcbnew.FromMM(e[1]))) for e in ends)
                     if found.GetAttribute() == _pcbnew.PAD_ATTRIB_PTH or joined:
                         made.append({"pin": pin, "already": "a hole or via of %s joined to the pin" % net})
                         continue

@@ -1223,6 +1223,25 @@ p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
         self.failure('work_copy_changed', 'approve_step', step='placement', work_copy_id=copy,
                      work_copy_revision=routed['work_copy_revision'])
 
+    def test_a_schematic_only_change_is_compared_afresh_before_write_back(self):
+        """Review of #247: the board DRC is reused after a schematic-only edit; the schematic
+        comparison is not, so a break the edit made still stops write-back."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        self.netlists = [[('A', 'U1', '1')]]
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC)
+        # KiCad's netlist of the edited schematic: it now has a part the board does not.
+        self.netlists = [[('A', 'U1', '1'), ('A', 'U9', '1')]] * 4
+        drc_runs = len([c for c in self.calls if c[1:3] == ['pcb', 'drc']])
+        result = self.call('write_back_kicad_board', **self.write_args(edited))
+        self.assertIn(result.failure['code'], ('schematic_board_differ', 'step_not_approved'))
+        if result.failure['code'] == 'step_not_approved':
+            self.approve(edited, 'schematic')
+            result = self.call('write_back_kicad_board', **self.write_args(edited))
+            self.assertEqual(result.failure['code'], 'schematic_board_differ')
+        self.assertTrue(result.failure['recovery']['new_mismatches'])
+        self.assertEqual(len([c for c in self.calls if c[1:3] == ['pcb', 'drc']]), drc_runs)
+
     def test_a_board_not_compared_with_its_schematic_is_not_written(self):
         """18 Nov review: an unavailable comparison passed write-back as "nothing new"."""
         (self.project / 'other.kicad_sch').write_text('(kicad_sch (version 1))\n')
