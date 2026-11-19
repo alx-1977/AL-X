@@ -550,8 +550,14 @@ def apply_change(change):
                 for ref in op["refs"]:
                     s.remove_symbol(ref)
             elif kind == "swap_symbol":
+                # The schematic's Footprint field is KiCad's Library:Name; the edit hands every
+                # footprint over as Library/Name, the board's form (19 Nov 2026: eight ERC
+                # warnings, an empty library nickname on D14, D15, Q1 and Q2).
+                footprint = op.get("footprint")
+                if isinstance(footprint, str) and "/" in footprint and ":" not in footprint:
+                    footprint = footprint.replace("/", ":", 1)
                 loose = s.swap_symbol(op["ref"], op["lib_id"], value=op.get("value"),
-                                      footprint=op.get("footprint"), at=op.get("at"), rotation=op.get("rotation"))
+                                      footprint=footprint, at=op.get("at"), rotation=op.get("rotation"))
                 if loose:
                     s.tidy(loose)
                 done["old_pins_tidied"] = len(loose)

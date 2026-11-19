@@ -264,6 +264,25 @@ s.save()
             nets = self.netlist(folder)
             self.assertIn(frozenset({("R1", "2"), ("R3", "2")}), nets.values())
 
+    def test_a_swap_writes_the_footprint_the_way_kicad_reads_it(self):
+        """19 Nov 2026: a swap wrote Library/Name into the Footprint field; KiCad needs Library:Name
+        and ERC reported eight parts with an empty library nickname."""
+        from alx.providers.kicad_change import CHANGE_HELPERS
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "t.kicad_sch").write_text(schematic())
+            program = Path(folder) / "edit.py"
+            resistor = library_symbol("R").replace('(symbol "R"', '(symbol "Device:R"', 1)
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS
+                               + "_LIBRARY_SYMBOLS.update(%r)\n" % {"Device:R": resistor} + script_runner(
+                                   'apply_change([{"op": "swap_symbol", "sheet": "t.kicad_sch", "ref": "R1", '
+                                   '"lib_id": "Device:R", "footprint": "Resistor_SMD/R_0603_1608Metric"}])\n'))
+            done = subprocess.run([str(PYTHON), str(program), str(Path(folder) / "t.kicad_pcb")],
+                                  capture_output=True, text=True, cwd=folder, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            sheet = (Path(folder) / "t.kicad_sch").read_text()
+            self.assertIn('"Footprint" "Resistor_SMD:R_0603_1608Metric"', sheet)
+            self.assertNotIn("Resistor_SMD/R_0603", sheet)
+
     def test_a_missing_symbol_names_the_sheet_it_is_on(self):
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / "t.kicad_sch").write_text(schematic())
