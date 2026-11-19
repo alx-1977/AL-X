@@ -11,6 +11,7 @@ codec, sample rate, bit rate), so the browser receives the same kind of audio.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from time import monotonic
@@ -40,6 +41,18 @@ def cartesia_output_format(output_format: str) -> dict[str, Any]:
     if codec == "pcm":
         return {"container": "raw", "encoding": "pcm_s16le", "sample_rate": rate}
     raise ValueError(f"Cartesia cannot produce output format {output_format!r}")
+
+
+def _explanation(body: bytes, transcript: str) -> str:
+    """Cartesia's message for a 400, shortened, with the transcript removed."""
+    try:
+        data = json.loads(body)
+        text = str(data.get("message") or data.get("error") or data.get("detail") or data)
+    except (ValueError, AttributeError):
+        text = body.decode("utf-8", "replace")
+    if transcript.strip():
+        text = text.replace(transcript, "[transcript]")
+    return text[:300]
 
 
 class CartesiaSynthesizer:
@@ -85,13 +98,14 @@ class CartesiaSynthesizer:
                 f"{self._base_url}/tts/bytes",
                 headers={
                     "X-API-Key": self._api_key,
+                    "Authorization": f"Bearer {self._api_key}",
                     "Cartesia-Version": self._api_version,
                     "Content-Type": "application/json",
                 },
                 json={
                     "model_id": self._model,
                     "transcript": response,
-                    "voice": {"mode": "id", "id": self._voice_id},
+                    "voice": {"id": self._voice_id},
                     "output_format": self._format,
                     "language": self._language,
                 },
@@ -100,9 +114,14 @@ class CartesiaSynthesizer:
                     # Only the status is kept: the body is untrusted and may quote the
                     # request back (errors.py). Raised outside any except block.
                     status = provider_response.status_code
-                    reason = {401: "invalid_api_key", 402: "quota_exceeded",
+                    reason = {400: "bad_request", 401: "invalid_api_key", 402: "quota_exceeded",
                               429: "rate_limited"}.get(status, "http_%d" % status)
-                    LOGGER.warning("Cartesia refused speech: HTTP %s %s", status, reason)
+                    explanation = ""
+                    if status == 400:
+                        # A malformed request is ours to fix, and only Cartesia's text says
+                        # which field: kept for the log, with her words blanked out.
+                        explanation = _explanation(await provider_response.aread(), response)
+                    LOGGER.warning("Cartesia refused speech: HTTP %s %s %s", status, reason, explanation)
                     self._emit_telemetry(correlation_id, "tts.refused", started_at,
                                          status_code=status, reason=reason)
                     raise_provider_failure("cartesia", reason, status_code=status)

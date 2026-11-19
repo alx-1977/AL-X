@@ -53,7 +53,8 @@ class CartesiaSpeechTests(unittest.TestCase):
         self.assertEqual(seen["url"], "https://api.cartesia.ai/tts/bytes")
         self.assertEqual(seen["headers"]["X-API-Key"], "key")
         self.assertEqual(seen["headers"]["Cartesia-Version"], "2025-04-16")
-        self.assertEqual(seen["body"]["voice"], {"mode": "id", "id": "voice-1"})
+        self.assertEqual(seen["body"]["voice"], {"id": "voice-1"})
+        self.assertEqual(seen["headers"]["Authorization"], "Bearer key")
         self.assertEqual(seen["body"]["output_format"], {"container": "mp3", "sample_rate": 44100, "bit_rate": 128000})
         self.assertEqual(seen["body"]["transcript"], "Hello Friedl")
         self.assertEqual([c.payload for c in chunks], [b"mp3-bytes", b""])
@@ -81,8 +82,9 @@ class CartesiaSpeechTests(unittest.TestCase):
     def test_one_setting_switches_the_provider(self) -> None:
         settings = RuntimeSettings.from_environment(cartesia_env(ALX_STT_API_VERSION="2025-04-16"))
         speech = settings.text_to_speech
+        # Speaking does not borrow hearing's API version (refused with 400 on 19 Nov 2026).
         self.assertEqual((speech.provider, speech.model, speech.api_key, speech.voice_id, speech.api_version),
-                         ("cartesia", "sonic-2", "cartesia-secret", "cartesia-voice", "2025-04-16"))
+                         ("cartesia", "sonic-3", "cartesia-secret", "cartesia-voice", "2026-08-14"))
         with mock.patch("alx.bootstrap.providers.subscription_cli_present", return_value=True):
             self.assertIsInstance(build_runtime_providers(settings).text_to_speech, CartesiaSynthesizer)
             back = RuntimeSettings.from_environment(environment())
@@ -93,6 +95,15 @@ class CartesiaSpeechTests(unittest.TestCase):
         values.pop("ALX_TTS_PRONUNCIATION_DICTIONARY_ID")
         values.pop("ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID")
         self.assertEqual(RuntimeSettings.from_environment(values).text_to_speech.provider, "cartesia")
+
+    def test_bad_request_explanation_is_logged_without_her_words(self) -> None:
+        body = json.dumps({"message": "invalid model_id for transcript Hello Friedl"}).encode()
+        with self.assertLogs("alx.providers.cartesia_tts", "WARNING") as logged, \
+                self.assertRaises(ProviderError) as raised:
+            asyncio.run(self._collect(synthesizer(lambda request: httpx.Response(400, content=body))))
+        self.assertEqual(raised.exception.reason, "bad_request")
+        self.assertIn("invalid model_id", logged.output[0])
+        self.assertNotIn("Hello Friedl", logged.output[0])
 
     @staticmethod
     async def _collect(synth: CartesiaSynthesizer):

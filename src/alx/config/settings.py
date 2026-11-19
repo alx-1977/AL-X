@@ -220,8 +220,8 @@ def _text_to_speech_settings(environment: Mapping[str, str]) -> TextToSpeechSett
     Each provider reads its own key, voice and model, so switching is one line:
     ElevenLabs: ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, ALX_TTS_MODEL and the
     pronunciation dictionary. Cartesia: CARTESIA_API_KEY, CARTESIA_VOICE_ID,
-    CARTESIA_TTS_MODEL (default sonic-2) and the Cartesia API version shared with
-    hearing. ALX_TTS_API_KEY / ALX_TTS_VOICE_ID still override either when set.
+    CARTESIA_TTS_MODEL (default sonic-3) and CARTESIA_TTS_API_VERSION (default
+    2026-08-14, Cartesia's current version for speech). ALX_TTS_API_KEY / ALX_TTS_VOICE_ID still override either when set.
     """
     provider = _required(environment, "ALX_TTS_PROVIDER")
     common = dict(
@@ -235,14 +235,17 @@ def _text_to_speech_settings(environment: Mapping[str, str]) -> TextToSpeechSett
     if provider.strip().lower() == "cartesia":
         return TextToSpeechSettings(
             provider="cartesia",
-            model=environment.get("CARTESIA_TTS_MODEL", "").strip() or "sonic-2",
+            model=environment.get("CARTESIA_TTS_MODEL", "").strip() or "sonic-3",
             api_key=_credential(environment, "ALX_TTS_API_KEY", "CARTESIA_API_KEY"),
             voice_id=_configured(environment, "ALX_TTS_VOICE_ID", "CARTESIA_VOICE_ID"),
             base_url=_configured(environment, "CARTESIA_TTS_BASE_URL", "CARTESIA_BASE_URL",
                                  "https://api.cartesia.ai").rstrip("/"),
             pronunciation_dictionary_id="",
             pronunciation_dictionary_version_id="",
-            api_version=_configured(environment, "CARTESIA_API_VERSION", "ALX_STT_API_VERSION"),
+            # Speaking has its own API version: Cartesia's current one is 2026-08-14
+            # (19 Nov 2026; the version hearing uses was refused for speech).
+            api_version=_configured(environment, "CARTESIA_TTS_API_VERSION", "CARTESIA_TTS_VERSION",
+                                    "2026-08-14"),
             **common,
         )
     return TextToSpeechSettings(
