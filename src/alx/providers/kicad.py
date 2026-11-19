@@ -809,6 +809,46 @@ class KiCadProvider:
         except SectionError as error:
             raise KiCadError(error.code, {'detail': error.detail}) from error
 
+    def _firefli_library(self):
+        """The FireFli library folder: KiCad's FIREFLI_KICAD_LIB path variable (his settings)."""
+        import pwd
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        versions = sorted((p for p in (home / 'Library/Preferences/kicad').glob('*') if p.is_dir()),
+                          key=lambda p: [int(x) for x in re.findall(r'\d+', p.name)] or [0])
+        for config in reversed(versions):
+            try:
+                found = (json.loads((config / 'kicad_common.json').read_text())
+                         .get('environment', {}).get('vars') or {}).get('FIREFLI_KICAD_LIB')
+            except (OSError, ValueError):
+                continue
+            if found:
+                return Path(found).expanduser()
+        raise KiCadError('unavailable', {'detail': 'the FireFli library is not set up in KiCad '
+                                                   '(path variable FIREFLI_KICAD_LIB)'})
+
+    def find_part(self, arguments):
+        """Parts in the FireFli library matching what is asked, with exact symbol and footprint
+        names, part number, LCSC number and package (19 Nov). Changes nothing."""
+        from alx.providers.kicad_parts import find_parts
+        if not any(str(arguments.get(k) or '').strip() for k in ('query', 'value', 'package', 'kind')):
+            raise KiCadError('arguments_unusable', {'detail': 'give query, value, package or kind'})
+        try:
+            limit = int(arguments.get('limit') or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        try:
+            found = find_parts(self._firefli_library(), str(arguments.get('query') or ''),
+                               str(arguments.get('value') or ''), str(arguments.get('package') or ''),
+                               str(arguments.get('kind') or ''), limit)
+        except FileNotFoundError as error:
+            raise KiCadError('unavailable', {'detail': 'no catalogue at %s' % error}) from error
+        except ValueError as error:
+            raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+        if not found['count']:
+            found['hint'] = ('not in the FireFli library: a new part is created in a copy_library work copy '
+                             'from its datasheet, then used by its exact name')
+        return found
+
     def select(self, arguments):
         """Find Similar on a board: the objects of one kind matching every filter, from the board
         index of this revision (18 Nov). Changes nothing."""

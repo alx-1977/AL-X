@@ -453,6 +453,19 @@ SELECT = CapabilityDefinition('select',
         ('kind', 'count', 'objects', 'truncated')),
     SideEffect.NONE, FAILURES)
 
+FIND_PART = CapabilityDefinition('find_part',
+    'Find parts in the FireFli library, changing nothing: every part matching all the filters given, '
+    'with its exact symbol name (LIBRARY:NAME, for add_symbol and swap_symbol lib_id), footprint, value, '
+    'part number, maker, package and LCSC number. Use it before naming any library part: never guess a '
+    'name or read library files. query: words that must all appear (part number, kind or description, '
+    'e.g. "comparator", "74LVC1G123", "TVS"); value: a component value compared as a number ("1u", '
+    '"100n", "4k7"); package: text in the footprint or package ("0603", "DFN"); kind: the library or '
+    'reference letter ("Capacitors", "R", "IC"). count 0 means the part is not in the library yet.',
+    obj({'query': S, 'value': S, 'package': S, 'kind': S, 'limit': I}),
+    obj({'count': I, 'parts': array(MAP), 'truncated': B, 'library': S, 'hint': S},
+        ('count', 'parts', 'truncated')),
+    SideEffect.NONE, FAILURES)
+
 INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
     "Read a work copy's schematic (work_copy_id), or one of his projects where it is (project_dir, "
     "e.g. P0020), as facts, changing nothing: every part (reference, value, "
@@ -546,6 +559,7 @@ class KiCadAction(str, Enum):
     RENDER = 'render'
     INSPECT_SCHEMATIC = 'inspect_schematic'
     SELECT = 'select'
+    FIND_PART = 'find_part'
     OPEN_IN_KICAD = 'open_in_kicad'
     TAKE_EDITS = 'take_edits'
 
@@ -569,6 +583,7 @@ CONTRACTS = {
     KiCadAction.RENDER: RENDER,
     KiCadAction.INSPECT_SCHEMATIC: INSPECT_SCHEMATIC,
     KiCadAction.SELECT: SELECT,
+    KiCadAction.FIND_PART: FIND_PART,
     KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
     KiCadAction.TAKE_EDITS: TAKE_EDITS,
 }
@@ -578,7 +593,7 @@ FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
     KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS,
-    KiCadAction.SELECT))
+    KiCadAction.SELECT, KiCadAction.FIND_PART))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -639,6 +654,7 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.RENDER: provider.render,
                KiCadAction.INSPECT_SCHEMATIC: provider.inspect_schematic,
                KiCadAction.SELECT: provider.select,
+               KiCadAction.FIND_PART: provider.find_part,
                KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad,
                KiCadAction.TAKE_EDITS: provider.take_edits}
 
