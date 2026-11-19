@@ -1314,8 +1314,12 @@ class KiCadProvider:
                                        self.datasheet_folder, client=client, nexar=nexar, digikey=digikey,
                                        download=fetcher.fetch_pdf)
         except DatasheetError as error:
-            raise KiCadError(error.code if error.code != 'not_found' else 'document_unavailable',
-                             {'detail': error.detail}) from error
+            recovery = {'detail': error.detail}
+            if error.candidates:
+                # Several parts answer to this number: each with maker and package, for her choice.
+                recovery['candidates'] = error.candidates
+            raise KiCadError({'not_found': 'document_unavailable', 'ambiguous_part': 'arguments_unusable'}
+                             .get(error.code, error.code), recovery) from error
         finally:
             # Both connections are closed, whatever happened (review of #243).
             fetcher.close()

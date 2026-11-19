@@ -361,7 +361,9 @@ FETCH_DATASHEET = CapabilityDefinition('fetch_datasheet',
     'downloads each plainly and keeps the first real PDF, in ALX_Storage/Datasheets, where '
     'check_layout, look and read_reference can read it where it is; never copy it elsewhere '
     "(not to his Desktop). Use it before saying a datasheet "
-    'cannot be found; tried lists every source and why it failed.',
+    'cannot be found; tried lists every source and why it failed. A family number that is not one '
+    'exact part (74LVC1G123) is refused with candidates in recovery: each part DigiKey lists with '
+    'its maker, package and description; choose the exact part_number and call again.',
     obj({'part_number': S, 'manufacturer': S}, ('part_number',)),
     obj({'path': S, 'source': S, 'url': S, 'tried': array(MAP)}),
     SideEffect.NONE, FAILURES)
