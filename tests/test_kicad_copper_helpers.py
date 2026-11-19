@@ -238,6 +238,17 @@ print("vias", sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA") - befor
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("vias 0", done.stdout, done.stdout)
             self.assertIn("joined to the pin", done.stdout)
+        # The same chain with its second piece on the bottom layer joins nothing: no via links them.
+        crossed = chained.replace("    t.SetLayer(_pcbnew.F_Cu)\n", "    t.SetLayer(_pcbnew.F_Cu if a == here else _pcbnew.B_Cu)\n")
+        self.assertNotEqual(crossed, chained)
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "board.kicad_pcb"
+            board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
+            program = Path(folder) / "edit.py"
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS + script_runner(crossed))
+            done = run(PYTHON, program, board)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("vias 1", done.stdout, done.stdout)
 
     def test_set_properties_changes_only_what_is_named_by_address(self) -> None:
         """18 Nov: Altium's Inspector. A size change keeps the stroke; vias, tracks and texts too."""

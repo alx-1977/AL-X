@@ -862,14 +862,18 @@ def apply_change(change):
                     # Already in its plane only if copper really joins it: a via in the pad, or a
                     # track of its net from the pad to a via (review of #247: any same-net via within
                     # 1.2 mm, another pin's, counted, and nothing was drawn).
-                    vias = [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetname() == net]
+                    # Only copper on the pin's own layer joins it: a via that reaches that layer, and
+                    # tracks drawn on it (review of #247: ends that merely lay over one another on
+                    # different layers were taken as joined).
+                    vias = [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetname() == net
+                            and t.IsOnLayer(side)]
 
                     def at_via(spot):
                         return any(_m.hypot(*(a - c for a, c in zip(xy(spot), xy(v.GetPosition()))))
                                    <= _pcbnew.ToMM(v.GetWidth(_pcbnew.F_Cu)) / 2 + 1e-3 for v in vias)
                     # Followed through any number of its net's tracks and arcs, not just one.
                     pieces = [t for t in b.GetTracks() if t.GetClass() in ("PCB_TRACK", "PCB_ARC")
-                              and t.GetNetname() == net]
+                              and t.GetNetname() == net and t.GetLayer() == side]
                     reached, ends, grown = set(), [], True
                     while grown:
                         grown = False
