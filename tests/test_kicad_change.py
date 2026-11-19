@@ -44,7 +44,11 @@ class ChangeShapeTests(unittest.TestCase):
                             ([{"op": "set", "kind": "part", "where": {}, "to": {"x": 1}}], "kind is one of"),
                             ([{"op": "set", "kind": "via", "where": {"nets": ["GND"]}, "to": {"width": 1}}], "to sets size, drill"),
                             ([{"op": "set", "kind": "field", "where": {"colour": "red"}, "to": {"size": 1}}], "where takes"),
-                            ([{"op": "set", "kind": "text", "where": {"all": True}, "to": {"move_by": [1]}}], r"move_by is \[x, y\]")):
+                            ([{"op": "set", "kind": "text", "where": {"all": True}, "to": {"move_by": [1]}}], r"move_by is \[x, y\]"),
+                            ([{"op": "set", "kind": "text", "where": {"name": None}, "to": {"visible": False}}], "where name is a value"),
+                            ([{"op": "set", "kind": "text", "where": {"all": "false"}, "to": {"visible": False}}], "where all is true"),
+                            ([{"op": "set", "kind": "field", "where": {"all": True, "name": "Value"}, "to": {"visible": False}}], "goes alone"),
+                            ([{"op": "set", "kind": "via", "where": {"nets": []}, "to": {"size": 1}}], "a list of net names")):
             with self.subTest(said=said), self.assertRaisesRegex(ChangeError, said):
                 validate_change(wrong)
 
@@ -137,6 +141,50 @@ class ChangeShapeTests(unittest.TestCase):
 
 
 @unittest.skipUnless(PYTHON.is_file() and CLI.is_file() and DEVICE.is_file(), "KiCad is not installed")
+class SetCheckTests(unittest.TestCase):
+    """18 Nov review: the first set_check passed P0009's 206 thinned designator strokes."""
+
+    def field(self, uid, ref, size, thickness, at=(0.0, 0.0)):
+        return {"id": uid, "kind": "field", "ref": ref, "name": "Reference", "size": list(size),
+                "thickness": thickness, "visible": True, "angle": 0.0, "at": list(at), "offset": list(at)}
+
+    def board(self, *objects):
+        return {"version": 2, "objects": list(objects), "nets": []}
+
+    def test_the_thinned_strokes_now_fail(self):
+        from alx.providers.kicad_change import set_check
+        before = self.board(self.field("a", "R1", (0.5, 0.5), 0.254), self.field("b", "R2", (1.27, 1.27), 0.254))
+        damaged = self.board(self.field("a", "R1", (0.5, 0.5), 0.075), self.field("b", "R2", (0.5, 0.5), 0.075))
+        repaired = self.board(self.field("a", "R1", (0.5, 0.5), 0.254), self.field("b", "R2", (0.5, 0.5), 0.254))
+        change = [{"op": "set", "kind": "field", "to": {"size": 0.5}, "_ids": ["a", "b"]}]
+        receipts, problems = set_check(change, before, damaged)
+        self.assertTrue(any("2 objects changed that no set asked for" in p and "thickness" in p for p in problems), problems)
+        receipts, problems = set_check(change, before, repaired)
+        self.assertEqual(problems, [])
+        self.assertEqual((receipts[0]["already"], receipts[0]["changed"], list(receipts[0]["ids_changed"])), (1, 1, ["b"]))
+
+    def test_a_move_that_did_nothing_fails_and_others_must_not_move(self):
+        from alx.providers.kicad_change import set_check
+        text = {"id": "t", "kind": "text", "text": "Keepout", "at": [10.0, 10.0], "size": [1, 1], "thickness": 0.2,
+                "visible": True, "angle": 0.0, "layer": "F.SilkS", "box": True}
+        other = dict(text, id="u", text="Cellular")
+        change = [{"op": "set", "kind": "text", "to": {"move_by": [2, 1]}, "_ids": ["t"]}]
+        _, problems = set_check(change, self.board(text, other), self.board(text, other))
+        self.assertTrue(any("not as asked" in p for p in problems), problems)
+        moved = dict(text, at=[12.0, 11.0])
+        receipts, problems = set_check(change, self.board(text, other), self.board(moved, other))
+        self.assertEqual((problems, receipts[0]["changed"]), ([], 1))
+        _, problems = set_check(change, self.board(text, other), self.board(moved, dict(other, at=[0.0, 0.0])))
+        self.assertTrue(any("u (text: at)" in p for p in problems), problems)
+
+    def test_objects_may_not_appear_or_go(self):
+        from alx.providers.kicad_change import set_check
+        a = self.field("a", "R1", (0.5, 0.5), 0.2)
+        change = [{"op": "set", "kind": "field", "to": {"size": 0.5}, "_ids": ["a"]}]
+        _, problems = set_check(change, self.board(a), self.board(a, self.field("z", "R9", (1, 1), 0.2)))
+        self.assertTrue(any("appeared (1)" in p for p in problems), problems)
+
+
 class RealChangeTests(unittest.TestCase):
     def runtime(self, folder):
         root = Path(folder).resolve()
@@ -171,11 +219,16 @@ class RealChangeTests(unittest.TestCase):
             refs, values = result.values["change_report"]["set"]
             self.assertEqual(refs["matched"], found.values["count"])
             self.assertEqual(refs["already"] + refs["changed"], refs["matched"])
-            self.assertEqual((list(refs["not_as_asked"]), list(refs["others_changed"])), ([], []))
+            self.assertEqual((list(refs["not_as_asked"]), refs["others_changed"]), ([], 0))
             after = board_index(next(Path(folder).rglob(checked["work_copy_id"] + "/project/board.kicad_pcb")).read_text())
             for o in select(after, "field", name="Reference"):
                 self.assertEqual((o["size"], o["thickness"]), ([0.5, 0.5], strokes[o["id"]]))
             self.assertTrue(all(not o["visible"] for o in select(after, "field", name="Value")))
+            # The revision she read is the one she changes: a stale one is refused.
+            stale = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"],
+                              work_copy_revision=found.values["work_copy_revision"], change=[
+                {"op": "set", "kind": "field", "where": {"name": "Value"}, "to": {"visible": True}}])
+            self.assertEqual(stale.failure["code"], "work_copy_changed")
             # Ambiguity and nothing-matches go back to her, before anything runs.
             many = self.call(runtime, "edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], change=[
                 {"op": "set", "kind": "field", "where": {"name": "Reference"}, "to": {"at": [1, 2]}}])
@@ -409,6 +462,30 @@ class BriefInspectTests(unittest.TestCase):
             overview.assert_not_called()
             self.assertEqual(result["parts"], [{"ref": "C1", "value": "100n", "footprint": "Lib:C_0402"}])
             self.assertEqual(result["nets"], [])
+
+
+class KeptReadingTests(unittest.TestCase):
+    def test_a_kept_index_of_an_older_shape_is_read_again(self):
+        """18 Nov review: a step-2 index of the same bytes, without text angle, was still used."""
+        import hashlib
+        import tempfile
+        from alx.providers.kicad import KiCadProvider
+        from alx.providers.kicad_index import INDEX_VERSION
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "b.kicad_pcb"
+            board.write_text('(kicad_pcb (gr_text "Keepout" (at 1 2 90) (layer "F.SilkS") (uuid "t1")))')
+            scratch = Path(folder) / "artifacts"
+            scratch.mkdir()
+            key = hashlib.sha256(board.read_text().encode()).hexdigest()[:32]
+            (scratch / ("index-%s.json" % key)).write_text('{"objects": [], "nets": []}')
+            provider = KiCadProvider.__new__(KiCadProvider)
+            index = provider._board_index(board, scratch)
+            self.assertEqual(index["version"], INDEX_VERSION)
+            self.assertEqual(index["objects"][0]["angle"], 90.0)
+            for n in range(12):
+                (scratch / ("index-old%d.json" % n)).write_text("{}")
+            provider._keep_latest(scratch, "index-")
+            self.assertEqual(len(list(scratch.glob("index-*.json"))), 8)
 
 
 class OneWayToChangeACopyTests(unittest.TestCase):

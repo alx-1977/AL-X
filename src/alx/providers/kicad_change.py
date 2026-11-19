@@ -59,7 +59,7 @@ SETTABLE = {
     'track': ('width',),
     'arc': ('width',),
 }
-FILTERS = ('refs', 'nets', 'layer', 'name', 'value', 'footprint', 'area', 'reads', 'ids', 'all')
+FILTERS = ('refs', 'nets', 'layer', 'name', 'value', 'footprint', 'area', 'reads', 'ids', 'all', 'named')
 
 
 class ChangeError(ValueError):
@@ -110,6 +110,23 @@ def validate_change(change: Any) -> dict[str, Any]:
             filters, values = op['where'], op['to']
             if not isinstance(filters, Mapping) or not set(filters) <= set(FILTERS):
                 raise ChangeError('%s (set): where takes %s' % (where, ', '.join(FILTERS)))
+            # Every filter given must filter (18 Nov review: name: null and all: "false" picked everything).
+            for key, value in filters.items():
+                if key in ('refs', 'nets', 'ids'):
+                    ok = isinstance(value, (list, tuple)) and value and all(isinstance(v, str) and v for v in value)
+                elif key == 'area':
+                    ok = (isinstance(value, (list, tuple)) and len(value) == 4
+                          and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value))
+                elif key in ('all', 'named'):
+                    ok = value is True
+                else:
+                    ok = isinstance(value, str) and bool(value)
+                if not ok:
+                    raise ChangeError('%s (set): where %s is %s' % (where, key, {
+                        'refs': 'a list of designators', 'nets': 'a list of net names', 'ids': 'a list of ids',
+                        'area': '[x0, y0, x1, y1] in mm', 'all': 'true', 'named': 'true'}.get(key, 'a value')))
+            if filters.get('all') and len(filters) > 1:
+                raise ChangeError('%s (set): all: true goes alone; it picks every %s' % (where, op['kind']))
             if not isinstance(values, Mapping) or not values or not set(values) <= set(SETTABLE[op['kind']]):
                 raise ChangeError('%s (set): to sets %s of a %s' % (where, ', '.join(SETTABLE[op['kind']]), op['kind']))
             for field in ('at', 'move_by'):
@@ -294,51 +311,82 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
     return problems[:30]
 
 
-def _holds(item, key, value):
-    """Whether one indexed object has the value set asked for (positions are reported, not
-    compared: a field's place is stored relative to its part)."""
-    if item is None:
+# Which indexed properties each settable property may change (positions are absolute).
+_TOUCHES = {'size': ('size',), 'thickness': ('thickness',), 'visible': ('visible',), 'angle': ('angle',),
+            'at': ('at', 'offset'), 'move_by': ('at', 'offset'), 'text': ('text',), 'drill': ('drill',),
+            'width': ('width',)}
+
+
+def _close(a, b):
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) < 1e-4
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_close(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _holds(before, after, key, value):
+    """Whether one object, after, has what set asked; before for a relative move."""
+    if after is None:
         return False
-    if key == 'size' and item['kind'] in ('field', 'text'):
+    if key == 'size' and after['kind'] in ('field', 'text'):
         wanted = [value, value] if isinstance(value, (int, float)) else list(value)
-        return item.get('size') is not None and all(abs(a - b) < 1e-4 for a, b in zip(item['size'], wanted))
+        return after.get('size') is not None and _close(list(after['size'][:2]), wanted)
+    if key == 'at':
+        return after.get('at') is not None and _close(list(after['at'][:2]), list(value))
+    if key == 'move_by':
+        return (before is not None and before.get('at') is not None and after.get('at') is not None
+                and _close([after['at'][0] - before['at'][0], after['at'][1] - before['at'][1]], list(value)))
     if key in ('size', 'thickness', 'angle', 'drill', 'width'):
-        have = item.get(key)
-        return have is not None and abs(float(have) - float(value)) < 1e-4
-    if key in ('visible', 'text'):
-        return item.get(key) == value
-    return True
+        return after.get(key) is not None and _close(after[key], value)
+    return after.get(key) == value
 
 
 def set_check(change, before, after):
-    """For each set operation: a receipt (matched, already as asked, changed) and what does
-    not hold: an object not as asked, or an object of that kind it did not pick that changed
-    a property it names (18 Nov: the designator job also thinned 206 strokes, unseen)."""
+    """Each set operation's receipt (matched, already as asked, changed), and what does not hold.
+
+    An object picked must end as asked (a move by where it is now). When the edit only sets,
+    the whole board is compared by address: each object may differ only in the properties the
+    operations that picked it name; nothing else may change, appear or go (18 Nov review: the
+    first version passed the 206 thinned designator strokes, checking only what was named)."""
     old = {o['id']: o for o in before['objects']}
     new = {o['id']: o for o in after['objects']}
-    picked = {}
+    allowed: dict[str, set] = {}
     for op in change:
         if op['op'] == 'set':
-            picked.setdefault(op['kind'], set()).update(op['_ids'])
+            for uid in op['_ids']:
+                allowed.setdefault(uid, set()).update(k for key in op['to'] for k in _TOUCHES[key])
     receipts, problems = [], []
     for op in change:
         if op['op'] != 'set':
             continue
-        values = op['to']
-        holds = (lambda item: all(_holds(item, key, value) for key, value in values.items()))
-        already = [uid for uid in op['_ids'] if holds(old.get(uid))]
-        wrong = [uid for uid in op['_ids'] if not holds(new.get(uid))]
-        others = sorted(uid for uid, item in old.items() if item['kind'] == op['kind']
-                        and uid not in picked[op['kind']] and uid in new
-                        and any(item.get(key) != new[uid].get(key) for key in values
-                                if key not in ('at', 'move_by')))
+        moves = [key for key in op['to'] if key in ('at', 'move_by')]
+        holds = (lambda b, a: all(_holds(b, a, key, value) for key, value in op['to'].items()))
+        # A move is never "already as asked": it is checked against where the object was.
+        already = [uid for uid in op['_ids'] if not moves and holds(None, old.get(uid))]
+        wrong = [uid for uid in op['_ids'] if not holds(old.get(uid), new.get(uid))]
         receipts.append({'kind': op['kind'], 'matched': len(op['_ids']), 'already': len(already),
                          'changed': len(op['_ids']) - len(already) - len(wrong), 'not_as_asked': wrong[:20],
-                         'others_changed': others[:20]})
+                         'ids_changed': [uid for uid in op['_ids'] if uid not in already and uid not in wrong][:50]})
         if wrong:
             problems.append('%d %s not as asked, e.g. %s' % (len(wrong), op['kind'], ', '.join(wrong[:5])))
+    if all(op['op'] == 'set' or op['op'] in SCHEMATIC_OPS for op in change):
+        appeared, gone = sorted(set(new) - set(old)), sorted(set(old) - set(new))
+        others = []
+        for uid in sorted(set(old) & set(new)):
+            differing = {key for key in set(old[uid]) | set(new[uid])
+                         if not _close(old[uid].get(key), new[uid].get(key))}
+            # A part's own record lists its fields' values; a field's offset follows its place.
+            differing -= allowed.get(uid, set())
+            if differing:
+                others.append('%s (%s: %s)' % (uid, old[uid]['kind'], ', '.join(sorted(differing))))
+        if appeared or gone:
+            problems.append('objects appeared (%d) or went (%d), e.g. %s' % (
+                len(appeared), len(gone), ', '.join((appeared + gone)[:5])))
         if others:
-            problems.append('%d %s not picked changed too, e.g. %s' % (len(others), op['kind'], ', '.join(others[:5])))
+            problems.append('%d objects changed that no set asked for, e.g. %s' % (len(others), '; '.join(others[:5])))
+        for receipt in receipts:
+            receipt['others_changed'] = len(others) + len(appeared) + len(gone)
     return receipts, problems
 
 
@@ -861,7 +909,7 @@ def apply_change(change):
                 done["removed"] = gone
             elif kind == "set":
                 # The objects picked from the board index before the script (provider), by address.
-                done["changed"] = set_properties(b, op["_ids"], op["to"])
+                done["applied_to"] = set_properties(b, op["_ids"], op["to"])
                 if op["kind"] in ("via", "track", "arc"):
                     refill(b)
             elif kind == "add_teardrops":

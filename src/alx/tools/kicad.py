@@ -134,12 +134,12 @@ _ACTION_DEFINITIONS = (
         'pin straight into its plane: a short stub and one via at the pin); add_teardrops {skip_nets?, area?} '
         '(teardrops where tracks meet pads and vias and have none, shaped like the board\'s own; RF nets with '
         'curved tracks are skipped); set {kind: field|text|via|track|arc, where: {refs?, nets?, layer?: F|B|layer, '
-        'name?: field name, value?, footprint?, area?: [x0, y0, x1, y1], reads?: a text\'s exact words, ids?, all?: true}, '
+        'name?: field name, value?, footprint?, area?: [x0, y0, x1, y1], reads?: a text\'s exact words, ids?, named?: true, all?: true}, '
         'to: {...}} (Altium\'s Find Similar then Inspector: every object of that kind matching all of where, '
         'from select\'s reading of this revision, gets exactly the properties in to and nothing else. field and '
         'text: size (mm, or [height, width]), thickness, visible, angle, at [x, y] (one object), move_by [dx, dy]; '
         'text also text; via: size, drill; track and arc: width. E.g. every designator 0.5 mm: {kind: field, '
-        'where: {name: Reference}, to: {size: 0.5}}. The report\'s set receipt says matched, already as asked, '
+        'where: {name: Reference, named: true}, to: {size: 0.5}}; pass select\'s work_copy_revision with the edit. The report\'s set receipt says matched, already as asked, '
         'changed; an object not as asked, or one not picked that changed, undoes the edit); '
         'title_block {title?, date?, revision?, company?}; copper_shape {net, outline: [[x, y], ...], layer?} (a solid copper polygon on one net, kept inside '
         'a no-pour keep-out like a track, touching nothing of another net: a taper from wide feed copper to a '
@@ -234,7 +234,7 @@ _ACTION_DEFINITIONS = (
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
         obj({'work_copy_id': S, 'script': S, 'change': array(MAP), 'footprints': array(S), 'symbols': array(S),
-             'dry_run': B, 'revert_to': S, 'checks': B}, ('work_copy_id',)),
+             'dry_run': B, 'revert_to': S, 'checks': B, 'work_copy_revision': S}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
              'previewed': B}),
@@ -441,11 +441,13 @@ SELECT = CapabilityDefinition('select',
     'board), pad, track, arc, via, zone, keepout, teardrop, text, graphic. Filters: refs, nets, layer '
     '(F, B or a layer name), name (a field\'s name), value, footprint (LIBRARY:NAME or NAME), area '
     '[x0, y0, x1, y1] mm, reads (a board text\'s exact words), ids. count is how many match; objects '
-    'lists them up to limit (default 100). The same where in an edit\'s set changes exactly these.',
+    'lists them up to limit (default 100); named true leaves out parts without a designator (logos). '
+    'work_copy_revision is the revision read: pass it to the edit whose set uses the same where, '
+    'and the edit is refused if the copy has changed since.',
     obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'kind': S, 'refs': array(S), 'nets': array(S),
          'layer': S, 'name': S, 'value': S, 'footprint': S, 'area': array(N), 'reads': S, 'ids': array(S),
-         'limit': I}, ('kind',)),
-    obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S},
+         'named': B, 'limit': I}, ('kind',)),
+    obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S, 'work_copy_revision': S},
         ('kind', 'count', 'objects', 'truncated')),
     SideEffect.NONE, FAILURES)
 

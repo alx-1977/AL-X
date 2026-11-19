@@ -10,10 +10,14 @@ it. Selection (`select`) is plain filtering of that list, with no KiCad process.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+# Bumped whenever an object gains or changes a property, so a kept index of an older shape is
+# never used (18 Nov review: text angle was added while step-2 indexes of the same bytes remained).
+INDEX_VERSION = 2
 KINDS = ("part", "field", "pad", "track", "arc", "via", "zone", "keepout", "teardrop", "text", "graphic")
 
 
@@ -72,6 +76,35 @@ def _net(node, names):
     return names.get(values[0], values[0]) if values else ""
 
 
+def _absolute(origin, angle, offset):
+    """A footprint child's board position from its offset: KiCad's own rotation (checked against
+    pcbnew on P0009: 3433 fields and pads, no difference)."""
+    if len(offset) < 2 or len(origin) < 2:
+        return None
+    theta = math.radians(angle)
+    return [round(origin[0] + offset[0] * math.cos(theta) + offset[1] * math.sin(theta), 6),
+            round(origin[1] - offset[0] * math.sin(theta) + offset[1] * math.cos(theta), 6)]
+
+
+def _arc_length(start, mid, end):
+    """The length along an arc through three points (18 Nov review: it was the chord)."""
+    if not (len(start) == len(mid) == len(end) == 2):
+        return None
+    (ax, ay), (bx, by), (cx, cy) = start, mid, end
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return round(math.dist(start, end), 4)
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+    r = math.dist((ux, uy), start)
+    angles = [math.atan2(p[1] - uy, p[0] - ux) for p in (start, mid, end)]
+    sweep = (angles[2] - angles[0]) % (2 * math.pi)
+    through = (angles[1] - angles[0]) % (2 * math.pi)
+    if through > sweep:
+        sweep = 2 * math.pi - sweep
+    return round(r * sweep, 4)
+
+
 def board_index(board_text: str) -> dict[str, Any]:
     """Every object on the board as a flat list, with the board's nets."""
     from alx.providers.kicad import sexpr
@@ -94,9 +127,11 @@ def board_index(board_text: str) -> dict[str, Any]:
         objects.append(part)
         for name, prop in props.items():
             size, thickness = _font(prop)
+            offset = _numbers(prop, "at")[:2]
             objects.append({"id": _uuid(prop) or "field:%s:%s" % (ref, name), "kind": "field", "ref": ref,
                             "name": name, "value": str(prop.children[2]), "layer": _value(prop, "layer", default=""),
-                            "offset": _numbers(prop, "at")[:2], "angle": (_numbers(prop, "at")[2:3] or [0.0])[0],
+                            "offset": offset, "at": _absolute(at[:2], part["rotation"], offset),
+                            "angle": (_numbers(prop, "at")[2:3] or [0.0])[0],
                             "size": size, "thickness": thickness, "visible": not _hidden(prop)})
         for pad in footprint.named("pad"):
             number = str(pad.children[1]) if len(pad.children) > 1 else ""
@@ -105,6 +140,7 @@ def board_index(board_text: str) -> dict[str, Any]:
                             "type": str(pad.children[2]) if len(pad.children) > 2 else "",
                             "shape": str(pad.children[3]) if len(pad.children) > 3 else "",
                             "size": _numbers(pad, "size")[:2],
+                            "at": _absolute(at[:2], part["rotation"], _numbers(pad, "at")[:2]),
                             "layers": [str(v) for v in (pad.named("layers")[0].children[1:] if pad.named("layers") else ())]})
     for node in tree.children:
         if not hasattr(node, "named"):
@@ -115,7 +151,8 @@ def board_index(board_text: str) -> dict[str, Any]:
             objects.append({"id": _uuid(node), "kind": "track" if kind == "segment" else "arc",
                             "net": _net(node, names), "layer": _value(node, "layer", default=""),
                             "width": (_numbers(node, "width") or [None])[0], "start": start, "end": end,
-                            "length": round(math.dist(start, end), 4) if len(start) == len(end) == 2 else None})
+                            "length": (_arc_length(start, _numbers(node, "mid")[:2], end) if kind == "arc" else
+                                       round(math.dist(start, end), 4) if len(start) == len(end) == 2 else None)})
         elif kind == "via":
             objects.append({"id": _uuid(node), "kind": "via", "net": _net(node, names),
                             "at": _numbers(node, "at")[:2], "size": (_numbers(node, "size") or [None])[0],
@@ -125,7 +162,12 @@ def board_index(board_text: str) -> dict[str, Any]:
             layers = node.named("layers") or node.named("layer")
             attr = node.named("attr")
             teardrop = bool(attr and attr[0].named("teardrop"))
-            objects.append({"id": _uuid(node), "kind": ("teardrop" if teardrop else
+            # KiCad writes no uuid on teardrop zones: their address is their own text (18 Nov review).
+            # From its net, layer and outline, not its fill, which KiCad redraws on every save.
+            outline = "".join(board_text[p.start:p.end] for p in node.named("polygon"))
+            uid = _uuid(node) or "teardrop:" + hashlib.sha256(
+                (_net(node, names) + "|" + str(_value(node, "layer", default="")) + "|" + outline).encode()).hexdigest()[:16]
+            objects.append({"id": uid, "kind": ("teardrop" if teardrop else
                                                         "keepout" if node.named("keepout") else "zone"),
                             "net": _net(node, names), "name": _value(node, "name", default=""),
                             "layers": [str(v) for v in (layers[0].children[1:] if layers else ())]})
@@ -142,7 +184,16 @@ def board_index(board_text: str) -> dict[str, Any]:
                             "layer": _value(node, "layer", default=""),
                             "width": (_numbers(node.named("stroke")[0], "width") if node.named("stroke") else
                                       _numbers(node, "width") or [None])[0] if (node.named("stroke") or node.named("width")) else None})
-    return {"objects": objects, "nets": sorted(set(names.values()) - {""})}
+    # Every address is unique: a repeated one (two uuid-less pads with one number) gets #2, #3.
+    seen: dict[str, int] = {}
+    for o in objects:
+        count = seen.get(o["id"], 0) + 1
+        seen[o["id"]] = count
+        if count > 1:
+            o["id"] = "%s#%d" % (o["id"], count)
+    # KiCad 10 keeps no list of nets: they are the names its objects carry.
+    nets = set(names.values()) | {o.get("net") for o in objects if o.get("net")}
+    return {"version": INDEX_VERSION, "objects": objects, "nets": sorted(nets - {"", None})}
 
 
 def pad_nets(index: Mapping[str, Any]) -> dict[str, str]:
@@ -174,14 +225,14 @@ def _where(o: Mapping[str, Any]) -> list[float] | None:
 def select(index: Mapping[str, Any], kind: str, *, refs: Iterable[str] | None = None,
            nets: Iterable[str] | None = None, layer: str | None = None, name: str | None = None,
            value: str | None = None, footprint: str | None = None, area: Iterable[float] | None = None,
-           reads: str | None = None, ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
+           reads: str | None = None, ids: Iterable[str] | None = None, named: bool = False) -> list[dict[str, Any]]:
     """The objects of one kind that match every filter given; exact values, no meaning guessed.
 
     refs: designators (a field, pad or part of these parts); nets: exact net names; layer: an
     exact layer, or "F"/"B" for a side; name: a field's name (Reference, Value, MPN ...); value:
     a part's or field's exact value; footprint: LIBRARY:NAME or just NAME; area: [x0, y0, x1, y1]
-    mm (parts, vias, texts by position, tracks by midpoint); reads: what a board text reads, exactly.
-    """
+    mm (everything by its own board position, tracks by midpoint); reads: what a board text reads,
+    exactly; named: only parts with a designator, and their fields and pads (not logos)."""
     if kind not in KINDS:
         raise ValueError("kind is one of " + ", ".join(KINDS))
     refs = set(refs) if refs is not None else None
@@ -197,6 +248,8 @@ def select(index: Mapping[str, Any], kind: str, *, refs: Iterable[str] | None = 
         if o["kind"] != kind:
             continue
         if ids is not None and o["id"] not in ids:
+            continue
+        if named and not o.get("ref"):
             continue
         if refs is not None and o.get("ref") not in refs:
             continue
@@ -222,7 +275,7 @@ def select(index: Mapping[str, Any], kind: str, *, refs: Iterable[str] | None = 
         if reads is not None and o.get("text") != reads:
             continue
         if box is not None:
-            spot = _where(parts.get(o.get("ref"), o) if kind in ("field", "pad") else o)
+            spot = _where(o)
             if not spot or not (box[0] <= spot[0] <= box[2] and box[1] <= spot[1] <= box[3]):
                 continue
         found.append(o)
@@ -278,4 +331,4 @@ def netlist_nets(model: Mapping[str, Any]) -> dict[frozenset, str]:
     return found
 
 
-__all__ = ["KINDS", "board_index", "net_groups", "netlist_model", "netlist_nets", "pad_nets", "select"]
+__all__ = ["INDEX_VERSION", "KINDS", "board_index", "net_groups", "netlist_model", "netlist_nets", "pad_nets", "select"]

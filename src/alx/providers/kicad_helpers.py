@@ -971,7 +971,7 @@ def set_properties(board, ids, values):
     (Altium's Inspector, 18 Nov). size: text height (and width alike), or [height, width] mm,
     or a via's diameter; thickness: text stroke; visible; angle: degrees; at: [x, y] mm, one
     object only; move_by: [dx, dy] mm; text: what a board text reads; drill: via drill; width:
-    track width. Returns how many objects it changed."""
+    track width. Returns how many objects it was applied to (what changed is measured after)."""
     items = items_by_id(board)
     missing = [uid for uid in ids if uid not in items]
     if missing:

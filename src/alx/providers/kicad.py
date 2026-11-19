@@ -463,6 +463,10 @@ def flat_symbol(text, tree, node, name):
     return head + rest + '\n' + '\n'.join('\t\t' + piece for piece in added) + '\n\t)'
 
 
+# The shape of a kept netlist reading; bumped when netlist_model changes.
+NETLIST_VERSION = 1
+
+
 class KiCadProvider:
     # Set by the runtime: where drawings for looking go, and how KiCad's own
     # windows are opened and the screen captured (open_in_kicad).
@@ -802,19 +806,25 @@ class KiCadProvider:
         """Find Similar on a board: the objects of one kind matching every filter, from the board
         index of this revision (18 Nov). Changes nothing."""
         from alx.providers.kicad_index import select
-        board = self._board_for(arguments)
-        scratch = (self.work_root / arguments['work_copy_id'] / 'artifacts'
-                   if self._is_copy_id(arguments.get('work_copy_id')) else self.work_root / 'sections')
+        # footprint here filters parts; for _board_for it would mean a library preview (review).
+        board = self._board_for({key: value for key, value in arguments.items() if key != 'footprint'})
+        revision = None
+        if self._is_copy_id(arguments.get('work_copy_id')):
+            root, meta = self._load(arguments['work_copy_id'])
+            scratch, revision = root / 'artifacts', self._revision(root, meta)
+        else:
+            scratch = self.work_root / 'sections'
         index = self._board_index(board, scratch)
         filters = {key: arguments[key] for key in ('refs', 'nets', 'layer', 'name', 'value', 'footprint',
-                                                   'area', 'reads', 'ids') if arguments.get(key) is not None}
+                                                   'area', 'reads', 'ids', 'named') if arguments.get(key) is not None}
         try:
             found = select(index, arguments['kind'], **filters)
         except (TypeError, ValueError) as error:
             raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
         limit = max(1, min(int(arguments.get('limit') or 100), 500))
         return {'kind': arguments['kind'], 'count': len(found), 'objects': found[:limit],
-                'truncated': len(found) > limit, 'board': board.name}
+                'truncated': len(found) > limit, 'board': board.name,
+                **({'work_copy_revision': revision} if revision else {})}
 
     def _copper_in(self, board, arguments):
         """The copper inside a window, compactly: what a route has to reach (16 Nov: the
@@ -1325,6 +1335,10 @@ class KiCadProvider:
             if arguments.get('revert_to') is not None:
                 if arguments.get('change') is not None or arguments.get('script') is not None:
                     raise KiCadError('arguments_unusable', {'detail': 'revert_to goes alone, without change or script'})
+                # 18 Nov review: a "preview" of a revert reverted for real.
+                if arguments.get('dry_run'):
+                    raise KiCadError('arguments_unusable', {'detail': 'revert_to cannot be previewed; the '
+                                                            'history lists what each revision changed'})
                 return self._revert(arguments)
             change = plain(arguments.get('change'))
             if isinstance(change, list):
@@ -1352,7 +1366,10 @@ class KiCadProvider:
             root, meta = self._load(arguments['work_copy_id'])
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
-            revision_before = self._revision(root, meta)
+            # The revision she read (select's) is the one she changes (18 Nov review).
+            if (arguments.get('work_copy_revision') is not None
+                    and self._revision(root, meta) != arguments['work_copy_revision']):
+                raise KiCadError('work_copy_changed')
             project = root / 'project'
             if plan and any(op['op'] == 'sync_from_schematic' for op in change):
                 # The board takes the schematic as it now is (KiCad's Update PCB from
@@ -1508,7 +1525,9 @@ class KiCadProvider:
                             break
                     truncated = plan is None and (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
                     report.update(file_diffs=diffs, diffs_truncated=truncated)
-                    if truncated:
+                    if truncated and not dry_run:
+                        # A preview is undone, so it keeps no evidence (18 Nov review: it promised
+                        # before and after copies that the undo then deleted).
                         # The report is cut short: keep before and after copies and the
                         # complete diff as evidence that later edits never delete.
                         # The snapshot itself becomes the before copy, still under the taint.
@@ -1658,6 +1677,9 @@ class KiCadProvider:
         root, meta = self._load(arguments['work_copy_id'])
         if meta.get('taint'):
             raise KiCadError('work_copy_tainted')
+        if (arguments.get('work_copy_revision') is not None
+                and self._revision(root, meta) != arguments['work_copy_revision']):
+            raise KiCadError('work_copy_changed')
         history = root / 'history'
         entries = [(path, json.loads((path / 'manifest.json').read_text()))
                    for path in sorted(history.iterdir())] if history.is_dir() else []
@@ -2405,20 +2427,36 @@ class KiCadProvider:
             return None
         contents = {name: digest for name, digest in design_inventory(project).items()
                     if name.endswith(('.kicad_sch', '.kicad_pro', 'sym-lib-table'))}
-        key = hashlib.sha256(json.dumps(contents, sort_keys=True).encode()).hexdigest()[:32]
+        # The key is everything the result depends on: which root, every sheet, the reader's own
+        # version and KiCad's (18 Nov review: the root and versions were missing).
+        kicad = Path(self.settings.kicad_cli)
+        stamp = kicad.stat().st_mtime_ns if kicad.exists() else 0
+        key = hashlib.sha256(json.dumps([NETLIST_VERSION, schematic.name, contents, str(kicad), stamp],
+                                        sort_keys=True).encode()).hexdigest()[:32]
         scratch.mkdir(parents=True, exist_ok=True)
         kept = scratch / ('netlist-%s.json' % key)
         if kept.is_file():
-            with suppress(ValueError):
-                return json.loads(kept.read_text())
+            with suppress(ValueError, KeyError, TypeError):
+                model = json.loads(kept.read_text())
+                if model.get('version') == NETLIST_VERSION and isinstance(model.get('nets'), list):
+                    return model
         output = scratch / (uuid.uuid4().hex + '.net')
         try:
             self._run('sch', 'export', 'netlist', '--output', output, schematic)
-            model = netlist_model(output.read_text(errors='replace'))
+            model = dict(netlist_model(output.read_text(errors='replace')), version=NETLIST_VERSION)
         finally:
             output.unlink(missing_ok=True)
         kept.write_text(json.dumps(model))
+        self._keep_latest(scratch, 'netlist-')
         return model
+
+    @staticmethod
+    def _keep_latest(scratch, prefix, count=8):
+        """Kept readings are bounded: only the newest few of each kind stay (18 Nov review: they
+        grew inside the work copy, which _load holds to its size limit)."""
+        kept = sorted(scratch.glob(prefix + '*.json'), key=lambda path: path.stat().st_mtime_ns)
+        for old in kept[:-count]:
+            old.unlink(missing_ok=True)
 
     @staticmethod
     def _picked(index, op):
@@ -2448,16 +2486,20 @@ class KiCadProvider:
 
     def _board_index(self, board, scratch):
         """The one reading of a board (kicad_index), kept per board revision (18 Nov)."""
-        from alx.providers.kicad_index import board_index
+        from alx.providers.kicad_index import INDEX_VERSION, board_index
         text = board.read_text(errors='replace')
         key = hashlib.sha256(text.encode()).hexdigest()[:32]
         scratch.mkdir(parents=True, exist_ok=True)
         kept = scratch / ('index-%s.json' % key)
         if kept.is_file():
-            with suppress(ValueError):
-                return json.loads(kept.read_text())
+            with suppress(ValueError, KeyError, TypeError):
+                index = json.loads(kept.read_text())
+                # An index of an older shape is never used (18 Nov review).
+                if index.get('version') == INDEX_VERSION and isinstance(index.get('objects'), list):
+                    return index
         index = board_index(text)
         kept.write_text(json.dumps(index))
+        self._keep_latest(scratch, 'index-')
         return index
 
     def _pin_groups(self, root, meta):
