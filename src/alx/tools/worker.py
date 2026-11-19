@@ -43,7 +43,7 @@ WORKER_KICAD_ACTIONS = tuple(item.value for item in (
     KiCadAction.INSPECT, KiCadAction.CHECK, KiCadAction.EDIT, KiCadAction.READ_REFERENCE,
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.FETCH_DATASHEET, KiCadAction.RENDER, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.SELECT,
-    KiCadAction.FIND_PART))
+    KiCadAction.FIND_PART, KiCadAction.ADD_PART))
 WORKER_LIMITS: tuple[tuple[str, ArgumentAlternatives], ...] = (
     (MAIL, ((("action", MailAction.READ_ATTACHMENT.value),),)),
     (KICAD, tuple((("action", name),) for name in WORKER_KICAD_ACTIONS)),

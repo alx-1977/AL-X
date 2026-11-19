@@ -466,6 +466,25 @@ FIND_PART = CapabilityDefinition('find_part',
         ('count', 'parts', 'truncated')),
     SideEffect.NONE, FAILURES)
 
+ADD_PART = CapabilityDefinition('add_part',
+    'Add a part that is not in the FireFli library to a copy_library work copy (work_copy_id): the symbol '
+    'and footprint you chose for it, copied under its part number with its fields and a catalogue row. '
+    'library: FireFli library name (ICs, Semiconductors, Connectors, Misc, ...); mpn, manufacturer, '
+    'description, datasheet (URL), reference (letter: U, IC, D, Q, ...), lcsc (when JLC stocks it), note; '
+    'symbol_from: LIBRARY:NAME of a symbol whose pins and numbering match the datasheet (KiCad\'s own, e.g. '
+    '74xGxx:74LVC1G123, or a FireFli part); footprint_from: LIBRARY/NAME of the matching package footprint '
+    '(KiCad\'s IPC footprints, e.g. Package_DFN_QFN/..., or a FireFli one); share_footprint true uses that '
+    'FireFli footprint as it is (a reel variant of the same package). Check the pin numbering of symbol and '
+    'footprint against the datasheet first. Then measure the footprint against the datasheet land pattern '
+    'with check_kicad_layout, correct it if it differs, and write the library back with his approval.',
+    obj({'work_copy_id': S, 'library': S, 'mpn': S, 'manufacturer': S, 'description': S, 'datasheet': S,
+         'reference': S, 'lcsc': S, 'note': S, 'symbol_from': S, 'footprint_from': S, 'share_footprint': B},
+        ('work_copy_id', 'library', 'mpn', 'manufacturer', 'description', 'datasheet', 'reference',
+         'symbol_from', 'footprint_from')),
+    obj({'symbol': S, 'footprint': S, 'catalogue': MAP, 'work_copy_id': S, 'work_copy_revision': S, 'next': S},
+        ('symbol', 'footprint', 'work_copy_id', 'work_copy_revision')),
+    SideEffect.EFFECTFUL, FAILURES)
+
 INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
     "Read a work copy's schematic (work_copy_id), or one of his projects where it is (project_dir, "
     "e.g. P0020), as facts, changing nothing: every part (reference, value, "
@@ -560,6 +579,7 @@ class KiCadAction(str, Enum):
     INSPECT_SCHEMATIC = 'inspect_schematic'
     SELECT = 'select'
     FIND_PART = 'find_part'
+    ADD_PART = 'add_part'
     OPEN_IN_KICAD = 'open_in_kicad'
     TAKE_EDITS = 'take_edits'
 
@@ -584,6 +604,7 @@ CONTRACTS = {
     KiCadAction.INSPECT_SCHEMATIC: INSPECT_SCHEMATIC,
     KiCadAction.SELECT: SELECT,
     KiCadAction.FIND_PART: FIND_PART,
+    KiCadAction.ADD_PART: ADD_PART,
     KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
     KiCadAction.TAKE_EDITS: TAKE_EDITS,
 }
@@ -593,7 +614,7 @@ FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
     KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS,
-    KiCadAction.SELECT, KiCadAction.FIND_PART))
+    KiCadAction.SELECT, KiCadAction.FIND_PART, KiCadAction.ADD_PART))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -655,6 +676,7 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.INSPECT_SCHEMATIC: provider.inspect_schematic,
                KiCadAction.SELECT: provider.select,
                KiCadAction.FIND_PART: provider.find_part,
+               KiCadAction.ADD_PART: provider.add_part,
                KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad,
                KiCadAction.TAKE_EDITS: provider.take_edits}
 

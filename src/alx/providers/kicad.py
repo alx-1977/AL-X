@@ -211,7 +211,7 @@ def library_inventory(source, *, exclude=frozenset()):
                             and here / name not in exclude and not (here / name).is_symlink())
         for name in sorted(files):
             path = here / name
-            if path in exclude or path.is_symlink() or not is_design_file(name):
+            if path in exclude or path.is_symlink() or not _library_file(here, name):
                 continue
             size = path.stat().st_size
             total += size
@@ -221,6 +221,12 @@ def library_inventory(source, *, exclude=frozenset()):
     return result
 
 
+def _library_file(folder, name):
+    """A library's own file: KiCad's, or its catalogue (catalogue/*.csv: every part's maker, MPN
+    and LCSC number; 19 Nov 2026, add_part found no catalogue in its copy)."""
+    return is_design_file(name) or (Path(folder).name == 'catalogue' and name.endswith('.csv'))
+
+
 def _library_files(source):
     """A copytree ignore keeping only a library's KiCad files and their folders."""
     def ignore(directory, names):
@@ -228,7 +234,7 @@ def _library_files(source):
         # Links are never followed: they could lead to far more than the
         # inventory counted (review of #240).
         return [name for name in names if name in _LIBRARY_SKIPPED or (here / name).is_symlink() or (
-            not (here / name).is_dir() and not is_design_file(name))]
+            not (here / name).is_dir() and not _library_file(here, name))]
     return ignore
 
 
@@ -2411,6 +2417,86 @@ class KiCadProvider:
                                         for name in pretty],
                 'symbol_libraries': symbols}
 
+    def add_part(self, arguments):
+        """A new part in a library work copy (19 Nov 2026), from the symbol and footprint AL/X chose:
+        named after its part number, with FireFli's fields and a catalogue row. Changes only the copy;
+        the footprint is measured against the datasheet with check_kicad_layout before write_back."""
+        from alx.providers.kicad_library_parts import (part_name, renamed_footprint, renamed_symbol,
+                                                       with_catalogue_row, with_symbol)
+        with self._locked(arguments['work_copy_id']):
+            root, meta = self._load(arguments['work_copy_id'])
+            if not meta.get('library'):
+                raise KiCadError('arguments_unusable', {'detail': 'add_part needs a copy_library work copy'})
+            project = root / 'project'
+            library = str(arguments.get('library') or '').strip()
+            mpn = str(arguments.get('mpn') or '').strip()
+            symbol_from = str(arguments.get('symbol_from') or '').strip()
+            footprint_from = str(arguments.get('footprint_from') or '').strip().replace(':', '/', 1)
+            missing = [k for k, v in (('library', library), ('mpn', mpn), ('symbol_from', symbol_from),
+                                      ('footprint_from', footprint_from)) if not v]
+            for key in ('manufacturer', 'description', 'datasheet', 'reference'):
+                if not str(arguments.get(key) or '').strip():
+                    missing.append(key)
+            if missing:
+                raise KiCadError('arguments_unusable', {'detail': 'add_part needs ' + ', '.join(missing)})
+            stem = 'FireFli_' + re.sub(r'^FireFli_', '', library)
+            symbols_file = project / 'symbols' / (stem + '.kicad_sym')
+            pretty = project / 'footprints' / (stem + '.pretty')
+            catalogue = project / 'catalogue' / (stem + '.csv')
+            if not (symbols_file.is_file() and pretty.is_dir() and catalogue.is_file()):
+                raise KiCadError('arguments_unusable', {'detail': 'no library %s in this copy (symbols, footprints '
+                                                        'and catalogue)' % stem})
+            name = part_name(mpn)
+            library_text = symbols_file.read_text()
+            if ('(symbol %s' % json.dumps(name)) in library_text or (pretty / (name + '.kicad_mod')).exists() \
+                    or any(row.get('MPN') == mpn for row in csv.DictReader(io.StringIO(catalogue.read_text()))):
+                raise KiCadError('arguments_unusable', {'detail': '%s is already in %s: find_part gives its name'
+                                                        % (mpn, stem)})
+            # The chosen symbol and footprint, from KiCad's own libraries or his (this copy first).
+            source_symbol = symbol_from.split(':', 1)
+            if len(source_symbol) != 2:
+                raise KiCadError('arguments_unusable', {'detail': 'symbol_from is LIBRARY:NAME'})
+            symbol_block = self._library_parts([symbol_from], project, 'symbols')[symbol_from]
+            shared = bool(arguments.get('share_footprint'))
+            footprint_library, footprint_name = footprint_from.split('/', 1) if '/' in footprint_from else ('', '')
+            if not footprint_name:
+                raise KiCadError('arguments_unusable', {'detail': 'footprint_from is LIBRARY/NAME'})
+            if shared:
+                if footprint_library != stem or not (pretty / (footprint_name + '.kicad_mod')).is_file():
+                    raise KiCadError('arguments_unusable', {'detail': 'share_footprint names a footprint already '
+                                                            'in %s (a reel variant of the same package)' % stem})
+                footprint_field = '%s:%s' % (stem, footprint_name)
+            else:
+                local = project / 'footprints' / (footprint_library + '.pretty') / (footprint_name + '.kicad_mod')
+                footprint_text = (local.read_text() if local.is_file() else
+                                  self._library_parts([footprint_from], project, 'footprints')[footprint_from])
+                footprint_field = '%s:%s' % (stem, name)
+            fields = {'Reference': str(arguments['reference']).strip(), 'Value': mpn, 'Footprint': footprint_field,
+                      'Datasheet': str(arguments['datasheet']).strip(),
+                      'Description': str(arguments['description']).strip(),
+                      'Manufacturer': str(arguments['manufacturer']).strip(), 'MPN': mpn,
+                      'LCSC': str(arguments.get('lcsc') or '').strip()}
+            block = renamed_symbol(symbol_block, source_symbol[1], name, fields)
+            new_library = with_symbol(library_text, block)
+            try:
+                sexpr(new_library)
+                if not shared:
+                    new_footprint = renamed_footprint(footprint_text, name)
+                    sexpr(new_footprint)
+            except Exception as error:  # noqa: BLE001 - a part KiCad could not read is never written
+                raise KiCadError('arguments_unusable', {'detail': 'the new part does not read back: %s' % error})
+            row = {**fields, 'Note': str(arguments.get('note') or '').strip()}
+            new_catalogue = with_catalogue_row(catalogue.read_text(), row)
+            symbols_file.write_text(new_library)
+            if not shared:
+                (pretty / (name + '.kicad_mod')).write_text(new_footprint)
+            catalogue.write_text(new_catalogue)
+            return {'symbol': '%s:%s' % (stem, name), 'footprint': footprint_field, 'catalogue': row,
+                    'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': self._revision(root),
+                    'next': ('measure the footprint against the datasheet land pattern with check_kicad_layout '
+                             '(footprint %s/%s), correct it if it differs, then write_back with his approval'
+                             % (stem, footprint_field.split(':', 1)[1]))}
+
     def _library_parts(self, names, project, kind):
         """Library footprints or symbols an edit names, read from KiCad's own library tables.
 
@@ -3264,7 +3350,9 @@ class KiCadProvider:
         # Any KiCad design file may be written back: a part change edits the
         # schematic as well as the board (2026-11-13, C62 and C66). Anything
         # else, or a file removed, is still refused, and named.
-        other = [name for name in changed if not is_design_file(name)]
+        own = ((lambda name: _library_file(Path(name).parent, Path(name).name)) if meta.get('library')
+               else is_design_file)
+        other = [name for name in changed if not own(name)]
         missing = sorted(set(meta['hashes']) - set(copied))
         if other or missing:
             raise KiCadError('unsupported_project', {
