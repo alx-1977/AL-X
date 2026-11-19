@@ -371,7 +371,7 @@ FETCH_DATASHEET = CapabilityDefinition('fetch_datasheet',
     SideEffect.NONE, FAILURES)
 COPY_LIBRARY = CapabilityDefinition('copy_library',
     'A work copy of a KiCad library folder (the FireFli library: footprints and symbols), for '
-    'adding or correcting parts. Edit it with edit (argv[1] is a file in the copy folder; '
+    'adding or correcting parts; without library_dir it is the FireFli library. Edit it with edit (argv[1] is a file in the copy folder; '
     'footprints(lib), footprint(lib, name) and save_footprint(lib, fp) read and save '
     'footprints; symbol libraries are text, edit them as files), measure a footprint against '
     "its datasheet land pattern with check_layout (footprint LIBRARY/NAME, part FP), and "
@@ -379,7 +379,7 @@ COPY_LIBRARY = CapabilityDefinition('copy_library',
     'commit and push the library repository. Build a new part from the manufacturer\'s '
     'datasheet land pattern, never by copying an imported Altium footprint; compare the '
     'two and show him any difference rather than choosing.',
-    obj({'library_dir': S}),
+    obj({'library_dir': S}, ()),
     obj({'work_copy_id': S, 'work_copy_revision': S, 'footprint_libraries': array(MAP),
          'symbol_libraries': array(S)}),
     SideEffect.NONE, FAILURES)

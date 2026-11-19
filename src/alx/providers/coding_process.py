@@ -541,7 +541,7 @@ def run_kicad_engine(executable, arguments, directory, *, runner=None, timeout_s
     return run_coding_subprocess(
         subprocess.run if runner is None else runner, [str(executable), *map(str, arguments)],
         cwd=str(directory), shell=False, check=False, timeout=timeout_seconds,
-        capture_output=True, text=True, stop_descendants=True,
+        capture_output=True, text=True, errors='replace', stop_descendants=True,
     )
 
 

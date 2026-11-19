@@ -2451,7 +2451,10 @@ class KiCadProvider:
         like a project. On 2026-11-13 hand-written scripts on his library crashed
         three times outside every guard the tool has.
         """
-        source = self._source(arguments['library_dir'])
+        named = str(arguments.get('library_dir') or '').strip()
+        if named in ('', '${FIREFLI_KICAD_LIB}', '$FIREFLI_KICAD_LIB', 'FIREFLI_KICAD_LIB'):
+            named = str(self._firefli_library())
+        source = self._source(named)
         if source.is_relative_to(self.work_root) or self.work_root.is_relative_to(source) or not source.is_dir():
             raise KiCadError('path_denied' if source.is_dir() else 'unsupported_project')
         if source.suffix == '.pretty':
@@ -2577,7 +2580,18 @@ class KiCadProvider:
         with tempfile.TemporaryDirectory(prefix='ngspice-', dir=root) as temporary:
             (Path(temporary) / library_file).write_bytes(source)
             (Path(temporary) / 'check.cir').write_text(check_deck(library_file, model, str(spec['model'])))
-            log = self._engine('ngspice', ['-b', 'check.cir'], temporary)
+            # KiCad runs ngspice in PSpice/LTspice compatibility; makers' models are written for those
+            # (a Diodes Inc BSIM3 LEVEL=7 model loads only so, 19 Nov 2026).
+            (Path(temporary) / '.spiceinit').write_text('set ngbehavior=ltpsa\n')
+            try:
+                log = self._engine('ngspice', ['-b', 'check.cir'], temporary)
+            except KiCadError as error:
+                if error.args[0] != 'engine_failed':
+                    raise
+                log = str((error.recovery or {}).get('log') or 'ngspice stopped')
+                raise KiCadError('arguments_unusable', {
+                    'detail': 'ngspice could not load %s from %s' % (spec['model'], wanted),
+                    'log': log[-1500:]}) from error
         if re.search(r"(?i)\berror\b|unknown subckt|could not find|can't find|no such|unrecognized", log):
             raise KiCadError('arguments_unusable', {'detail': 'ngspice could not load %s from %s' % (spec['model'], wanted),
                                                     'log': log[-1500:]})

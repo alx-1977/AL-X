@@ -82,6 +82,14 @@ class ModelTests(unittest.TestCase):
             self.assertNotRegex(ok.stdout + ok.stderr, r"(?i)\berror\b")
             self.assertRegex(bad.stdout + bad.stderr, r"(?i)\berror\b|unknown subckt|could not find")
 
+    def test_engine_output_that_is_not_text_is_still_read(self) -> None:
+        # ngspice prints raw bytes in its device listing for some maker models (BSS84AK, 19 Nov 2026).
+        from alx.providers.coding_process import run_kicad_engine
+        with tempfile.TemporaryDirectory() as folder:
+            done = run_kicad_engine("/usr/bin/printf", ["ok \\231\\231 end"], folder)
+            self.assertIn("ok", done.stdout)
+            self.assertIn("end", done.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.config.settings import KiCadSettings  # noqa: E402
 from alx.providers.kicad import KiCadError, KiCadProvider, _non_library_parts, library_inventory  # noqa: E402
 from alx.providers.kicad_library_parts import part_name, with_catalogue_row  # noqa: E402
+from alx.providers.coding_process import run_kicad_engine  # noqa: E402
 from alx.providers.kicad_part_builder import PartSpecError, build_footprint, build_symbol  # noqa: E402
 
 KICAD = Path("/Applications/KiCad/KiCad.app/Contents")
@@ -155,6 +156,41 @@ class LibraryCopyTests(unittest.TestCase):
             with self.assertRaises(KiCadError) as refused:
                 provider.add_part({k: v for k, v in dict(part, mpn="OTHER").items() if k != "spice_none"})
             self.assertIn("spice", refused.exception.recovery["detail"])
+
+    @unittest.skipUnless(CLI.is_file() and Path("/opt/homebrew/bin/ngspice").is_file(), "KiCad or ngspice missing")
+    def test_a_pspice_dialect_model_from_the_inbox_is_accepted(self) -> None:
+        # A Diodes Inc 2N7002 model: BSIM3 written LEVEL=7, which ngspice loads only in KiCad's
+        # PSpice/LTspice compatibility (19 Nov 2026 it failed the check with no reason given).
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            root = self.library(folder)
+            inbox = folder / "inbox"
+            inbox.mkdir()
+            (inbox / "2N7002 (SPICE MODEL).LIB").write_text(
+                ".SUBCKT F2N7002 2 1 3\nRg 1 6 10\nM1 2 6 3 3 Bsim3 W=0.033 L=2.0e-6\n"
+                ".MODEL Bsim3 NMOS (LEVEL=7 VERSION=3.1 TOX=1000e-10 VTH0=1.937 U0=700)\n.ENDS\n")
+            settings = KiCadSettings.from_environment({"ALX_KICAD_DESIGN_ROOTS": str(folder / "designs")},
+                                                      folder / "storage")
+            provider = KiCadProvider(settings, lambda exe, args: subprocess.run([exe, *args], capture_output=True,
+                                                                                text=True))
+            provider.parts_inbox = inbox
+            provider.engine_paths = {"ngspice": Path("/opt/homebrew/bin/ngspice")}
+            provider.execute_engine = run_kicad_engine
+            provider._firefli_library = lambda: root
+            copy = provider.copy_library({"library_dir": "${FIREFLI_KICAD_LIB}"})
+            added = provider.add_part({
+                "work_copy_id": copy["work_copy_id"], "library": "ICs", "mpn": "2N7002", "manufacturer": "Diodes",
+                "description": "N-MOSFET", "datasheet": "https://example.test/2n7002.pdf", "reference": "Q",
+                "pins": [{"number": "1", "name": "G", "type": "input"}, {"number": "2", "name": "S", "type": "passive"},
+                         {"number": "3", "name": "D", "type": "passive"}],
+                "footprint": {"package": "pads", "body": [1, 0.6], "height": 0.37, "pads": [
+                    {"number": "1", "x": -0.35, "y": -0.225, "width": 0.4, "height": 0.25},
+                    {"number": "2", "x": -0.35, "y": 0.225, "width": 0.4, "height": 0.25},
+                    {"number": "3", "x": 0.35, "y": 0, "width": 0.4, "height": 0.7}]},
+                "spice": {"file": "2N7002 (SPICE MODEL).LIB", "model": "F2N7002", "pins": {"1": "1", "2": "3", "3": "2"}}})
+            self.assertEqual(added["symbol"], "FireFli_ICs:2N7002")
+            # Without a folder, the copy is of the FireFli library.
+            self.assertTrue(provider.copy_library({})["work_copy_id"])
 
 
 if __name__ == "__main__":
