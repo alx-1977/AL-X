@@ -62,6 +62,9 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name).resolve()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name).resolve()
         git(self.root, "init", "-q", "-b", "main")
         git(self.root, "config", "user.email", "test@example.test")
         git(self.root, "config", "user.name", "test")
@@ -93,7 +96,7 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         completed = subprocess.run(
             ["bash", "-c", 'source scripts/alx && runtime_code'],
             cwd=self.root, capture_output=True, text=True, check=True,
-            env=isolated_environment(),
+            env=isolated_environment(HOME=str(self.home)),
         )
         return Path(completed.stdout.strip())
 
@@ -130,10 +133,9 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         )
         self.assertEqual(git(self.root, "worktree", "list", "--porcelain").count("worktree "), 1)
 
-    def test_snapshot_lives_in_git_metadata_and_follows_main(self) -> None:
+    def test_snapshot_lives_outside_icloud_and_follows_main(self) -> None:
         first = self.runtime_code()
-        common = Path(git(self.root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-        self.assertEqual(first.parent, common / "alx-runtime")
+        self.assertEqual(first.parent, self.home / "Library/Application Support/alx/runtime-code")
         self.assertEqual(self.runtime_code(), first)
 
         # main moves on (a merge AL/X synchronised); the next start follows it.
@@ -149,9 +151,7 @@ class LauncherRunsCommittedMain(unittest.TestCase):
         self.assertTrue((first / "src/alx/probe.py").is_file())
 
     def test_only_its_own_unfinished_extraction_is_cleaned(self) -> None:
-        base = Path(
-            git(self.root, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        ) / "alx-runtime"
+        base = self.home / "Library/Application Support/alx/runtime-code"
         # Another start's extraction, still in progress.
         theirs = base / ".staging-999999"
         theirs.mkdir(parents=True)

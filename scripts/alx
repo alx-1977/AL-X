@@ -151,12 +151,13 @@ start() {
 # Nothing else is deleted: another AL/X process may still be running from an
 # older snapshot, and only this process's own unfinished extraction is ours.
 runtime_code() {
-  local sha common base target staging
+  local sha base target staging
   sha="$(git -C "$ROOT" rev-parse --verify --quiet 'refs/heads/main^{commit}')" \
     || { echo "no local main commit to run" >&2; return 1; }
-  common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)" \
-    || return 1
-  base="$common/alx-runtime"
+  # Outside the checkout: his Desktop is in iCloud, which moves older files
+  # off the Mac, and a restart onto a five-day-old snapshot spent three minutes
+  # fetching them back (19 Nov 2026). Application Support is never synced.
+  base="$HOME/Library/Application Support/alx/runtime-code"
   target="$base/$sha"
   if [ ! -e "$target" ]; then
     staging="$base/.staging-$$"
