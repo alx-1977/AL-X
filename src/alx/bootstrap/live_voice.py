@@ -966,6 +966,7 @@ async def run(repository_root: Path) -> None:
         restart_part = CodePart(build_self_restart_executors(
             lambda: running_commit_of(CODE_ROOT, repository_runtime.authority),
             repository_runtime.authority.main_commit,
+            repository_runtime.authority.main_contains,
             lambda: coding_runtime is None or coding_runtime.agent.reserve_for_restart(),
             lambda: coding_runtime is not None and coding_runtime.agent.release_restart(),
             lambda: start_restart(

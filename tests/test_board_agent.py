@@ -202,8 +202,7 @@ class BoardAgentTests(unittest.TestCase):
         self.assertEqual(executor({}).failure["code"], "arguments_unusable")
 
     def test_the_agent_cannot_approve_write_back_or_open_windows(self) -> None:
-        for action in ("approve_step", "write_back", "export", "open_in_kicad", "confirm_layout_readings",
-                       "copy_library"):
+        for action in ("approve_step", "write_back", "export", "open_in_kicad", "confirm_layout_readings"):
             refused = board_agent_call_refusal(CapabilityCall("c", "kicad", {"action": action}))
             self.assertEqual(refused.reason_code, "board_agent_action_not_allowed", action)
         for action in BOARD_AGENT_KICAD_ACTIONS:

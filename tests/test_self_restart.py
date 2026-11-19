@@ -21,10 +21,10 @@ from alx.tools.self_restart import build_self_restart_executors  # noqa: E402
 
 
 class RestartSelfTests(unittest.TestCase):
-    def build(self, running="a" * 40, main="b" * 40, coding=False, launch=None):
+    def build(self, running="a" * 40, main="b" * 40, coding=False, launch=None, merged=True):
         self.restarts, self.released = [], []
         return build_self_restart_executors(
-            lambda: running, lambda: main, lambda: not coding,
+            lambda: running, lambda: main, lambda commit: merged, lambda: not coding,
             lambda: self.released.append(1),
             launch or (lambda: self.restarts.append(1)), lambda: "call-1",
         )[CodeAction.RESTART]
@@ -41,6 +41,11 @@ class RestartSelfTests(unittest.TestCase):
         self.assertIs(result.state, CapabilityResultState.SUCCEEDED)
         self.assertEqual(result.values["main_commit"], "b" * 40)
         self.assertEqual(self.restarts, [1])
+
+    def test_a_branch_main_does_not_hold_is_not_dropped(self) -> None:
+        result = self.build(merged=False)({})
+        self.assertEqual(result.failure["code"], "running_unmerged_work")
+        self.assertEqual(self.restarts, [])
 
     def test_nothing_new_is_not_a_restart(self) -> None:
         result = self.build(main="a" * 40)({})

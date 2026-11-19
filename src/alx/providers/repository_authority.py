@@ -270,6 +270,16 @@ class RepositoryAuthority:
         """
         return self._sha_of("refs/heads/main")
 
+    def main_contains(self, commit: str) -> bool:
+        """Whether main already holds this commit; False when git cannot tell.
+
+        A process started from an unmerged branch is not behind main: restarting
+        it onto main drops that branch's work (19 Nov 2026).
+        """
+        if not valid_sha(commit):
+            return False
+        return self._run(("git", "merge-base", "--is-ancestor", commit, "refs/heads/main")).returncode == 0
+
     def _sha_of(self, revision: str) -> str:
         """What this revision points at now, or "" when it names nothing."""
         completed = self._run(("git", "rev-parse", "--verify", f"{revision}^{{commit}}"))
