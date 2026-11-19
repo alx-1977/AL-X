@@ -128,6 +128,24 @@ print("left", len(left), len(s.wires()), sorted(l["name"] for l in s.labels()))
             nets = self.netlist(folder)
             self.assertIn(frozenset({("R1", "2"), ("R2", "1")}), nets.values())
 
+    def test_removing_items_names_only_the_pins_wired_to_them(self):
+        """18 Nov review: remove_items excused every pin on the sheet for a small rectangle."""
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "t.kicad_sch").write_text(schematic())
+            done = self.run_script(folder, """
+s = sheet("t.kicad_sch")
+pins = {item["ref"]: item["pins"] for item in s.symbols()}
+r1, r2, r3 = pins["R1"], pins["R2"], pins["R3"]
+s.add_wire(r1["2"], (r1["2"][0], 115.57), (r2["1"][0], 115.57), r2["1"])
+s.add_wire(r3["2"], (r3["2"][0], 120.65))
+s.save()
+s = sheet("t.kicad_sch")
+mid = ((r1["2"][0] + r2["1"][0]) / 2, 115.57)
+s.remove_items([r1["2"][0] - 0.1, 115.4, r2["1"][0] + 0.1, 115.7], ("wire",))
+print("scope", s.removed_scope)
+""")
+            self.assertIn("scope ['R1.2', 'R2.1']", done)
+
     def test_a_swapped_symbol_keeps_its_place_and_gets_the_new_pins(self):
         capacitor = library_symbol("C")
         with tempfile.TemporaryDirectory() as folder:

@@ -176,7 +176,7 @@ _ACTION_DEFINITIONS = (
         'restore the copy; uncertain restoration taints it durably. When diffs_truncated, '
         'full_diff_path holds the complete diff and before_copy_path/after_copy_path copies '
         'from before and after the edit; later edits keep them. Read them with '
-        'read_reference_file, continuing long text with offset. evidence_full when retained '
+        'kicad read_reference, continuing long text with offset. evidence_full when retained '
         'evidence would exceed its own limit; the edit is then undone. Review the report before '
         'requesting write-back approval; a new revision invalidates previous approval. '
         'Tested helpers come before your script, in millimetres and degrees, layers as '
@@ -248,7 +248,8 @@ _ACTION_DEFINITIONS = (
         'and positions.csv (Designator, Mid X, Mid Y, Layer, Rotation) beside the zip, from KiCad\'s own '
         'exports, each part turned and shifted by its library footprint\'s JLC Rotation Offset and JLC '
         'Position Offset; the result lists lines without an LCSC number, corrected parts and bottom-side '
-        'parts (check those in JLC\'s preview). work_copy_revision: the revision the files must be of. '
+        'parts (check those in JLC\'s preview), and each correction used. work_copy_revision (required): the revision '
+        'the files must be of. '
         'output_dir is relative to the original project. Optional renames map generated file '
         'or layer names to exact manufacturer filenames; ambiguous mappings return. Optional '
         'zip_name adds a zip. Publication only adds files and refuses existing targets before '
@@ -257,7 +258,7 @@ _ACTION_DEFINITIONS = (
         'by final filename ignores Gerber comments and creation/generator metadata.',
         obj({'work_copy_id': S, 'output_dir': S, 'renames': MAP, 'zip_name': S, 'compare_with': S,
              'separate_drills': B, 'assembly': B, 'work_copy_revision': S},
-            ('work_copy_id', 'output_dir')),
+            ('work_copy_id', 'output_dir', 'work_copy_revision')),
         obj({'files_written': array(S), 'comparison': COMPARISON, 'staging_path': S, 'origin': S,
              'assembly': MAP}, ('files_written', 'comparison', 'staging_path', 'origin')),
         SideEffect.EFFECTFUL, FAILURES),

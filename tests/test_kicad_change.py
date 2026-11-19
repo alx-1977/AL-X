@@ -130,6 +130,14 @@ class ChangeShapeTests(unittest.TestCase):
         self.assertTrue(unmet(items, before, both, names, {}, [{"scope": ["R1.1", "R2.1"]}], names))
         # Removing what touches nothing parts no pins.
         self.assertTrue(unmet([{"op": "remove_dangling", "sheet": "a"}], before, only_a, names, {}, (), names))
+        # A net that vanishes altogether is caught too (18 Nov review: only pins still there were checked).
+        vanished = {"R1.1": ab, "R2.1": ab}
+        problems = unmet([{"op": "remove_dangling", "sheet": "a"}], before, vanished, names, {}, (), names)
+        self.assertTrue(any("R5.1 is gone from the schematic" in p for p in problems), problems)
+        # remove_items is excused only for the pins wired to what it removed, and their nets.
+        items = [{"op": "remove_items", "sheet": "a", "area": [0, 0, 1, 1]}]
+        self.assertEqual(unmet(items, before, only_a, names, {}, [{"scope": ["R1.1"]}], names), [])
+        self.assertTrue(unmet(items, before, both, names, {}, [{"scope": ["R1.1"]}], names))
 
     def test_the_board_can_take_the_schematic_in_one_operation(self):
         plan = validate_change([{"op": "sync_from_schematic", "place": {"C93": [170.0, 95.0, 90]}}])
@@ -462,6 +470,8 @@ class BriefInspectTests(unittest.TestCase):
             overview.assert_not_called()
             self.assertEqual(result["parts"], [{"ref": "C1", "value": "100n", "footprint": "Lib:C_0402"}])
             self.assertEqual(result["nets"], [])
+            with mock.patch.object(KiCadProvider, "_board_for", return_value=board):
+                self.assertEqual(provider.inspect({"work_copy_id": "w", "brief": True, "nets": ["NONE"]})["parts"], [])
 
 
 class KeptReadingTests(unittest.TestCase):
@@ -506,7 +516,11 @@ class OneWayToChangeACopyTests(unittest.TestCase):
                 if (isinstance(node, ast.Attribute) and node.attr == "_record_history"
                         and isinstance(node.ctx, ast.Load)):
                     owners.setdefault("history", set()).add(method.name)
-        self.assertEqual(owners, {"snapshot": {"_change"}, "history": {"_change"}})
+                # Any copy of a whole project tree back into place (18 Nov review: hierarchy's retry did).
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "copytree"
+                        and node.args and "snapshot" in ast.unparse(node.args[0])):
+                    owners.setdefault("restore", set()).add(method.name)
+        self.assertEqual(owners, {"snapshot": {"_change"}, "history": {"_change"}, "restore": {"_change"}})
         users = {method.name for method in provider.body if isinstance(method, ast.FunctionDef)
                  and "self._change(" in ast.get_source_segment(source, method)}
         self.assertEqual(users, {"edit", "make_hierarchical", "take_edits", "_revert"})

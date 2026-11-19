@@ -346,8 +346,8 @@ class KiCadTests(unittest.TestCase):
         (history / 'HEAD').write_text('ref: refs/heads/master')
         self.success('write_back_kicad_board', **self.write_args(fixed))
         # Exports cannot be put into it (review of #208), and it is never entered.
-        self.failure('path_denied', 'export_kicad_manufacturing',
-                     work_copy_id=checked['work_copy_id'], output_dir='.history/gerbers')
+        self.failure('path_denied', 'export_kicad_manufacturing', work_copy_id=checked['work_copy_id'],
+                     work_copy_revision=fixed['work_copy_revision'], output_dir='.history/gerbers')
         from unittest.mock import patch as patched
         import os as os_module
         entered = []
@@ -1192,6 +1192,15 @@ p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
         self.failure('work_copy_changed', 'approve_step', step='placement', work_copy_id=copy,
                      work_copy_revision=routed['work_copy_revision'])
 
+    def test_a_board_not_compared_with_its_schematic_is_not_written(self):
+        """18 Nov review: an unavailable comparison passed write-back as "nothing new"."""
+        (self.project / 'other.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        checked = self.check()
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        result = self.call('write_back_kicad_board', **self.write_args(edited))
+        self.assertEqual(result.failure['code'], 'schematic_board_differ')
+        self.assertIn('could not be compared', result.failure['recovery']['detail'])
+
     def test_an_unchanged_step_needs_no_approval_and_approving_it_records_nothing(self):
         # A schematic to show him: approval needs a view that actually opened (18 Nov review).
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
@@ -1501,6 +1510,39 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         moved = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.MOVE_U1)
         self.assertEqual(moved['steps']['placement'], 'needs_approval')
 
+    def test_history_is_kept_only_for_a_settled_change(self):
+        """18 Nov review: a history entry written before the taint was cleared stayed for a change
+        that was undone; a revert lost its history if it failed after deleting it."""
+        checked = self.check()
+        root = self.settings.work_root / checked['work_copy_id']
+        first = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        entries = (lambda: sorted(p.name for p in (root / 'history').iterdir()))
+        self.assertEqual(len(entries()), 1)
+        real_save = KiCadProvider._save_metadata
+        failures = [1]
+
+        def failing(provider, where, meta):
+            # Once: the save that would settle the change fails; the undo's own save works.
+            if not meta.get('taint') and failures:
+                failures.pop()
+                raise OSError('disk full')
+            return real_save(provider, where, meta)
+        with patch.object(KiCadProvider, '_save_metadata', failing):
+            failed = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                               script=EDIT_SCRIPT.replace("'(kicad_pcb ", "'(kicad_pcb  "))
+        self.assertEqual(failed.state, CapabilityResultState.FAILED)
+        self.assertEqual(len(entries()), 1)
+        # A revert that fails puts its history back.
+        with patch.object(KiCadProvider, '_board_drc', side_effect=KiCadError('cli_failed')):
+            reverted = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
+        self.assertEqual(reverted.state, CapabilityResultState.FAILED)
+        self.assertEqual(len(entries()), 1)
+        self.assertEqual(KiCadProvider(self.settings, self.execute_cli)._revision(root), first['work_copy_revision'])
+        # A preview of a revert is refused, never carried out.
+        self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                     revert_to='start', dry_run=True)
+        self.assertEqual(len(entries()), 1)
+
     def test_failed_edit_restores_entire_copy_and_absent_files(self):
         checked = self.check()
         root = self.settings.work_root / checked['work_copy_id']
@@ -1579,7 +1621,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         import zipfile
         runtime = self.manufacturing_runtime()
         checked = self.check()
-        args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/test',
+        args = {'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production/test',
                 'renames': {'User.1': 'pib_0.15.gbr', 'test-F_Cu.gbr': 'top.gbr'}, 'zip_name': 'maker.zip'}
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
@@ -1609,7 +1651,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
                         (target / name).write_text('M48\nT1C0.25\n')
                 return SimpleNamespace(returncode=0)
             runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
-            args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/' + str(option),
+            args = {'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production/' + str(option),
                     'renames': {'F.Cu': 'top.gbr'}}
             if option is not None:
                 args['separate_drills'] = option
@@ -1658,7 +1700,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
             return SimpleNamespace(returncode=0)
         runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
         checked = self.check()
-        args = {'work_copy_id': checked['work_copy_id'], 'output_dir': 'production/jlc', 'zip_name': 'gerbers.zip',
+        args = {'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production/jlc', 'zip_name': 'gerbers.zip',
                 'assembly': True, 'work_copy_revision': checked['work_copy_revision']}
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', args)
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
@@ -1695,7 +1737,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         checked = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(self.project)})
         self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-            'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production/jlc', 'zip_name': 'g.zip'})
+            'work_copy_id': checked.values['work_copy_id'], 'work_copy_revision': checked.values['work_copy_revision'], 'output_dir': 'production/jlc', 'zip_name': 'g.zip'})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         self.assertTrue((self.project / 'production/jlc/g.zip').is_file())
 
@@ -1732,11 +1774,11 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         for output, renames in (('../escape', {}), ('/absolute', {}), ('production', {'User.1': '../escape'}),
                                 ('production', {'User.1': 'test-F_Cu.gbr'})):
             result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-                'work_copy_id': checked['work_copy_id'], 'output_dir': output, 'renames': renames})
+                'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': output, 'renames': renames})
             self.assertEqual(result.state, CapabilityResultState.FAILED)
         (self.project / 'linked').symlink_to(self.root)
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-            'work_copy_id': checked['work_copy_id'], 'output_dir': 'linked/production'})
+            'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'linked/production'})
         self.assertEqual(result.failure['code'], 'path_denied')
 
     def test_references_text_zip_folder_pdf_image_altium_and_icloud(self):
@@ -1817,7 +1859,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         edited = self.fixed()
         runtime = self.manufacturing_runtime()
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-            'work_copy_id': edited['work_copy_id'], 'output_dir': 'production'})
+            'work_copy_id': edited['work_copy_id'], 'work_copy_revision': edited['work_copy_revision'], 'output_dir': 'production'})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
         self.success('write_back_kicad_board', **self.write_args(edited))
         self.assertIn('(layer "User.1")', (self.project / 'test.kicad_pcb').read_text())
@@ -1938,7 +1980,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
             return SimpleNamespace(returncode=0)
         runtime = build_kicad_runtime(lambda: 'export', self.environment, self.storage, runner)
         result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-            'work_copy_id': checked['work_copy_id'], 'output_dir': 'production',
+            'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production',
             'renames': {'test-job.gbrjob': 'maker.json', 'test-F_Cu.gbr': 'top.gbr',
                         'test-B_Cu.gbr': 'bottom.gbrjob'}})
         self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
@@ -1958,7 +2000,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
             return real_fsync(fd)
         with patch('alx.providers.kicad.os.fsync', fsync):
             result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-                'work_copy_id': checked['work_copy_id'], 'output_dir': 'production'})
+                'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production'})
         self.assertEqual(result.state, CapabilityResultState.FAILED)
         metadata = json.loads((self.storage / 'kicad' / checked['work_copy_id'] / 'metadata.json').read_text())
         self.assertEqual(len(metadata['exports']), 1)

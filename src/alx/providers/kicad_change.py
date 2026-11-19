@@ -289,7 +289,10 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
             scope.update(pin for pin, name in before_names.items() if _short(name) in nets)
         elif op['op'] == 'remove_items':
             done = change_result[index] if index < len(change_result) else {}
-            scope.update((done or {}).get('scope') or ())
+            # The pins wired to what went, and every pin that shared a net with them before.
+            for pin in (done or {}).get('scope') or ():
+                scope.add(pin)
+                scope.update(before.get(pin, ()))
     groups: dict[str, set] = {}
     # A part the change adds has pins only afterwards; what the change joins them to counts
     # (16 Nov: the added C93 was reported as joined unasked to L6, C44 and GND).
@@ -297,6 +300,11 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
         if pin.split('.')[0] not in free and (pin in before or pin in parent):
             groups.setdefault(find(pin), set()).add(pin)
     problems = []
+    # A pin that is gone without its part being removed or swapped (18 Nov review: only pins
+    # still there were looked at, so a whole net could vanish unseen).
+    for pin in sorted(set(before) - set(after)):
+        if pin.split('.')[0] not in free:
+            problems.append('%s is gone from the schematic, but its part was not removed' % pin)
     for pin, partners in sorted(after.items()):
         if pin.split('.')[0] in free or pin not in before:
             continue
@@ -547,11 +555,10 @@ def apply_change(change):
             elif kind == "remove_labels":
                 done["removed"] = s.remove_labels(op["nets"], op.get("area"))
             elif kind == "remove_items":
-                # Its scope: the pins on this sheet, the only ones its wiring can part.
-                done["scope"] = sorted("%s.%s" % (item["ref"], number) for item in s.symbols()
-                                       for number in item["pins"])
                 done["removed"] = s.remove_items(op["area"], tuple(op.get("kinds") or
                                                               ("wire", "label", "no_connect", "junction", "power")))
+                # Its scope: the pins wired to what it removed (their nets are added by the check).
+                done["scope"] = s.removed_scope
             elif kind == "remove_dangling":
                 done["removed"] = s.remove_dangling(op.get("area"))
             elif kind == "unwire":

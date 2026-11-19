@@ -1164,9 +1164,40 @@ class Sheet:
                     cut.append(node)
                     points |= set(self._symbol_pins(node, libs).values())
                     counts["power"] = counts.get("power", 0) + 1
+        # What the removal can part: the pins wired to what goes, found before it goes (18 Nov
+        # review: every pin on the sheet was excused for a small rectangle).
+        self.removed_scope = self.pins_touching(points)
         self._cut([spans[id(n)] for n in cut])
         self.tidy(points)
         return counts
+
+    def pins_touching(self, points):
+        """Symbol pins (REF.NUMBER, not power symbols) wired on this sheet to any of these points."""
+        root, _ = self._tree()
+        libs = self._libs(root)
+
+        def on(p, a, b):
+            cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+            return (abs(cross) < 1e-6 and min(a[0], b[0]) - 1e-6 <= p[0] <= max(a[0], b[0]) + 1e-6
+                    and min(a[1], b[1]) - 1e-6 <= p[1] <= max(a[1], b[1]) + 1e-6)
+        segments = [seg for wire in self.wires() for seg in zip(wire, wire[1:])]
+        reach, used, grown = set(points), set(), True
+        while grown:
+            grown = False
+            for index, (a, b) in enumerate(segments):
+                if index not in used and any(on(p, a, b) for p in reach):
+                    used.add(index)
+                    reach |= {a, b}
+                    grown = True
+        found = set()
+        for symbol in _children(root, "symbol"):
+            ref = self._ref(symbol)
+            if not ref or ref.startswith("#"):
+                continue
+            for number, point in self._symbol_pins(symbol, libs).items():
+                if point in reach or any(on(point, *segments[i]) for i in used):
+                    found.add("%s.%s" % (ref, number))
+        return sorted(found)
 
     def remove_dangling(self, area=None):
         """Remove what connects to nothing (inside area when given): no-connects off any pin,
@@ -1457,6 +1488,4 @@ def sheets():
 # ---- end of schematic helpers ----
 '''
 
-NAMES = ("sheet", "sheets")
-
-__all__ = ["NAMES", "SCHEMATIC_HELPERS"]
+__all__ = ["SCHEMATIC_HELPERS"]

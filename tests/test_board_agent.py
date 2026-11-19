@@ -205,6 +205,18 @@ class ViewerTests(unittest.TestCase):
             viewer.terminate()
         kill.assert_called_once()
 
+    def test_a_window_that_never_opened_is_a_failure(self):
+        """18 Nov review: a failed launch returned an empty viewer and counted as shown."""
+        from types import SimpleNamespace
+        from alx.providers import coding_process
+        failed = (lambda argv, **kwargs: SimpleNamespace(returncode=1 if argv[0] == "/usr/bin/open" else 0,
+                                                         stdout="", stderr="no application"))
+        with self.assertRaisesRegex(OSError, "did not open"):
+            coding_process.start_kicad_viewer("/Apps/pcbnew.app", "/tmp/x.kicad_pcb", runner=failed, settle_seconds=1)
+        silent = (lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+        with self.assertRaisesRegex(OSError, "no KiCad window appeared"):
+            coding_process.start_kicad_viewer("/Apps/pcbnew.app", "/tmp/x.kicad_pcb", runner=silent, settle_seconds=0.3)
+
 
 if __name__ == "__main__":
     unittest.main()

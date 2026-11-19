@@ -785,9 +785,15 @@ class KiCadProvider:
             index = self._board_index(board, self.work_root / 'sections')
             refs = set(arguments.get('refs') or ()) or None
             needle = str(arguments.get('contains') or '').lower()
+            # The same filters as the full reading, then only the names (18 Nov review: nets were
+            # ignored and fields not searched).
+            on_nets = ({o['ref'] for o in select(index, 'pad', nets=arguments['nets'])}
+                       if arguments.get('nets') else None)
             parts = [{'ref': o['ref'], 'value': o['value'], 'footprint': o['footprint']}
                      for o in select(index, 'part', refs=refs)
-                     if not needle or needle in ' '.join((o['ref'], o['value'], o['footprint'])).lower()]
+                     if (on_nets is None or o['ref'] in on_nets)
+                     and (not needle or needle in ' '.join([o['ref'], o['value'], o['footprint'],
+                                                            *map(str, o['fields'].values())]).lower())]
             limit = max(1, min(int(arguments.get('limit') or 300), 1000))
             return {'board': {'file': board.name}, 'parts': parts[:limit], 'nets': [], 'zones': [],
                     'truncated': {'parts': len(parts) > limit}}
@@ -1034,8 +1040,7 @@ class KiCadProvider:
                     if not differing or not loose or split - loose:
                         break
                     keep |= loose
-                    shutil.rmtree(project)
-                    shutil.copytree(copy_change.snapshot, project)
+                    copy_change.reset()
                 result = dict(result, connected=pins['connected'], carried_by_buses=pins.get('carried_by_buses', []),
                               reason=result['reason'] or pins['reason'])
                 if 'top_sheet_crossings' in pins:
@@ -1605,9 +1610,14 @@ class KiCadProvider:
             shutil.rmtree(snapshot, ignore_errors=True)
             raise KiCadError('verification_failed')
         self._save_metadata(root, dict(meta, taint=uuid.uuid4().hex))
+        def reset():
+            """Back to how the copy was when the change began, inside it (a retry starts again)."""
+            shutil.rmtree(project)
+            shutil.copytree(snapshot, project)
         change = SimpleNamespace(project=project, snapshot=snapshot, original=original, meta=meta,
-                                 keep_snapshot_at=None, changed=[], revision=revision_before)
-        settled = False
+                                 keep_snapshot_at=None, changed=[], revision=revision_before,
+                                 on_commit=[], on_rollback=[], reset=reset)
+        settled, pending = False, None
         try:
             yield change
             before_files = design_inventory(snapshot)
@@ -1616,16 +1626,28 @@ class KiCadProvider:
                                     if before_files.get(name) != current.get(name))
             change.revision = self._revision(root, change.meta)
             if change.changed and record:
-                self._record_history(root, snapshot, original, change.changed, revision_before, change.revision)
+                pending = self._record_history(root, snapshot, original, change.changed, revision_before,
+                                               change.revision)
             if change.keep_snapshot_at is not None:
                 snapshot.rename(change.keep_snapshot_at)
                 change.snapshot = change.keep_snapshot_at
             # The pending taint is cleared last; nothing after it can fail the change.
             self._save_metadata(root, change.meta)
             settled = True
+            # Then its history is published and what it retired goes; a failure here leaves the
+            # copy settled with one kept edit fewer, never a kept edit it does not have.
+            with suppress(OSError):
+                if pending is not None:
+                    self._publish_history(root, pending)
+                for action in change.on_commit:
+                    action()
         except BaseException as error:
             restored = False
+            if pending is not None:
+                shutil.rmtree(pending, ignore_errors=True)
             try:
+                for action in reversed(change.on_rollback):
+                    action()
                 # Never follow a link a script made while restoring.
                 if project.is_symlink():
                     project.unlink()
@@ -1650,22 +1672,37 @@ class KiCadProvider:
 
     HISTORY_KEPT = 60
 
+    @staticmethod
+    def _history_entries(root):
+        """The kept edits in order, never one still being written (a .pending entry)."""
+        history = root / 'history'
+        return sorted(path for path in history.iterdir()
+                      if not path.name.startswith('.')) if history.is_dir() else []
+
     def _record_history(self, root, snapshot, original, changed, before, after):
-        """Keep the files an edit changed as they were before it, to go back to."""
+        """Write the files an edit changed, as they were before it, to a pending entry; it becomes
+        a kept edit only when the change is settled (18 Nov review: an entry written before the
+        taint was cleared stayed for a change that was then undone, and pruned a good one)."""
         history = root / 'history'
         history.mkdir(exist_ok=True)
-        entries = sorted(history.iterdir())
-        number = int(entries[-1].name.split('-', 1)[0]) + 1 if entries else 1
-        entry = history / ('%05d-%s' % (number, uuid.uuid4().hex[:8]))
-        (entry / 'files').mkdir(parents=True)
+        pending = history / ('.pending-' + uuid.uuid4().hex)
+        (pending / 'files').mkdir(parents=True)
         created = [name for name in changed if name not in original]
         for name in changed:
             if name in original:
-                (entry / 'files' / name).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(snapshot / name, entry / 'files' / name)
-        (entry / 'manifest.json').write_text(json.dumps(
+                (pending / 'files' / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(snapshot / name, pending / 'files' / name)
+        (pending / 'manifest.json').write_text(json.dumps(
             {'before': before, 'after': after, 'changed': changed, 'created': created}))
-        for old in sorted(history.iterdir())[:-self.HISTORY_KEPT]:
+        return pending
+
+    def _publish_history(self, root, pending):
+        """A settled change's pending entry becomes the newest kept edit; the oldest beyond the
+        limit go."""
+        entries = self._history_entries(root)
+        number = int(entries[-1].name.split('-', 1)[0]) + 1 if entries else 1
+        pending.rename(root / 'history' / ('%05d-%s' % (number, uuid.uuid4().hex[:8])))
+        for old in self._history_entries(root)[:-self.HISTORY_KEPT]:
             shutil.rmtree(old, ignore_errors=True)
 
     def _revert(self, arguments):
@@ -1680,9 +1717,7 @@ class KiCadProvider:
         if (arguments.get('work_copy_revision') is not None
                 and self._revision(root, meta) != arguments['work_copy_revision']):
             raise KiCadError('work_copy_changed')
-        history = root / 'history'
-        entries = [(path, json.loads((path / 'manifest.json').read_text()))
-                   for path in sorted(history.iterdir())] if history.is_dir() else []
+        entries = [(path, json.loads((path / 'manifest.json').read_text())) for path in self._history_entries(root)]
         current = self._revision(root, meta)
         if not entries or entries[-1][1]['after'] != current:
             raise KiCadError('arguments_unusable', {'detail': 'this copy has no kept edits to go back over'})
@@ -1701,7 +1736,20 @@ class KiCadProvider:
         facts_before = board_facts(board_text())
         # Inside one change: if putting the files back or reporting on them fails, the copy is as
         # it was and so is its history (18 Nov review: history went before the reports finished).
-        with self._change(root, meta, record=False):
+        with self._change(root, meta, record=False) as copy_change:
+            # The edits gone back over leave history with the change: set aside now, put back if
+            # it fails, removed only once it is settled (18 Nov review).
+            retired = root / 'history' / ('.retired-' + uuid.uuid4().hex)
+            retired.mkdir()
+            for path, _ in entries[index:]:
+                path.rename(retired / path.name)
+            # Rollback runs these last first: put the entries back, then drop the empty holder.
+            copy_change.on_rollback.append(lambda: shutil.rmtree(retired, ignore_errors=True))
+            copy_change.on_rollback.append(lambda: [moved.rename(root / 'history' / moved.name)
+                                                    for moved in sorted(retired.iterdir())])
+            copy_change.on_commit.append(lambda: shutil.rmtree(retired, ignore_errors=True))
+            entries = [(retired / path.name, manifest) if i >= index else (path, manifest)
+                       for i, (path, manifest) in enumerate(entries)]
             changed = set()
             for path, manifest in reversed(entries[index:]):
                 for name in manifest['changed']:
@@ -1724,9 +1772,6 @@ class KiCadProvider:
                 totals = self._board_drc(root, meta)[0]
                 if any(name.endswith('.kicad_sch') for name in changed):
                     report['erc'] = self._erc(root, meta, against_original=True)
-        # The edits gone back over leave history only once the copy is settled.
-        for path, _ in entries[index:]:
-            shutil.rmtree(path, ignore_errors=True)
         return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision, 'stdout': '',
                 'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps,
                 'previewed': False}
@@ -1750,8 +1795,7 @@ class KiCadProvider:
             self._source(output)
             # The files are of the revision she names (18 Nov review: the copy could change
             # between the request and the export).
-            if (arguments.get('work_copy_revision') is not None
-                    and self._revision(root, meta) != arguments['work_copy_revision']):
+            if self._revision(root, meta) != arguments.get('work_copy_revision'):
                 raise KiCadError('work_copy_changed')
             staging = root / 'artifacts' / ('manufacturing-' + uuid.uuid4().hex)
             staging.mkdir(parents=True)
@@ -1764,6 +1808,10 @@ class KiCadProvider:
             aux = re.search(r'\(aux_axis_origin ([-0-9.]+) ([-0-9.]+)\)', board_text)
             place_origin = bool(aux and (float(aux.group(1)), float(aux.group(2))) != (0.0, 0.0))
             plotted = board
+            if place_origin and '(useauxorigin ' not in board_text:
+                # 18 Nov review: the rewrite silently did nothing, while drill and positions moved.
+                raise KiCadError('unsupported_project', {'detail': 'the board has a drill/place origin but no '
+                                                         'plot setting for it; save the board once in KiCad'})
             if place_origin:
                 plotted = staging.parent / ('plot-' + uuid.uuid4().hex) / board.name
                 plotted.parent.mkdir()
@@ -1829,7 +1877,7 @@ class KiCadProvider:
             assembly = None
             if arguments.get('assembly'):
                 # BOM and positions go beside the zip, not in it: JLC takes them separately.
-                assembly, assembly_files = self._assembly_files(root, meta, board, board_text, place_origin)
+                assembly, assembly_files = self._assembly_files(root, meta, board, place_origin)
                 for name, data in assembly_files.items():
                     if unicodedata.normalize('NFC', name).casefold() in filename_keys or name in files:
                         raise KiCadError('rename_ambiguous')
@@ -1892,7 +1940,7 @@ class KiCadProvider:
                     'origin': 'drill/place origin' if place_origin else 'absolute',
                     **({'assembly': assembly} if assembly is not None else {})}
 
-    def _assembly_files(self, root, meta, board, board_text, place_origin):
+    def _assembly_files(self, root, meta, board, place_origin):
         """JLC's BOM and positions, from KiCad's own exports of this copy (18 Nov), with each
         part's JLC correction read from its library footprint."""
         from alx.providers.kicad_assembly import BOM_FIELDS, BOM_GROUP, BOM_LABELS, correction, jlc_bom, jlc_positions
@@ -1925,6 +1973,7 @@ class KiCadProvider:
         bom_refs = {ref for line in csv.DictReader(io.StringIO(bom)) for ref in line['Designator'].split(',')}
         placed = {line['Designator'] for line in csv.DictReader(io.StringIO(positions))}
         return ({'bom_lines': bom.count('\n') - 1, 'missing_lcsc': missing, **report,
+                 'corrections_used': {fp: {'rotation': fix[0], 'offset': list(fix[1])} for fp, fix in fixes.items()},
                  'footprints_not_in_library': sorted(unread)[:30],
                  'in_bom_not_placed': sorted(bom_refs - placed)[:30],
                  'placed_not_in_bom': sorted(placed - bom_refs)[:30]},
@@ -2588,10 +2637,14 @@ class KiCadProvider:
         schematic to compare, which is not the same as no differences (18 Nov review: the flag
         was tested after None had become an empty list, so it always read True)."""
         now = self._parity(root, meta)
-        base = (self._baseline(root) or {}).get('parity') or []
+        base = (self._baseline(root) or {}).get('parity')
         found = now or []
+        if base is None:
+            # No comparison on his original: nothing can be called fixed, and everything found now
+            # is new (18 Nov review: an unavailable baseline became an empty one).
+            return {'new': sorted(set(found)), 'fixed': 0, 'available': now is not None, 'baseline': False}
         return {'new': sorted(set(found) - set(base)), 'fixed': len(set(base) - set(found)),
-                'available': now is not None}
+                'available': now is not None, 'baseline': True}
 
     def _new_faults(self, root, signatures):
         """DRC errors and unconnected items found now that his original did not have."""
@@ -2828,6 +2881,11 @@ class KiCadProvider:
             raise KiCadError('arguments_unusable', {'detail': 'what is schematic or board'})
         if self.open_viewer is None or self.capture_screen is None:
             raise KiCadError('unavailable')
+        # Under the copy's lock, so the view shows exactly the revision it records (18 Nov review).
+        with self._locked(arguments['work_copy_id']):
+            return self._open_view(arguments, what)
+
+    def _open_view(self, arguments, what):
         root, meta = self._load(arguments['work_copy_id'])
         if meta.get('library'):
             raise KiCadError('arguments_unusable', {'detail': 'a library copy has no board or schematic'})
@@ -2861,8 +2919,11 @@ class KiCadProvider:
             raise KiCadError('unsupported_project', {'detail': 'no %s to open' % what})
         view = {'stamp': stamp, 'revision': self._revision(root, meta), 'what': what,
                 'files': design_inventory(views / 'amended')}
-        for index, path in enumerate(files):
-            self._viewers.append(self.open_viewer(what, path, index))
+        try:
+            for index, path in enumerate(files):
+                self._viewers.append(self.open_viewer(what, path, index))
+        except OSError as error:
+            raise KiCadError('unavailable', {'detail': 'KiCad did not open: %s' % error}) from error
         # Recorded only once the windows opened, with what they show (18 Nov review: a failed
         # launch, or a schematic view, could count as having shown him the board).
         meta = dict(meta, view=view)
@@ -2882,15 +2943,16 @@ class KiCadProvider:
         into her copy as one kept edit (17 Nov: he placed parts his way and wanted her to go on
         from there). Only while her copy is as it was when the window opened."""
         work_copy_id = arguments['work_copy_id']
-        root, meta = self._load(work_copy_id)
-        if meta.get('taint'):
-            raise KiCadError('work_copy_tainted')
-        view = meta.get('view') or {}
-        folder = root / 'views' / str(view.get('stamp', '')) / 'amended'
-        if not view or not folder.is_dir():
-            raise KiCadError('arguments_unusable', {'detail': 'no KiCad window of this copy was opened for him; '
-                                                    'open_in_kicad first'})
+        # Everything read under the lock (18 Nov review: the metadata was loaded before it).
         with self._locked(work_copy_id):
+            root, meta = self._load(work_copy_id)
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            view = meta.get('view') or {}
+            folder = root / 'views' / str(view.get('stamp', '')) / 'amended'
+            if not view or not folder.is_dir():
+                raise KiCadError('arguments_unusable', {'detail': 'no KiCad window of this copy was opened for him; '
+                                                        'open_in_kicad first'})
             before = self._revision(root, meta)
             if before != view.get('revision'):
                 raise KiCadError('arguments_unusable', {'detail': 'your copy changed after the window was opened '
@@ -3039,7 +3101,13 @@ class KiCadProvider:
                 raise KiCadError('step_not_approved', {
                     'needs': next(step for step in STEPS if status[step] not in ('unchanged', 'approved')),
                     'steps': status})
-            differing = self._compared_parity(root, meta)['new']
+            parity = self._compared_parity(root, meta)
+            if not parity['available'] and any((root / 'project').glob('*.kicad_sch')):
+                # A project with a schematic is written back only once the board is compared with it
+                # (18 Nov review: an unavailable comparison passed as "nothing new").
+                raise KiCadError('schematic_board_differ', {'detail': 'the board could not be compared with '
+                                                            'its schematic', 'new_mismatches': []})
+            differing = parity['new']
             if differing:
                 raise KiCadError('schematic_board_differ', {'new_mismatches': differing[:20]})
             # Nor with a DRC error or an unconnected item his original did not

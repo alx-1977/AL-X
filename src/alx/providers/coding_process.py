@@ -512,16 +512,19 @@ def start_kicad_viewer(application, path, *, runner=None, settle_seconds=10.0):
                                       timeout=10, capture_output=True, text=True)
         return {int(item) for item in (found.stdout or '').split() if item.isdigit()}
     before = running()
-    run_coding_subprocess(subprocess.run if runner is None else runner,
-                          ['/usr/bin/open', '-n', '-a', str(application), str(path)], shell=False,
-                          check=False, timeout=30, capture_output=True, text=True)
+    opened = run_coding_subprocess(subprocess.run if runner is None else runner,
+                                   ['/usr/bin/open', '-n', '-a', str(application), str(path)], shell=False,
+                                   check=False, timeout=30, capture_output=True, text=True)
+    # A window counts only when one is seen (18 Nov review: a failed launch was taken as shown).
+    if getattr(opened, 'returncode', 0):
+        raise OSError('KiCad did not open: %s' % (getattr(opened, 'stderr', '') or '').strip()[:200])
     deadline = monotonic() + settle_seconds
     while monotonic() < deadline:
         new = running() - before
         if new:
             return _Viewer(new)
         sleep(0.25)
-    return _Viewer(())
+    raise OSError('no KiCad window appeared within %g s' % settle_seconds)
 
 
 def capture_screen(target, *, runner=None, timeout_seconds=30):

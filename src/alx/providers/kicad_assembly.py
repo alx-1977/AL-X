@@ -69,8 +69,9 @@ def jlc_positions(kicad_pos: str, corrections: Mapping[str, tuple[float, tuple[f
     """JLC's CPL (Designator, Mid X, Mid Y, Layer, Rotation) from KiCad's CSV positions.
 
     corrections: each designator's (rotation, (dx, dy)). Returns the CSV and a report of the
-    designators corrected and those on the bottom (JLC's bottom-side rotation is to be
-    checked in its preview: nothing here has been proven against a bottom-side order)."""
+    designators corrected and those on the bottom (bottom-side parts follow the Fabrication
+    Toolkit's convention; no bottom-side order has been built from these files yet: check them
+    in JLC's preview)."""
     rows = list(csv.DictReader(io.StringIO(kicad_pos)))
     out, corrected, bottom = [], [], []
     for row in rows:
@@ -80,15 +81,23 @@ def jlc_positions(kicad_pos: str, corrections: Mapping[str, tuple[float, tuple[f
         if side == "Bottom":
             bottom.append(ref)
         fix = corrections.get(ref)
+        # The Fabrication Toolkit's convention, which JLC built P0009's first order from (18 Nov
+        # review): on the bottom the part's own frame is mirrored in y, and JLC wants the rotation
+        # as seen from above, 180 degrees minus KiCad's.
+        angle = math.radians(rotation)
         if fix:
             turn, (dx, dy) = fix
             if side == "Bottom":
-                dx = -dx
-            angle = math.radians(rotation)
-            x += dx * math.cos(angle) - dy * math.sin(angle)
-            y += dx * math.sin(angle) + dy * math.cos(angle)
-            rotation += turn
+                x += dx * math.cos(angle) + dy * math.sin(angle)
+                y += dx * math.sin(angle) - dy * math.cos(angle)
+            else:
+                x += dx * math.cos(angle) - dy * math.sin(angle)
+                y += dx * math.sin(angle) + dy * math.cos(angle)
             corrected.append(ref)
+        if side == "Bottom":
+            rotation = 180.0 - rotation
+        if fix:
+            rotation += turn
         rotation %= 360
         out.append((ref, "%.4f" % x, "%.4f" % y, side, "%g" % round(rotation, 4)))
     return (_csv(("Designator", "Mid X", "Mid Y", "Layer", "Rotation"), out),
