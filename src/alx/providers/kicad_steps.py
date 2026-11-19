@@ -174,9 +174,9 @@ def parity_mismatches(schematic_nets: dict, board_text: str) -> list:
     right = {g for g in map(within, board) if len(g) > 1}
 
     def names(nodes):
-        nodes = sorted(nodes)
-        shown = ', '.join('%s.%s' % node for node in nodes[:12])
-        return shown + (' and %d more' % (len(nodes) - 12) if len(nodes) > 12 else '')
+        # Every pin, in full: each line is the identity of its difference (review of #247: cut to
+        # twelve pins, a new break on a large net read as the old one). Shortened only to show.
+        return ', '.join('%s.%s' % node for node in sorted(nodes))
     # A net that differs by a few pins is named by what differs, not listed whole
     # (16 Nov: three new GND pins listed every GND pin on the board, twice).
     lines, matched = [], set()
@@ -199,5 +199,14 @@ def parity_mismatches(schematic_nets: dict, board_text: str) -> list:
     return sorted(lines)
 
 
+def shown_mismatch(line: str, limit: int = 12) -> str:
+    """A parity line as it is shown: a long pin list cut to the first few."""
+    head, sep, pins = line.rpartition(': ')
+    items = pins.split(', ')
+    if not sep or len(items) <= limit:
+        return line
+    return '%s: %s and %d more' % (head, ', '.join(items[:limit]), len(items) - limit)
+
+
 __all__ = ['STEPS', 'board_groups', 'board_pad_nets', 'board_steps', 'edit_refusal', 'fingerprints', 'parity_mismatches',
-           'ready', 'step_status']
+           'ready', 'shown_mismatch', 'step_status']

@@ -1103,8 +1103,12 @@ async def run(repository_root: Path) -> None:
     # outside its limit on a capability it holds is refused before the broker.
     def worker_dispatch(call):
         refusal = worker_call_refusal(call)
-        if refusal is not None:
-            return refusal
+        return refusal if refusal is not None else delegated_dispatch(call)
+
+    # Her broker and gate for a delegate, with her permissions and nothing she was granted per call; each
+    # delegate applies only its own limits first (19 Nov review of #247: the board agent's calls
+    # went through the worker's narrower list, so make_hierarchical and take_edits always failed).
+    def delegated_dispatch(call):
         token = current_call_id.set(call.call_id)
         try:
             return broker.dispatch(call, AuthorityContext(
@@ -1132,7 +1136,7 @@ async def run(repository_root: Path) -> None:
     # and gate, with her permissions and none of her approvals.
     def board_agent_dispatch(call):
         refusal = board_agent_call_refusal(call)
-        return refusal if refusal is not None else worker_dispatch(call)
+        return refusal if refusal is not None else delegated_dispatch(call)
 
     # Its kicad description lists only its own actions (D-083).
     board_agent = None

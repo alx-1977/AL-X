@@ -212,6 +212,14 @@ class KiCadTests(unittest.TestCase):
         failed = kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': checked['work_copy_id'],
                                                                       'what': 'board'})
         self.assertIn('screen could not be taken', failed.failure['recovery']['detail'])
+        # The window is still tracked: an edit he saves there is protected, but it is not "shown".
+        root = self.runtime.provider._load(checked['work_copy_id'])[0]
+        window = next((root / 'views').glob('*/amended/test.kicad_pcb'))
+        window.write_text(BOARD.replace('(kicad_pcb', '(kicad_pcb ', 1))
+        self.runtime.provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        again = kicad_call(self.runtime.executors, 'open_in_kicad', {'work_copy_id': checked['work_copy_id'],
+                                                                     'what': 'board'})
+        self.assertIn('take_edits first', again.failure['recovery']['detail'])
 
     def test_an_edit_he_saved_in_the_window_is_taken_before_approval(self):
         """19 Nov recheck: the approval covered the board before his saved adjustment; a KiCad lock

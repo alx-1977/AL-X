@@ -125,6 +125,11 @@ class ChangeShapeTests(unittest.TestCase):
         labels = [{"op": "remove_labels", "nets": ["A"]}]
         self.assertEqual(unmet(labels, before, only_a, names, {}, [{"removed": 1}], names), [])
         self.assertTrue(unmet(labels, before, both, names, {}, [{"removed": 1}], names))
+        # Results are found by their operation's number, whatever order they ran in (review of #247).
+        swapped_first = [{"op": "swap_symbol", "n": 3}, {"op": "swap_symbol", "n": 1}, {"op": "remove_labels", "n": 2, "removed": 1}]
+        batch = [{"op": "swap_symbol", "sheet": "a", "ref": "U6", "lib_id": "X:Y"}, labels[0],
+                 {"op": "swap_symbol", "sheet": "a", "ref": "U7", "lib_id": "X:Y"}]
+        self.assertEqual(unmet(batch, before, only_a, names, {}, swapped_first, names), [])
         # Removing no label excuses nothing (19 Nov recheck).
         self.assertTrue(unmet(labels, before, only_a, names, {}, [{"removed": 0}], names))
         items = [{"op": "remove_items", "sheet": "a", "area": [0, 0, 1, 1]}]

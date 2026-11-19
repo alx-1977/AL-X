@@ -151,6 +151,74 @@ print("teardrops", len(teardrops(t)), len(teardrops(t, (1000, 1000, 1001, 1001))
             self.assertNotIn(".alx-fp-", " ".join(p.name for p in Path(folder).iterdir()))
             self.assertRegex(done.stdout, r"teardrops [1-9]\d* 0")
 
+    def test_a_route_goes_round_a_keepout_between_aligned_ends(self) -> None:
+        """Review of #247: the last straight run was checked against copper only and could cross a
+        keep-out lying between two lined-up ends."""
+        script = """
+b = load()
+zone = _pcbnew.ZONE(b)
+zone.SetIsRuleArea(True)
+zone.SetDoNotAllowTracks(True)
+zone.SetLayer(_pcbnew.F_Cu)
+outline = zone.Outline()
+outline.NewOutline()
+for x, y in ((119, 105), (121, 105), (121, 115), (119, 115)):
+    outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
+b.Add(zone)
+runs, vias = route(b, "ARC", (110, 110), (130, 110), 0.2, "F", layers=["F"])
+crosses = any(119 < x < 121 and 105 < y < 115 for _, pts in runs for x, y in
+              [((p[0] + q[0]) / 2, (p[1] + q[1]) / 2) for p, q in zip(pts, pts[1:])] + [pt for pt in pts])
+print("crosses", crosses)
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "board.kicad_pcb"
+            board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
+            program = Path(folder) / "edit.py"
+            program.write_text(HELPERS + script_runner(script))
+            done = run(PYTHON, program, board)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("crosses False", done.stdout)
+
+    def test_to_plane_ignores_a_nearby_via_it_is_not_joined_to(self) -> None:
+        """Review of #247: any same-net via within 1.2 mm made a pin count as already in its plane,
+        and nothing was drawn for it."""
+        from alx.providers.kicad_change import CHANGE_HELPERS
+        from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
+        script = """
+b = load()
+fp = part(b, "U7")
+pin = next(iter(fp.Pads()))
+net = pin.GetNetname()
+zone = _pcbnew.ZONE(b)
+zone.SetLayer(_pcbnew.B_Cu)
+zone.SetNetCode(pin.GetNetCode())
+outline = zone.Outline()
+outline.NewOutline()
+for x, y in ((0, 0), (200, 0), (200, 200), (0, 200)):
+    outline.Append(_pcbnew.FromMM(x), _pcbnew.FromMM(y))
+b.Add(zone)
+near = _pcbnew.PCB_VIA(b)
+here = pin.GetPosition()
+near.SetPosition(_pcbnew.VECTOR2I(here.x + _pcbnew.FromMM(1.0), here.y + _pcbnew.FromMM(0.3)))
+near.SetNetCode(pin.GetNetCode())
+near.SetWidth(_pcbnew.FromMM(0.45))
+near.SetDrill(_pcbnew.FromMM(0.2))
+b.Add(near)
+before = sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA")
+save(b)
+report = apply_change([{"op": "to_plane", "pins": ["U7." + pin.GetNumber()]}])
+b = load()
+print("vias", sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA") - before, report[0].get("made") or report[0])
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "board.kicad_pcb"
+            board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
+            program = Path(folder) / "edit.py"
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS + script_runner(script))
+            done = run(PYTHON, program, board)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn("vias 1", done.stdout, done.stdout)
+
     def test_set_properties_changes_only_what_is_named_by_address(self) -> None:
         """18 Nov: Altium's Inspector. A size change keeps the stroke; vias, tracks and texts too."""
         script = """

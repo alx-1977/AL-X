@@ -287,7 +287,13 @@ class WorkerLimitTests(unittest.TestCase):
         function = next(node for node in ast.walk(ast.parse(source))
                         if isinstance(node, ast.FunctionDef) and node.name == "worker_dispatch")
         rendered = ast.unparse(function)
-        self.assertLess(rendered.index("worker_call_refusal(call)"), rendered.index("broker.dispatch"))
+        self.assertLess(rendered.index("worker_call_refusal(call)"), rendered.index("delegated_dispatch(call)"))
+        # The board agent applies its own limits, never the worker's (review of #247).
+        board = ast.unparse(next(node for node in ast.walk(ast.parse(source))
+                                 if isinstance(node, ast.FunctionDef) and node.name == "board_agent_dispatch"))
+        self.assertIn("board_agent_call_refusal(call)", board)
+        self.assertNotIn("worker_call_refusal", board)
+        self.assertNotIn("worker_dispatch", board)
 
     def test_a_refused_call_reaches_the_worker_as_rejected(self) -> None:
         from alx.specialists.worker import MechanicalWorker

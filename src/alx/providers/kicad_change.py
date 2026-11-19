@@ -281,14 +281,22 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
     # anywhere in a batch let an unrelated broken connection through). remove_dangling takes
     # only what touches nothing, so it may split nothing.
     scope: set = set()
+    # Each operation's own result, by its number: swaps run first, so results are in run order
+    # (review of #247: a later swap's result was read as a removal's).
+    numbered = {item['n']: item for item in change_result if isinstance(item, Mapping) and 'n' in item}
+
+    def result_of(index):
+        if numbered:
+            return numbered.get(index + 1) or {}
+        return (change_result[index] if index < len(change_result) else {}) or {}
     for index, op in enumerate(change):
         if op['op'] == 'unwire':
             scope.update(op['pins'])
         elif op['op'] == 'remove_labels':
             # Only if it removed a label at all (19 Nov recheck: removing nothing excused a split),
             # and a net named in full, or by a short name only one net has.
-            done = change_result[index] if index < len(change_result) else {}
-            removed = (done or {}).get('removed')
+            done = result_of(index)
+            removed = done.get('removed')
             if not (sum(removed.values()) if isinstance(removed, dict) else removed):
                 continue
             for wanted in op['nets']:
@@ -299,9 +307,8 @@ def _unasked(change, before, after, before_names, after_names=None, change_resul
                         continue
                 scope.update(pin for pin, name in before_names.items() if name in full)
         elif op['op'] == 'remove_items':
-            done = change_result[index] if index < len(change_result) else {}
             # Only the pins wired to what went (19 Nov recheck: their whole net hid another split).
-            scope.update((done or {}).get('scope') or ())
+            scope.update(result_of(index).get('scope') or ())
     groups: dict[str, set] = {}
     # A part the change adds has pins only afterwards; what the change joins them to counts
     # (16 Nov: the added C93 was reported as joined unasked to L6, C44 and GND).
@@ -852,11 +859,21 @@ def apply_change(change):
                         raise ValueError("%s is on %s, which has no plane on another layer to go down to"
                                          % (pin, net or "no net"))
                     centre = xy(found.GetPosition())
-                    if found.GetAttribute() == _pcbnew.PAD_ATTRIB_PTH or any(
-                            t.GetClass() == "PCB_VIA" and t.GetNetname() == net
-                            and _m.hypot(*(a - c for a, c in zip(xy(t.GetPosition()), centre))) < 1.2
-                            for t in b.GetTracks()):
-                        made.append({"pin": pin, "already": "a hole or via of %s at the pin" % net})
+                    # Already in its plane only if copper really joins it: a via in the pad, or a
+                    # track of its net from the pad to a via (review of #247: any same-net via within
+                    # 1.2 mm, another pin's, counted, and nothing was drawn).
+                    vias = [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetname() == net]
+
+                    def at_via(spot):
+                        return any(_m.hypot(*(a - c for a, c in zip(xy(spot), xy(v.GetPosition()))))
+                                   <= _pcbnew.ToMM(v.GetWidth(_pcbnew.F_Cu)) / 2 + 1e-3 for v in vias)
+                    joined = any(found.HitTest(v.GetPosition()) for v in vias) or any(
+                        t.GetClass() == "PCB_TRACK" and t.GetNetname() == net
+                        and ((found.HitTest(t.GetStart()) and at_via(t.GetEnd()))
+                             or (found.HitTest(t.GetEnd()) and at_via(t.GetStart())))
+                        for t in b.GetTracks())
+                    if found.GetAttribute() == _pcbnew.PAD_ATTRIB_PTH or joined:
+                        made.append({"pin": pin, "already": "a hole or via of %s joined to the pin" % net})
                         continue
                     body = xy(found.GetParentFootprint().GetPosition())
                     out = (centre[0] - body[0], centre[1] - body[1])

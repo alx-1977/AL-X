@@ -66,7 +66,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
 REFERENCE = obj({'kind': S, 'path': S, 'text': S, 'truncated': B, 'entry': S,
-    'media_type': S, 'width': I, 'height': I, 'page_count': I,
+    'media_type': S, 'width': I, 'height': I, 'page_count': I, 'next_offset': I,
     'pages': array(obj({'page': I, 'text': S, 'truncated': B})),
     'documents': array(S), 'streams': array(S), 'board_records_decoded': B,
     'entries': array(obj({'name': S, 'kind': S, 'bytes': I}, ('name',)))}, ('kind',))
@@ -268,8 +268,8 @@ _ACTION_DEFINITIONS = (
         'Folders list entries; images give dimensions; PDFs give per-page text; Altium '
         'projects give contents and OLE documents give stream names when board records '
         'cannot be decoded; text/Gerber/KiCad give bounded text; offset (characters, default 0) '
-        'continues truncated text at offset plus the length already read, PDFs too (offset counts '
-        'page text already read). Also reads retained '
+        'continues truncated text at offset plus the length already read; a PDF stops at a page cut short '
+        'and gives next_offset to carry on from. Also reads retained '
         'KiCad edit evidence paths. Zip lists entries or reads '
         'one named entry. iCloud placeholders return not_downloaded. Does not interpret content.',
         obj({'path': S, 'entry': S, 'offset': I}, ('path',)), REFERENCE, SideEffect.NONE, FAILURES),

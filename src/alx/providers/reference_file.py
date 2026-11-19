@@ -225,11 +225,15 @@ def content_facts(name, data, start=0):
             pages.append({'page': index + 1, 'text': text[:min(4000, budget)],
                           'truncated': len(text) > min(4000, budget)})
             budget -= len(pages[-1]['text'])
-            if budget <= 0:
-                stopped_early = stopped_early or index + 1 < last
+            # A page cut short ends the reading here, so what comes back is one unbroken run of
+            # text and the next offset carries on exactly after it (review of #247: later pages
+            # followed a cut page, and the next offset skipped its unread rest).
+            if budget <= 0 or pages[-1]['truncated']:
+                stopped_early = stopped_early or pages[-1]['truncated'] or index + 1 < last
                 break
         return dict(kind='pdf', pages=pages, page_count=len(reader.pages),
-                    truncated=stopped_early or any(p['truncated'] for p in pages))
+                    truncated=stopped_early or any(p['truncated'] for p in pages),
+                    next_offset=start + sum(len(p['text']) for p in pages))
     if suffix in ('.pcbdoc', '.schdoc'):
         return ole_stream_names(data)
     if b'\x00' in data[:1024] and not data.startswith((b'\xff\xfe', b'\xfe\xff')):

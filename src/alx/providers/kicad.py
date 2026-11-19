@@ -33,6 +33,7 @@ from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
 from alx.providers.kicad_change import CHANGE_HELPERS, ChangeError, plain, set_check, unmet, validate_change
 from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.kicad_steps import (STEPS, board_pad_nets, edit_refusal, fingerprints, parity_mismatches, ready,
+                                        shown_mismatch,
                                       step_status)
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
 from alx.providers.coding_process import KICAD_CLI_UNAVAILABLE_ERRORS, KICAD_CLI_TIMEOUT
@@ -2481,7 +2482,10 @@ class KiCadProvider:
     @staticmethod
     def _drc_key(root, meta):
         board = root / 'project' / meta['board']
-        # The rules and the project's severities decide the result as much as the board.
+        # The rules and the project's severities decide the result as much as the board. The
+        # schematic is not in the key on purpose: KiCad's schematic-parity findings are left out of
+        # everything reused (totals and signatures, 15 Nov), and the board-vs-schematic comparison
+        # comes from _parity, fresh per schematic revision.
         return hashlib.sha256(json.dumps([sha(path) if path.is_file() else None for path in (
             board, board.with_suffix('.kicad_dru'), board.with_suffix('.kicad_pro'))]).encode()).hexdigest()
 
@@ -2686,8 +2690,14 @@ class KiCadProvider:
         if base is None:
             # No comparison on his original: nothing can be called fixed, and everything found now
             # is new (18 Nov review: an unavailable baseline became an empty one).
-            return {'new': sorted(set(found)), 'fixed': 0, 'available': now is not None, 'baseline': False}
-        return {'new': sorted(set(found) - set(base)), 'fixed': len(set(base) - set(found)) if now is not None else 0,
+            return {'new': sorted(shown_mismatch(line) for line in set(found)), 'fixed': 0,
+                    'available': now is not None, 'baseline': False}
+        # Compared in full; a baseline kept before 19 Nov holds lines already cut to twelve pins,
+        # so those are matched as they were kept.
+        old = set(base)
+        new = sorted(line for line in set(found) if line not in old and shown_mismatch(line) not in old)
+        fixed = [line for line in old if line not in set(found) and line not in {shown_mismatch(f) for f in found}]
+        return {'new': [shown_mismatch(line) for line in new], 'fixed': len(fixed) if now is not None else 0,
                 'available': now is not None, 'baseline': True}
 
     def _new_faults(self, root, signatures):
@@ -2968,6 +2978,11 @@ class KiCadProvider:
                 self._viewers.append(self.open_viewer(what, path, index))
         except OSError as error:
             raise KiCadError('unavailable', {'detail': 'KiCad did not open: %s' % error}) from error
+        # The window is recorded as soon as it is open, so an edit he saves there can always be taken
+        # in or protected (review of #247: a failed screenshot left an open, untracked window); it
+        # counts as shown, for approval, only once the screen was taken.
+        meta = dict(meta, view=dict(view, shown=False))
+        self._save_metadata(root, meta)
         time.sleep(self.viewer_settle_seconds)
         folder = self.render_folder / arguments['work_copy_id']
         folder.mkdir(parents=True, exist_ok=True)
@@ -2976,9 +2991,7 @@ class KiCadProvider:
         if not shot.is_file():
             raise KiCadError('unavailable', {'detail': 'the screen could not be taken, so it is not known what he '
                                              'saw; check screen-recording permission'})
-        # Recorded only once the windows opened and the screen was taken, with what they show
-        # (18 Nov review: a failed launch, or a schematic view, could count as showing him the board).
-        meta = dict(meta, view=view)
+        meta = dict(meta, view=dict(view, shown=True))
         self._save_metadata(root, meta)
         return {'opened': [str(path) for path in files],
                 'windows': (['current (his design)'] if len(files) == 2 else []) + ['amended (your copy)'],
@@ -3077,7 +3090,7 @@ class KiCadProvider:
                 # recheck: the approval covered the board before his adjustment).
                 raise KiCadError('arguments_unusable', {'detail': 'he saved an edit in the KiCad window: take_edits '
                                                         'first, then show him again and ask'})
-            if view.get('revision') != revision:
+            if view.get('revision') != revision or not view.get('shown'):
                 raise KiCadError('arguments_unusable', {'detail': 'he has not been shown this version: open it '
                                                         'for him with open_in_kicad first, then ask'})
             shows = 'schematic' if step == 'schematic' else 'board'

@@ -155,10 +155,16 @@ class MechanicalWorker:
     def capability_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._definitions))
 
+    def _new_run(self) -> None:
+        """Repeated-refusal counting covers one run: a call refused before an approval may succeed
+        after it (review of #247: the last refusal carried over into the next job and stretch)."""
+        self._last_refused, self._repeats = None, 0
+
     def run(self, brief: str, job_id: str, max_calls: int) -> dict[str, Any]:
         if not self._busy.acquire(blocking=False):
             raise WorkerError("worker_busy")
         try:
+            self._new_run()
             return self._run(brief, job_id, max_calls)
         finally:
             self._busy.release()

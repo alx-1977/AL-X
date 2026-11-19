@@ -468,6 +468,11 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         for k in range(count + 1):
             here = point(a[0] + (z[0] - a[0]) * k / count, a[1] + (z[1] - a[1]) * k / count)
             shapes.update((id(shape), shape) for shape in near(edge_table[name], here))
+            # Inside the board and out of keep-outs along its length, its two ends (pads, which
+            # may sit by the edge) aside (review of #247: a last run crossed a keep-out).
+            if 0 < k < count and ((inside is not None and not inside.Contains(here))
+                                  or any(area.Contains(here) for area in banned[name])):
+                return False
         piece = _pcbnew.SEG(point(*a), point(*z))
         return not any(shape.Collide(piece, reach) for shape in shapes.values())
 

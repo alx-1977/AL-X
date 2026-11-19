@@ -144,6 +144,7 @@ class BoardJobAgent(MechanicalWorker):
         if not self._busy.acquire(blocking=False):
             raise WorkerError("worker_busy")
         try:
+            self._new_run()
             return self._work(job_id, brief, message, max_calls)
         finally:
             self._running = None
