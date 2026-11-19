@@ -182,3 +182,17 @@ class LookCapabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StorageAliasTests(unittest.TestCase):
+    """19 Nov 2026: look refused ~/ALX_Storage/... that read_reference accepted."""
+
+    def test_storage_short_form_points_at_her_storage(self) -> None:
+        from pathlib import Path
+        from alx.bootstrap.look import _storage_alias
+        storage = Path("/icloud/ALX_Storage")
+        self.assertEqual(_storage_alias("~/ALX_Storage/Whiteboard/a.pdf", storage),
+                         storage / "Whiteboard" / "a.pdf")
+        self.assertEqual(_storage_alias(str(Path.home() / "ALX_Storage" / "x.png"), storage),
+                         storage / "x.png")
+        self.assertEqual(_storage_alias("/elsewhere/b.pdf", storage), Path("/elsewhere/b.pdf"))

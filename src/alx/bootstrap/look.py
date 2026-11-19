@@ -17,6 +17,19 @@ ALX_STORAGE = Path("~/Library/Mobile Documents/com~apple~CloudDocs/ALX_Storage")
 PERMISSION = "files.look"
 
 
+def _storage_alias(raw: str, storage: Path) -> Path:
+    """'~/ALX_Storage/...' is her storage in iCloud, as kicad read_reference reads it.
+
+    19 Nov 2026: the board agent looked at its own render as ~/ALX_Storage/Whiteboard/...
+    and was refused, though read_reference had just accepted the same form; his home
+    folder also holds an unrelated local ALX_Storage."""
+    given = Path(raw.strip())
+    for alias in (("~", "ALX_Storage"), (Path.home() / "ALX_Storage").parts):
+        if given.parts[:len(alias)] == alias:
+            return storage.joinpath(*given.parts[len(alias):])
+    return given.expanduser()
+
+
 @dataclass(frozen=True)
 class LookRuntime:
     definitions: tuple
@@ -43,7 +56,7 @@ def build_look_runtime(call_id_source, environment: Mapping[str, str], storage_r
         if not isinstance(raw, str) or not raw.strip():
             raise LookError("arguments_unusable", "path is a file path")
         try:
-            path = reference_path(Path(raw).expanduser(), roots=roots)
+            path = reference_path(_storage_alias(raw, storage.expanduser()), roots=roots)
         except ReferenceError as error:
             raise LookError("path_denied", "only his design folders and ALX_Storage") from error
         return look(path, arguments, store=store, scratch_root=storage_root / "look-scratch",
