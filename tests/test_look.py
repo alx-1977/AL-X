@@ -180,9 +180,6 @@ class LookCapabilityTests(unittest.TestCase):
         self.assertEqual(wiring.count("image_source=look_images"), 3)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class StorageAliasTests(unittest.TestCase):
     """19 Nov 2026: look refused ~/ALX_Storage/... that read_reference accepted."""
@@ -196,3 +193,7 @@ class StorageAliasTests(unittest.TestCase):
         self.assertEqual(_storage_alias(str(Path.home() / "ALX_Storage" / "x.png"), storage),
                          storage / "x.png")
         self.assertEqual(_storage_alias("/elsewhere/b.pdf", storage), Path("/elsewhere/b.pdf"))
+
+
+if __name__ == "__main__":
+    unittest.main()

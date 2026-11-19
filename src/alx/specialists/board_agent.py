@@ -37,6 +37,36 @@ logger = logging.getLogger(__name__)
 
 REPORT_TOOL = "report_step"
 RECEIPTS_KEPT = 40
+# What the job has read, carried from stretch to stretch (19 Nov 2026: 405 calls in one job,
+# 108 of them exact repeats; each stretch starts afresh and read the same datasheets,
+# library files and settings again).
+NOTEBOOK_KEPT = 80
+# Reads whose answer cannot change during a job: kept, and an identical call answered from
+# them without running again. Reads of the work copy are never kept: edits change it.
+UNCHANGING_READS = ("read_reference", "fetch_datasheet", "find_part")
+
+
+def _read_key(capability_id: Any, arguments: Mapping[str, Any]) -> str | None:
+    """The key of a read whose answer cannot change during the job, or None."""
+    if capability_id != "kicad" or arguments.get("action") not in UNCHANGING_READS:
+        return None
+    if "runtime/kicad/" in str(arguments.get("path", "")) or arguments.get("work_copy_id"):
+        return None
+    return json.dumps([capability_id, dict(arguments)], sort_keys=True, default=str)
+
+
+def _note(arguments: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    """One notebook line: what was asked and the gist of what came back."""
+    asked = {k: arguments[k] for k in ("action", "path", "page", "offset", "part_number", "manufacturer",
+                                       "query", "value", "package", "kind", "refs", "work_copy_id")
+             if arguments.get(k) not in (None, "", [], {})}
+    found: dict[str, Any] = {}
+    for key in ("path", "pages", "page_count", "next_offset", "count", "document"):
+        if isinstance(result.get(key), (str, int, float)):
+            found[key] = result[key]
+    if isinstance(result.get("parts"), list):
+        found["parts"] = [p.get("symbol") or p.get("ref") for p in result["parts"][:12] if isinstance(p, Mapping)]
+    return {"asked": asked, "found": found}
 
 
 class BoardJobStopped(Exception):
@@ -165,6 +195,24 @@ class BoardJobAgent(MechanicalWorker):
         target.write_text(json.dumps(journal, ensure_ascii=False))
         target.replace(self._journal_path(job_id))
 
+    def _reads_path(self, job_id: str) -> Path:
+        return self._journal_root / (job_id + ".reads.json")
+
+    def _load_reads(self, job_id: str) -> dict[str, str]:
+        """Answers of the job's unchanging reads, beside its journal, never shown to the model whole."""
+        try:
+            kept = json.loads(self._reads_path(job_id).read_text())
+        except (OSError, ValueError):
+            return {}
+        return kept if isinstance(kept, dict) else {}
+
+    def _save_reads(self, job_id: str, reads: Mapping[str, str]) -> None:
+        try:
+            self._journal_root.mkdir(parents=True, exist_ok=True)
+            self._reads_path(job_id).write_text(json.dumps(reads, ensure_ascii=False))
+        except OSError:
+            logger.warning("board job %s: reads not kept", job_id)
+
     def _preferences_text(self) -> str:
         try:
             text = self._preferences.read_text() if self._preferences is not None else ""
@@ -199,6 +247,19 @@ class BoardJobAgent(MechanicalWorker):
                                     "work_copy_revision": receipt.get("work_copy_revision", "")}
         journal["receipts"] = (journal.get("receipts", []) + [receipt])[-RECEIPTS_KEPT:]
         self._save(job_id, journal)
+
+    def _remember(self, journal: dict[str, Any], arguments: Mapping[str, Any], answer: str) -> None:
+        """A successful read goes in the job's notebook (what was asked, the gist of the answer)."""
+        if arguments.get("action") not in UNCHANGING_READS + ("inspect_schematic", "inspect", "render"):
+            return
+        try:
+            values = json.loads(answer).get("values") or {}
+        except (ValueError, AttributeError):
+            return
+        result = values.get("result") if isinstance(values.get("result"), Mapping) else values
+        note = _note(arguments, result if isinstance(result, Mapping) else {})
+        kept = [n for n in journal.get("notebook", []) if n.get("asked") != note["asked"]]
+        journal["notebook"] = (kept + [note])[-NOTEBOOK_KEPT:]
 
     def _log_call(self, job_id: str, tool_use: Mapping[str, Any], summary: Mapping[str, Any], answer: str) -> None:
         """Every call in full, beside the journal and never shown to the model: what was sent
@@ -240,7 +301,11 @@ class BoardJobAgent(MechanicalWorker):
                           "state before you change it.",
                 "work_copy": journal.get("work_copy"),
                 "events": journal["events"],
-                "latest_calls": journal.get("receipts", [])}, ensure_ascii=False)))
+                "latest_calls": journal.get("receipts", []),
+                "already_read": journal.get("notebook", []),
+                "already_read_note": "what this job has read so far and what came back: use it rather than "
+                                     "reading again; an identical read is answered from the earlier one"},
+                ensure_ascii=False)))
         return ModelRequest(tuple(messages), "board_report", REPORT_SCHEMA, affinity_key=job_id,
                             kind="board_agent", tools=agent_tools(),
                             on_retry=self._renewal(job_id, journal))
@@ -261,6 +326,7 @@ class BoardJobAgent(MechanicalWorker):
         self._running = job_id
         self._stop.clear()
         request = self._request(job_id, journal)
+        reads = self._load_reads(job_id)
         started = monotonic()
         calls: list[dict[str, Any]] = []
         returned: list[dict[str, Any]] = []
@@ -287,7 +353,25 @@ class BoardJobAgent(MechanicalWorker):
                     return stopped("call_limit")
                 if monotonic() - started > self._max_seconds:
                     return stopped("time_limit")
-                answer, summary, images = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
+                tool_input = completion.tool_use.get("input") if isinstance(completion.tool_use.get("input"), Mapping) else {}
+                try:
+                    asked = json.loads(tool_input.get("arguments_json") or "{}")
+                except (TypeError, ValueError):
+                    asked = {}
+                asked = asked if isinstance(asked, dict) else {}
+                key = _read_key(tool_input.get("capability_id"), asked)
+                if key is not None and key in reads:
+                    # Read before in this job and unchanged since: the same answer, not run again.
+                    answer, images = reads[key], ()
+                    summary = {"call_id": f"{job_id}-{len(calls) + 1}", "capability_id": "kicad",
+                               "outcome": "succeeded", "repeated_read": True}
+                else:
+                    answer, summary, images = self._call(completion.tool_use, f"{job_id}-{len(calls) + 1}")
+                    if summary.get("outcome") == "succeeded":
+                        if key is not None:
+                            reads[key] = answer
+                            self._save_reads(job_id, reads)
+                        self._remember(journal, asked, answer)
                 calls.append(summary)
                 returned.append({**summary, "returned": json.loads(answer)})
                 self._receipt(job_id, journal, summary, answer)

@@ -93,6 +93,37 @@ class BoardAgentTests(unittest.TestCase):
         self.assertIn("GND ports face down.", fresh.messages[0].content)
         self.assertEqual(model.requests[0].kind, "board_agent")
 
+    def test_a_job_remembers_what_it_read_across_stretches(self) -> None:
+        """19 Nov 2026: 405 calls in one job, 108 exact repeats; each stretch read the same
+        datasheets again. An identical unchanging read is answered from the first one, and the
+        next stretch is told what was read."""
+        def dispatch(item):
+            self.dispatched.append(item)
+            return CapabilityAttempt(item, CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult(
+                item.call_id, item.capability_id, CapabilityResultState.SUCCEEDED,
+                {"action": item.arguments["action"], "result": {"path": "/ds/TPT75176B.pdf", "pages": "1-4"}}))
+        datasheet = {"action": "fetch_datasheet", "part_number": "TPT75176B-DF6R"}
+        reading = {"action": "read_reference", "path": "/ds/TPT75176B.pdf", "offset": 0}
+        copy_read = {"action": "read_reference", "path": "/x/.alx/runtime/kicad/abc/project/a.kicad_sch"}
+        model = SessionModel([call(datasheet), call(reading), call(datasheet), call(copy_read), call(copy_read),
+                              report("step_ready", "schematic"), call(reading), report("step_ready", "placement")])
+        agent = BoardJobAgent(model, dispatch, (KICAD,), Path(self.folder.name))
+        first = agent.work(job_id=None, brief="Add the RS485 LEDs.", message=None, max_calls=20)
+        self.assertEqual(len(first["calls"]), 5)
+        # The datasheet was fetched once; work-copy reads always run (edits change them).
+        actions = [item.arguments["action"] for item in self.dispatched]
+        self.assertEqual(actions.count("fetch_datasheet"), 1)
+        self.assertEqual(sum(1 for item in self.dispatched if item.arguments.get("path", "").endswith("a.kicad_sch")), 2)
+        self.assertTrue(first["calls"][2].get("repeated_read"))
+        second = agent.work(job_id=first["job_id"], brief=None, message="Approved.", max_calls=20)
+        self.assertEqual(second["status"], "step_ready")
+        history = json.loads(model.requests[6].messages[-1].content)
+        asked = [note["asked"].get("action") for note in history["already_read"]]
+        self.assertIn("fetch_datasheet", asked)
+        self.assertIn("/ds/TPT75176B.pdf", json.dumps(history["already_read"]))
+        # Across stretches the identical datasheet read is still answered from the first.
+        self.assertEqual(sum(1 for item in self.dispatched if item.arguments == reading), 1)
+
     def test_alx_can_stop_a_running_stretch(self) -> None:
         agent_box = {}
 
