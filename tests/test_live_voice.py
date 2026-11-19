@@ -649,6 +649,32 @@ class VoiceSessionTests(unittest.IsolatedAsyncioTestCase):
             {"type": "phase", "value": "thinking", "input_origin": "background_event"},
         )
 
+    async def test_refused_speech_keeps_the_session_listening(self) -> None:
+        """19 Nov 2026: an ElevenLabs 401 ended the voice session. Her words are on the
+        screen already; a failed speech request reports the error and listens again."""
+
+        class RefusingSynthesizer:
+            async def synthesize(self, response, correlation_id=None):
+                raise RuntimeError("401 Unauthorized")
+                yield  # pragma: no cover - an async generator
+
+        session = VoiceSession(
+            FakeGateway((outcome(GoalStatus.ACTIVE),)),
+            FakeTranscriber((transcription("final", TranscriptionState.FINAL, "Hello"),)),
+            RefusingSynthesizer(),
+            "friedl", 8, 3650,
+            clock=lambda: NOW,
+            identifier_factory=lambda: "turn-1",
+        )
+        events = [event async for event in session.exchange("conversation-1", incoming_audio())]
+        kinds = [event.kind for event in events]
+        error = kinds.index(VoiceEventKind.ERROR)
+        self.assertEqual(events[error].reason, "speech_synthesis_error")
+        self.assertIn(VoiceEventKind.TEXT, kinds[:error])
+        self.assertIs(kinds[error + 1], VoiceEventKind.LISTENING)
+        from alx.interfaces.server import MID_EXCHANGE_RECOVERABLE_REASONS
+        self.assertIn("speech_synthesis_error", MID_EXCHANGE_RECOVERABLE_REASONS)
+
     async def test_tts_transport_diagnostics_arrive_before_audio(self) -> None:
         diagnostics = VoiceDiagnosticFeed()
 

@@ -850,8 +850,12 @@ class VoiceSession:
                     yield VoiceEvent(VoiceEventKind.DIAGNOSTIC, diagnostic=event)
                 yield VoiceEvent(VoiceEventKind.AUDIO, audio=chunk)
         except Exception:
-            yield VoiceEvent(VoiceEventKind.ERROR, reason="speech_synthesis_error")
-            return
+            # Her words are already on the screen. A refused or broken speech request ends
+            # this reply's audio, not the session (19 Nov 2026: each ElevenLabs 401 dropped
+            # the voice session). The server recovers it inside the running exchange.
+            failed = True
+        else:
+            failed = False
         finally:
             if next_chunk is not None and not next_chunk.done():
                 # Closed by the consumer mid-read: stop the read before the
@@ -861,5 +865,8 @@ class VoiceSession:
             close = getattr(chunks, "aclose", None)
             if close is not None:
                 await close()
-        LOGGER.info("Speech synthesis completed")
+        if failed:
+            yield VoiceEvent(VoiceEventKind.ERROR, reason="speech_synthesis_error")
+        else:
+            LOGGER.info("Speech synthesis completed")
         yield VoiceEvent(VoiceEventKind.LISTENING)

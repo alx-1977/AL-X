@@ -67,7 +67,7 @@ RECOVERABLE_TRANSPORT_REASONS = frozenset(
 
 # Where recovery happens decides whether AL/X can still hear.
 #
-# These three are raised mid-exchange while the transcriber and the microphone
+# These are raised mid-exchange while the transcriber and the microphone
 # iterator are both alive, and `exchange()` already yields LISTENING and keeps
 # running afterwards. Returning here would abandon that live audio iterator and
 # start a second consumer of the same browser socket, so the next thing Friedl
@@ -78,7 +78,7 @@ RECOVERABLE_TRANSPORT_REASONS = frozenset(
 # there is no exchange left to continue and re-entry is the only way back.
 MID_EXCHANGE_RECOVERABLE_REASONS = frozenset(
     {
-        "reasoner_error", "memory_persistence_error",
+        "reasoner_error", "memory_persistence_error", "speech_synthesis_error",
     }
 )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from time import monotonic
 from typing import Any
@@ -13,6 +15,19 @@ import httpx
 from alx.contracts import AudioChunk
 from alx.providers.elevenlabs_pronunciation import DictionaryLocator
 from alx.providers.errors import ProviderError, raise_provider_failure
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _refusal(body: bytes) -> str:
+    """ElevenLabs' own reason for a refused request: detail status and message, shortened."""
+    try:
+        detail = json.loads(body).get("detail")
+    except (ValueError, AttributeError):
+        return body[:200].decode("utf-8", "replace") or "no reason given"
+    if isinstance(detail, dict):
+        return " ".join(str(detail.get(key, "")) for key in ("status", "message")).strip()[:300]
+    return str(detail)[:300]
 
 
 def _media_type(output_format: str) -> str:
@@ -118,6 +133,13 @@ class ElevenLabsSynthesizer:
                     ],
                 },
             ) as provider_response:
+                if provider_response.status_code >= 400:
+                    # ElevenLabs says why in the body (quota_exceeded, invalid_api_key,
+                    # detected_unusual_activity...). 19 Nov 2026: three 401s showed only as
+                    # speech_synthesis_error. The key itself is never logged.
+                    LOGGER.warning("ElevenLabs refused speech: HTTP %s, %s",
+                                   provider_response.status_code,
+                                   _refusal(await provider_response.aread()))
                 provider_response.raise_for_status()
                 self._emit_telemetry(
                     correlation_id,
