@@ -3112,6 +3112,29 @@ This grants no authority a single goal update lacks: completion still requires s
 - **Free scripting is retired as the change surface.** The board agent may edit only through `change`. Arbitrary scripts remain for AL/X only until the change operations cover every edit she still needs, then the script route, its runner and its description are deleted (Law 0); until then no new behaviour is added to it.
 - **Boundary.** D-082's order, approvals and write-back checks are unchanged. No new Law exception.
 
+## D-084a — Board edits as checked scripts over a tested operation library (amends D-084)
+
+- **Date:** 2026-11-20
+- **Decision owner:** Friedl
+- **Status: APPROVED in principle by Friedl, 2026-11-20.** His words: "I agree with this... I have seen too many failed calls in ALXs terminal. I am happy to try your way." The detailed build plan goes to him before coding.
+- **Background.** On 20 Nov, Claude did P0005 directly, the job AL/X's board agent had failed:
+  - move RS485 to its own sheet;
+  - redesign the activity LEDs;
+  - redraw both sheets to a new standard.
+  It worked by scripting edits on a project copy and checking every result: a full net comparison, a style check, ERC with no new findings, and looking at a render. The fixed `change` operations could not express creating a sheet or a redraw. The run was heavy (171 model steps), so cost stays the risk to watch. Friedl: KiCad is the UI; AL/X needs reasoning plus execution, and must not be limited where it is not needed.
+- **Decision.** There is one change path. The board agent writes a script against a tested library of operations. The D-084 operations become that library's functions, and the library grows when a script works and is worth keeping. Every script, whether it is one call or custom, passes the same code-run gate before anything is shown to him:
+  - `netcompare`: the result's connections equal the declared intent, and nothing else changed;
+  - `stylecheck`: the FireFli schematic standard;
+  - ERC: no new findings;
+  - a render the agent looks at.
+  A change that fails the gate is undone, and the failure is named. The standard, checker and design blocks live in the FireFli library (`SCHEMATIC_STANDARD.md`, `tools/`, `blocks/`).
+- **Still to settle in the plan:**
+  - image viewing for the agent's own render only (D-083a turned Codex image viewing off);
+  - which model runs the agent;
+  - context bounds (D-084's review: 40–60k working context);
+  - how the deleted `script` route and its runner come back as this single path (Law 0).
+- **Boundary.** D-082's order, approvals and write-back checks are unchanged. His files are written only on his yes. No new Law exception.
+
 ## D-083a — The board agent may run on Codex (Astra) (amends D-065, D-083)
 
 - **Date:** 2026-11-16
