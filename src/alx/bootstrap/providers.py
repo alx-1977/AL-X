@@ -59,6 +59,7 @@ class RuntimeProviders:
     worker: ReasoningModel
     # D-083: the board agent's model, on her own Claude login.
     board_agent: ReasoningModel
+    board_presentation: ReasoningModel
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
@@ -289,26 +290,26 @@ def build_runtime_providers(
         oauth_token=settings.claude_oauth_token,
         session_record_dir=session_record_dir,
     )
-    if settings.board_agent.provider == CODEX_SUBSCRIPTION_PROVIDER:
-        if not codex_subscription_cli_present():
-            raise ConfigurationError("the Codex CLI is required for the board agent on Codex")
-        board_agent = CodexSubscriptionAgentModel(
-            settings.board_agent.model,
-            settings.board_agent.timeout_seconds,
-            telemetry_sink=telemetry_sink,
-            effort=settings.board_agent.effort if settings.board_agent.effort != "none" else "high",
-        )
-    else:
-        board_agent = ClaudeSubscriptionReasoningModel(
-            settings.board_agent.model,
-            settings.board_agent.timeout_seconds,
+    def board_model(config):
+        if config.provider == CODEX_SUBSCRIPTION_PROVIDER:
+            if not codex_subscription_cli_present():
+                raise ConfigurationError("the Codex CLI is required for the board agent on Codex")
+            return CodexSubscriptionAgentModel(
+                config.model, config.timeout_seconds, telemetry_sink=telemetry_sink,
+                effort=config.effort if config.effort != "none" else "high",
+            )
+        return ClaudeSubscriptionReasoningModel(
+            config.model,
+            config.timeout_seconds,
             telemetry_sink=telemetry_sink,
             config_dir=settings.core_claude_config_dir,
             expected_account=settings.core_claude_account,
             oauth_token=settings.claude_oauth_token,
             session_record_dir=session_record_dir,
-            effort=settings.board_agent.effort if settings.board_agent.effort != "none" else "",
+            effort=config.effort if config.effort != "none" else "",
         )
+    board_agent = board_model(settings.board_agent)
+    board_presentation = board_model(settings.board_presentation)
     coding = _build_coding_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)
 
@@ -332,6 +333,7 @@ def build_runtime_providers(
         autonomous_first_pass=autonomous_first_pass,
         worker=worker,
         board_agent=board_agent,
+        board_presentation=board_presentation,
         coding=coding,
         coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth

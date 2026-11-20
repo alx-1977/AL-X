@@ -935,6 +935,20 @@ def board_agent_settings(
     return replace(reasoning, model=model, effort=effort or "none")
 
 
+def board_presentation_settings(
+    environment: Mapping[str, str], reasoning: "ReasoningSettings",
+) -> "ReasoningSettings":
+    """The board agent's presentation model uses a subscription transport."""
+    provider = environment.get("ALX_BOARD_PRESENT_PROVIDER", "").strip() or CLAUDE_SUBSCRIPTION_PROVIDER
+    if provider not in (CLAUDE_SUBSCRIPTION_PROVIDER, CODEX_SUBSCRIPTION_PROVIDER):
+        raise ConfigurationError("ALX_BOARD_PRESENT_PROVIDER must be claude_subscription or codex_subscription")
+    model = environment.get("ALX_BOARD_PRESENT_MODEL", "").strip() or BOARD_AGENT_DEFAULT_MODEL
+    effort = environment.get("ALX_BOARD_PRESENT_EFFORT", "").strip().lower() or "medium"
+    if effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigurationError("ALX_BOARD_PRESENT_EFFORT must be low, medium, high, xhigh or max")
+    return replace(reasoning, provider=provider, model=model, effort=effort, api_key="")
+
+
 def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:
     """How promptly a matured request is noticed. Not a cognition cadence.
 
@@ -1291,6 +1305,7 @@ class RuntimeSettings:
     worker: "ReasoningSettings"
     # D-083: the board agent that does a whole KiCad board job for her.
     board_agent: "ReasoningSettings"
+    board_presentation: "ReasoningSettings"
     # D-028 coding jobs. Independent of the conversational Core.
     coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
@@ -1329,6 +1344,7 @@ class RuntimeSettings:
             autonomous_first_pass=autonomous_first_pass_settings(environment, autonomous),
             worker=worker_settings(environment, reasoning),
             board_agent=board_agent_settings(environment, reasoning),
+            board_presentation=board_presentation_settings(environment, reasoning),
             coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),

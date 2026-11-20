@@ -1151,6 +1151,7 @@ async def run(repository_root: Path) -> None:
         policies[BOARD_AGENT_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
         board_agent = BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
                                     storage_root / "board-jobs",
+                                    presentation_model=providers.board_presentation,
                                     preferences=ALX_STORAGE.expanduser() / "Preferences" / "Schematic and layout.md",
                                     image_source=partial(stored_image, look_runtime.store),
                                     block_catalog=(kicad_runtime.provider.design_block_catalog

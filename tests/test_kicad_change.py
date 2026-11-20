@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
 
 from alx.bootstrap.kicad import build_kicad_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
+from alx.contracts.kicad import PresentationEditScope, presentation_edit_scope  # noqa: E402
 from alx.providers.kicad_change import ChangeError, unmet, validate_postconditions  # noqa: E402
 from kicad_actions import kicad_call  # noqa: E402
 from test_kicad_schematic_helpers import (APP, CLI, DEVICE, P0005_FIXTURE, PYTHON,  # noqa: E402
@@ -306,6 +307,44 @@ s.save()
             self.assertEqual(copy.read_bytes(), initial)
             unknown = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work, change=[])
             self.assertIn("not taken by edit: change", str(unknown.failure))
+
+    def test_presentation_edits_keep_the_real_netlist_and_work_copy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            copy = self.call(runtime, "check", project_dir=str(project)).values
+            work = copy["work_copy_id"]
+            schematic = next(Path(folder).rglob(work + "/project/board.kicad_sch"))
+            original = schematic.read_bytes()
+            token = presentation_edit_scope.set(PresentationEditScope(work, copy["work_copy_revision"]))
+            try:
+                def edit(script, **args):
+                    return self.call(runtime, "edit", work_copy_id=work, script=script, **args)
+
+                wire = {"op": "wire", "from": "R1.2", "to": "R2.1"}
+                for args in ({}, {"intent": [wire]}):
+                    refused = edit("raise RuntimeError('script must not run')", **args)
+                    self.assertEqual(refused.failure["code"], "arguments_unusable", refused.failure)
+                    self.assertIn("require intent: []", str(refused.failure))
+                joined = edit('s = sheet("board.kicad_sch")\n'
+                              's.wire_pin_to("R1","2",s.symbol("R2")["pins"]["1"])\ns.save()', intent=[])
+                self.assertEqual(joined.failure["code"], "change_unmet", joined.failure)
+                self.assertIn("R1.2 gained R2.1", joined.failure["recovery"]["unmet"])
+                self.assertEqual(joined.failure["recovery"]["rollback_status"], "restored")
+                changed_value = edit(
+                    'import sys\nfrom pathlib import Path\n'
+                    'p = Path(sys.argv[1]).with_suffix(".kicad_sch")\n'
+                    'p.write_text(p.read_text().replace(\'(property "Value" "10k"\', \'(property "Value" "100"\'))',
+                    intent=[])
+                self.assertIn("presentation changed R1 value", str(changed_value.failure))
+                self.assertEqual(schematic.read_bytes(), original)
+                tidied = edit('s = sheet("board.kicad_sch")\ns.tidy_fields("R1")\ns.save()', intent=[])
+                self.assertEqual(tidied.state, CapabilityResultState.SUCCEEDED, tidied.failure)
+                self.assertNotEqual(schematic.read_bytes(), original)
+                self.assertNotEqual(tidied.values["work_copy_revision"], copy["work_copy_revision"])
+                stale = edit("pass", intent=[])
+                self.assertEqual(stale.failure["code"], "work_copy_changed", stale.failure)
+            finally:
+                presentation_edit_scope.reset(token)
 
     def test_split_keeps_existing_erc_error_and_symbol_instance_identities(self):
         from alx.providers.kicad import sexpr

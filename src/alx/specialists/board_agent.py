@@ -28,9 +28,11 @@ from time import monotonic
 from typing import Any
 
 from alx.contracts import (
-    CapabilityAttempt, CapabilityCall, CapabilityDefinition, ModelMessage, ModelRequest, ModelRole,
-    ReasoningModel,
+    CapabilityAttempt, CapabilityAttemptDisposition, CapabilityCall, CapabilityDefinition,
+    ModelCompletion, ModelMessage, ModelRequest, ModelRole, ReasoningModel,
 )
+from alx.contracts.kicad import PresentationEditScope, presentation_edit_scope
+from alx.contracts.usage import is_measured
 from alx.specialists.worker import MechanicalWorker, WorkerError, _catalogue, _plain, worker_tools
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,26 @@ REPORT_SCHEMA: Mapping[str, Any] = {
 }
 STATUSES = ("step_ready", "question", "done", "blocked")
 
+PRESENTATION_BRIEF = (
+    "Redraw this job's existing schematic sheets on the same work copy to the FireFli standard. "
+    "Read /Users/friedlbasson/Desktop/VSC/FireFli-KiCad-Lib/SCHEMATIC_STANDARD.md. "
+    "The accepted P0005 redraw scripts are reference material in "
+    "/Users/friedlbasson/Desktop/VSC/FireFli-KiCad-Lib/tools/reference_p0005/. "
+    "Make no electrical change. Use block_grid and place_in_slot, route, info_table, mirror_block, "
+    "place_power, upright, arrange_root and FireFli design blocks as applicable to the existing circuit. "
+    "Use kicad edit with intent: [] for every edit and look at every crop. Render the finished schematic "
+    "and use look on every page, including sheets without a crop. Return the structured schematic step_ready "
+    "report with the current work copy and revision and a short summary of what you tidied. Report any blocker."
+)
+
+PRESENTATION_ACTIONS = frozenset({"check", "edit", "inspect_schematic", "read_reference", "render", "select"})
+PRESENTATION_INSTRUCTIONS = (
+    "You are AL/X's board agent carrying out the presentation brief. Earlier job events are evidence "
+    "of the finished engineering. Use look and the listed KiCad fields for check, edit, "
+    "inspect_schematic, read_reference, render and select. Work on the job's current work copy. "
+    "Report to AL/X in the structured output format."
+)
+
 
 def agent_tools() -> tuple[dict[str, Any], ...]:
     return (*worker_tools(), {
@@ -144,13 +166,18 @@ class BoardJobAgent(MechanicalWorker):
         definitions: Sequence[CapabilityDefinition],
         journal_root: Path,
         *,
+        presentation_model: ReasoningModel | None = None,
         preferences: Path | None = None,
         max_seconds: float = 1800.0,
         image_source: Callable[[str], bytes | None] | None = None,
         block_catalog: Callable[[], Mapping[str, str]] | None = None,
         status_sink: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
-        super().__init__(model, dispatch, definitions, max_seconds=max_seconds, image_source=image_source)
+        super().__init__(model, self._dispatch_board_call, definitions,
+                         max_seconds=max_seconds, image_source=image_source)
+        self._board_dispatch = dispatch
+        self._presentation_model = presentation_model
+        self._presentation_scope: PresentationEditScope | None = None
         self._journal_root = Path(journal_root)
         self._preferences = preferences
         self._block_catalog = block_catalog
@@ -176,19 +203,40 @@ class BoardJobAgent(MechanicalWorker):
         return True
 
     def work(self, *, job_id: str | None, brief: str | None, message: str | None,
-             max_calls: int) -> dict[str, Any]:
+             max_calls: int, presentation: bool = False) -> dict[str, Any]:
         if not self._busy.acquire(blocking=False):
             raise WorkerError("worker_busy")
+        engineering_model = self._model
         try:
             self._new_run()
-            return self._work(job_id, brief, message, max_calls)
+            return self._work(job_id, brief, message, max_calls, presentation=presentation)
         finally:
             if self._running is not None:
                 self._publish_status(self._running, terminal=True)
             self._running = None
+            self._presentation_scope = None
+            self._model = engineering_model
             self._busy.release()
 
+    def _dispatch_board_call(self, call: CapabilityCall) -> CapabilityAttempt:
+        scope = self._presentation_scope
+        if scope is None or call.capability_id != "kicad":
+            return self._board_dispatch(call)
+        operation = call.arguments.get("action")
+        if (not isinstance(operation, str) or operation not in PRESENTATION_ACTIONS
+                or (operation != "read_reference" and (
+                    call.arguments.get("work_copy_id") != scope.work_copy_id or "project_dir" in call.arguments))):
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
+                                     reason_code="presentation_work_copy_only")
+        token = presentation_edit_scope.set(scope)
+        try:
+            return self._board_dispatch(call)
+        finally:
+            presentation_edit_scope.reset(token)
+
     def _journal_path(self, job_id: str) -> Path:
+        if not job_id or Path(job_id).name != job_id or job_id in (".", ".."):
+            raise WorkerError("job_unknown")
         return self._journal_root / (job_id + ".json")
 
     def _journal(self, job_id: str) -> dict[str, Any]:
@@ -250,7 +298,13 @@ class BoardJobAgent(MechanicalWorker):
         for key in ("work_copy_id", "work_copy_revision", "previewed"):
             if isinstance(result, Mapping) and result.get(key) is not None:
                 receipt[key] = result[key]
-        if receipt.get("work_copy_id"):
+        scope = self._presentation_scope
+        if (scope is not None and receipt.get("action") == "edit" and not receipt.get("previewed")
+                and receipt.get("work_copy_id") == scope.work_copy_id and receipt.get("work_copy_revision")):
+            self._presentation_scope = replace(scope, work_copy_revision=receipt["work_copy_revision"])
+            journal["work_copy"] = {"work_copy_id": scope.work_copy_id,
+                                    "work_copy_revision": receipt["work_copy_revision"]}
+        elif scope is None and receipt.get("work_copy_id"):
             journal["work_copy"] = {"work_copy_id": receipt["work_copy_id"],
                                     "work_copy_revision": receipt.get("work_copy_revision", "")}
         journal["receipts"] = (journal.get("receipts", []) + [receipt])[-RECEIPTS_KEPT:]
@@ -316,20 +370,47 @@ class BoardJobAgent(MechanicalWorker):
                  "refused": returned.get("refused") if isinstance(returned, Mapping) else None,
                  "reason_code": returned.get("reason_code") if isinstance(returned, Mapping) else None,
                  "failure": failure}
+        if self._presentation_scope is not None:
+            entry["pass"] = "presentation"
+        self._append_log(job_id, "calls", entry)
+
+    def _append_log(self, job_id: str, stream_name: str, entry: Mapping[str, Any]) -> None:
         try:
-            with (self._journal_root / f"{job_id}.calls.jsonl").open("a") as stream:
+            with (self._journal_root / f"{job_id}.{stream_name}.jsonl").open("a") as stream:
                 stream.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
         except OSError:
-            logger.warning("board job %s: call log not written", job_id)
+            logger.warning("board job %s: %s log not written", job_id, stream_name)
+
+    def _complete(self, job_id: str, request: ModelRequest) -> ModelCompletion:
+        if self._presentation_scope is None:
+            return self._model.complete(request)
+        entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "pass": "presentation"}
+        try:
+            completion = self._model.complete(request)
+        except Exception:
+            self._append_log(job_id, "model-calls", {**entry, "outcome": "failed", "session_usage": None})
+            raise
+        paused = completion.tool_use is not None
+        measured = not paused and is_measured(completion.usage)
+        self._append_log(job_id, "model-calls", {
+            **entry, "provider": completion.provider, "model": completion.model,
+            "outcome": "tool" if paused else "completed",
+            # The provider reports the native session's totals at its final response.
+            "session_usage": dict(completion.usage) if measured else None,
+        })
+        return completion
 
     def _request(self, job_id: str, journal: Mapping[str, Any]) -> ModelRequest:
         blocks = self._block_catalog() if self._block_catalog is not None else {}
         catalog = "\n".join(f"- {name} — {' '.join(description.split())}"
                             for name, description in blocks.items())
-        system = (f"{AGENT_INSTRUCTIONS}\nFireFli design blocks:\n{catalog or '(none available)'}\n"
+        presenting = self._presentation_scope is not None
+        instructions = PRESENTATION_INSTRUCTIONS if presenting else AGENT_INSTRUCTIONS
+        system = (f"{instructions}\nFireFli design blocks:\n{catalog or '(none available)'}\n"
                   f"His preferences:\n{self._preferences_text()}\n\n"
                   f"Capabilities you may call:\n{_catalogue(tuple(self._definitions.values()))}")
-        messages = [ModelMessage(ModelRole.SYSTEM, system), ModelMessage(ModelRole.USER, journal["brief"])]
+        messages = [ModelMessage(ModelRole.SYSTEM, system),
+                    ModelMessage(ModelRole.USER, PRESENTATION_BRIEF if presenting else journal["brief"])]
         if journal["events"] or journal.get("receipts"):
             messages.append(ModelMessage(ModelRole.USER, json.dumps({
                 "transport_fact": "earlier_in_this_job",
@@ -344,8 +425,9 @@ class BoardJobAgent(MechanicalWorker):
                 "already_read_note": "what this job has read so far and what came back: use it rather than "
                                      "reading again; an identical read is answered from the earlier one"},
                 ensure_ascii=False)))
-        return ModelRequest(tuple(messages), "board_report", REPORT_SCHEMA, affinity_key=job_id,
-                            kind="board_agent", tools=agent_tools(),
+        return ModelRequest(tuple(messages), "board_report", REPORT_SCHEMA,
+                            affinity_key=f"{job_id}:presentation" if presenting else job_id,
+                            kind="board_agent", tools=worker_tools() if presenting else agent_tools(),
                             on_retry=self._renewal(job_id, journal))
 
     def _finish(self, job_id: str, journal: dict[str, Any], calls: list, outcome: dict[str, Any]) -> dict[str, Any]:
@@ -353,13 +435,33 @@ class BoardJobAgent(MechanicalWorker):
         return {"job_id": job_id, "calls": calls, **outcome}
 
     def _work(self, job_id: str | None, brief: str | None, message: str | None,
-              max_calls: int) -> dict[str, Any]:
+              max_calls: int, *, presentation: bool) -> dict[str, Any]:
         if job_id is None:
+            if presentation:
+                raise WorkerError("schematic_not_ready")
             job_id = uuid.uuid4().hex[:12]
             journal = {"brief": brief, "events": []}
         else:
             journal = self._journal(job_id)
-            journal["events"].append({"alx": message})
+            if presentation:
+                events = journal["events"]
+                if any(event.get("pass") == "presentation" for event in events):
+                    raise WorkerError("presentation_already_started")
+                report = events[-1].get("report", {}) if events else {}
+                copy = report.get("work_copy_id")
+                revision = report.get("work_copy_revision")
+                if (report.get("status") != "step_ready" or report.get("step") != "schematic"
+                        or not isinstance(copy, str) or not copy
+                        or not isinstance(revision, str) or not revision):
+                    raise WorkerError("schematic_not_ready")
+                if self._presentation_model is None:
+                    raise WorkerError("worker_failed")
+                self._model = self._presentation_model
+                self._presentation_scope = PresentationEditScope(copy, revision)
+                journal["work_copy"] = {"work_copy_id": copy, "work_copy_revision": revision}
+                events.append({"pass": "presentation"})
+            else:
+                journal["events"].append({"alx": message})
         if "activity" not in journal:
             count = 0
             if journal["events"]:
@@ -385,11 +487,11 @@ class BoardJobAgent(MechanicalWorker):
                                       "work_copy": journal.get("work_copy")})
             return self._finish(job_id, journal, calls, {"status": "stopped", "stop_reason": reason})
         try:
-            completion = self._model.complete(request)
+            completion = self._complete(job_id, request)
             while completion.tool_use is not None:
                 if self._stop.is_set():
                     return stopped("stopped_by_alx")
-                if completion.tool_use.get("name") == REPORT_TOOL:
+                if not presentation and completion.tool_use.get("name") == REPORT_TOOL:
                     report = _plain(completion.tool_use.get("input"))
                     if not isinstance(report, dict) or report.get("status") not in STATUSES:
                         raise WorkerError("report_malformed", returned)
@@ -420,6 +522,8 @@ class BoardJobAgent(MechanicalWorker):
                     activity["sheet"] = Path(asked["sheet"]).stem
                 self._publish_status(job_id, activity)
                 key = _read_key(tool_input.get("capability_id"), asked)
+                if presentation and asked.get("action") != "read_reference":
+                    key = None
                 if key is not None and key in reads:
                     # Read before in this job and unchanged since: the same answer, not run again.
                     answer, images = reads[key], ()
@@ -439,7 +543,7 @@ class BoardJobAgent(MechanicalWorker):
                 self._publish_status(job_id, activity)
                 if self._stop.is_set():
                     return stopped("stopped_by_alx")
-                completion = self._model.complete(replace(request, tool_result=answer, tool_images=images))
+                completion = self._complete(job_id, replace(request, tool_result=answer, tool_images=images))
         except BoardJobStopped:
             return stopped("stopped_by_alx")
         except WorkerError:
@@ -451,9 +555,16 @@ class BoardJobAgent(MechanicalWorker):
             self._abandon()
             raise WorkerError("worker_failed", returned) from error
         # The session ended without a report call: its final answer is the report.
+        if presentation and self._stop.is_set():
+            return stopped("stopped_by_alx")
         report = _plain(completion.output)
         if not isinstance(report, dict) or report.get("status") not in STATUSES:
             raise WorkerError("report_malformed", returned)
+        if presentation and report["status"] in ("step_ready", "done"):
+            if (report["status"] != "step_ready" or report.get("step") != "schematic"
+                    or any(report.get(key) != value for key, value in journal["work_copy"].items())
+                    or not isinstance(report.get("summary"), str) or not report["summary"].strip()):
+                raise WorkerError("report_malformed", returned)
         journal["events"].append({"report": report})
         return self._finish(job_id, journal, calls, {"status": report["status"], "report": report})
 

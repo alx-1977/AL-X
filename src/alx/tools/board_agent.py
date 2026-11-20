@@ -50,7 +50,8 @@ DEFINITION = CapabilityDefinition(
     "job: what he asked in his words, the project, what done means for this step in a sentence "
     "(from docs/BOARD_EDIT_DONE.md, which the agent cannot read) and anything he has already decided. Each stretch of its work ends with a report: the end of a "
     "step (step_ready), a question it cannot settle from his drawings or datasheets (question), "
-    "the end (done) or a dead end (blocked); report names the work copy and the revision. Then "
+    "the end (done) or a dead end (blocked); report names the work copy and the revision. "
+    "With job_id and pass set to presentation, run the one redraw-only pass after schematic step_ready. Then "
     "show him that step with kicad open_in_kicad (his original beside it only when he wants to compare), look at the screenshot, and tell him plainly; "
     "record his yes with kicad approve_step; and pass on what he said with job_id and message, in "
     "his words: the next stretch starts from the job's journal. stop true with job_id stops a "
@@ -63,6 +64,7 @@ DEFINITION = CapabilityDefinition(
         "brief": _STRING,
         "job_id": _STRING,
         "message": _STRING,
+        "pass": _STRING,
         "max_calls": StructuredSchema(ValueKind.INTEGER),
         "stop": StructuredSchema(ValueKind.BOOLEAN),
     }, (), extra_properties=False),
@@ -76,7 +78,8 @@ DEFINITION = CapabilityDefinition(
     }, ("job_id", "status"), extra_properties=False),
     # It edits her work copies through the agent.
     SideEffect.EFFECTFUL,
-    ("arguments_unusable", "worker_busy", "worker_failed", "job_unknown"),
+    ("arguments_unusable", "worker_busy", "worker_failed", "job_unknown",
+     "schematic_not_ready", "presentation_already_started"),
 )
 
 
@@ -93,26 +96,33 @@ def build_board_agent_executors(
             return CapabilityResult(call_id, DELEGATE_BOARD_JOB, CapabilityResultState.FAILED, failure=failure)
 
         brief, job_id, message = arguments.get("brief"), arguments.get("job_id"), arguments.get("message")
+        pass_name = arguments.get("pass")
+        if "pass" in arguments and pass_name != "presentation":
+            return failed("arguments_unusable")
         if arguments.get("stop") is True:
             # Never waits for the running stretch: it is the way to end one.
-            if not isinstance(job_id, str) or brief is not None or message is not None:
+            if not isinstance(job_id, str) or brief is not None or message is not None or pass_name is not None:
                 return failed("arguments_unusable")
             stopped = agent.stop(job_id)
             return CapabilityResult(call_id, DELEGATE_BOARD_JOB, CapabilityResultState.SUCCEEDED,
                                     {"job_id": job_id, "status": "stopping" if stopped else "not_running",
                                      "stopped": stopped})
         max_calls = arguments.get("max_calls", DEFAULT_CALLS)
-        starting = isinstance(brief, str) and bool(brief.strip()) and job_id is None and message is None
-        resuming = (brief is None and isinstance(job_id, str) and bool(job_id.strip())
-                    and isinstance(message, str) and bool(message.strip()))
-        if (not (starting or resuming) or isinstance(max_calls, bool) or not isinstance(max_calls, int)
+        existing = brief is None and isinstance(job_id, str) and bool(job_id.strip())
+        presenting = pass_name == "presentation" and existing and message is None
+        starting = (pass_name is None and isinstance(brief, str) and bool(brief.strip())
+                    and job_id is None and message is None)
+        resuming = pass_name is None and existing and isinstance(message, str) and bool(message.strip())
+        if (not (starting or resuming or presenting) or isinstance(max_calls, bool) or not isinstance(max_calls, int)
                 or not 0 < max_calls <= MAX_CALLS):
             return failed("arguments_unusable")
         try:
-            outcome = agent.work(job_id=job_id if resuming else None, brief=brief if starting else None,
-                                 message=message if resuming else None, max_calls=max_calls)
+            outcome = agent.work(job_id=job_id, brief=brief, message=message, max_calls=max_calls,
+                                 presentation=presenting)
         except WorkerError as error:
-            code = error.code if error.code in ("worker_busy", "job_unknown") else "worker_failed"
+            code = error.code if error.code in (
+                "worker_busy", "job_unknown", "schematic_not_ready", "presentation_already_started",
+            ) else "worker_failed"
             return failed(code, error.calls)
         except Exception:  # noqa: BLE001 - a provider failure is evidence for the Core
             return failed("worker_failed")

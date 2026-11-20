@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import sys
 
@@ -46,6 +47,28 @@ def environment(**changes: str) -> dict[str, str]:
 
 
 class RuntimeConfigurationTests(unittest.TestCase):
+    def test_board_presentation_uses_its_own_subscription_settings(self) -> None:
+        defaults = RuntimeSettings.from_environment(environment()).board_presentation
+        self.assertEqual((defaults.provider, defaults.model, defaults.effort, defaults.api_key),
+                         ("claude_subscription", "claude-opus-5-5", "medium", ""))
+        settings = RuntimeSettings.from_environment(environment(
+            ALX_BOARD_PRESENT_PROVIDER=" codex_subscription ",
+            ALX_BOARD_PRESENT_MODEL=" gpt-6-astra ",
+            ALX_BOARD_PRESENT_EFFORT=" HIGH ",
+        ))
+        with (patch("alx.bootstrap.providers.codex_subscription_cli_present", return_value=True),
+              patch("alx.bootstrap.providers.subscription_cli_present", return_value=True),
+              patch("alx.bootstrap.providers.CodexSubscriptionAgentModel") as provider):
+            adapters = build_runtime_providers(settings)
+        self.assertIs(adapters.board_presentation, provider.return_value)
+        self.assertIsNot(adapters.board_agent, adapters.board_presentation)
+        self.assertEqual(provider.call_args.args[0], "gpt-6-astra")
+        self.assertEqual(provider.call_args.kwargs["effort"], "high")
+        for key, value in (("ALX_BOARD_PRESENT_PROVIDER", "anthropic"),
+                           ("ALX_BOARD_PRESENT_EFFORT", "invalid")):
+            with self.subTest(key=key), self.assertRaisesRegex(ConfigurationError, key):
+                RuntimeSettings.from_environment(environment(**{key: value}))
+
     def test_live_voice_runtime_policy_is_configuration(self) -> None:
         settings = LiveVoiceSettings.from_environment(
             environment(

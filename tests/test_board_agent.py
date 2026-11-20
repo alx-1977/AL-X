@@ -20,6 +20,7 @@ from alx.contracts import (  # noqa: E402
     CapabilityResult, CapabilityResultState, ModelCompletion, SideEffect, StructuredSchema, ValueKind,
 )
 from alx.specialists.board_agent import REPORT_TOOL, BoardJobAgent  # noqa: E402
+from alx.contracts.kicad import presentation_edit_scope  # noqa: E402
 from alx.tools.board_agent import (  # noqa: E402
     BOARD_AGENT_KICAD_ACTIONS, DEFINITION, board_agent_call_refusal, build_board_agent_executors,
 )
@@ -71,6 +72,83 @@ class BoardAgentTests(unittest.TestCase):
 
     def agent(self, model):
         return BoardJobAgent(model, self.dispatch, (KICAD,), Path(self.folder.name))
+
+    def test_presentation_requires_the_latest_report_to_be_schematic_ready(self):
+        for status, step in (("question", "schematic"), ("step_ready", "placement"),
+                             ("step_ready", "routing"), ("done", "schematic")):
+            with self.subTest(status=status, step=step):
+                presentation = SessionModel([])
+                agent = BoardJobAgent(SessionModel([report(status, step)]), self.dispatch, (KICAD,),
+                                      Path(self.folder.name), presentation_model=presentation)
+                execute = build_board_agent_executors(agent, lambda: "c")[DEFINITION.capability_id]
+                job = execute({"brief": "Engineering"}).values["job_id"]
+                self.assertEqual(execute({"job_id": job, "pass": "presentation"}).failure["code"],
+                                 "schematic_not_ready")
+                self.assertEqual(presentation.requests, [])
+                self.assertEqual(execute({"job_id": job, "pass": "presentation", "message": "go"})
+                                 .failure["code"], "arguments_unusable")
+
+    def test_presentation_reuses_ready_copy_and_journal_once_across_restart(self):
+        copy_id = "w" * 32
+        scopes = []
+        usage = {"input_tokens": 17, "output_tokens": 13, "cached_tokens": 0, "reasoning_tokens": 0}
+
+        def dispatch(item):
+            scopes.append(presentation_edit_scope.get())
+            return CapabilityAttempt(item, CapabilityAttemptDisposition.EXECUTED, True, CapabilityResult(
+                item.call_id, item.capability_id, CapabilityResultState.SUCCEEDED,
+                {"action": "edit", "result": {"work_copy_id": copy_id, "work_copy_revision": "r2"}}))
+
+        class PresentationModel(SessionModel):
+            def complete(self, request):
+                result = super().complete(request)
+                if result.tool_use is not None:
+                    return ModelCompletion("presentation-subscription", "presentation-model", {},
+                                           tool_use=result.tool_use)
+                ready = report("step_ready", "schematic")["input"]
+                ready.update(summary="Aligned the root sheet", work_copy_revision="r2")
+                return ModelCompletion("presentation-subscription", "presentation-model", ready, usage)
+
+        engineering = SessionModel([report("step_ready", "schematic"), report("step_ready", "placement")])
+        folder = Path(self.folder.name)
+        original = BoardJobAgent(engineering, dispatch, (KICAD,), folder)
+        execute = build_board_agent_executors(original, lambda: "c")[DEFINITION.capability_id]
+        job = execute({"brief": "Engineering request"}).values["job_id"]
+        presenter = PresentationModel([
+            call({"action": "take_edits", "work_copy_id": copy_id}),
+            call({"action": "edit", "work_copy_id": "other", "script": "pass", "intent": []}),
+            call({"action": "edit", "work_copy_id": copy_id, "script": "pass", "intent": []}),
+            None,
+        ])
+        agent = BoardJobAgent(engineering, dispatch, (KICAD,), folder, presentation_model=presenter)
+        execute = build_board_agent_executors(agent, lambda: "c")[DEFINITION.capability_id]
+        passed = execute({"job_id": job, "pass": "presentation"})
+        self.assertEqual(passed.values["report"]["summary"], "Aligned the root sheet")
+        self.assertEqual([item["outcome"] for item in passed.values["calls"]],
+                         ["presentation_work_copy_only", "presentation_work_copy_only", "succeeded"])
+        self.assertEqual([(scope.work_copy_id, scope.work_copy_revision) for scope in scopes], [(copy_id, "r1")])
+        self.assertIsNone(presentation_edit_scope.get())
+        request = presenter.requests[0]
+        self.assertIn("tools/reference_p0005/", request.messages[1].content)
+        self.assertNotIn("Engineering request", request.messages[1].content)
+        self.assertEqual(json.loads(request.messages[-1].content)["work_copy"]["work_copy_id"], copy_id)
+        self.assertEqual(request.affinity_key, f"{job}:presentation")
+        journal = json.loads((folder / f"{job}.json").read_text())
+        self.assertEqual(journal["events"][-1]["report"]["work_copy_revision"], "r2")
+        self.assertEqual(journal["events"][0]["report"]["work_copy_revision"], "r1")
+        calls = [json.loads(line) for line in (folder / f"{job}.calls.jsonl").read_text().splitlines()]
+        self.assertEqual([entry["pass"] for entry in calls], ["presentation"] * 3)
+        model_calls = [json.loads(line) for line in (folder / f"{job}.model-calls.jsonl").read_text().splitlines()]
+        self.assertEqual([entry["outcome"] for entry in model_calls], ["tool"] * 3 + ["completed"])
+        self.assertEqual(model_calls[-1]["session_usage"], usage)
+        self.assertEqual((model_calls[-1]["provider"], model_calls[-1]["model"]),
+                         ("presentation-subscription", "presentation-model"))
+        restarted = BoardJobAgent(engineering, dispatch, (KICAD,), folder, presentation_model=presenter)
+        execute = build_board_agent_executors(restarted, lambda: "c")[DEFINITION.capability_id]
+        self.assertEqual(execute({"job_id": job, "pass": "presentation"}).failure["code"],
+                         "presentation_already_started")
+        self.assertEqual(execute({"job_id": job, "message": "Approved"}).values["report"]["step"], "placement")
+        self.assertEqual(len(presenter.requests), 4)
 
     def test_activity_follows_calls_and_survives_a_new_stretch(self):
         from alx.interfaces.diagnostic_feed import VoiceDiagnosticFeed

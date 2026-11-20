@@ -24,6 +24,7 @@ from contextlib import contextmanager, suppress
 from types import SimpleNamespace
 import fcntl
 
+from alx.contracts.kicad import presentation_edit_scope
 from alx.providers.credential_paths import denied
 
 # How layout-check readings are measured; part of every confirmation (D-081).
@@ -1496,6 +1497,12 @@ class KiCadProvider:
             os.close(fd)
 
     def edit(self, arguments):
+        presentation = presentation_edit_scope.get()
+        if presentation is not None:
+            if plain(arguments.get('intent')) != []:
+                raise KiCadError('arguments_unusable', {'detail': 'presentation edits require intent: []'})
+            if arguments['work_copy_id'] != presentation.work_copy_id or arguments.get('revert_to') is not None:
+                raise KiCadError('arguments_unusable', {'detail': 'presentation edits must redraw the job work copy'})
         with self._locked(arguments['work_copy_id']):
             if arguments.get('revert_to') is not None:
                 if set(arguments) - {'work_copy_id', 'revert_to', 'dry_run'}:
@@ -1526,6 +1533,8 @@ class KiCadProvider:
             if (arguments.get('work_copy_revision') is not None
                     and self._revision(root, meta) != arguments['work_copy_revision']):
                 raise KiCadError('work_copy_changed')
+            if presentation is not None and self._revision(root, meta) != presentation.work_copy_revision:
+                raise KiCadError('work_copy_changed')
             project = root / 'project'
             footprints = self._library_parts(arguments.get('footprints') or (), project, 'footprints')
             # From his library even where a sheet already keeps a copy: that copy may be bare
@@ -1539,6 +1548,8 @@ class KiCadProvider:
                     if not self._sheet_has_symbol(project, name):
                         raise
             library = bool(meta.get('library'))
+            if presentation is not None and library:
+                raise KiCadError('arguments_unusable', {'detail': 'presentation needs a board work copy'})
             # A library copy has no board: the script's argument is its folder.
             board = project / ('.library' if library else meta['board'])
             empty = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
@@ -1598,6 +1609,14 @@ class KiCadProvider:
                     facts_after = board_facts('(kicad_pcb)' if library else board.read_text())
                     changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
                                      if original.get(name) != current.get(name))
+                    if presentation is not None:
+                        outside = [name for name in changed
+                                   if not ((name.endswith('.kicad_sch') and name in original and name in current)
+                                           or (name.endswith('.kicad_sch' + GRID_SUFFIX)
+                                               and name[:-len(GRID_SUFFIX)] in original))]
+                        if outside:
+                            raise KiCadError('change_unmet', {'unmet': [
+                                'presentation may only redraw existing schematic sheets: ' + ', '.join(outside)]})
                     report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                               'board': structural_diff(facts_before, facts_after),
                               'label_exceptions': label_exceptions,
@@ -1608,7 +1627,7 @@ class KiCadProvider:
                         stage = 'edit_gate'
                         report.update(self._edit_gate(root, meta, snapshot, changed, model, postconditions,
                                                       sets, prior_drc, signatures, label_exceptions,
-                                                      orientation_exceptions))
+                                                      orientation_exceptions, presentation=presentation is not None))
                         if (any(name.endswith(('.kicad_sch', '.kicad_pcb')) for name in changed)
                                 and 'intent' not in arguments and not dry_run):
                             report['unmet'].append('intent is required for a drawing edit; [] for unchanged connectivity')
@@ -1785,7 +1804,7 @@ class KiCadProvider:
         return found
 
     def _edit_gate(self, root, meta, snapshot, changed, model, postconditions, sets, prior_drc, drc,
-                   label_exceptions=(), orientation_exceptions=()):
+                   label_exceptions=(), orientation_exceptions=(), *, presentation=False):
         from alx.providers.kicad_index import board_index
         project, board = root / 'project', meta['board']
         sheets = [name for name in changed if name.endswith('.kicad_sch')]
@@ -1808,6 +1827,13 @@ class KiCadProvider:
         if electrical:
             after = self._netlist(project, board, root / 'artifacts')
             problems.extend(unmet(sch_items, design_state(model), design_state(after)))
+            if presentation and model is not None and after is not None:
+                before_parts = {c['ref']: c for c in model['components']}
+                after_parts = {c['ref']: c for c in after['components']}
+                for ref in sorted(before_parts.keys() & after_parts.keys()):
+                    for field in ('value', 'footprint', 'fields'):
+                        if before_parts[ref][field] != after_parts[ref][field]:
+                            problems.append(f'presentation changed {ref} {field}')
             if sheets and after is None:
                 problems.append('cannot verify changed sheets without a root schematic')
             if any(name != Path(board).with_suffix('.kicad_sch').as_posix() for name in sheets):
