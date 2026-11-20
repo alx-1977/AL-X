@@ -36,10 +36,6 @@ def board_agent_call_refusal(call: CapabilityCall) -> CapabilityAttempt | None:
     if call.capability_id == KICAD and not arguments_match(allowed, call.arguments):
         return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
                                  reason_code="board_agent_action_not_allowed")
-    # D-084: the agent changes a copy only through a structured change.
-    if call.capability_id == KICAD and call.arguments.get("script") is not None:
-        return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
-                                 reason_code="board_agent_script_not_allowed")
     return None
 
 

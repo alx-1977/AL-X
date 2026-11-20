@@ -1147,7 +1147,7 @@ class Sheet:
     def _cut(self, spans_to_cut):
         for start, end in sorted(spans_to_cut, reverse=True):
             line = self.text.rfind("\n", 0, start)
-            self.text = self.text[:line if line >= 0 else start] + self.text[end:]
+            self.text = self.text[:line if line >= 0 and not self.text[line:start].strip() else start] + self.text[end:]
 
     def _append(self, block):
         end = self.text.rfind("\n\t(sheet_instances")
@@ -1424,6 +1424,8 @@ class Sheet:
         Keeps its reference, fields and instances. Returns the old pin points
         that no new pin now lands on, to wire or tidy.
         """
+        if footprint and "/" in footprint and ":" not in footprint:
+            footprint = footprint.replace("/", ":", 1)
         if lib_id not in _LIBRARY_SYMBOLS and lib_id not in self._libs(self._tree()[0]):
             raise KeyError("name %s in the edit's symbols so the tool copies it in" % lib_id)
         before = self.symbol(ref)["pins"]
@@ -1638,6 +1640,228 @@ def sheets():
     """The schematic files of the copy."""
     root = _os.path.dirname(BOARD_PATH)
     return sorted(name for name in _os.listdir(root) if name.endswith(".kicad_sch"))
+
+# Geometry helpers operate on parsed nodes. Unrelated top-level items retain their bytes.
+def _sexp(node, depth=1):
+    # Keep modified KiCad items readable and compatible with the existing sheet helpers.
+    indent = "\t" * depth
+    pieces = ["(" + node[0]]
+    for n in node[1:]:
+        pieces.append("\n" + indent + "\t" + _sexp(n, depth + 1) if isinstance(n, list) else " " + n)
+    return "".join(pieces) + ("\n" + indent if any(isinstance(n, list) for n in node) else "") + ")"
+
+
+def _walk(node):
+    yield node
+    for item in node:
+        if isinstance(item, list):
+            yield from _walk(item)
+
+
+def _header(root, key):
+    return _sexp(_child(root, key))
+
+
+def _root_sheet():
+    return sheet(_os.path.splitext(_os.path.basename(BOARD_PATH))[0] + ".kicad_sch")
+
+
+def _sheet_files(root):
+    for item in _children(root, "sheet"):
+        props = {_unq(p[1]).lower(): _unq(p[2]) for p in _children(item, "property")}
+        yield props["sheetfile"], props["sheetname"], _unq(_child(item, "uuid")[1])
+
+
+def _hierarchy():
+    """All instance paths by file. Report cycles and ambiguous reused sheets to the caller."""
+    top = _root_sheet()
+    paths = {}
+    pages = set()
+    def visit(s, path, parents):
+        file = _os.path.realpath(s.path)
+        if file in parents:
+            raise ValueError("cyclic sheet hierarchy at " + file)
+        paths.setdefault(file, []).append(path)
+        tree, _ = s._tree()
+        pages.update(_unq(p[1]) for p in _walk(tree) if _head(p) == "page")
+        for child, _, uid in _sheet_files(tree):
+            visit(sheet(_os.path.join(_os.path.dirname(file), child)), path + "/" + uid, parents | {file})
+    tree, _ = top._tree()
+    visit(top, "/" + _unq(_child(tree, "uuid")[1]), set())
+    return paths, pages
+
+
+def new_sheet(name, file, at=None):
+    """Create a child of the project root and return its saved Sheet."""
+    if not name or file != _os.path.basename(file) or not file.endswith(".kicad_sch"):
+        raise ValueError("give a sheet name and a new .kicad_sch filename")
+    top = _root_sheet()
+    root, _ = top._tree()
+    if any(n == name for _, n, _ in _sheet_files(root)):
+        raise ValueError("sheet name already in use: " + name)
+    paths, pages = _hierarchy()
+    page = next(str(i) for i in range(2, len(pages) + 3) if str(i) not in pages)
+    x, y = at or (25.4, 25.4 + 20.32 * len(_children(root, "sheet")))
+    uid = str(_uuid.uuid4())
+    project = _os.path.splitext(_os.path.basename(BOARD_PATH))[0]
+    top._append('(sheet (at %g %g) (size 25.4 12.7) (stroke (width 0.1524) (type solid)) '
+                '(fill (color 0 0 0 0)) (uuid %s) '
+                '(property "Sheetname" %s (at %g %g 0) (effects (font (size 1.27 1.27)) (justify left bottom))) '
+                '(property "Sheetfile" %s (at %g %g 0) (effects (font (size 1.27 1.27)) (justify left top))) '
+                '(instances (project %s (path %s (page %s)))))' %
+                (x, y, _q(uid), _q(name), x, y, _q(file), x, y+12.7, _q(project),
+                 _q(paths[_os.path.realpath(top.path)][0]), _q(page)))
+    with open(_os.path.join(_os.path.dirname(top.path), file), "x") as handle:
+        handle.write('(kicad_sch %s (generator "eeschema") (uuid %s) %s (lib_symbols))\n' %
+                     (_header(root, "version"), _q(str(_uuid.uuid4())), _header(root, "paper")))
+    top.save()
+    return sheet(file)
+
+
+def _geometry(item, s, libs):
+    at = _child(item, "at")
+    if _head(item) == "symbol":
+        return [_r(at[1:3]), *s._symbol_pins(item, libs).values()]
+    coords = [_r(p[1:3]) for p in _walk(item) if _head(p) in ("xy", "start", "mid", "end", "center")]
+    if coords:
+        return coords
+    if at:
+        x, y = _r(at[1:3])
+        size = _child(item, "size")
+        return [(x, y), (x + float(size[1]), y + float(size[2]))] if size else [(x, y)]
+    return []
+
+
+def _hits_box(a, b, box):
+    # Clip the parametric segment against both intervals.
+    lo, hi = 0., 1.
+    for start, end, low, high in zip(a, b, box[:2], box[2:]):
+        if end == start:
+            if not low <= start <= high:
+                return False
+        else:
+            p, q = sorted(((low-start)/(end-start), (high-start)/(end-start)))
+            lo, hi = max(lo, p), min(hi, q)
+    return lo <= hi
+
+
+def _region(s, box):
+    root, spans = s._tree()
+    libs = s._libs(root)
+    inside, crossing = [], []
+    local_labels = {}
+    for item in root:
+        if not isinstance(item, list) or _head(item) in ("lib_symbols", "title_block", "sheet_instances"):
+            continue
+        points = _geometry(item, s, libs)
+        if not points:
+            continue
+        selected = all(s._inside(p, box) for p in points)
+        if _head(item) == "label":
+            local_labels.setdefault(_unq(item[1]), {}).setdefault(selected, []).append(points[0])
+        if selected:
+            if _head(item) == "sheet":
+                raise ValueError("region includes a hierarchical sheet")
+            inside.append((item, spans[id(item)]))
+        elif any(_hits_box(a, b, box) for a, b in zip(points, points[1:])):
+            crossing.append({"kind": _head(item), "points": points})
+    for name, locations in local_labels.items():
+        if True in locations and False in locations:
+            crossing.append({"kind": "shared local label", "name": name,
+                             "inside": locations[True], "outside": locations[False]})
+    return inside, crossing
+
+
+def move_region(source, destination, area):
+    """Move to an existing unique sheet instance; crossing items stay on the source."""
+    src, dst = sheet(source), sheet(destination)
+    if _os.path.realpath(src.path) == _os.path.realpath(dst.path):
+        raise ValueError("source and destination are the same sheet")
+    paths, _ = _hierarchy()
+    old, new = (paths.get(_os.path.realpath(s.path), []) for s in (src, dst))
+    if len(old) != 1 or len(new) != 1:
+        raise ValueError("move needs a single hierarchy instance of each sheet")
+    selected, crossing = _region(src, area)
+    sr, _ = src._tree()
+    dr, spans = dst._tree()
+    source_libs, dest_libs = src._libs(sr), dst._libs(dr)
+    moved, imports, blocks = [], {}, []
+    for item, span in selected:
+        if _head(item) == "symbol":
+            ref = src._ref(item)
+            moved.append(ref)
+            lib = _unq(_child(item, "lib_id")[1])
+            if lib in dest_libs and dest_libs[lib] != source_libs[lib]:
+                raise ValueError("different cached definitions of " + lib)
+            if lib not in dest_libs:
+                imports[lib] = source_libs[lib]
+            entries = [n for n in _walk(_child(item, "instances") or []) if _head(n) == "path"]
+            if len(entries) != 1 or _unq(entries[0][1]) != old[0]:
+                raise ValueError("ambiguous instance path for " + ref)
+            block = src.text[span[0]:span[1]]
+            blocks.append(_re.sub(r'(\(path\s+)' + _re.escape(entries[0][1]) + r'(?=\s|\))',
+                                  lambda m: m[1] + _q(new[0]), block, count=1))
+        else:
+            blocks.append(src.text[span[0]:span[1]])
+    end = spans[id(_child(dr, "lib_symbols"))][1]-1
+    dst.text = dst.text[:end] + "\n".join(map(_sexp, imports.values())) + dst.text[end:]
+    for block in blocks:
+        dst._append(block)
+    src._cut([span for _, span in selected])
+    dst.save()
+    src.save()
+    return {"references": moved, "items": len(blocks), "crossings": crossing}
+
+
+def copy_layout(file, ref_map, area, offset, target_area=None):
+    """Replace twin geometry in a translated rectangle, retaining target identities and fields."""
+    import copy
+    s = sheet(file)
+    dx, dy = offset
+    target = target_area or [area[0] + dx, area[1] + dy, area[2] + dx, area[3] + dy]
+    if not (target[2] < area[0] or area[2] < target[0] or target[3] < area[1] or area[3] < target[1]):
+        raise ValueError("source and target blocks overlap")
+    source, cut1 = _region(s, area)
+    dest, cut2 = _region(s, target)
+    if cut1 or cut2:
+        raise ValueError("items cross the block boundary: %s" % (cut1+cut2))
+    # The twins may have different supply notes and tables. Copy electrical layout only.
+    kinds = ("wire", "junction", "no_connect", "symbol")
+    source = [(item, span) for item, span in source if _head(item) in kinds]
+    dest = [(item, span) for item, span in dest if _head(item) in kinds]
+    twins = {s._ref(item): item for item, _ in dest if _head(item) == "symbol"}
+    refs = [s._ref(item) for item, _ in source if _head(item) == "symbol"]
+    dest_refs = [s._ref(item) for item, _ in dest if _head(item) == "symbol"]
+    if (set(ref_map) != set(refs) or len(set(ref_map.values())) != len(refs)
+            or set(ref_map.values()) != set(dest_refs) or len(twins) != len(dest_refs)):
+        raise ValueError("map every symbol in both blocks, including power symbols, one to one")
+    blocks = []
+    for item, _ in source:
+        layout = copy.deepcopy(item)
+        for n in _walk(layout):
+            if _head(n) in ("at", "xy", "start", "mid", "end", "center"):
+                n[1:3] = ["%.6f" % (float(n[1])+dx), "%.6f" % (float(n[2])+dy)]
+            if _head(n) == "uuid":
+                n[1] = _q(str(_uuid.uuid4()))
+        if _head(layout) == "symbol":
+            twin = twins[ref_map[s._ref(layout)]]
+            twin[:] = [n for n in twin if _head(n) not in ("at", "mirror")]
+            twin.extend(n for n in layout if _head(n) in ("at", "mirror"))
+            props = {n[1]: n for n in _children(layout, "property")}
+            for prop in _children(twin, "property"):
+                if prop[1] in props:
+                    for key in ("at", "effects"):
+                        value = _child(props[prop[1]], key)
+                        if value:
+                            prop[:] = [n for n in prop if _head(n) != key] + [value]
+            layout = twin
+        blocks.append(_sexp(layout))
+    s._cut([span for _, span in dest])
+    for block in blocks:
+        s._append(block)
+    s.save()
+    return {"references": dict(ref_map), "items": len(blocks)}
+
 # ---- end of schematic helpers ----
 '''
 

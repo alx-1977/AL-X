@@ -129,7 +129,7 @@ class KiCadTests(unittest.TestCase):
             target = Path(argv[argv.index('--output') + 1])
             nets = self.netlists.pop(0) if getattr(self, 'netlists', None) else [('N1', 'R1', '1')]
             target.write_text('(export (components ' + ' '.join(
-                f'(comp (ref "{ref}") (value "10k") (footprint "R_0603"))'
+                f'(comp (libsource (lib "Lib") (part "Test")) (ref "{ref}") (value "10k") (footprint "R_0603"))'
                 for ref in sorted({ref for _name, ref, _pin in nets})) + ') (nets ' + ' '.join(
                 f'(net\n(code "1") (name "{name}") (node (ref "{ref}") (pin "{pin}")))'
                 for name, ref, pin in nets) + '))')
@@ -169,6 +169,8 @@ class KiCadTests(unittest.TestCase):
         return SimpleNamespace(returncode=0)
 
     def call(self, name, **arguments):
+        if name == 'edit_kicad_work_copy' and 'script' in arguments:
+            arguments.setdefault('intent', [])
         if name == 'approve_step' and arguments.get('work_copy_id'):
             # He approves what he was shown (17 Nov): the copy is opened for him first.
             self.shown(arguments['work_copy_id'], 'schematic' if arguments.get('step') == 'schematic' else 'board')
@@ -184,6 +186,7 @@ class KiCadTests(unittest.TestCase):
 
     def test_a_step_is_approved_only_on_a_view_that_opened_and_shows_that_step(self):
         """18 Nov review: a failed launch, or a schematic view, counted as showing him the board."""
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))')
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
             EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
@@ -236,6 +239,7 @@ class KiCadTests(unittest.TestCase):
         self.assertIn('take_edits first', refused.failure['recovery']['detail'])
 
     def test_a_step_is_approved_only_once_he_was_shown_that_version(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))')
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
             EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
@@ -763,6 +767,47 @@ class KiCadTests(unittest.TestCase):
             EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
         self.assertEqual(edited['change_report']['erc']['totals']['error'], 1)
 
+    def test_an_undriven_net_can_be_reported_at_another_pin_on_another_sheet(self):
+        model = {"components": [], "nets": [{"name": name, "nodes": []} for name in ("GND", "3V3")]}
+        def marker(net, sheet, uid):
+            return {"type": "power_pin_not_driven", "severity": "error", "sheet": sheet,
+                    "description": "Input Power pin not driven by any Output Power pins",
+                    "items": [{"uuid": uid, "description": f"Symbol #PWR? Hidden pin  [{net}, Power input, Line]"}]}
+        old = marker("GND", "/Power/", "a")
+        moved = marker("GND", "/Radio/", "b")
+        fresh = marker("3V3", "/Radio/", "c")
+        self.assertEqual(KiCadProvider._new_findings([old], [moved, fresh], (model, model)), [fresh])
+        self.assertEqual(KiCadProvider._new_findings([old], [moved, old], (model, model)), [old])
+
+    def test_new_erc_errors_restore_the_copy_and_warnings_are_kept(self):
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))')
+        checked = self.check()
+        work = checked['work_copy_id']
+        copy = next(self.storage.rglob(work + '/project/test.kicad_sch'))
+        original = copy.read_bytes()
+        # KiCad reports the same described fault on independent pins. Preserve occurrence
+        # counts and severity even when the original design already had this fault.
+        provider = self.runtime.provider
+        run = provider.execute_cli
+        severity = 'error'
+        def reports(cli, args):
+            if args[:2] == ['sch', 'erc']:
+                source = Path(args[-1])
+                violations = [] if source.read_bytes() == original else [
+                    {'type':'pin_conflict', 'severity':severity, 'description':'Pin conflict',
+                     'items':[{'description':'Symbol U3 Pin 2', 'uuid':'pin-id'}]}]
+                self.erc_report = {'sheets':[{'path':'/Child', 'violations':violations}]}
+            return run(cli, args)
+        with patch.object(provider, 'execute_cli', reports):
+            bad = self.call('edit_kicad_work_copy', work_copy_id=work, script=self.CHANGE_SCHEMATIC)
+            self.assertEqual(bad.failure['code'], 'change_unmet')
+            self.assertIn('Symbol U3 Pin 2', str(bad.failure['recovery']['unmet']))
+            self.assertEqual(copy.read_bytes(), original)
+            severity = 'warning'
+            good = self.success('edit_kicad_work_copy', work_copy_id=work, script=self.CHANGE_SCHEMATIC)
+            warning, = good['change_report']['gate']['erc']
+            self.assertEqual((warning['sheet'], warning['severity']), ('/Child', 'warning'))
+
     def test_the_check_counts_top_level_sheets(self):
         """An Altium import makes one top-level sheet per Altium sheet (KiCad 10)."""
         (self.project / 'test.kicad_sch').write_text('(kicad_sch)')
@@ -785,6 +830,7 @@ class KiCadTests(unittest.TestCase):
     def test_a_schematic_change_writes_back_and_a_stray_file_is_named(self):
         """2026-11-13: a part change on C62 and C66 edited two schematic sheets."""
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
+        (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))')
         checked = self.check()
         edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=(
             EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
@@ -1227,9 +1273,12 @@ p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
         """Review of #247: the board DRC is reused after a schematic-only edit; the schematic
         comparison is not, so a break the edit made still stops write-back."""
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
-        self.netlists = [[('A', 'U1', '1')]]
+        self.netlists = [[('A', 'U1', '1')], [('A', 'U1', '1'), ('A', 'U9', '1')]]
+        # The added part is intentional on the schematic and still absent from the board.
         checked = self.check()
-        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC)
+        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              intent=[{'op': 'add', 'ref':'U9','part':'Lib:Test'},
+                                      {'op': 'wire', 'from':'U9.1','to':'U1.1'}], script=self.CHANGE_SCHEMATIC)
         # KiCad's netlist of the edited schematic: it now has a part the board does not.
         self.netlists = [[('A', 'U1', '1'), ('A', 'U9', '1')]] * 4
         drc_runs = len([c for c in self.calls if c[1:3] == ['pcb', 'drc']])
@@ -1303,7 +1352,9 @@ p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
         self.netlists = [[('A', 'U1', '1'), ('B', 'U1', '2')] for _ in range(6)]
         checked = self.check()
         # Her copy joins them on the board.
-        joined = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="""
+        joined = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              intent=[{'op': 'disconnect', 'side': 'board', 'pin': 'U1.2'},
+                                      {'op': 'label', 'side': 'board', 'pin': 'U1.2', 'net': 'A'}], script="""
 import sys
 from pathlib import Path
 p = Path(sys.argv[1])
@@ -1322,13 +1373,14 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         self.report = {'violations': [{'type': 'clearance', 'severity': 'error', 'description': 'Clearance',
                                        'items': [{'description': 'Track [A] on F.Cu'}]}],
                        'unconnected_items': [], 'schematic_parity': []}
-        edited = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
-        compared = edited['change_report']['compared_to_original']
-        # No schematic in this project: nothing compared, which is not "no differences" (18 Nov review).
-        self.assertFalse(compared['schematic_vs_board_available'])
-        self.assertEqual(compared['new'], 1)
-        self.assertEqual(compared['resolved'], 2)
-        self.assertEqual(compared['new_findings'][0]['type'], 'clearance')
+        result = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
+        self.assertEqual(result.failure['code'], 'change_unmet')
+        recovery = result.failure['recovery']
+        self.assertEqual(recovery['gate']['drc'][0]['type'], 'clearance')
+        self.assertEqual(recovery['rollback_status'], 'restored')
+        preview = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                               script=EDIT_SCRIPT, dry_run=True)
+        self.assertEqual(preview['change_report']['compared_to_original']['new'], 1)
 
     def test_an_edit_gets_the_library_footprints_it_names(self):
         """Her script cannot read his library; the footprints it names go in with it."""

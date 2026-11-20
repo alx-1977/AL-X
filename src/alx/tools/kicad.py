@@ -60,7 +60,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'step_refusal': MAP, 'change_result': array(MAP), 'unmet': array(S), 'reverted_edits': I,
+    'step_refusal': MAP, 'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I,
     'set': array(MAP)},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
@@ -105,68 +105,21 @@ _ACTION_DEFINITIONS = (
             'compared_to_original': MAP}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('edit_kicad_work_copy',
-        'Change a registered untainted work copy. change (D-084) is the way: a list of operations, '
-        'each {op, ...}, with exact references, pins as REF.PIN and nets. Schematic ops name their '
-        'sheet (file name): remove_symbols {refs}; swap_symbol {ref, lib_id, value?, footprint?, at?, '
-        'rotation?} (wiring left on old pins is tidied; pins_still_wired names new pins where old wiring '
-        'still ends, now joined to them: check each; the part takes the fields of its library part, MPN and LCSC included); '
-        'add_symbol {ref, like, at, rotation?, lib_id?, value?} (a new part copied from part `like` on that sheet, under a '
-        'free reference, then swapped to lib_id if given; its pins may touch nothing); wire {from, to, via?} (to a pin '
-        'already wired: straight onto that wiring with a junction where it can; otherwise straight out of the pin one '
-        'grid step, then one turn, his way; where that is not clear the tool finds its own clear path round parts '
-        'and wiring, and tries from the other end, so leave via out; via: [[x, y], ...] on the 1.27 grid only to '
-        'choose a particular route); label {pin, net, kind?: label|global_label}; power {pin | pins, '
-        'port} (a GND or power symbol already on that sheet with that value is copied, GND down, '
-        'power up, on a short wire; pins: neighbouring pins on one side share one wire and one port; where they are boxed in, '
-        'the wire goes on, crossing a wire once, to a port clear of everything); no_connect {pins}; tidy_fields {refs}; remove_labels {nets, area?} (with the stubs only they '
-        'held; without sheet, on every sheet); remove_items {area: [x1, y1, x2, y2], kinds?: wire|label|no_connect|junction|power} '
-        '(what lies wholly inside; power symbols found by place, unannotated too; never parts); '
-        'unwire {pins} (whatever is wired to those pins, and wiring left hanging; wiring on to other '
-        'pins stays); remove_dangling {area?} (no-connects off pins, labels on nothing, ports touching nothing, '
-        'wires with a free end). New wiring that would touch anything already there (a wire, a '
-        'label, a flag, another pin) is refused, naming it and where, unless it is already on the same net. Board ops: route {from: REF.PAD | [x, y], to: REF.PAD | [x, y], width?, layers?, follow?: [NET, ...], radius?, net?} (one '
-        'connection whose path the tool works out in Friedl\'s style: straight runs and 45-degree bends, as few '
-        'bends and vias as it can, clear of everything, on the layers this board is routed on, with its usual '
-        'width and via; a line 0.3 mm or wider is RF: it stays on its layer with arcs at the RF radius. follow: '
-        'lines already routed that go the same way; this one runs beside them at even spacing. Reports bends, '
-        'length and "neat" (what goes against his style, else "clean"). Ordinary lines must use it: track '
-        'refuses lines under 0.3 mm longer than 2 mm. Route lines that travel together one after another '
-        'with follow); to_plane {pins: [REF.PAD, ...]} (a power or ground '
-        'pin straight into its plane: a short stub and one via at the pin); add_teardrops {skip_nets?, area?} '
-        '(teardrops where tracks meet pads and vias and have none, shaped like the board\'s own; RF nets with '
-        'curved tracks are skipped); set {kind: field|text|via|track|arc, where: {refs?, nets?, layer?: F|B|layer, '
-        'name?: field name, value?, footprint?, area?: [x0, y0, x1, y1], reads?: a text\'s exact words, ids?, named?: true, all?: true}, '
-        'to: {...}} (Altium\'s Find Similar then Inspector: every object of that kind matching all of where, '
-        'from select\'s reading of this revision, gets exactly the properties in to and nothing else. field and '
-        'text: size (mm, or [height, width]), thickness, visible, angle, at [x, y] (one object), move_by [dx, dy]; '
-        'text also text; via: size, drill; track and arc: width. E.g. every designator 0.5 mm: {kind: field, '
-        'where: {name: Reference, named: true}, to: {size: 0.5}}; pass select\'s work_copy_revision with the edit. The report\'s set receipt says matched, already as asked, '
-        'changed; an object not as asked, or one not picked that changed, undoes the edit); '
-        'title_block {title?, date?, revision?, company?}; copper_shape {net, outline: [[x, y], ...], layer?} (a solid copper polygon on one net, kept inside '
-        'a no-pour keep-out like a track, touching nothing of another net: a taper from wide feed copper to a '
-        'small pad, or feed copper); remove_copper_shapes {nets, area: [x1, y1, x2, y2]} (copper shapes and '
-        'pours of those nets wholly inside, to redraw them); keepout {outline: [[x, y], ...], layers?: [F, In1, ..., B], no_tracks?, no_vias?, name?} (a '
-        'keep-out area: pours pull back from it, e.g. an antenna clearance from its datasheet layout); '
-        'remove_keepouts {area: [x1, y1, x2, y2], name?} (keep-out areas wholly inside, to resize or replace one); sync_from_schematic {place?: {REF: [x, y, rotation?]}} (the board takes the schematic as it '
-        'is, like KiCad\'s Update PCB from Schematic: changed footprints swapped in place, values and fields '
-        'such as MPN and LCSC copied, every pad on its schematic net; parts new to the board go where place '
-        'says, else are listed in needs_place; parts only on the board are listed, never removed: remove_parts '
-        'takes them off); remove_parts '
-        '{refs, with_tracks?} (copper only they used goes too); replace_part {ref, footprint, '
-        'pin_nets?}; add_part {ref, footprint, at, rotation?, side?, value?, pin_nets?}; place {ref, '
-        'at? | near: {ref, offset}, rotation?, side?}; track {width, from?: REF.PAD, to?: REF.PAD, '
-        'points?, net?, layer?, radius?}; via {net, at}; remove_tracks {nets, area?}; remove_teardrops '
-        '{area}; remove_dangling_tracks {area} (tracks and vias inside that lead nowhere, by KiCad\'s '
-        'own connectivity, repeated until none). The library parts named are found by themselves. Code carries the change out in one '
-        'run and checks the result: every wire, label, power and no-connect holds in KiCad\'s netlist, '
-        'every replaced pad has its net, removed parts are gone, and no pin (other than a '
-        'swapped or removed part\'s) is joined to anything the change did not join, nor split '
-        'unless the change removes labels or leftovers; otherwise nothing is kept and change_unmet lists each unmet item, so a refused change costs '
-        'nothing: make the change rather than preview it. A change runs no ERC (checks true asks for '
-        'it); run check work_copy_id once at the end of the step. revert_to (a revision '
-        'from an earlier result, or start) alone puts the copy back as it was then. '
-        'change_report.change_result says what each operation did. script (bounded Python with '
-        'pcbnew) remains for what change cannot yet express, for you alone, not your board agent. '
+        'Run one bounded Python script on the work copy. Declare intent as a list of postconditions. '
+        'Use [] for unchanged connectivity and parts. Each item has op, and optional side '
+        '(schematic by default or board). wire {from,to} joins REF.PINs, disconnect {pin} detaches '
+        'a pin from its previous net, label {pin, net} sets the exact KiCad net (including sheet path). '
+        'add/swap {ref, part} names the new library ID, remove {ref} removes a part. For board set '
+        'use {op:"set",side:"board",kind,ids,to} with IDs and work_copy_revision from select. '
+        'set_properties(b, ids, values) edits those objects. The gate verifies every postcondition, '
+        'unexpected pin and part changes, new FireFli style violations and new ERC/DRC errors. '
+        'Failures restore the revision and name what failed. Warnings are reported. '
+        'revert_to alone (an earlier revision or start) restores a kept edit. '
+        'Use new_sheet(name,file), move_region(source,destination,area), and '
+        'copy_layout(sheet,ref_map,area,offset) for schematic blocks. Additional board helpers include '
+        'remove_parts, place_part, route_connection, to_plane, add_keepout, remove_keepouts, '
+        'remove_tracks, remove_dangling_tracks, remove_copper_shapes, add_teardrops, set_title_block, '
+        'sync_from_schematic(b,place) (supply needed footprints). '
         'argv[1] is the board. dry_run true runs it, reports everything it would change '
         '(printed output, change report, DRC, comparison with his original, and step_refusal if '
         'his order would refuse it) and puts the copy back as it was: look before you change, '
@@ -234,8 +187,8 @@ _ACTION_DEFINITIONS = (
         'change_report.compared_to_original lists DRC findings his original did not have (new, '
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
-        obj({'work_copy_id': S, 'script': S, 'change': array(MAP), 'footprints': array(S), 'symbols': array(S),
-             'dry_run': B, 'revert_to': S, 'checks': B, 'work_copy_revision': S}, ('work_copy_id',)),
+        obj({'work_copy_id': S, 'script': S, 'intent': array(MAP), 'footprints': array(S), 'symbols': array(S),
+             'dry_run': B, 'revert_to': S, 'work_copy_revision': S}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
              'previewed': B, 'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
@@ -448,7 +401,7 @@ SELECT = CapabilityDefinition('select',
     '(F, B or a layer name), name (a field\'s name), value, footprint (LIBRARY:NAME or NAME), area '
     '[x0, y0, x1, y1] mm, reads (a board text\'s exact words), ids. count is how many match; objects '
     'lists them up to limit (default 100); named true leaves out parts without a designator (logos). '
-    'work_copy_revision is the revision read: pass it to the edit whose set uses the same where, '
+    'work_copy_revision is the revision read: pass it to the edit that uses these object IDs, '
     'and the edit is refused if the copy has changed since.',
     obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'kind': S, 'refs': array(S), 'nets': array(S),
          'layer': S, 'name': S, 'value': S, 'footprint': S, 'area': array(N), 'reads': S, 'ids': array(S),
@@ -656,7 +609,7 @@ DEFINITION = CapabilityDefinition(KICAD,
         f'required: {", ".join(definition.input_schema.required) or "none"}. {definition.purpose}'
         for name, definition in CONTRACTS.items()),
     StructuredSchema(ValueKind.OBJECT, {'action': S, **_FIELDS}, ('action',), extra_properties=False),
-    obj({'action': S, 'result': MAP}),
+    obj({'action': S, 'result': MAP, 'image_sha256s': array(S)}, ('action', 'result')),
     SideEffect.EFFECTFUL, FAILURES,
     trace_fields=('action',),
     read_only_when=tuple((('action', name),) for name in FREE_ACTIONS),
@@ -714,8 +667,13 @@ def build_kicad_executors(provider, call_id_source):
                 result = methods[action](values)
                 if not contract.output_schema.accepts(result):
                     raise ValueError('invalid_report')
-                return CapabilityResult(call_id_source(), KICAD, CapabilityResultState.SUCCEEDED,
-                                        {'action': action.value, 'result': result})
+                envelope = {'action': action.value, 'result': result}
+                if action == KiCadAction.EDIT:
+                    digests = [i['image_sha256'] for i in result['change_report'].get('drawings', ())
+                               if 'image_sha256' in i]
+                    if digests:
+                        envelope['image_sha256s'] = digests
+                return CapabilityResult(call_id_source(), KICAD, CapabilityResultState.SUCCEEDED, envelope)
             except Exception as error:
                 code = (str(error) if str(error) in FAILURES else
                         'unsupported_project' if isinstance(error, (KeyError, ValueError, TypeError, IndexError))

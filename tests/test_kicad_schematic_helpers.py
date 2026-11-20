@@ -77,6 +77,78 @@ class SchematicHelperTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
         return {name: nodes for nodes, name in netlist_nets(netlist_model(output.read_text())).items()}
 
+    def test_new_sheet_and_region_move_keep_netlist_and_instance_identity(self):
+        from alx.providers.kicad import sexpr
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            top.write_text(schematic())
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+s.wire_pin_to("R1","2",s.symbol("R2")["pins"]["1"])
+s.add_wire((50,90),(200,90))
+s.save()
+""")
+            nets = self.netlist(folder)
+            original = sexpr(top.read_text())
+            uid = original.named("uuid")[0].children[1]
+            symbols = [s.named("uuid")[0].children[1] for s in original.named("symbol")][:2]
+            info = self.run_script(folder, """
+import json
+new_sheet("Power","power.kicad_sch")
+print(json.dumps(move_region("t.kicad_sch","power.kicad_sch",[95,89,134,118])))
+""")
+            import json
+            report = json.loads(info)
+            self.assertEqual(report["references"], ["R1", "R2"])
+            self.assertIn({"kind":"wire","points":[[50,90],[200,90]]}, report["crossings"])
+            self.assertEqual(nets, self.netlist(folder))
+            block = sexpr(top.read_text()).named("sheet")[0]
+            sheet_id = block.named("uuid")[0].children[1]
+            moved = sexpr(Path(folder, "power.kicad_sch").read_text()).named("symbol")
+            self.assertEqual(symbols, [s.named("uuid")[0].children[1] for s in moved])
+            for s in moved:
+                path = s.named("instances")[0].named("project")[0].named("path")[0].children[1]
+                self.assertEqual(path, f"/{uid}/{sheet_id}")
+
+    def test_copy_layout_moves_the_target_fields_and_wiring_and_keeps_its_values(self):
+        from alx.providers.kicad import sexpr
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            text = schematic()
+            start = text.index('(property "Reference" "R3"')
+            top.write_text(text[:start] + text[start:].replace('"10k"', '"22k"', 1))
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+s.wire_pin_to("R1","2",s.symbol("R2")["pins"]["1"])
+s.save()
+copy_layout("t.kicad_sch", {"R1":"R3","R2":"R4"}, [95,88,134,120], (50.8,0))
+""")
+            tree = sexpr(top.read_text())
+            r3 = next(s for s in tree.named("symbol") if s.named("property")[0].children[2] == "R3")
+            self.assertEqual(r3.named("property")[1].children[2], "22k")
+            self.assertEqual(r3.named("at")[0].children[1:], ["152.400000","101.600000","0"])
+            self.assertIn(frozenset({("R3","2"),("R4","1")}), self.netlist(folder).values())
+
+    def test_swap_to_a_derived_library_mpn_uses_its_base_pins_and_its_own_fields(self):
+        from alx.providers.kicad import flat_symbol, sexpr
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            top.write_text(schematic())
+            library = '(kicad_symbol_lib ' + library_symbol("R") + (
+                ' (symbol "Intermediate" (extends "R"))'
+                ' (symbol "MPN" (extends "Intermediate") (property "Value" "14.5k" (at 0 0 0))))')
+            tree = sexpr(library)
+            flat = flat_symbol(library, tree, tree.named("symbol")[-1], "MPN")
+            self.run_script(folder, 's = sheet("t.kicad_sch"); s.swap_symbol("R1","Local:MPN"); s.save()',
+                            {"Local:MPN": flat})
+            saved = sexpr(top.read_text())
+            cached = next(s for s in saved.named("lib_symbols")[0].named("symbol") if s.children[1] == "Local:MPN")
+            self.assertFalse(cached.named("extends"))
+            self.assertTrue(any(unit.named("pin") for unit in cached.named("symbol")))
+            value = next(p.children[2] for p in cached.named("property") if p.children[1] == "Value")
+            self.assertEqual(value, "14.5k")
+            self.assertTrue(any(("R1","1") in nodes for nodes in self.netlist(folder).values()))
+
     def test_wires_and_labels_at_pin_points_connect_in_kicads_netlist(self):
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / "t.kicad_sch").write_text(schematic())
@@ -267,15 +339,14 @@ s.save()
     def test_a_swap_writes_the_footprint_the_way_kicad_reads_it(self):
         """19 Nov 2026: a swap wrote Library/Name into the Footprint field; KiCad needs Library:Name
         and ERC reported eight parts with an empty library nickname."""
-        from alx.providers.kicad_change import CHANGE_HELPERS
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / "t.kicad_sch").write_text(schematic())
             program = Path(folder) / "edit.py"
             resistor = library_symbol("R").replace('(symbol "R"', '(symbol "Device:R"', 1)
-            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS
+            program.write_text(HELPERS + SCHEMATIC_HELPERS
                                + "_LIBRARY_SYMBOLS.update(%r)\n" % {"Device:R": resistor} + script_runner(
-                                   'apply_change([{"op": "swap_symbol", "sheet": "t.kicad_sch", "ref": "R1", '
-                                   '"lib_id": "Device:R", "footprint": "Resistor_SMD/R_0603_1608Metric"}])\n'))
+                                   's = sheet("t.kicad_sch"); s.swap_symbol("R1", '
+                                   '"Device:R", footprint="Resistor_SMD/R_0603_1608Metric"); s.save()\n'))
             done = subprocess.run([str(PYTHON), str(program), str(Path(folder) / "t.kicad_pcb")],
                                   capture_output=True, text=True, cwd=folder, timeout=120)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])

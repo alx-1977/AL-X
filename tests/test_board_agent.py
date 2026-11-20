@@ -72,6 +72,17 @@ class BoardAgentTests(unittest.TestCase):
     def agent(self, model):
         return BoardJobAgent(model, self.dispatch, (KICAD,), Path(self.folder.name))
 
+    def test_edit_crops_reach_the_next_model_request(self):
+        pictures = {"sheet": b"sheet PNG", "board": b"board PNG"}
+        def dispatch(call):
+            result = CapabilityResult(call.call_id, "kicad", CapabilityResultState.SUCCEEDED,
+                                      {"action": "edit", "result": {}, "image_sha256s": list(pictures)})
+            return CapabilityAttempt(call, CapabilityAttemptDisposition.EXECUTED, True, result)
+        model = SessionModel([call({"action":"edit","script":"pass","intent":[]}), report("step_ready","schematic")])
+        agent = BoardJobAgent(model, dispatch, (KICAD,), Path(self.folder.name), image_source=pictures.get)
+        agent.work(job_id=None, brief="Draw a sheet", message=None, max_calls=4)
+        self.assertEqual([image.data for image in model.requests[-1].tool_images], list(pictures.values()))
+
     def test_each_stretch_is_a_fresh_session_started_from_the_journal_and_his_preferences(self) -> None:
         prefs = Path(self.folder.name) / "prefs.md"
         prefs.write_text("- GND ports face down.")
@@ -207,10 +218,8 @@ class BoardAgentTests(unittest.TestCase):
             self.assertEqual(refused.reason_code, "board_agent_action_not_allowed", action)
         for action in BOARD_AGENT_KICAD_ACTIONS:
             self.assertIsNone(board_agent_call_refusal(CapabilityCall("c", "kicad", {"action": action})))
-        # D-084: it changes a copy only through a structured change, never a script.
-        scripted = board_agent_call_refusal(CapabilityCall("c", "kicad", {"action": "edit", "script": "x"}))
-        self.assertEqual(scripted.reason_code, "board_agent_script_not_allowed")
-        self.assertIsNone(board_agent_call_refusal(CapabilityCall("c", "kicad", {"action": "edit", "change": []})))
+        self.assertIsNone(board_agent_call_refusal(CapabilityCall(
+            "c", "kicad", {"action": "edit", "script": "b = load()", "intent": []})))
         self.assertIsNone(board_agent_call_refusal(CapabilityCall("c", "look", {"path": "x"})))
         self.assertIn("open_in_kicad", DEFINITION.purpose)
 

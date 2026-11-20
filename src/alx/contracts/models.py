@@ -52,6 +52,17 @@ class ToolImage:
             raise ValueError("a tool image has data")
 
 
+def result_images(values, image_source):
+    """Resolve only PNGs named in the result envelope, for this continuation."""
+    digests = values.get("image_sha256s", ())
+    if "image_sha256" in values:
+        digests = (values["image_sha256"],)
+    if not isinstance(digests, (list, tuple)):
+        return ()
+    return tuple(ToolImage("image/png", data) for digest in digests if isinstance(digest, str)
+                 and (data := image_source(digest)))
+
+
 @dataclass(frozen=True, slots=True)
 class ModelRequest:
     """A model request created by AL/X reasoning, not by a frontend."""

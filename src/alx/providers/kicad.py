@@ -30,9 +30,11 @@ from alx.providers.credential_paths import denied
 MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
-from alx.providers.kicad_change import CHANGE_HELPERS, ChangeError, plain, set_check, unmet, validate_change
+from alx.providers.kicad_board_helpers import BOARD_HELPERS
+from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
+from alx.providers.kicad_style import violations
 from alx.providers.kicad_rules import check_layout_rules
-from alx.providers.kicad_steps import (STEPS, board_pad_nets, edit_refusal, fingerprints, parity_mismatches, ready,
+from alx.providers.kicad_steps import (STEPS, edit_refusal, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
                                       step_status)
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
@@ -476,7 +478,7 @@ def compare_manufacturing(files, previous):
     return {'files': result[:200], 'truncated': len(result) > 200}
 
 
-def flat_symbol(text, tree, node, name):
+def flat_symbol(text, tree, node, name, ancestors=()):
     """A library symbol as a schematic stores it: one that extends another (16 Nov: every FireFli
     capacitor extends "C") gets that symbol's drawing and pins under its own name, and keeps
     its own fields."""
@@ -489,11 +491,15 @@ def flat_symbol(text, tree, node, name):
         raise KiCadError('arguments_unusable', {'detail': '%s extends %s, which is not in its library'
                                                 % (name, base_name)})
     base = base[0]
+    base_text = text
+    if base_name in (*ancestors, name):
+        raise KiCadError('arguments_unusable', {'detail': f'cyclic symbol inheritance at {base_name}'})
     if base.named('extends'):
-        raise KiCadError('arguments_unusable', {'detail': '%s extends a symbol that itself extends another'
-                                                % name})
+        base_text = flat_symbol(text, tree, base, base_name, (*ancestors, name))
+        base = sexpr(base_text)
     own_fields = {p.children[1] for p in node.named('property') if len(p.children) > 1}
     own_kinds = {c.name for c in node.children if isinstance(c, Node)}
+    own_units = {str(unit.children[1]) for unit in node.named('symbol')}
     added = []
     for child in base.children[2:]:
         if not isinstance(child, Node) or child.name == 'extends':
@@ -502,10 +508,13 @@ def flat_symbol(text, tree, node, name):
             continue
         if child.name not in ('property', 'symbol') and child.name in own_kinds:
             continue
-        piece = text[child.start:child.end]
+        piece = base_text[child.start:child.end]
         if child.name == 'symbol' and len(child.children) > 1:
             unit = str(child.children[1])
-            piece = piece.replace(json.dumps(unit), json.dumps(name + unit[len(base_name):]), 1)
+            target = name + unit[len(base_name):]
+            if target in own_units:
+                continue
+            piece = piece.replace(json.dumps(unit), json.dumps(target), 1)
         added.append(piece)
     head = text[node.start:extends[0].start].rstrip()
     rest = text[extends[0].end:node.end - 1].rstrip()
@@ -513,7 +522,7 @@ def flat_symbol(text, tree, node, name):
 
 
 # The shape of a kept netlist reading; bumped when netlist_model changes.
-NETLIST_VERSION = 1
+NETLIST_VERSION = 3
 
 
 class KiCadProvider:
@@ -1444,34 +1453,22 @@ class KiCadProvider:
     def edit(self, arguments):
         with self._locked(arguments['work_copy_id']):
             if arguments.get('revert_to') is not None:
-                if arguments.get('change') is not None or arguments.get('script') is not None:
-                    raise KiCadError('arguments_unusable', {'detail': 'revert_to goes alone, without change or script'})
+                if set(arguments) - {'work_copy_id', 'revert_to', 'dry_run'}:
+                    raise KiCadError('arguments_unusable', {'detail': 'revert_to goes alone'})
                 # 18 Nov review: a "preview" of a revert reverted for real.
                 if arguments.get('dry_run'):
                     raise KiCadError('arguments_unusable', {'detail': 'revert_to cannot be previewed; the '
                                                             'history lists what each revision changed'})
                 return self._revert(arguments)
-            change = plain(arguments.get('change'))
-            if isinstance(change, list):
-                # A footprint named as KiCad's Footprint field writes it (Library:Name) is taken
-                # as Library/Name (17 Nov: two refusals for the colon).
-                change = [dict(op, footprint=op['footprint'].replace(':', '/', 1))
-                          if isinstance(op, dict) and isinstance(op.get('footprint'), str)
-                          and ':' in op['footprint'] and '/' not in op['footprint'] else op for op in change]
             dry_run = bool(arguments.get('dry_run'))
-            if (change is None) == (arguments.get('script') is None):
-                raise KiCadError('arguments_unusable', {'detail': 'give change (a structured change) or script'})
-            plan = None
-            if change is not None:
-                # D-084: a structured change, carried out and checked by code.
-                try:
-                    plan = validate_change(change)
-                except ChangeError as error:
-                    raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
-                script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
-                          "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
-            else:
-                script = arguments['script']
+            script = arguments.get('script')
+            try:
+                postconditions = validate_postconditions(plain(arguments.get('intent', [])))
+            except ChangeError as error:
+                raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+            sets = [item for item in postconditions if item['op'] == 'set']
+            if sets and not arguments.get('work_copy_revision'):
+                raise KiCadError('arguments_unusable', {'detail': 'set needs the revision returned by select'})
             if not script or len(script) > 128000 or self.execute_python is None:
                 raise KiCadError('arguments_unusable')
             root, meta = self._load(arguments['work_copy_id'])
@@ -1482,40 +1479,12 @@ class KiCadProvider:
                     and self._revision(root, meta) != arguments['work_copy_revision']):
                 raise KiCadError('work_copy_changed')
             project = root / 'project'
-            if plan and any(op['op'] == 'sync_from_schematic' for op in change):
-                # The board takes the schematic as it now is (KiCad's Update PCB from
-                # Schematic, 17 Nov): its parts, fields and nets go in with the change.
-                sync = self._schematic_sync(root, meta)
-                change = [dict(op, _sync=sync) if op['op'] == 'sync_from_schematic' else op for op in change]
-                plan['footprints'] = sorted(set(plan['footprints']) | set(sync['footprints']))
-                script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
-                          "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
-            index_before = None
-            if plan and any(op['op'] == 'set' for op in change) and arguments.get('work_copy_revision') is None:
-                # Find Similar then change: what changes is what she saw (19 Nov recheck: a via added
-                # since her select would have been included).
-                raise KiCadError('arguments_unusable', {'detail': 'set: pass work_copy_revision from the select '
-                                                        'that showed what this changes'})
-            if plan and any(op['op'] == 'set' for op in change):
-                # Find Similar: the objects each set changes are picked from the board index of
-                # this revision before anything runs, and go in by address (18 Nov).
-                index_before = self._board_index(project / meta['board'], root / 'artifacts')
-                change = [dict(op, _ids=self._picked(index_before, op)) if op['op'] == 'set' else op
-                          for op in change]
-                moved = [uid for op in change if op['op'] == 'set' and {'at', 'move_by'} & set(op['to'])
-                         for uid in op['_ids']]
-                if len(moved) != len(set(moved)):
-                    raise KiCadError('arguments_unusable', {'detail': 'set: one object is moved by two operations; '
-                                                            'give it one at or one move_by'})
-                script = ('import json as _json\n_report = apply_change(_json.loads(%r))\n'
-                          "print('CHANGE_RESULT ' + _json.dumps(_report))\n" % json.dumps(change))
-            wanted = (lambda kind: sorted(set(arguments.get(kind) or ()) | set((plan or {}).get(kind) or ())))
-            footprints = self._library_parts(wanted('footprints'), project, 'footprints')
+            footprints = self._library_parts(arguments.get('footprints') or (), project, 'footprints')
             # From his library even where a sheet already keeps a copy: that copy may be bare
             # (16 Nov: the stored 100 pF part had no MPN or LCSC). A copy the library cannot
             # give (an import's own symbols) stays as the sheet keeps it.
             symbols = {}
-            for name in wanted('symbols'):
+            for name in arguments.get('symbols') or ():
                 try:
                     symbols.update(self._library_parts([name], project, 'symbols'))
                 except KiCadError:
@@ -1531,17 +1500,18 @@ class KiCadProvider:
             try:
                 with self._change(root, meta) as copy_change:
                     snapshot, original = copy_change.snapshot, copy_change.original
-                    before = empty if library else self._board_drc(root, meta)[0]
+                    before, prior_drc = (empty, []) if library else self._board_drc(root, meta)
                     facts_before = board_facts('(kicad_pcb)' if library else board.read_text())
                     steps_before = None if library else fingerprints(project, meta['board'])
                     # Tested helpers first, then her script compiled on its own, so
                     # its own first lines (a __future__ import) and line numbers
                     # stay as she wrote them (2026-11-12).
-                    pins_before, names_before = (self._pin_groups(root, meta)
-                                                 if plan and plan['schematic'] and not library else ({}, {}))
-                    script_path.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS
-                                           + '_LIBRARY_FOOTPRINTS.update(%r)\n' % footprints
-                                           + '_LIBRARY_SYMBOLS.update(%r)\n' % symbols
+                    model = None if library else self._netlist(project, meta['board'], root / 'artifacts')
+                    sync = self._schematic_sync(project, meta, model) if model is not None else {}
+                    script_path.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS
+                                           + 'SCHEMATIC_SYNC = %a\n' % sync
+                                           + '_LIBRARY_FOOTPRINTS.update(%a)\n' % footprints
+                                           + '_LIBRARY_SYMBOLS.update(%a)\n' % symbols
                                            + script_runner(script))
                     stage = 'script'
                     executed = self.execute_python(str(self.settings.kicad_python), script_path, board)
@@ -1571,40 +1541,28 @@ class KiCadProvider:
                         steps_after = fingerprints(project, meta['board'])
                         original_steps = self._original_steps(root, meta)
                         refusal = edit_refusal(steps_before, steps_after, original_steps, meta.get('approvals', {}))
-                        if refusal and not dry_run:
-                            raise KiCadError('step_not_approved', refusal)
                         steps = step_status(original_steps, meta.get('approvals', {}), steps_after)
-                    change_result, problems = [], []
-                    if plan is not None:
-                        marker = [line for line in stdout.splitlines() if line.startswith('CHANGE_RESULT ')]
-                        change_result = json.loads(marker[-1][len('CHANGE_RESULT '):]) if marker else []
-                        pins_after, names_after = (self._pin_groups(root, meta) if plan['schematic']
-                                                   else ({}, {}))
-                        problems = unmet(change, pins_before, pins_after, names_after,
-                                         board_pad_nets(board.read_text()) if plan['board'] else {},
-                                         change_result, names_before)
-                        if index_before is not None:
-                            from alx.providers.kicad_index import board_index
-                            receipts, wrong = set_check(change, index_before, board_index(board.read_text()))
-                            problems += wrong
-                        if problems and not dry_run:
-                            # Not what the change declared: undone, every unmet item named.
-                            raise KiCadError('change_unmet', {'unmet': problems[:30], 'change_result': change_result})
                     current = design_inventory(project)
                     facts_after = board_facts('(kicad_pcb)' if library else board.read_text())
                     changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
                                      if original.get(name) != current.get(name))
                     report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                               'board': structural_diff(facts_before, facts_after)}
-                    if plan is not None:
-                        # A removal's scope is for the check above, not for her to read.
-                        report['change_result'] = [{key: value for key, value in item.items() if key != 'scope'}
-                                                   if isinstance(item, dict) else item for item in change_result]
-                        report['unmet'] = problems[:30]
-                        if index_before is not None:
-                            report['set'] = receipts
+                    if library and (postconditions or any(n.endswith(('.kicad_pcb', '.kicad_sch')) for n in changed)):
+                        raise KiCadError('arguments_unusable', {'detail': 'check a board work copy to edit drawings'})
+                    if not library and (changed or postconditions):
+                        stage = 'edit_gate'
+                        report.update(self._edit_gate(root, meta, snapshot, changed, model, postconditions,
+                                                      sets, prior_drc, signatures))
+                        if (any(name.endswith(('.kicad_sch', '.kicad_pcb')) for name in changed)
+                                and 'intent' not in arguments and not dry_run):
+                            report['unmet'].append('intent is required for a drawing edit; [] for unchanged connectivity')
+                        if report['unmet'] and not dry_run:
+                            raise KiCadError('change_unmet', {k: report[k] for k in ('unmet', 'gate')})
                     if not library and changed:
                         report['compared_to_original'] = self._compared(root, meta, signatures)
+                        if refusal and not dry_run:
+                            raise KiCadError('step_not_approved', refusal)
                         if dry_run and refusal:
                             report['step_refusal'] = refusal
                     # Friedl's taper rule on the edited board, so she sees a step
@@ -1615,18 +1573,8 @@ class KiCadProvider:
                                               if library else
                                               {'findings': [], 'omitted': 0, 'not_checked': 'nothing changed'}
                                               if not changed else self._layout_rules(board))
-                    if not library and any(name.endswith('.kicad_sch') for name in changed) and (
-                            plan is None or arguments.get('checks')):
-                        # A schematic edit is checked like the first copy (review of #239). A
-                        # structured change is already proven against the netlist, so its ERC
-                        # waits for the step's check unless asked for (16 Nov, Friedl: ERC once,
-                        # at the end, not after every edit).
-                        report['erc'] = self._erc(root, meta, against_original=True)
-                    # A structured change says what each operation did and is checked against
-                    # the netlist; the raw text diff added ~24,000 characters to every one of the
-                    # agent's edits and nothing it used (16 Nov). History keeps the before files.
-                    diffs, budget = [], (0 if plan is not None else 24000)
-                    for name in (changed[:200] if budget else ()):
+                    diffs, budget = [], 24000
+                    for name in changed[:200]:
                         left = (snapshot / name).read_text(errors='replace') if name in original else ''
                         right = (project / name).read_text(errors='replace') if name in current else ''
                         # Stream the diff into a bounded report; retain the snapshot
@@ -1644,7 +1592,7 @@ class KiCadProvider:
                         budget -= used
                         if budget <= 0:
                             break
-                    truncated = plan is None and (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
+                    truncated = (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
                     report.update(file_diffs=diffs, diffs_truncated=truncated)
                     if truncated and not dry_run:
                         # A preview is undone, so it keeps no evidence (18 Nov review: it promised
@@ -1677,6 +1625,10 @@ class KiCadProvider:
                         raise _Preview({'work_copy_id': arguments['work_copy_id'], 'stdout': stdout[:16000],
                                         'stderr': stderr[:16000], 'change_report': report, 'before': before,
                                         'after': after, 'steps': steps, 'previewed': True})
+                    if not library and changed:
+                        from alx.providers.kicad_drawing import drawings
+                        report['drawings'] = drawings(self, snapshot, project, changed,
+                                                      steps_before['routing'] != steps_after['routing'])
                     if evidence:
                         # The snapshot becomes the evidence's before copy.
                         copy_change.keep_snapshot_at = evidence / 'before'
@@ -1719,6 +1671,129 @@ class KiCadProvider:
                 # Best-effort cleanup only: the outcome is already decided.
                 with suppress(OSError):
                     script_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _covered_sheets(project, board, model):
+        """Resolve exported instance UUID paths to files, including nested/reused sheets."""
+        if model is None:
+            return set()
+        top = (project / board).with_suffix('.kicad_sch')
+        by_instance = {'': top}
+        children = {}
+        for instance in sorted(model['sheet_paths'], key=lambda path: path.count('/')):
+            if not instance:
+                continue
+            parent, _, uid = instance.rpartition('/')
+            path = by_instance.get(parent)
+            if path is None:
+                continue
+            if path not in children:
+                children[path] = {}
+                for node in sexpr(path.read_text()).named('sheet'):
+                    prop = next((p for p in node.named('property')
+                                 if p.children[1].lower() == 'sheetfile'), None)
+                    if prop is not None and node.named('uuid'):
+                        children[path][node.named('uuid')[0].children[1]] = prop.children[2]
+            if uid in children[path]:
+                child = (path.parent / children[path][uid]).resolve()
+                if not child.is_relative_to(project.resolve()) or not child.is_file():
+                    raise KiCadError('unsupported_project', {'detail': f'invalid child of {path.name}: {uid}'})
+                by_instance[instance] = child
+        # KiCad 10 also exports multiple independent top sheets from project settings.
+        settings = top.with_suffix('.kicad_pro')
+        roots = json.loads(settings.read_text()).get('schematic', {}).get('top_level_sheets', []) if settings.exists() else []
+        represented = set(model['sheet_paths'])
+        files = {path.relative_to(project).as_posix() for path in by_instance.values()}
+        files.update(entry['filename'] for entry in roots if entry.get('uuid') in represented)
+        return files
+
+    def _edit_gate(self, root, meta, snapshot, changed, model, postconditions, sets, prior_drc, drc):
+        from alx.providers.kicad_index import board_index
+        project, board = root / 'project', meta['board']
+        sheets = [name for name in changed if name.endswith('.kicad_sch')]
+        board_items = [item for item in postconditions if item.get('side') == 'board']
+        sch_items = [item for item in postconditions if item.get('side', 'schematic') == 'schematic']
+        gate = {'style': [], 'erc': [], 'drc': []}
+        problems = []
+        report = {'gate': gate, 'unmet': problems}
+        if any(n.endswith('.kicad_pcb') and n != board for n in changed):
+            problems.append('cannot check an additional board against this work copy')
+        electrical = sheets or sch_items or any(n.endswith(('.kicad_pro', '.kicad_sym', 'sym-lib-table')) for n in changed)
+        after = model
+        if electrical:
+            after = self._netlist(project, board, root / 'artifacts')
+            problems.extend(unmet(sch_items, design_state(model), design_state(after)))
+            if sheets and after is None:
+                problems.append('cannot verify changed sheets without a root schematic')
+            if any(name != Path(board).with_suffix('.kicad_sch').as_posix() for name in sheets):
+                for folder, reading in ((snapshot, model), (project, after)):
+                    covered = self._covered_sheets(folder, board, reading)
+                    problems.extend(f'{name} is outside the exported schematic hierarchy'
+                                    for name in sheets if (folder / name).is_file() and name not in covered)
+            for name in sheets:
+                for kind, x, y, pins in sorted(violations(project / name) - violations(snapshot / name)):
+                    issue = f'{name} ({x}, {y}): {kind}: {", ".join(pins)}'
+                    gate['style'].append(issue)
+                    problems.append(issue)
+        if electrical or board in changed:
+            before_erc, after_erc = [], []
+            self._erc(root, meta, project=snapshot, findings=before_erc)
+            erc = self._erc(root, meta, against_original=True, findings=after_erc)
+            if electrical:
+                report['erc'] = erc
+            gate['erc'] = self._new_findings(before_erc, after_erc, models=(model, after))
+        if board in changed or board_items:
+            old_index = board_index((snapshot / board).read_text())
+            new_index = board_index((project / board).read_text())
+            problems.extend(unmet(board_items, board_state(old_index), board_state(new_index)))
+            if sets:
+                for item in sets:
+                    available = {o['id'] for o in old_index['objects'] if o['kind'] == item['kind']}
+                    problems.extend(f'{uid}: no {item["kind"]} in selected revision'
+                                    for uid in item['ids'] if uid not in available)
+                report['set'], wrong = set_check(sets, old_index, new_index)
+                problems.extend(wrong)
+        gate['drc'] = self._new_findings(prior_drc, drc)
+        for checker in ('erc', 'drc'):
+            problems.extend(f'{checker.upper()} {f["type"]}: {f["description"]} {f["items"]}'
+                            for f in gate[checker] if f['severity'] == 'error')
+        return report
+
+    @staticmethod
+    def _new_findings(before, after, models=(None, None)):
+        """Subtract occurrences, keeping complete evidence for each new finding."""
+        def keys(findings, model):
+            by_pin = design_state(model)[1]
+            net_names = {net['name'] for net in model['nets']} if model else set()
+            return [key(f, by_pin, net_names) for f in findings]
+
+        def key(f, by_pin, net_names):
+            # An undriven net has one ERC marker. KiCad may choose a different
+            # representative power input on every run, even on another sheet.
+            if f['type'] == 'power_pin_not_driven' and len(f['items']) == 1:
+                item = f['items'][0]
+                description = item.get('description', '') if isinstance(item, dict) else ''
+                power = re.match(r'^Symbol #PWR\S* Hidden pin\s+\[([^,]+), Power input,', description)
+                pin = re.match(r'^Symbol (\S+) (?:Hidden pin|Pin) (\S+) \[', description)
+                net = power[1] if power and power[1] in net_names else None
+                if pin and not net:
+                    net = by_pin.get(f'{pin[1]}.{pin[2]}')
+                if net:
+                    return (f['type'], f['severity'], net)
+            # KiCad includes positions in ERC item records. Prefer persistent UUIDs so
+            # moving the same offending component does not introduce another error.
+            items = [([i.get('uuid') or i.get('pos'), i.get('description')] if isinstance(i, dict)
+                      else i) for i in f['items']]
+            return json.dumps([f.get('sheet'), f['type'], f['severity'], f['description'],
+                               sorted(items, key=str), f.get('ids') or f.get('at')], sort_keys=True)
+        old = Counter(keys(before, models[0]))
+        new = []
+        for signature, finding in zip(keys(after, models[1]), after):
+            if old[signature]:
+                old[signature] -= 1
+            else:
+                new.append(finding)
+        return new
 
     @contextmanager
     def _change(self, root, meta, *, record=True):
@@ -2178,7 +2253,7 @@ class KiCadProvider:
         except Exception as error:  # noqa: BLE001 - a fact for her, not a failed step
             return {'findings': [], 'omitted': 0, 'not_checked': str(error)[:200]}
 
-    def _erc(self, root, meta, signatures=None, against_original=False):
+    def _erc(self, root, meta, signatures=None, against_original=False, *, project=None, findings=None):
         """KiCad's electrical rules check of the copy's schematic, grouped like the DRC.
 
         against_original: only findings his original did not already have are listed
@@ -2191,7 +2266,7 @@ class KiCadProvider:
                 known = set(map(tuple, json.loads((root / 'baseline.json').read_text())['erc']))
             except (OSError, ValueError, KeyError, TypeError):
                 known = None
-        schematic = (root / 'project' / meta['board']).with_suffix('.kicad_sch')
+        schematic = ((project or root / 'project') / meta['board']).with_suffix('.kicad_sch')
         if not schematic.is_file():
             return {'checked': False, 'reason': 'no schematic beside the board', 'totals':
                     {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}, 'groups': [],
@@ -2216,6 +2291,9 @@ class KiCadProvider:
                 totals['total'] += 1
                 mark = (kind, str(finding.get('description', '')),
                         '|'.join(str(i.get('description', '')) for i in (finding.get('items') or ())))
+                if findings is not None:
+                    findings.append({'type': kind, 'severity': severity, 'sheet': sheet.get('path', ''),
+                                     'description': mark[1], 'items': finding.get('items') or []})
                 if signatures is not None:
                     signatures.append(list(mark))
                 if known is not None:
@@ -2265,6 +2343,10 @@ class KiCadProvider:
             raise KiCadError('invalid_report')
         board_text = (root / 'project' / meta['board']).read_text()
         board = sexpr(board_text)
+        # The DRC also assigns temporary UUIDs to synthetic items such as "PCB".
+        # Only UUIDs that occur in the drawing identify an object across runs.
+        stored_ids = {node.children[1] for node in descendants(board)
+                      if node.name in ('uuid', 'tstamp') and len(node.children) > 1}
         identities = {}
         for footprint in board.named('footprint'):
             refs = references(footprint)
@@ -2340,6 +2422,8 @@ class KiCadProvider:
                     first = (finding['items'] or [{}])[0].get('pos') or {}
                     signatures.append({'type': kind, 'severity': severity,
                                        'description': finding.get('description', ''),
+                                       'ids': sorted(i['uuid'] for i in finding['items']
+                                                     if i.get('uuid') in stored_ids),
                                        'items': sorted(str(item.get('description', ''))
                                                        for item in finding['items']),
                                        # Where it is, so it can be found and fixed (16 Nov); not
@@ -2815,8 +2899,9 @@ class KiCadProvider:
         # schematic is not in the key on purpose: KiCad's schematic-parity findings are left out of
         # everything reused (totals and signatures, 15 Nov), and the board-vs-schematic comparison
         # comes from _parity, fresh per schematic revision.
-        return hashlib.sha256(json.dumps([sha(path) if path.is_file() else None for path in (
-            board, board.with_suffix('.kicad_dru'), board.with_suffix('.kicad_pro'))]).encode()).hexdigest()
+        files = (board, board.with_suffix('.kicad_dru'), board.with_suffix('.kicad_pro'))
+        return hashlib.sha256(json.dumps(['drc-with-item-ids', *[sha(p) if p.is_file() else None
+                                                               for p in files]]).encode()).hexdigest()
 
     def _remember_drc(self, root, meta, totals, signatures):
         (root / 'drc-last.json').write_text(json.dumps({'board': self._drc_key(root, meta), 'totals': totals,
@@ -2883,32 +2968,6 @@ class KiCadProvider:
         for old in kept[:-count]:
             old.unlink(missing_ok=True)
 
-    @staticmethod
-    def _picked(index, op):
-        """The addresses one set operation picks: exact filters over the board index, or all of
-        that kind. Ambiguity and stale addresses go back to her, never guessed (Law 3)."""
-        from alx.providers.kicad_index import select
-        filters = dict(op['where'])
-        every = bool(filters.pop('all', False))
-        ids = filters.pop('ids', None)
-        if not filters and ids is None and not every:
-            raise KiCadError('arguments_unusable', {'detail': 'set: say what to pick in where, or all: true '
-                                                    'for every %s' % op['kind']})
-        try:
-            found = select(index, op['kind'], ids=ids, **filters)
-        except (TypeError, ValueError) as error:
-            raise KiCadError('arguments_unusable', {'detail': 'set: %s' % error}) from error
-        if ids is not None:
-            gone = sorted(set(ids) - {o['id'] for o in found})
-            if gone:
-                raise KiCadError('arguments_unusable', {'detail': 'set: not on this revision or not a %s: %s'
-                                                        % (op['kind'], ', '.join(gone[:10]))})
-        if not found:
-            raise KiCadError('arguments_unusable', {'detail': 'set: no %s matches %s' % (op['kind'], dict(op['where']))})
-        if 'at' in op['to'] and len(found) != 1:
-            raise KiCadError('arguments_unusable', {'detail': 'set: at places one object; %d match' % len(found)})
-        return [o['id'] for o in found]
-
     def _board_index(self, board, scratch):
         """The one reading of a board (kicad_index), kept per board revision (18 Nov)."""
         from alx.providers.kicad_index import INDEX_VERSION, board_index
@@ -2928,27 +2987,8 @@ class KiCadProvider:
         self._keep_latest(scratch, 'index-')
         return index
 
-    def _pin_groups(self, root, meta):
-        """Each schematic pin (REF.PIN) with the pins on its net, and its net's name, from KiCad's netlist."""
-        from alx.providers.kicad_index import netlist_nets
-        model = self._netlist(root / 'project', meta['board'], root / 'artifacts')
-        if model is None:
-            return {}, {}
-        groups, names = {}, {}
-        for nodes, name in netlist_nets(model).items():
-            pins = frozenset('%s.%s' % node for node in nodes)
-            for pin in pins:
-                groups[pin] = pins
-                names[pin] = name
-        return groups, names
-
-    def _schematic_sync(self, root, meta):
-        """Every schematic part with its footprint, value, fields and sheet path, and each
-        pad's net, from KiCad's own netlist of the copy; and the library footprints the board
-        lacks for them (LIBRARY/NAME)."""
-        model = self._netlist(root / 'project', meta['board'], root / 'artifacts')
-        if model is None:
-            raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
+    def _schematic_sync(self, project, meta, model):
+        """Structured input for the script's sync_from_schematic helper."""
         parts, nets = {}, {}
         for comp in model['components']:
             parts[comp['ref']] = {'footprint': comp['footprint'], 'value': comp['value'],
@@ -2956,7 +2996,7 @@ class KiCadProvider:
         for net in model['nets']:
             for node in net['nodes']:
                 nets.setdefault(node['ref'], {})[node['pin']] = net['name']
-        board_text = (root / 'project' / meta['board']).read_text(errors='replace')
+        board_text = (project / meta['board']).read_text(errors='replace')
         on_board = {}
         for item in sexpr(board_text).named('footprint'):
             refs = [p.children[2] for p in item.named('property') if len(p.children) > 2 and p.children[1] == 'Reference']
@@ -3214,6 +3254,25 @@ class KiCadProvider:
                              'type': str(node.children[1])})
         return sorted(pins, key=lambda p: (len(p['number']), p['number']))
 
+    def _export_pdf(self, what, board, made, *, options=()):
+        """Draw the given revision with KiCad, for both published PDFs and edit feedback."""
+        if what == 'schematic':
+            schematic = board.with_suffix('.kicad_sch')
+            if not schematic.is_file():
+                raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
+            self._run('sch', 'export', 'pdf', *options, '--output', made, schematic)
+        else:
+            inner = sorted(set(re.findall(r'"(In\d+\.Cu)"', board.read_text())),
+                           key=lambda n: int(re.sub(r'\D', '', n)))
+            copper = [] if what == 'placement' else ['F.Cu', *inner, 'B.Cu']
+            # The fab layers carry every pad outline and number: where each pin points.
+            layers = copper + ['F.Silkscreen', 'B.Silkscreen', 'F.Fab', 'B.Fab', 'Edge.Cuts']
+            self._run('pcb', 'export', 'pdf', '--mode-single', '--sketch-pads-on-fab-layers', '--scale', '0',
+                      *(('--black-and-white',) if what == 'placement' else ()),
+                      '--layers', ','.join(layers), '--output', made, board)
+        if not made.is_file():
+            raise KiCadError('render_failed')
+
     def render(self, arguments):
         """KiCad's own drawing of a work copy, or of his original, as a PDF to look at."""
         what = arguments.get('what')
@@ -3228,22 +3287,7 @@ class KiCadProvider:
         name = '%s-%s.pdf' % (what, 'original' if original else self._revision(root)[:10])
         made = root / 'artifacts' / (uuid.uuid4().hex + '.pdf')
         made.parent.mkdir(exist_ok=True)
-        if what == 'schematic':
-            schematic = board.with_suffix('.kicad_sch')
-            if not schematic.is_file():
-                raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
-            self._run('sch', 'export', 'pdf', '--output', made, schematic)
-        else:
-            inner = sorted(set(re.findall(r'"(In\d+\.Cu)"', board.read_text())),
-                           key=lambda n: int(re.sub(r'\D', '', n)))
-            copper = [] if what == 'placement' else ['F.Cu', *inner, 'B.Cu']
-            # The fab layers carry every pad outline and number: where each pin points.
-            layers = copper + ['F.Silkscreen', 'B.Silkscreen', 'F.Fab', 'B.Fab', 'Edge.Cuts']
-            self._run('pcb', 'export', 'pdf', '--mode-single', '--sketch-pads-on-fab-layers', '--scale', '0',
-                      *(('--black-and-white',) if what == 'placement' else ()),
-                      '--layers', ','.join(layers), '--output', made, board)
-        if not made.is_file():
-            raise KiCadError('render_failed')
+        self._export_pdf(what, board, made)
         folder = self.render_folder / arguments['work_copy_id']
         folder.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(made, folder / name)

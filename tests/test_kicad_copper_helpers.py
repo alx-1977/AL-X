@@ -183,10 +183,45 @@ print("crosses", crosses)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("crosses False", done.stdout)
 
+    def test_script_library_board_operations_on_real_copper(self):
+        from alx.providers.kicad_board_helpers import BOARD_HELPERS
+        from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
+        script = """
+b = load()
+box = [(110,100), (115,100), (115,105), (110,105)]
+added = add_keepout(b, box, layers=["F"], name="antenna")
+assert added == {"corners":4, "layers":1}, added
+assert not remove_keepouts(b, [0,0,10,10])
+assert remove_keepouts(b, [109,99,116,106], name="antenna") == ["antenna"]
+add_copper(b, "SIDE", "F", box)
+assert remove_copper_shapes(b, ["SIDE"], [109,99,116,106]) == 1
+routed = route_connection(b, (40,20), (52,26), width=.15, layers=["F"], net="TAPER")
+assert routed["runs"] and routed["length_mm"] > 0
+assert remove_tracks(b, ["TAPER"], [39,19,53,27]) > 0
+add_track(b, "ARC", [(50,50),(52,50)], .4)
+assert remove_dangling_tracks(b, [49,49,53,51]) == 1
+assert place_part(b, "U7", at=(80,80), rotation=90) == (80.0,80.0)
+assert set_title_block(b, revision="A")["revision"] == "A"
+data = sync_from_schematic(b)
+assert data["needs_place"] == ["R99"]
+remove_parts(b, ["U7"])
+save(b)
+assert load().FindFootprintByReference("U7") is None
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            board = Path(folder) / "board.kicad_pcb"
+            board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
+            program = Path(folder) / "edit.py"
+            snapshot = {"parts": {"R99": {"footprint": "Test:R"}}, "nets": {}}
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS
+                               + "SCHEMATIC_SYNC = %r\n" % snapshot + script_runner(script))
+            done = run(PYTHON, program, board)
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+
     def test_to_plane_ignores_a_nearby_via_it_is_not_joined_to(self) -> None:
         """Review of #247: any same-net via within 1.2 mm made a pin count as already in its plane,
         and nothing was drawn for it."""
-        from alx.providers.kicad_change import CHANGE_HELPERS
+        from alx.providers.kicad_board_helpers import BOARD_HELPERS
         from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
         script = """
 b = load()
@@ -210,7 +245,8 @@ near.SetDrill(_pcbnew.FromMM(0.2))
 b.Add(near)
 before = sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA")
 save(b)
-report = apply_change([{"op": "to_plane", "pins": ["U7." + pin.GetNumber()]}])
+report = to_plane(b, ["U7." + pin.GetNumber()])
+save(b)
 b = load()
 print("vias", sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA") - before, report[0].get("made") or report[0])
 """
@@ -218,7 +254,7 @@ print("vias", sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA") - befor
             board = Path(folder) / "board.kicad_pcb"
             board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
             program = Path(folder) / "edit.py"
-            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS + script_runner(script))
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS + script_runner(script))
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("vias 1", done.stdout, done.stdout)
@@ -233,7 +269,7 @@ print("vias", sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA") - befor
             board = Path(folder) / "board.kicad_pcb"
             board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
             program = Path(folder) / "edit.py"
-            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS + script_runner(chained))
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS + script_runner(chained))
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("vias 0", done.stdout, done.stdout)
@@ -245,7 +281,7 @@ print("vias", sum(1 for t in b.GetTracks() if t.GetClass() == "PCB_VIA") - befor
             board = Path(folder) / "board.kicad_pcb"
             board.write_bytes((FIXTURES / "copper_board.kicad_pcb").read_bytes())
             program = Path(folder) / "edit.py"
-            program.write_text(HELPERS + SCHEMATIC_HELPERS + CHANGE_HELPERS + script_runner(crossed))
+            program.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS + script_runner(crossed))
             done = run(PYTHON, program, board)
             self.assertEqual(done.returncode, 0, done.stderr[-2000:])
             self.assertIn("vias 1", done.stdout, done.stdout)

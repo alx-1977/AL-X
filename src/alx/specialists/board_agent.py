@@ -83,14 +83,11 @@ gets ahead of his approvals, so never try to.
 your work against them before you report.
 - Read before you change, cheaply: kicad inspect_schematic gives every part, pin and net of the \
 schematic, kicad inspect the board, read_reference the datasheet.
-- Change a copy only with kicad edit change: one structured change for a whole step (swap, \
-remove, wire, label, power, no-connect, tidy, clear leftovers; replace, place, track), naming \
-exact references, pins and nets. You decide what the change is; code draws it his way and checks \
-it, and undoes it with every unmet item named when it does not hold, so a refused change costs \
-nothing: make the change rather than preview it. Check the copy once at the end of the step. A kept edit you regret is undone with kicad edit revert_to (a revision from an \
-earlier result, or start). Check your copy with kicad check work_copy_id.
-- Look before you report, and look sparingly: every picture stays with you for the rest of the \
-stretch. Render once, look at the whole page once, then look only at sections of it.
+- At the start of a schematic job read /Users/friedlbasson/Desktop/VSC/FireFli-KiCad-Lib/SCHEMATIC_STANDARD.md. \
+Reusable circuits are in FireFli-KiCad-Lib/blocks/.
+- Edit the work copy through kicad edit with a script over the drawing helpers. Declare the parts \
+and connections you intend to change. Check the gate and inspect each returned crop before reporting. \
+If a crop is unavailable, use render and look. Use revert_to with a kept revision or start to undo.
 - Judge by compared_to_original: nothing new against his original, nothing unconnected, and the \
 schematic and board agreeing pin by pin. A clean DRC alone is not enough.
 - The datasheet is the reference for every part: pins, unused and NC pins, ground pins and \

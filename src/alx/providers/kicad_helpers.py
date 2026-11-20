@@ -894,9 +894,7 @@ def remove_copper(board, identifier):
 
 def add_copper(board, net, on, corners):
     """A solid copper polygon of `net` on copper layer `on`, corners in mm."""
-    code = board.FindNet(net)
-    if code is None:
-        raise KeyError("no net %s on this board" % net)
+    code = _net(board, net)
     item = _pcbnew.PCB_SHAPE(board)
     item.SetShape(_pcbnew.SHAPE_T_POLY)
     item.SetLayer(layer(on))
@@ -904,6 +902,7 @@ def add_copper(board, net, on, corners):
     item.SetFilled(True)
     item.SetWidth(0)
     item.SetNet(code)
+    _refuse_touching(board, net, code, [item], layer(on))
     board.Add(item)
     return item
 
@@ -1163,7 +1162,7 @@ def refill(board):
 
 def script_runner(script):
     """Her script, compiled as its own file named "script" with the helpers in reach."""
-    return "exec(compile(%r, 'script', 'exec'), dict(globals(), __name__='__main__'))\n" % script
+    return "exec(compile(%a, 'script', 'exec'), dict(globals(), __name__='__main__'))\n" % script
 
 
 NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rotate_part", "pad",

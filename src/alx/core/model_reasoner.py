@@ -10,7 +10,7 @@ from typing import Any
 
 from alx.contracts.continuity import AutonomousSpendAuthority
 from alx.contracts.cognition import AutonomousRequestUnbounded
-from alx.contracts.models import input_token_upper_bound
+from alx.contracts.models import input_token_upper_bound, result_images
 from alx.contracts.result_summary import bound_result
 from alx.contracts.mail import MailReference
 from alx.contracts.trace import MAX_TRACE_REFERENCE_CHARACTERS, TraceSink, TraceStatus, TraceSubsystem, emit_trace
@@ -1920,9 +1920,7 @@ class ModelReasoner:
         result = None if attempt is None else attempt.result
         if result is None or result.state is not CapabilityResultState.SUCCEEDED:
             return ()
-        digest = (result.values or {}).get("image_sha256")
-        data = self._image_source(digest) if isinstance(digest, str) else None
-        return () if not data else (ToolImage("image/png", data),)
+        return result_images(result.values or {}, self._image_source)
 
     def _continue(self, request: ModelRequest, result: str,
                   images: tuple[ToolImage, ...] = ()):

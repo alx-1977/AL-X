@@ -58,19 +58,16 @@ class RealRoundTripTests(unittest.TestCase):
             # Copper left floating is a new unconnected item his original did not
             # have: approved or not, it is not written (review, 15 Nov).
             floating = success("check_kicad_board", project_dir=str(project))
-            loose = success("edit_kicad_work_copy", work_copy_id=floating["work_copy_id"], script=(
-                'b = load()\nadd_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])\n'
-                'refill(b)\nsave(b)\n'))
-            success("approve_step", step="routing", work_copy_id=loose["work_copy_id"],
-                    work_copy_revision=loose["work_copy_revision"])
-            refused = kicad_call(runtime.executors, "write_back_kicad_board", {
-                "work_copy_id": loose["work_copy_id"], "work_copy_revision": loose["work_copy_revision"],
-                "project_dir": str(project)})
-            self.assertEqual(refused.failure["code"], "board_not_clean")
+            refused = kicad_call(runtime.executors, "edit_kicad_work_copy", {
+                "work_copy_id": floating["work_copy_id"], "intent": [],
+                "script": 'b = load()\nadd_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])\n'
+                          'refill(b)\nsave(b)\n'})
+            self.assertEqual(refused.failure["code"], "change_unmet")
+            self.assertEqual(refused.failure["recovery"]["gate"]["drc"][0]["type"], "unconnected_items")
             self.assertNotIn("(xy 30 2)", (project / "board.kicad_pcb").read_text())
             # Copper joined to the net's own copper is written.
             checked = success("check_kicad_board", project_dir=str(project))
-            edited = success("edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], script=(
+            edited = success("edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], intent=[], script=(
                 'b = load()\nadd_copper(b, "SIDE", "F", [(26, 2), (28, 2), (28, 3), (26, 3)])\n'
                 'refill(b)\nsave(b)\n'))
             # KiCad completes this minimal project file on save; the settings

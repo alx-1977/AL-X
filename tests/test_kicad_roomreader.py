@@ -403,7 +403,7 @@ print(json.dumps({'stiffener': moved_stiffener, 'notes': moved_notes,
                   + '\nWINDOW = ' + repr(window) + '\nEXPORT_LAYERS = '
                   + repr(list(reference_layers)) + '\n' + script)
         edited = _succeeded(runtime, 'edit_kicad_work_copy', {
-            'work_copy_id': work_id, 'script': script})
+            'work_copy_id': work_id, 'intent': [], 'script': script})
         evidence = json.loads(edited['stdout'])
         report = edited['change_report']['board']
         assert not report['truncated']

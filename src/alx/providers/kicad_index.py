@@ -327,7 +327,9 @@ def netlist_model(netlist_text: str) -> dict[str, Any]:
                 if text(comp, name):
                     fields.setdefault(name.capitalize(), text(comp, name))
             sheet = comp.named("sheetpath")
-            components.append({"ref": text(comp, "ref"), "value": text(comp, "value"),
+            source = comp.named("libsource")
+            lib_id = ":".join(text(source[0], key) for key in ("lib", "part")) if source else ""
+            components.append({"lib_id": lib_id, "ref": text(comp, "ref"), "value": text(comp, "value"),
                                "footprint": text(comp, "footprint"), "fields": fields,
                                "sheet": text(sheet[0], "names") if sheet else "/",
                                "path": (text(sheet[0], "tstamps") if sheet else "/") + text(comp, "tstamps")})
@@ -337,7 +339,9 @@ def netlist_model(netlist_text: str) -> dict[str, Any]:
             nets.append({"name": text(net, "name"),
                          "nodes": [{"ref": text(node, "ref"), "pin": text(node, "pin"),
                                     "function": text(node, "pinfunction")} for node in net.named("node")]})
-    return {"components": components, "nets": nets}
+    sheet_paths = [text(sheet, "tstamps").strip("/") for design in tree.named("design")
+                   for sheet in design.named("sheet")]
+    return {"components": components, "nets": nets, "sheet_paths": sheet_paths}
 
 
 def netlist_nets(model: Mapping[str, Any]) -> dict[frozenset, str]:

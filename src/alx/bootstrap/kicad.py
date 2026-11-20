@@ -30,6 +30,7 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
                                              timeout_seconds=settings.cli_timeout_seconds),
                              partial(run_kicad_python, runner=runner,
                                      timeout_seconds=settings.script_timeout_seconds))
+    provider.image_store = storage_root / "looks"
     provider.engine_paths = {
         name: Path(environment.get(key, default)).expanduser().absolute()
         for name, key, default in (

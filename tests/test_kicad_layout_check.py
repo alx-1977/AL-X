@@ -174,7 +174,7 @@ class RealLayoutCheckTests(unittest.TestCase):
             self.assertFalse(empty["passed"])
             self.assertIn("no number could be read", empty["reason"])
             # An edit of the copy makes an earlier check stale for the screen.
-            call("edit_kicad_work_copy", work_copy_id=copy, script="b = load()\nmove_part(b, 'U2', 16, 5)\nsave(b)\n")
+            call("edit_kicad_work_copy", work_copy_id=copy, intent=[], script="b = load()\nset_title_block(b, revision='2')\nsave(b)\n")
             self.assertFalse(provider.layout_check_result(checked["check_id"])["current"])
 
 
@@ -234,7 +234,7 @@ class LibraryWorkTests(unittest.TestCase):
             reading = [{"number": number["id"], "measures": {"pad_size": "FP.1", "axis": "x"}}]
             first = call("check_layout", **where, readings=reading)
             self.assertEqual((first["numbers"][0]["status"], first["numbers"][0]["board_mm"]), ("differs", 0.5))
-            edited = call("edit_kicad_work_copy", work_copy_id=copy["work_copy_id"], script=(
+            edited = call("edit_kicad_work_copy", work_copy_id=copy["work_copy_id"], intent=[], script=(
                 "fp = footprint('Test', 'PAD1')\n"
                 "fp.Pads()[0].SetSize(_pcbnew.PADSTACK.ALL_LAYERS, point(0.6, 0.6))\n"
                 "save_footprint('Test', fp)\n"

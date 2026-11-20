@@ -60,8 +60,7 @@ def worker_call_refusal(call: CapabilityCall) -> CapabilityAttempt | None:
         if call.capability_id == capability_id and not arguments_match(allowed, call.arguments):
             return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
                                      reason_code="worker_action_not_allowed")
-    # D-084: edits of a copy only as a structured change; free scripts are not the worker's
-    # (18 Nov review: only the board agent refused them).
+    # The checked script grant in D-084a applies to the board specialist.
     if call.capability_id == KICAD and call.arguments.get("script") is not None:
         return CapabilityAttempt(call, CapabilityAttemptDisposition.REJECTED, False,
                                  reason_code="worker_script_not_allowed")

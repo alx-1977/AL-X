@@ -144,7 +144,7 @@ print('confined')
                 for group in checked.values[key]))
             edited = kicad_call(runtime.executors, 'edit_kicad_work_copy', {
                 'work_copy_id': checked.values['work_copy_id'],
-                'script': '''
+                'intent': [], 'script': '''
 import sys
 import pcbnew
 board = pcbnew.LoadBoard(sys.argv[1])
