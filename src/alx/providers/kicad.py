@@ -32,7 +32,7 @@ from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_schematic_helpers import GRID_SUFFIX, SCHEMATIC_HELPERS
 from alx.providers.kicad_board_helpers import BOARD_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
-from alx.providers.kicad_style import label_violations, placement_warnings, violations
+from alx.providers.kicad_style import label_violations, orientation_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.kicad_steps import (STEPS, edit_refusal, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
@@ -1512,6 +1512,7 @@ class KiCadProvider:
             except ChangeError as error:
                 raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
             label_exceptions = [item for item in declared if 'label_net' in item]
+            orientation_exceptions = [item for item in declared if 'orientation' in item]
             postconditions = [item for item in declared if 'op' in item]
             sets = [item for item in postconditions if item['op'] == 'set']
             if sets and not arguments.get('work_copy_revision'):
@@ -1599,13 +1600,15 @@ class KiCadProvider:
                                      if original.get(name) != current.get(name))
                     report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
                               'board': structural_diff(facts_before, facts_after),
-                              'label_exceptions': label_exceptions}
+                              'label_exceptions': label_exceptions,
+                              'orientation_exceptions': orientation_exceptions}
                     if library and (declared or any(n.endswith(('.kicad_pcb', '.kicad_sch')) for n in changed)):
                         raise KiCadError('arguments_unusable', {'detail': 'check a board work copy to edit drawings'})
                     if not library and (changed or declared):
                         stage = 'edit_gate'
                         report.update(self._edit_gate(root, meta, snapshot, changed, model, postconditions,
-                                                      sets, prior_drc, signatures, label_exceptions))
+                                                      sets, prior_drc, signatures, label_exceptions,
+                                                      orientation_exceptions))
                         if (any(name.endswith(('.kicad_sch', '.kicad_pcb')) for name in changed)
                                 and 'intent' not in arguments and not dry_run):
                             report['unmet'].append('intent is required for a drawing edit; [] for unchanged connectivity')
@@ -1782,7 +1785,7 @@ class KiCadProvider:
         return found
 
     def _edit_gate(self, root, meta, snapshot, changed, model, postconditions, sets, prior_drc, drc,
-                   label_exceptions=()):
+                   label_exceptions=(), orientation_exceptions=()):
         from alx.providers.kicad_index import board_index
         project, board = root / 'project', meta['board']
         sheets = [name for name in changed if name.endswith('.kicad_sch')]
@@ -1794,7 +1797,7 @@ class KiCadProvider:
             sheets = [name for name in sheets if name not in removed or name in still_referenced]
         board_items = [item for item in postconditions if item.get('side') == 'board']
         sch_items = [item for item in postconditions if item.get('side', 'schematic') == 'schematic']
-        gate = {'style': [], 'erc': [], 'drc': [], 'style_warnings': [], 'label_joins': []}
+        gate = {'style': [], 'erc': [], 'drc': [], 'style_warnings': [], 'label_joins': [], 'orientation': []}
         problems = []
         report = {'gate': gate, 'unmet': problems}
         if any(n.endswith('.kicad_pcb') and n != board for n in changed):
@@ -1817,24 +1820,39 @@ class KiCadProvider:
                     issue = f'{name} ({x}, {y}): {kind}: {", ".join(pins)}'
                     gate['style'].append(issue)
                     problems.append(issue)
-            if sheets or after != model:
-                allowed = {item['label_net'] for item in label_exceptions}
-                for name in sorted(self._covered_sheets(project, board, after)):
-                    old = label_violations(snapshot / name, model)
-                    for key, issue in label_violations(project / name, after).items():
-                        prior = old.get(key)
-                        if (prior and issue['labels'] == prior['labels']
-                                and len(issue['positions']) <= len(prior['positions'])):
-                            continue
-                        if allowed & {issue['net'], *issue['labels']}:
-                            continue
-                        gate['label_joins'].append(dict(issue, sheet=name))
-                        message = (f'{name}: label-joined pins: {issue["net"]} '
-                                   f'{", ".join(issue["pins"])} at {issue["positions"]}')
-                        gate['style'].append(message)
-                        problems.append(message)
+                old = orientation_violations(snapshot / name)
+                allowed_refs = {item['orientation'] for item in orientation_exceptions}
+                for key, issue in sorted(orientation_violations(project / name).items()):
+                    if key in old or issue['ref'] in allowed_refs:
+                        continue
+                    gate['orientation'].append(dict(issue, sheet=name))
+                    message = f'{name} {issue["at"]}: {issue["ref"]}: {issue["rule"]}'
+                    gate['style'].append(message)
+                    problems.append(message)
         warn_sheets = set(sheets) | {name[:-len(GRID_SUFFIX)] for name in changed
                                      if name.endswith('.kicad_sch' + GRID_SUFFIX)}
+        if warn_sheets or after != model:
+            allowed = {item['label_net'] for item in label_exceptions}
+            covered = self._covered_sheets(project, board, after)
+            for name in sorted(covered if sheets or after != model else covered & warn_sheets):
+                old = label_violations(snapshot / name, model)
+                for key, issue in label_violations(project / name, after).items():
+                    prior = old.get(key)
+                    if (prior and (not prior['warning'] or issue['warning'])
+                            and issue['labels'] == prior['labels']
+                            and len(issue['positions']) <= len(prior['positions'])):
+                        continue
+                    if allowed & {issue['net'], *issue['labels']}:
+                        continue
+                    gate['label_joins'].append(dict(issue, sheet=name))
+                    message = (f'{name}: label-joined pins: {issue["net"]} '
+                               f'{", ".join(issue["pins"])} at {issue["positions"]}')
+                    if issue['warning']:
+                        gate['style_warnings'].append(message + ' (block boundaries unavailable)')
+                    else:
+                        message += f' inside block {issue["block"]}'
+                        gate['style'].append(message)
+                        problems.append(message)
         for name in sorted(warn_sheets):
             old = placement_warnings(snapshot / name)
             gate['style_warnings'].extend(

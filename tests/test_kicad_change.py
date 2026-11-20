@@ -19,7 +19,8 @@ from alx.bootstrap.kicad import build_kicad_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.providers.kicad_change import ChangeError, unmet, validate_postconditions  # noqa: E402
 from kicad_actions import kicad_call  # noqa: E402
-from test_kicad_schematic_helpers import APP, CLI, DEVICE, PYTHON, schematic, library_symbol  # noqa: E402
+from test_kicad_schematic_helpers import (APP, CLI, DEVICE, P0005_FIXTURE, PYTHON,  # noqa: E402
+                                          library_symbol, schematic)
 
 APP_SYMBOLS = APP / "SharedSupport/symbols"
 
@@ -150,6 +151,13 @@ class RealChangeTests(unittest.TestCase):
     def test_label_join_is_new_only_and_requires_a_visible_declaration(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime, project = self.runtime(folder)
+            schematic_path = project / "board.kicad_sch"
+            drawing = schematic_path.read_text().rstrip()[:-1]
+            schematic_path.write_text(drawing + """
+(text "One block" (at 85 80 0) (effects (font (size 1.524 1.524) (bold yes))))
+(polyline (pts (xy 85 81) (xy 100 81)) (stroke (width 0.254) (type solid)))
+)
+""")
             work = self.call(runtime, "check", project_dir=str(project)).values["work_copy_id"]
             root, _ = runtime.provider._load(work)
             copy = root / "project/board.kicad_sch"
@@ -164,13 +172,52 @@ class RealChangeTests(unittest.TestCase):
             self.assertEqual(tuple(evidence["pins"]), ("R1.1", "R3.1"))
             self.assertEqual(len(evidence["positions"]), 2)
             self.assertEqual(copy.read_bytes(), before)
-            declaration = {"label_net": "SIGNAL", "reason": "Connect separate blocks"}
+            declaration = {"label_net": "SIGNAL", "reason": "Keep the connector break visible"}
             kept = self.call(runtime, "edit", work_copy_id=work, script=script, intent=intent + [declaration])
             self.assertEqual(kept.state, CapabilityResultState.SUCCEEDED, kept.failure)
             self.assertEqual(dict(kept.values["change_report"]["label_exceptions"][0]), declaration)
             another_edit = 's=sheet("board.kicad_sch"); s.tidy_fields("R4"); s.save()'
             result = self.call(runtime, "edit", work_copy_id=work, script=another_edit, intent=[])
             self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+
+    def test_label_join_without_blocks_is_advisory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            work = self.call(runtime, "check", project_dir=str(project)).values["work_copy_id"]
+            script = ('s=sheet("board.kicad_sch"); s.label_pin("R1","1","SIGNAL"); '
+                      's.label_pin("R3","1","SIGNAL"); s.save()')
+            intent = [{"op": "label", "pin": pin, "net": "/SIGNAL"} for pin in ("R1.1", "R3.1")]
+            kept = self.call(runtime, "edit", work_copy_id=work, script=script, intent=intent)
+            self.assertEqual(kept.state, CapabilityResultState.SUCCEEDED, kept.failure)
+            gate = kept.values["change_report"]["gate"]
+            self.assertTrue(gate["label_joins"][0]["warning"])
+            self.assertIn("block boundaries unavailable", gate["style_warnings"][0])
+
+    def test_orientation_is_new_only_and_reports_the_exception(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            (project / "board.kicad_sch").write_text(P0005_FIXTURE.read_text().replace(
+                '(project "t"', '(project "board"'))
+            work = self.call(runtime, "check", project_dir=str(project)).values["work_copy_id"]
+            # U2 already has a vertical flip in the fixture. Add a new route-free
+            # defect to a real power symbol, with its electrical contact preserved.
+            script = """
+s = sheet("board.kicad_sch")
+ref = s.place_power("FireFli_Power:GND", (30.48, 45.72))
+part = s.symbol(ref)
+s.add_no_connect(next(iter(part["pins"].values())))
+_relocate_symbol(s, ref, part["at"], 180, None)
+s.save()
+"""
+            args = dict(work_copy_id=work, script=script)
+            rejected = self.call(runtime, "edit", **args, intent=[])
+            self.assertEqual(rejected.failure["code"], "change_unmet", rejected.failure)
+            issues = rejected.failure["recovery"]["gate"]["orientation"]
+            self.assertEqual([issue["rule"] for issue in issues], ["ground graphic must be below its pin"])
+            declaration = {"orientation": issues[0]["ref"], "reason": "Exercise the checked style exception"}
+            kept = self.call(runtime, "edit", **args, intent=[declaration])
+            self.assertEqual(kept.state, CapabilityResultState.SUCCEEDED, kept.failure)
+            self.assertEqual(dict(kept.values["change_report"]["orientation_exceptions"][0]), declaration)
 
     def test_unreferenced_sheet_can_be_deleted_and_failed_edits_remove_created_files(self):
         with tempfile.TemporaryDirectory() as folder:

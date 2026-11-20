@@ -87,7 +87,9 @@ read_reference for datasheets and other evidence files.
 - At the start of a schematic job read /Users/friedlbasson/Desktop/VSC/FireFli-KiCad-Lib/SCHEMATIC_STANDARD.md. \
 Use a FireFli design block when one fits.
 - Define a block_grid, place parts with place_in_slot and mirror twin blocks with mirror_block.
-- Wire pins with route and put block information in info_table.
+- Use route for wires inside a block and labels or ports between blocks. Put block information in info_table.
+- Place supplies and grounds with s.place_power and check symbol orientation with s.upright. +If it reports pins that need rewiring, plan their reconnection before flipping the symbol.
+- After adding or moving a root sheet symbol, call arrange_root with all root sheets in signal order.
 - Edit the work copy through kicad edit with a script over the drawing helpers. Declare the parts \
 and connections you intend to change. Check the gate and inspect each returned crop before reporting. \
 If a crop is unavailable, use render and look. Use revert_to with a kept revision or start to undo.

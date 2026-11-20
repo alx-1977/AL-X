@@ -2,9 +2,10 @@
 from collections import defaultdict
 from itertools import combinations
 import json
-from math import cos, radians, sin
 
-from alx.providers.kicad_schematic_helpers import GRID_SUFFIX
+from alx.providers.kicad_schematic_helpers import (
+    GRID_SUFFIX, orientation_findings, paper_size, placed_point, point_on_segment as _on, segment_groups,
+)
 
 
 def _first(node, key):
@@ -20,8 +21,6 @@ def _pins(root):
     for symbol in root.named('symbol'):
         ref = next(p.children[2] for p in symbol.named('property') if p.children[1] == 'Reference')
         at = _first(symbol, 'at').children
-        x, y = map(float, at[1:3])
-        angle = radians(float(at[3]))
         mirror = _first(symbol, 'mirror')
         axis = mirror.children[1] if mirror else ''
         unit = _first(symbol, 'unit')
@@ -35,12 +34,8 @@ def _pins(root):
                     '0', style.children[1] if style else '1'):
                 continue
             for pin in drawing.named('pin'):
-                a, b = _point(_first(pin, 'at'))
-                if axis == 'x':
-                    b = -b
-                if axis == 'y':
-                    a = -a
-                pt = round(x + a*cos(angle) - b*sin(angle), 2), round(y - a*sin(angle) - b*cos(angle), 2)
+                a, b = map(float, _first(pin, 'at').children[1:3])
+                pt = placed_point(at, axis, a, b)
                 yield ref, _first(pin, 'number').children[1], pt, _first(symbol, 'uuid')
 
 
@@ -85,39 +80,10 @@ def violations(path):
     return found
 
 
-def _on(point, a, b):
-    x, y = point
-    x0, y0 = a
-    x1, y1 = b
-    return (min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1)
-            and abs((x - x0) * (y1 - y0) - (y - y0) * (x1 - x0)) < 1e-6)
-
-
 def _wire_groups(root, points):
     """Physical wire groups, with crosses connected only at explicit junctions."""
     wires = list(_segments(root, 'wire'))
-    incident = defaultdict(set)
-    for index, wire in enumerate(wires):
-        for point in wire:
-            incident[point].add(index)
-    for dot in root.named('junction'):
-        p = _point(_first(dot, 'at'))
-        incident[p].update(i for i, (a, b) in enumerate(wires) if _on(p, a, b))
-    joins = defaultdict(set)
-    for group in incident.values():
-        for member in group:
-            joins[member].update(group)
-    groups = {}
-    for index in range(len(wires)):
-        if index in groups:
-            continue
-        groups[index] = index
-        todo = [index]
-        while todo:
-            for neighbor in joins[todo.pop()]:
-                if neighbor not in groups:
-                    groups[neighbor] = index
-                    todo.append(neighbor)
+    groups = segment_groups(wires, (_point(_first(dot, 'at')) for dot in root.named('junction')))
     # Coordinate tokens also associate a label with a bare pin at that spot.
     return {p: {p} | {groups[i] for i, (a, b) in enumerate(wires) if _on(p, a, b)} for p in points}
 
@@ -134,8 +100,70 @@ def _port_points(root, pins_and_labels):
     return ports
 
 
+def _grid_bounds(path):
+    sidecar = path.with_name(path.name + GRID_SUFFIX)
+    if not sidecar.is_file():
+        return {}
+    return {name: (min(grid['columns'].values()), max(grid['columns'].values()),
+                   min(grid['rows'].values()), max(grid['rows'].values()))
+            for name, grid in json.loads(sidecar.read_text()).items()}
+
+
+def _block_lookup(path, root):
+    """Grid rectangles take precedence. Title rows divide the remaining page into bands."""
+    paper = _first(root, 'paper')
+    size = paper_size(paper.children[1:]) if paper else None
+    grids = {name: bounds for name, bounds in _grid_bounds(path).items()
+             if bounds[0] < bounds[1] and bounds[2] < bounds[3]}
+    underlines = set()
+    for line in root.named('polyline'):
+        points = sorted(_point(p) for p in _first(line, 'pts').named('xy'))
+        stroke = _first(line, 'stroke')
+        kind = _first(stroke, 'type') if stroke else None
+        if len(points) == 2 and points[0][1] == points[1][1] and kind and kind.children[1] == 'solid':
+            underlines.add(points[0])
+    rows = []
+    for item in root.named('text'):
+        effects = _first(item, 'effects')
+        font = _first(effects, 'font') if effects else None
+        bold = _first(font, 'bold') if font else None
+        if bold is None or 'no' in bold.children[1:]:
+            continue
+        x, y = _point(_first(item, 'at'))
+        for left, line_y in underlines:
+            if abs(left - x) <= 0.05 and 0 < line_y - y <= 2.54:
+                rows.append((line_y, left, item.children[1]))
+    bands = []
+    for y, x, name in sorted(set(rows)):
+        if not bands or y - bands[-1][0] > 2.54:
+            bands.append((y, []))
+        bands[-1][1].append((x, y, name))
+
+    def locate(point):
+        x, y = point
+        if size and not (0 <= x <= size[0] and 0 <= y <= size[1]):
+            return None
+        explicit = [name for name, (left, right, top, bottom) in grids.items()
+                    if left <= x <= right and top <= y <= bottom]
+        if explicit:
+            return ('grid', explicit[0]) if len(explicit) == 1 else None
+        row = next((titles for top, titles in reversed(bands) if top <= y), ())
+        title = max((title for title in row if title[0] <= x and title[1] <= y), default=None)
+        return ('title', title) if title is not None else None
+
+    return (locate, bool(grids or bands))
+
+
+def orientation_violations(path):
+    """Key by instance UUID and rule so moving a pre-existing issue does not reintroduce it."""
+    if not path.is_file():
+        return {}
+    return {(uid, rule): {'ref': ref, 'rule': rule, 'at': point}
+            for uid, ref, rule, point in orientation_findings(path.read_text())}
+
+
 def label_violations(path, model):
-    """Newness is measured by exported net and joined pins; positions are evidence."""
+    """Find within-block local joins, or advisory joins on a sheet without detectable blocks."""
     from alx.providers.kicad import sexpr
     if not model or not path.is_file():
         return {}
@@ -145,6 +173,7 @@ def label_violations(path, model):
         labels[item.children[1]].append(_point(_first(item, 'at')))
     if not labels:
         return {}
+    block_at, has_blocks = _block_lookup(path, root)
     pins = defaultdict(set)
     for ref, number, point, uid in _pins(root):
         if uid:
@@ -161,7 +190,7 @@ def label_violations(path, model):
         local = name.rsplit('/', 1)[-1]
         if len(net['nodes']) < 2:
             continue
-        instances, members, pin_groups = set(), [], set()
+        instances, members, physical, pin_blocks = set(), [], [], set()
         for node in net['nodes']:
             component = components.get(node['ref'])
             if component is None:
@@ -170,20 +199,30 @@ def label_violations(path, model):
             candidates = [p for uid in identifiers.split() for p in pins[uid, node['pin']]]
             if not candidates:
                 break
-            pin_groups.update(g for p in candidates for g in groups[p])
+            physical.append({g for p in candidates for g in groups[p]})
+            pin_blocks.update(block_at(p) for p in candidates)
             instances.add(path_name)
             members.append(f'{node["ref"]}.{node["pin"]}')
         else:
+            if not physical or set.intersection(*physical):
+                continue
+            pin_groups = set.union(*physical)
             names = {n for n, group in label_groups.items() if group & pin_groups}
             # The exported name can identify a label on an otherwise pinless
             # island. Physical groups also find aliases KiCad did not export.
             names.update(n for n in (name, local) if n in labels)
             connected = pin_groups | {g for n in names for g in label_groups[n]}
-            if len(instances) == 1 and names and not connected & port_groups:
+            inside_one = len(pin_blocks) == 1 and None not in pin_blocks
+            if (len(instances) == 1 and names and not connected & port_groups
+                    and (inside_one or not has_blocks)):
                 positions = sorted({p for label in names for p in labels[label]})
                 members.sort()
-                findings[name, tuple(members)] = {'rule': 'label-joined pins', 'net': name, 'pins': members,
-                                                    'positions': positions, 'labels': sorted(names)}
+                issue = {'rule': 'label-joined pins', 'net': name, 'pins': members,
+                         'positions': positions, 'labels': sorted(names), 'warning': not has_blocks}
+                if inside_one:
+                    kind, block = next(iter(pin_blocks))
+                    issue['block'] = block if kind == 'grid' else block[2]
+                findings[name, tuple(members)] = issue
     return findings
 
 
@@ -199,13 +238,12 @@ def placement_warnings(path):
               _point(_first(node, 'at'))) for node in root.named('symbol')]
     parts = [(ref, p) for ref, p in parts if not ref.startswith('#')]
     tables = defaultdict(list)
-    bounds = {}
+    bounds = _grid_bounds(path)
     warnings = set()
     for name, grid in blocks.items():
         cols, rows = grid['columns'], grid['rows']
         xs, ys = set(cols.values()), set(rows.values())
-        left, right, top, bottom = min(xs), max(xs), min(ys), max(ys)
-        bounds[name] = left, right, top, bottom
+        left, right, top, bottom = bounds[name]
         signal = [y for r, y in rows.items() if r not in ('rail', 'ground')]
         by_row = defaultdict(list)
         for ref, (x, y) in parts:

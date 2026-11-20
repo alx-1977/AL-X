@@ -6,6 +6,7 @@ Needs KiCad; skipped where it is not installed (CI).
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,7 @@ APP = Path("/Applications/KiCad/KiCad.app/Contents")
 PYTHON = APP / "Frameworks/Python.framework/Versions/Current/bin/python3"
 CLI = APP / "MacOS/kicad-cli"
 DEVICE = APP / "SharedSupport/symbols/Device.kicad_sym"
+P0005_FIXTURE = REPOSITORY_ROOT / "tests/fixtures/kicad/p0005_round4.kicad_sch"
 
 
 def library_symbol(name):
@@ -61,21 +63,151 @@ def schematic():
 
 @unittest.skipUnless(PYTHON.is_file() and CLI.is_file() and DEVICE.is_file(), "KiCad is not installed")
 class SchematicHelperTests(unittest.TestCase):
-    def run_script(self, folder, script, symbols=None):
+    def run_script(self, folder, script, symbols=None, project="t"):
         program = Path(folder) / "edit.py"
         program.write_text(HELPERS + SCHEMATIC_HELPERS + "_LIBRARY_SYMBOLS.update(%r)\n" % (symbols or {})
                            + script_runner(script))
-        done = subprocess.run([str(PYTHON), str(program), str(Path(folder) / "t.kicad_pcb")],
+        done = subprocess.run([str(PYTHON), str(program), str(Path(folder) / (project + ".kicad_pcb"))],
                               capture_output=True, text=True, cwd=folder, timeout=120)
         self.assertEqual(done.returncode, 0, done.stderr[-3000:])
         return done.stdout
 
-    def netlist(self, folder):
-        output = Path(folder) / "t.net"
+    def netlist(self, folder, project="t"):
+        output = Path(folder) / (project + ".net")
         done = subprocess.run([str(CLI), "sch", "export", "netlist", "--output", str(output),
-                               str(Path(folder) / "t.kicad_sch")], capture_output=True, text=True, timeout=120)
+                               str(Path(folder) / (project + ".kicad_sch"))],
+                              capture_output=True, text=True, timeout=120)
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
         return {name: nodes for nodes, name in netlist_nets(netlist_model(output.read_text())).items()}
+
+    def test_p0005_labels_depend_on_block_boundaries_not_sheet_membership(self):
+        from alx.providers.kicad_style import label_violations
+
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            shutil.copyfile(P0005_FIXTURE, top)
+            nets = self.netlist(folder)
+            self.assertEqual(nets["/RS485_D"], frozenset({("R10", "1"), ("U2", "3")}))
+            self.assertEqual(nets["/RS485_R"], frozenset({("R11", "2"), ("U2", "6")}))
+            model = netlist_model(Path(folder, "t.net").read_text())
+            self.assertEqual(label_violations(top, model), {})
+
+            # The local copies of these nets deliberately have no port to
+            # exempt them. Removing the second underline makes one block.
+            drawing = top.read_text()
+            top.write_text(drawing.replace("(xy 104.14 129.03)", "(xy 104.14 129.54)"))
+            violations = label_violations(top, model)
+            self.assertEqual({issue["net"] for issue in violations.values()}, {"/RS485_D", "/RS485_R"})
+            self.assertFalse(any(issue["warning"] for issue in violations.values()))
+
+            top.write_text(drawing)
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+block_grid(s, "combined", (25.4, 63.5), ["left", "right"], ["top", "bottom"],
+           col_pitch=177.8, row_pitch=114.3)
+""")
+            violations = label_violations(top, model)
+            self.assertEqual({issue["net"] for issue in violations.values()}, {"/RS485_D", "/RS485_R"})
+
+    def test_p0005_power_and_ic_orientation_follow_library_graphics(self):
+        from alx.providers.kicad_style import orientation_violations
+
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            shutil.copyfile(P0005_FIXTURE, top)
+            original = orientation_violations(top)
+            self.assertEqual([(issue["ref"], issue["rule"]) for issue in original.values()],
+                             [("U2", "library top faces down")])
+            out = self.run_script(folder, """
+s = sheet("t.kicad_sch")
+before = s.text
+blocked = s.upright("U2")
+assert not blocked["changed"] and s.text == before
+assert set(blocked["rewire"]) == {"3", "6"}, blocked
+s.remove_labels(["RS485_D", "RS485_R"])
+u2 = s.symbol("U2")
+s.add_no_connect(u2["pins"]["3"])
+assert s.upright("U2") == {"changed": True, "rewire": {}}
+assert s.symbol("U2")["uuid"] == u2["uuid"]
+assert s.symbol("U2")["mirror"] is None
+assert s._scene()["no_connects"] == [s.symbol("U2")["pins"]["3"]]
+
+refs = {}
+for i, net in enumerate(("3V3", "5V", "GND", "GND_ISO", "V_ISO"), 1):
+    at = (round(25.4 * i, 2), 45.72)
+    ref = s.place_power(net, at)
+    refs[net] = ref
+    part = s.symbol(ref)
+    assert list(part["pins"].values()) == [at]
+    assert part["rotation"] == (0 if "GND" in net else 180)
+    _relocate_symbol(s, ref, at, (part["rotation"] + 180) % 360, None)
+for net, ref in sorted(refs.items()):
+    print(net, ref)
+_relocate_symbol(s, "U2", u2["at"], 180, None)
+s.save()
+""")
+            refs = dict(line.split() for line in out.splitlines())
+            flipped = {issue["ref"]: issue["rule"] for issue in orientation_violations(top).values()}
+            self.assertEqual(flipped.pop("U2"), "library top faces down")
+            self.assertEqual(flipped, {ref: ("ground graphic must be below its pin" if "GND" in net
+                                            else "supply graphic must be above its pin")
+                                       for net, ref in refs.items()})
+            self.run_script(folder, f"""
+s = sheet("t.kicad_sch")
+for ref in {list(refs.values())!r}:
+    before = s.symbol(ref)
+    assert s.upright(ref) == {{"changed": True, "rewire": {{}}}}
+    after = s.symbol(ref)
+    assert (after["pins"], after["uuid"]) == (before["pins"], before["uuid"])
+assert s.upright("U2")["changed"]
+assert s.symbol("U2")["mirror"] == "x"  # a vertical reflection preserves the half turn's left-right swap
+start, stub = s._stub_end("R10", "2")
+s.place_power("3V3", stub)
+s.add_wire(start, stub)
+s.save()
+""")
+            self.assertEqual(orientation_violations(top), {})
+            self.assertEqual(self.netlist(folder)["3V3"], frozenset({("R10", "2")}))
+
+    def test_arrange_root_preserves_net_names_members_and_sheet_instances(self):
+        from unittest.mock import patch
+        from alx.providers.kicad import sexpr
+        from test_kicad_hierarchy import LINKS, connect_with_sheet_pins, make_hierarchical, scanner_fixture
+
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            top = project / "scanner.kicad_sch"
+            links = dict(LINKS, HALO=[0, 1, 3])
+            links["RFID{TX RX}"] = [0, 2, 3]
+            with patch("test_kicad_hierarchy.LINKS", links):
+                scanner_fixture(project)
+            make_hierarchical(project)
+            connect_with_sheet_pins(project)
+            original = sexpr(top.read_text())
+            nets = self.netlist(folder, "scanner")
+            self.assertEqual(len(nets), 7)
+            self.assertEqual([len(nets[name]) for name in ("/HALO", "/RFID.TX", "/RFID.RX")], [3, 3, 3])
+            self.run_script(folder, """
+order = ["Power", "MCU", "Halo", "RFID"]
+first = arrange_root(order)
+second = arrange_root(order)
+assert first == second
+""", project="scanner")
+            arranged = sexpr(top.read_text())
+            self.assertEqual(self.netlist(folder, "scanner"), nets)
+            self.assertTrue(arranged.named("wire") and arranged.named("bus"))
+            self.assertTrue(arranged.named("junction"))
+            children = arranged.named("sheet")
+            self.assertEqual(len({node.one("at").children[2] for node in children}), 1)
+            self.assertEqual(len({tuple(node.one("size").children[1:]) for node in children}), 1)
+            names = [next(p.children[2] for p in node.named("property") if p.children[1] == "Sheetname")
+                     for node in sorted(children, key=lambda node: float(node.one("at").children[1]))]
+            self.assertEqual(names, ["Power", "MCU", "Halo", "RFID"])
+            self.assertEqual([node.one("uuid").children for node in original.named("sheet")],
+                             [node.one("uuid").children for node in children])
+            self.assertEqual([node.one("instances").one("project").one("path").children[1]
+                              for node in original.named("sheet")],
+                             [node.one("instances").one("project").one("path").children[1] for node in children])
 
     def test_slot_grids_can_be_reopened_mirrored_and_used_for_wiring(self):
         from alx.providers.kicad_style import placement_warnings

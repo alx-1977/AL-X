@@ -8,7 +8,7 @@ board helpers; it reads only files in the copy.
 
 GRID_SUFFIX = ".alx-grid.json"
 
-SCHEMATIC_HELPERS = "_GRID_SUFFIX = %r\n" % GRID_SUFFIX + r'''
+_GEOMETRY = r'''
 # ---- schematic helpers (text edits of .kicad_sch; KiCad has no schematic API) ----
 import math as _math
 import json as _json
@@ -68,6 +68,20 @@ def _q(value):
 
 def _r(point):
     return (round(float(point[0]), 2), round(float(point[1]), 2))
+
+
+_PAPER = {"A5": (210, 148), "A4": (297, 210), "A3": (420, 297), "A2": (594, 420), "A1": (841, 594),
+          "A0": (1189, 841), "A": (279.4, 215.9), "B": (431.8, 279.4), "C": (558.8, 431.8)}
+
+
+def _paper_size(paper):
+    if not paper:
+        return None
+    if paper[0] == "User" and len(paper) >= 3:
+        size = float(paper[1]), float(paper[2])
+    else:
+        size = _PAPER.get(paper[0])
+    return size[::-1] if size and paper[-1] == "portrait" else size
 
 
 def _lib_pins(symbol):
@@ -163,6 +177,105 @@ def _placed(at, mirror, x, y):
     return _r((float(at[1]) + rx, float(at[2]) + ry))
 
 
+def _on(point, a, b):
+    """The point lies on the wire a-b, ends included."""
+    (x, y), (x1, y1), (x2, y2) = point, a, b
+    if abs((x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)) > 1e-6:
+        return False
+    return (min(x1, x2) - 1e-6 <= x <= max(x1, x2) + 1e-6
+            and min(y1, y2) - 1e-6 <= y <= max(y1, y2) + 1e-6)
+
+
+def _segment_groups(segments, junctions):
+    """Group physically connected segments, joining crosses only at explicit junctions."""
+    from collections import defaultdict
+    incident = defaultdict(set)
+    for index, (a, b) in enumerate(segments):
+        incident[a].add(index)
+        incident[b].add(index)
+    for point in junctions:
+        incident[point].update(i for i, (a, b) in enumerate(segments) if _on(point, a, b))
+    neighbors = defaultdict(set)
+    for indices in incident.values():
+        for index in indices:
+            neighbors[index].update(indices)
+    groups = {}
+    for first in range(len(segments)):
+        if first in groups:
+            continue
+        groups[first] = first
+        pending = [first]
+        while pending:
+            for index in neighbors[pending.pop()]:
+                if index not in groups:
+                    groups[index] = first
+                    pending.append(index)
+    return groups
+
+
+def _power_side(drawings, rotation, axis):
+    """Sheet y of the graphic's bounding centre relative to the connection pin."""
+    pins = {number: point for part in drawings for number, point in _lib_pins(part).items()}
+    if len(pins) != 1:
+        return None
+    at = ["at", 0, 0, rotation]
+    ys = [_placed(at, axis, x, y)[1] for part in drawings for x, y in _lib_outline(part)]
+    if ys:
+        return (min(ys) + max(ys)) / 2 - _placed(at, axis, *next(iter(pins.values())))[1]
+
+
+def _power_turn(drawings, net, axis=None):
+    want = 1 if "GND" in net.upper() else -1
+    turns = [(abs(side), turn) for turn in (0, 90, 180, 270)
+             if (side := _power_side(drawings, turn, axis)) is not None and side * want > 0.01]
+    if not turns:
+        raise ValueError("cannot determine the graphic orientation for " + net)
+    return max(turns, key=lambda item: (item[0], -item[1]))[1]
+
+
+def _orientation(symbol, lib, ref, net):
+    at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
+    axis = mirror[1] if mirror else None
+    rotation = float(at[3])
+    drawings = list(_lib_drawings(symbol, lib))
+    if _child(lib, "power"):
+        side = _power_side(drawings, rotation, axis)
+        down = "GND" in net.upper()
+        if side is not None and side * (1 if down else -1) <= 0.01:
+            return "ground graphic must be below its pin" if down else "supply graphic must be above its pin"
+    else:
+        pins = {pin for part in drawings for pin in _lib_pins(part)}
+        # Three-pin transistors are exempt. U and IC references apply
+        # even where a particular unit has only a few drawn pins.
+        if (len(pins) > 3 or ref.startswith(("U", "IC"))) and _math.cos(
+                _math.radians(rotation)) * (-1 if axis == "x" else 1) < -0.01:
+            return "library top faces down"
+
+
+def _orientation_findings(text):
+    root, _ = _sx(text)
+    libs = {_unq(n[1]): n for n in _children(_child(root, "lib_symbols") or [], "symbol")}
+    for symbol in _children(root, "symbol"):
+        lib = libs.get(_unq(_child(symbol, "lib_id")[1]))
+        if lib is None:
+            continue
+        props = {_unq(p[1]): _unq(p[2]) for p in _children(symbol, "property")}
+        ref = props.get("Reference", "")
+        problem = _orientation(symbol, lib, ref, props.get("Value", ""))
+        if problem:
+            uid = _child(symbol, "uuid")
+            yield (_unq(uid[1]) if uid else ref, ref, problem, _r(_child(symbol, "at")[1:3]))
+'''
+
+_geometry = {}
+exec(_GEOMETRY, _geometry)
+placed_point = _geometry["_placed"]
+point_on_segment = _geometry["_on"]
+segment_groups = _geometry["_segment_groups"]
+orientation_findings = _geometry["_orientation_findings"]
+paper_size = _geometry["_paper_size"]
+
+SCHEMATIC_HELPERS = "_GRID_SUFFIX = %r\n" % GRID_SUFFIX + _GEOMETRY + r'''
 def _straight(points):
     """A path without points where it runs straight on: no wire break there for another
     wire's end to join (16 Nov: a GND lead crossing an RF wire at its stub end)."""
@@ -184,15 +297,6 @@ def _backtracks(points):
         if abs(u[0] * v[1] - u[1] * v[0]) < 1e-9 and u[0] * v[0] + u[1] * v[1] < 0:
             return True
     return False
-
-
-def _on(point, a, b):
-    """The point lies on the wire a-b, ends included."""
-    (x, y), (x1, y1), (x2, y2) = point, a, b
-    if abs((x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)) > 1e-6:
-        return False
-    return (min(x1, x2) - 1e-6 <= x <= max(x1, x2) + 1e-6
-            and min(y1, y2) - 1e-6 <= y <= max(y1, y2) + 1e-6)
 
 
 def _top_properties(block):
@@ -300,23 +404,17 @@ class Sheet:
                           "pins": self._symbol_pins(symbol, libs)})
         return found
 
-    _PAPER = {"A5": (210, 148), "A4": (297, 210), "A3": (420, 297), "A2": (594, 420), "A1": (841, 594),
-              "A0": (1189, 841), "A": (279.4, 215.9), "B": (431.8, 279.4), "C": (558.8, 431.8)}
+    def _page_size(self, root):
+        paper = _child(root, "paper")
+        return _paper_size([_unq(token) for token in paper[1:]]) if paper else None
 
     def _title_block(self, root):
         """The title block's area on this sheet, [x0, y0, x1, y1], from his page template
         (16 Nov, Friedl: the drawing ran into the title block). None when unknown."""
-        paper = _child(root, "paper")
-        if not paper:
+        page = self._page_size(root)
+        if page is None:
             return None
-        if _unq(paper[1]) == "User" and len(paper) >= 4:
-            width, height = float(paper[2]), float(paper[3])
-        elif _unq(paper[1]) in self._PAPER:
-            width, height = self._PAPER[_unq(paper[1])]
-        else:
-            return None
-        if len(paper) > 2 and _unq(paper[-1]) == "portrait":
-            width, height = height, width
+        width, height = page
         folder = _os.path.dirname(self.path)
         margins, reach_x, reach_y = (10.0, 10.0), 110.0, 32.0   # KiCad's own title block
         try:
@@ -369,7 +467,8 @@ class Sheet:
     def _placed_symbol(self, ref):
         root, spans = self._tree()
         libs = self._libs(root)
-        found = [s for s in _children(root, "symbol") if self._ref(s) == ref]
+        found = [s for s in _children(root, "symbol") if self._ref(s) == ref
+                 or (_child(s, "uuid") and _unq(_child(s, "uuid")[1]) == ref)]
         if not found:
             raise self._missing(ref)
         symbol = found[0]
@@ -444,9 +543,9 @@ class Sheet:
         self._check_segments([(a, b, "%s.%s" % (ref, pin)) for a, b in zip(points, points[1:])],
                              {own} | {_r(p) for p in allow} | ends, same)
 
-    def _check_segments(self, segments, allowed, same=(), strict=False):
+    def _check_segments(self, segments, allowed, same=(), strict=False, scene=None):
         """segments: (a, b, the pin it is for); refused at the first that touches what is there."""
-        scene = self._scene()
+        scene = self._scene() if scene is None else scene
         root, libs = scene["root"], scene["libs"]
         # Leftover wiring joined to nothing (no pin, label or port anywhere on it) is no hazard:
         # touching it joins nothing. remove_dangling clears it.
@@ -510,7 +609,7 @@ class Sheet:
                                      % (who, what, point[0], point[1], joined(point) if what == "a wire end" else ""))
             # Never along a wire already there, whatever its net: two wires on one line
             # (16 Nov, R18: the new R38 wire ran over the old one).
-            for pts in scene["wires"]:
+            for pts in scene["wires"] + scene.get("other_wiring", []):
                 for c, d in zip(pts, pts[1:]):
                     if _overlap(a, b, c, d):
                         raise ValueError("%s: the new wire would run along an existing wire from (%g, %g) to "
@@ -643,7 +742,8 @@ class Sheet:
                          "clear via points" % reason)
 
     def _route(self, ref, pin, begin, goals, target, margin=30.48, heading=None, tees=(),
-               arrival_heading=None, channels=(), strict=False, enter_pin=True, leads=()):
+               arrival_heading=None, channels=(), strict=False, enter_pin=True, leads=(),
+               scene=None, area=None):
         """A clear grid path from begin to the first of goals that it reaches, or None.
 
         On the 1.27 mm grid, straight runs and as few turns as possible, kept within
@@ -662,20 +762,22 @@ class Sheet:
         arrive = ({_r(goal)} if enter_pin else set()) | {t for t in tees if on_grid(t)}
         if not arrive:
             return None
-        scene = self._scene()
+        scene = self._scene() if scene is None else scene
         if scene["orphans"] is None:
             scene["orphans"] = self._orphan_wires(scene["root"], scene["libs"])
-        own = self.symbol(ref)["pins"][str(pin)]
-        same, ends = self._wired_to(target)
-        allowed = {own, _r(target)} | arrive | (set() if strict else ends)
+        own = self.symbol(ref)["pins"][str(pin)] if ref is not None else begin
+        same, ends = ((), set()) if strict else self._wired_to(target)
+        allowed = {own, begin, _r(target)} | arrive | ends
         skip = set() if strict else set(same) | scene["orphans"]
         bounds = [begin, *arrive]
         x0, x1 = min(p[0] for p in bounds) - margin, max(p[0] for p in bounds) + margin
         y0, y1 = min(p[1] for p in bounds) - margin, max(p[1] for p in bounds) + margin
+        if area is not None:
+            x0, y0, x1, y1 = max(x0, area[0]), max(y0, area[1]), min(x1, area[2]), min(y1, area[3])
 
         def near(*pts):
             return any(x0 - 3 <= p[0] <= x1 + 3 and y0 - 3 <= p[1] <= y1 + 3 for p in pts)
-        segments = [(c, d) for pts in scene["wires"] for c, d in zip(pts, pts[1:])
+        segments = [(c, d) for pts in scene["wires"] + scene.get("other_wiring", []) for c, d in zip(pts, pts[1:])
                     if _hits_box(c, d, (x0, y0, x1, y1))]
         live = [(c, d) for pts in scene["wires"] if tuple(pts) not in skip
                 for c, d in zip(pts, pts[1:]) if _hits_box(c, d, (x0, y0, x1, y1))]
@@ -987,18 +1089,25 @@ class Sheet:
             if port is None:
                 raise reason
             ports.append(port)
-        counted = {}
-        for a, b, _ in segments:
-            self.add_wire(a, b)
-            for point in (a, b):
-                counted[point] = counted.get(point, 0) + 1
-        for point, count in counted.items():
-            if count >= 3:
-                self.add_junction(point)
-        for port in ports:
-            # Turned as his own symbol on the sheet is turned (16 Nov: forcing the angle
-            # put imported 3V3 symbols upside down).
-            self.copy_symbol(template, port, None)
+        source, library, _ = self._placed_symbol(template)
+        old = self.text
+        try:
+            counted = {}
+            for a, b, _ in segments:
+                self.add_wire(a, b)
+                for point in (a, b):
+                    counted[point] = counted.get(point, 0) + 1
+            for point, count in counted.items():
+                if count >= 3:
+                    self.add_junction(point)
+            for port in ports:
+                if library and _child(library, "power"):
+                    self.place_power(_unq(_child(source, "lib_id")[1]), port)
+                else:
+                    self.copy_symbol(template, port, None)
+        except Exception:
+            self.text = old
+            raise
         return ports
 
     def ground_pin(self, ref, pin, template):
@@ -1008,6 +1117,20 @@ class Sheet:
     def power_pin(self, ref, pin, template):
         """A power port, pointing up, on a short wire from the pin. template: that port's reference."""
         return self.port_pins([(ref, pin)], template, down=False)[0]
+
+    def place_power(self, net, at):
+        """Place a power symbol with its connection pin at (x, y). Return its new reference.
+
+        Pass the net name or a specific LIBRARY:SYMBOL. A definition must be cached
+        in this sheet or supplied through edit's symbols argument.
+        """
+        return _place_power(self, net, at)
+
+    def upright(self, ref):
+        """Correct an upside-down symbol. If pins need manual rewiring, return
+        their old and proposed positions and leave the drawing intact.
+        """
+        return _upright(self, ref)
 
     def tidy_fields(self, ref):
         """Reference and value beside the part, the same way for every part, clear of its body.
@@ -1789,6 +1912,147 @@ def _relocate_symbol(s, ref, point, rotation, mirror):
         raise
 
 
+def _at_node(point, rotation):
+    return ["at", "%g" % point[0], "%g" % point[1], "%g" % rotation]
+
+
+def _orient_power(symbol, lib, net, point, axis=None):
+    drawings = list(_lib_drawings(symbol, lib))
+    rotation = _power_turn(drawings, net, axis)
+    pins = {number: xy for part in drawings for number, xy in _lib_pins(part).items()}
+    number, pin = next(iter(pins.items()))
+    offset = _placed(_at_node((0, 0), rotation), axis, *pin)
+    anchor = _r(tuple(p - d for p, d in zip(point, offset)))
+    _child(symbol, "at")[1:] = _at_node(anchor, rotation)[1:]
+    down = "GND" in net.upper()
+    ys = [_placed(_at_node(anchor, rotation), axis, *xy)[1]
+          for part in drawings for xy in _lib_outline(part)]
+    for prop in _children(symbol, "property"):
+        position = _child(prop, "at")
+        if _unq(prop[1]) == "Value" and position:
+            y = max(ys) + 1.27 if down else min(ys) - 1.27
+            position[1:] = _at_node((point[0], y), rotation % 180)[1:]
+            effects = _child(prop, "effects")
+            if effects:
+                effects[:] = [item for item in effects if _head(item) != "justify"]
+    return number
+
+
+def _place_power(s, net, at):
+    point = tuple(map(float, at))
+    if len(point) != 2 or not all(map(_math.isfinite, point)):
+        raise ValueError("give the power pin position in sheet millimetres")
+    point = _r(point)
+    root, _ = s._tree()
+    cached = s._libs(root)
+    definitions = dict(cached)
+    definitions.update({name: _sx(text)[0] for name, text in _LIBRARY_SYMBOLS.items() if name not in cached})
+    matches = [(name, lib) for name, lib in definitions.items() if _child(lib, "power")
+               and (net == name or (":" not in net and any(
+                   _unq(p[1]) == "Value" and _unq(p[2]) == net for p in _children(lib, "property"))))]
+    matches = [(name, lib) for name, lib in matches if name.rsplit(":", 1)[-1] == net] or matches
+    if len(matches) != 1:
+        raise ValueError("power symbol %s: %s; name one LIBRARY:SYMBOL in edit's symbols"
+                         % (net, ", ".join(name for name, _ in matches) or "no matching definition"))
+    name, lib = matches[0]
+    if name not in cached and _child(lib, "extends"):
+        raise ValueError("power symbol %s needs its flattened library definition" % name)
+    value = next(_unq(p[2]) for p in _children(lib, "property") if _unq(p[1]) == "Value")
+    paths, _ = _hierarchy()
+    instances = paths.get(_os.path.realpath(s.path), [])
+    if not instances:
+        raise ValueError("power placement needs a sheet in the project hierarchy")
+    taken = set()
+    for file in paths:
+        tree = root if file == _os.path.realpath(s.path) else Sheet(file)._tree()[0]
+        taken.update(s._ref(n) for n in _children(tree, "symbol"))
+        taken.update(_unq(n[1]) for n in _walk(tree) if _head(n) == "reference")
+    number = 1
+    references = []
+    for _ in instances:
+        while {"#PWR%04d" % number, "#PWR0%d" % number, "#PWR%d" % number} & taken:
+            number += 1
+        references.append("#PWR%04d" % number)
+        number += 1
+    ref = references[0]
+    project = _os.path.splitext(_os.path.basename(BOARD_PATH))[0]
+    symbol = ["symbol", ["lib_id", _q(name)], _at_node(point, 0), ["unit", "1"],
+              ["in_bom", "no"], ["on_board", "no"], ["dnp", "no"],
+              ["uuid", _q(_uuid.uuid4())],
+              ["property", _q("Reference"), _q(ref), _at_node(point, 0),
+               ["effects", ["font", ["size", "1.27", "1.27"]], ["hide", "yes"]]],
+              ["property", _q("Value"), _q(value), _at_node(point, 0),
+               ["effects", ["font", ["size", "1.27", "1.27"]]]],
+              ["instances", ["project", _q(project), *[
+                  ["path", _q(path), ["reference", _q(reference)], ["unit", "1"]]
+                  for path, reference in zip(instances, references)]]]]
+    pin = _orient_power(symbol, lib, value, point)
+    symbol.append(["pin", _q(pin), ["uuid", _q(_uuid.uuid4())]])
+    if name not in cached:
+        s._ensure_lib(name)
+    s._append(_sexp(symbol))
+    return ref
+
+
+def _upright(s, name):
+    symbol, lib, spans = s._placed_symbol(name)
+    ref = s._ref(symbol)
+    net = next((_unq(p[2]) for p in _children(symbol, "property") if _unq(p[1]) == "Value"), "")
+    if lib is None:
+        raise ValueError("no library definition for " + ref)
+    if not _orientation(symbol, lib, ref, net):
+        return {"changed": False, "rewire": {}}
+    lib_id = _unq(_child(symbol, "lib_id")[1])
+    before = s._symbol_pins(symbol, {lib_id: lib})
+    at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
+    axis = mirror[1] if mirror else None
+    start, end = spans[id(symbol)]
+    if _child(lib, "power"):
+        _orient_power(symbol, lib, net, next(iter(before.values())), axis)
+        s.text = s.text[:start] + _sexp(symbol) + s.text[end:]
+        return {"changed": True, "rewire": {}}
+    # Reflect the current placement across a horizontal line through its
+    # anchor. This preserves which side of the symbol each pin is on.
+    rotation = (-float(at[3])) % 360
+    new_axis = {"x": None, None: "x", "y": None}[axis]
+    if axis == "y":
+        rotation = (rotation + 180) % 360
+    at[3] = "%g" % rotation
+    if mirror:
+        symbol.remove(mirror)
+    if new_axis:
+        symbol.insert(symbol.index(at) + 1, ["mirror", new_axis])
+    after = s._symbol_pins(symbol, {lib_id: lib})
+    scene = s._scene()
+    terminals = ({p for pin, p, _, _ in scene["pins"] if pin.rsplit(".", 1)[0] != ref}
+                 | {item["at"] for item in scene["labels"]} | scene["ports_and_dots"])
+    wires = [(a, b) for points in scene["wires"] for a, b in zip(points, points[1:])]
+    rewire = {pin: {"from": point, "to": after[pin]} for pin, point in before.items()
+              if point != after[pin] and any(
+                  spot in terminals or any(_on(spot, a, b) for a, b in wires)
+                  for spot in (point, after[pin]))}
+    if rewire:
+        return {"changed": False, "rewire": rewire}
+    root, original_spans = s._tree()
+    nc_moves = {before[pin]: point for pin, point in after.items()}
+    updated = [(start, end, _sexp(symbol))]
+    for mark in _children(root, "no_connect"):
+        position = _child(mark, "at")
+        old = _r(position[1:3])
+        if old in nc_moves and old != nc_moves[old]:
+            position[1:] = _at_node(nc_moves[old], 0)[1:3]
+            updated.append((*original_spans[id(mark)], _sexp(mark)))
+    old_text = s.text
+    try:
+        for first, last, content in sorted(updated, reverse=True):
+            s.text = s.text[:first] + content + s.text[last:]
+        s.tidy_fields(ref)
+    except Exception:
+        s.text = old_text
+        raise
+    return {"changed": True, "rewire": {}}
+
+
 def place_in_slot(sheet, ref, block, column, row, rotation=0):
     """Move a symbol anchor to a named column and row and tidy its fields. Returns (x, y)."""
     grid = _block_grids(sheet)[block]
@@ -2087,6 +2351,291 @@ def _root_sheet():
     return sheet(_os.path.splitext(_os.path.basename(BOARD_PATH))[0] + ".kicad_sch")
 
 
+def _sheet_row_item(item, position, size):
+    """Move a sheet's pins and properties with their original edges."""
+    at, dimensions = _child(item, "at"), _child(item, "size")
+    old, old_size = _r(at[1:3]), _r(dimensions[1:3])
+    moves = []
+    directions = {0: (1, 0), 90: (0, -1), 180: (-1, 0), 270: (0, 1)}
+    for child in _children(item, "pin") + _children(item, "property"):
+        pos = _child(child, "at")
+        if pos is None:
+            continue
+        point = _r(pos[1:3])
+        offsets = [round(p - a, 2) for p, a in zip(point, old)]
+        if _head(child) == "pin":
+            direction = directions.get(float(pos[3]) % 360)
+            if direction is None:
+                raise ValueError("sheet pin has a non-orthogonal orientation: " + _unq(child[1]))
+            axis = 0 if direction[0] else 1
+            if direction[axis] > 0:
+                offsets[axis] += size[axis] - old_size[axis]
+            cross = 1 - axis
+            if not 0 <= offsets[cross] <= size[cross]:
+                raise ValueError("sheet size is too small for pin " + _unq(child[1]))
+        elif offsets[1] >= old_size[1]:
+            offsets[1] += size[1] - old_size[1]
+        new = _r(tuple(p + d for p, d in zip(position, offsets)))
+        if _head(child) == "pin":
+            moves.append((point, new, direction, _unq(child[1])))
+        pos[1:3] = _at_node(new, 0)[1:3]
+    at[1:3] = _at_node(position, 0)[1:3]
+    dimensions[1:3] = _at_node(size, 0)[1:3]
+    return moves
+
+
+def _root_harnesses(top, root, spans, moves):
+    """Extract affected physical wire and bus groups, keeping their electrical terminals."""
+    from collections import defaultdict
+
+    pins = defaultdict(list)
+    for old, new, direction, name in moves:
+        pins[old].append((new, name))
+    changed = {old for old, entries in pins.items() if any(old != new for new, _ in entries)}
+    if not changed:
+        return [], []
+    labels = [item for kind in ("label", "global_label", "hierarchical_label") for item in _children(root, kind)]
+    marks = {_r(_child(item, "at")[1:3]): item for item in _children(root, "no_connect")}
+    dots = {_r(_child(item, "at")[1:3]): item for item in _children(root, "junction")}
+    terminal_sets = {"wire": set(), "bus": set()}
+    libs = top._libs(root)
+    terminal_sets["wire"].update(point for item in _children(root, "symbol")
+                                 for point in top._symbol_pins(item, libs).values())
+    for entry in _children(root, "bus_entry"):
+        a, d = (_r(_child(entry, key)[1:3]) for key in ("at", "size"))
+        b = _r(tuple(p + q for p, q in zip(a, d)))
+        for kind in terminal_sets:
+            terminal_sets[kind].update((a, b))
+
+    removed, edits, harnesses, connected = set(), [], [], set()
+    for kind, stationary in terminal_sets.items():
+        nodes = _children(root, kind)
+        segments = [tuple(_r(n[1:3]) for n in _children(_child(item, "pts"), "xy")) for item in nodes]
+        groups = defaultdict(list)
+        for index, group in _segment_groups(segments, dots if kind == "wire" else ()).items():
+            groups[group].append(index)
+        for group in groups.values():
+            edges = [segments[index] for index in group]
+
+            def touches(point):
+                return any(_on(point, a, b) for a, b in edges)
+
+            sheet_pins = {point for point in pins if touches(point)}
+            if not sheet_pins & changed:
+                continue
+            connected.update(sheet_pins)
+            removed.update(id(nodes[i]) for i in group)
+            if kind == "wire":
+                removed.update(id(item) for point, item in dots.items() if touches(point))
+            attached = [label for label in labels if touches(_r(_child(label, "at")[1:3]))]
+            if any(id(label) in removed for label in attached):
+                raise ValueError("root label touches multiple harnesses; separate its connection first")
+            removed.update(map(id, attached))
+            endpoints = sorted({new for old in sheet_pins for new, _ in pins[old]}
+                               | {point for point in stationary if touches(point)})
+            harnesses.append((kind, endpoints, attached))
+    for old in sorted(changed - connected):
+        destinations = [new for new, _ in pins[old]]
+        attached = [label for label in labels if _r(_child(label, "at")[1:3]) == old]
+        if attached or len(destinations) > 1:
+            name = pins[old][0][1]
+            kind = "bus" if "{" in name or "[" in name else "wire"
+            harnesses.append((kind, sorted(destinations), attached))
+            removed.update(map(id, attached))
+        if old in marks and len(destinations) == 1:
+            mark = marks[old]
+            _child(mark, "at")[1:] = _at_node(destinations[0], 0)[1:3]
+            edits.append((*spans[id(mark)], _sexp(mark)))
+    return edits + [(*spans[uid], "") for uid in removed], harnesses
+
+
+def _root_segment(top, kind, a, b):
+    top._append('(%s (pts (xy %g %g) (xy %g %g)) (stroke (width 0) (type default)) (uuid %s))'
+                % (kind, *a, *b, _q(_uuid.uuid4())))
+
+
+def _root_label_anchor(label, edges, fallback):
+    if not edges:
+        return fallback
+
+    def length(edge):
+        return sum(abs(x - y) for x, y in zip(*edge))
+
+    horizontal = [tuple(sorted(edge)) for edge in edges if edge[0][1] == edge[1][1]]
+    if _head(label) == "label" and horizontal:
+        left, right = max(horizontal, key=length)
+        effects = _child(label, "effects") or []
+        justify = _child(effects, "justify") or []
+        inset = min(2.54, right[0] - left[0])
+        return _r((right[0] - inset if "right" in justify else left[0] + inset, left[1]))
+    a, b = max(edges, key=length)
+    return _r(tuple(_snap((x + y) / 2) for x, y in zip(a, b)))
+
+
+def _root_harness(top, kind, terminals, labels, directions, area):
+    """Route a trunk and attach further terminals at explicit junctions."""
+    points = [terminals[0]]
+    edges = []
+    for terminal in terminals[1:]:
+        if edges:
+            # Attach away from the original pins' one-step straight leads.
+            candidates = set()
+            for a, b in edges:
+                steps = round(max(abs(b[0] - a[0]), abs(b[1] - a[1])) / 1.27)
+                candidates.update(_r(tuple(x + (y - x) * i / steps for x, y in zip(a, b)))
+                                  for i in range(1, steps))
+            candidates.update(set(points) - set(terminals))
+            candidates = sorted(candidates, key=lambda p: (sum(abs(x - y) for x, y in zip(p, terminal)), p))
+        else:
+            candidates = [terminals[0]]
+        for target in candidates:
+            try:
+                branch = _route_root_leg(top, kind, terminal, target, directions, area)
+            except ValueError as error:
+                detail = str(error)
+                continue
+            if edges:
+                if kind == "wire" and not any(_r(_child(n, "at")[1:3]) == target
+                                              for n in _children(top._tree()[0], "junction")):
+                    top.add_junction(target)
+                if kind == "bus":
+                    tree, spans = top._tree()
+                    for node in _children(tree, "bus"):
+                        a, b = (_r(n[1:3]) for n in _children(_child(node, "pts"), "xy"))
+                        if target not in (a, b) and _on(target, a, b):
+                            top._cut([spans[id(node)]])
+                            _root_segment(top, "bus", a, target)
+                            _root_segment(top, "bus", target, b)
+                            break
+            points.extend(branch)
+            edges.extend(zip(branch, branch[1:]))
+            break
+        else:
+            raise ValueError("cannot reconnect %s terminal at %s: %s"
+                             % (kind, terminal, detail if candidates else "no available junction"))
+    for label in labels:
+        point = _root_label_anchor(label, edges, terminals[0])
+        _child(label, "at")[1:3] = _at_node(point, 0)[1:3]
+        top._append(_sexp(label))
+
+
+def _route_root_leg(top, kind, start, target, directions, area):
+    scene = dict(top._scene())
+    root = scene["root"]
+    wires = {k: [[_r(p[1:3]) for p in _children(_child(n, "pts"), "xy")] for n in _children(root, k)]
+             for k in ("wire", "bus")}
+    scene["wires"] = wires[kind]
+    scene["orphans"] = set()
+    scene["parts"] = list(scene["parts"])
+    for item in _children(root, "sheet"):
+        x, y = _r(_child(item, "at")[1:3])
+        w, h = _r(_child(item, "size")[1:3])
+        scene["parts"].append(("sheet", (x, y, x + w, y + h)))
+    other = wires["bus" if kind == "wire" else "wire"]
+    scene["other_wiring"] = other
+    scene["ports_and_dots"] = scene["ports_and_dots"] | {p for pts in other for p in pts}
+    for item in _children(root, "bus_entry"):
+        a = _r(_child(item, "at")[1:3])
+        d = _r(_child(item, "size")[1:3])
+        scene["ports_and_dots"].update((a, _r(tuple(x + y for x, y in zip(a, d)))))
+    if any(_snap(v) != v for v in (*start, *target)):
+        raise ValueError("harness endpoints must be on the 1.27 mm grid")
+    who = "%s from %s to %s" % (kind, start, target)
+    outgoing, incoming = directions.get(start), directions.get(target)
+    begin = _r(tuple(p + 1.27 * d for p, d in zip(start, outgoing))) if outgoing else start
+    end = _r(tuple(p + 1.27 * d for p, d in zip(target, incoming))) if incoming else target
+    leads = [(a, b) for a, b in ((start, begin), (target, end)) if a != b]
+    allowed = {start, target}
+    if _on(begin, start, target) and _on(end, start, target) and (
+            start[0] == target[0] or start[1] == target[1]):
+        points = [start, target]
+        try:
+            top._check_segments([(start, target, who)], allowed, strict=True, scene=scene)
+        except ValueError:
+            points = None
+    else:
+        points = None
+    if points is None:
+        tail = top._route(None, None, begin, [end], target, margin=max(area[2:]),
+                          heading=outgoing, strict=True,
+                          arrival_heading=tuple(d * 1.27 for d in incoming) if incoming else None,
+                          leads=leads, scene=scene, area=area)
+        if tail is None:
+            raise ValueError("cannot redraw " + who)
+        points = _straight([start, begin, *tail, target])
+        if _backtracks(points):
+            raise ValueError("redrawing %s would overlap its own lead" % who)
+        top._check_segments([(a, b, who) for a, b in zip(points, points[1:])],
+                            allowed, strict=True, scene=scene)
+    if kind == "wire":
+        _draw_routed_wire(top, points, [tuple(wire) for wire in wires[kind]])
+    else:
+        for a, b in zip(points, points[1:]):
+            _root_segment(top, kind, a, b)
+    return points
+
+
+def arrange_root(order, size=None, gap=25.4):
+    """Save the root sheet symbols in one centred row above the title block.
+
+    Order lists each exact sheet name, filename or UUID once. Size is (width,
+    height) in mm and defaults to the largest extents. The existing harness
+    terminals are rerouted on the drawing grid. An obstructed route raises
+    with its endpoints before the sheet is saved. Use an empty electrical intent.
+    """
+    top = _root_sheet()
+    root, spans = top._tree()
+    items = _children(root, "sheet")
+    order = list(order)
+    aliases = list(_sheet_files(root))
+    selected = [[item for item, names in zip(items, aliases) if name in names] for name in order]
+    if (not items or len(order) != len(items) or any(len(matches) != 1 for matches in selected)
+            or len({id(matches[0]) for matches in selected}) != len(items)):
+        raise ValueError("order must name each root sheet exactly once")
+    dimensions = [_r(_child(item, "size")[1:3]) for item in items]
+    width, height = (tuple(map(float, size)) if size is not None else
+                     tuple(round(_math.ceil((max(axis) - 1e-6) / 1.27) * 1.27, 2)
+                           for axis in zip(*dimensions)))
+    gap = float(gap)
+    if any(not _math.isfinite(n) or n <= 0 or abs(_snap(n) - n) > 1e-6 for n in (width, height, gap)):
+        raise ValueError("sheet size and gap must be positive multiples of 1.27 mm")
+    width, height, gap = map(_snap, (width, height, gap))
+    page = top._page_size(root)
+    if page is None:
+        raise ValueError("unknown root page size")
+    title = top._title_block(root)
+    bottom = title[1] if title else page[1] - 10
+    row_width = len(items) * width + (len(items) - 1) * gap
+    if row_width > page[0] - 20 or height > bottom - 20:
+        raise ValueError("the row does not fit on the root page above its title block")
+    x0, y = _snap((page[0] - row_width) / 2), _snap((10 + bottom - height) / 2)
+    edits, moves, positions = [], [], {}
+    for index, (name, (item,)) in enumerate(zip(order, selected)):
+        position = _r((x0 + index * (width + gap), y))
+        moves.extend(_sheet_row_item(item, position, (width, height)))
+        edits.append((*spans[id(item)], _sexp(item)))
+        positions[name] = position
+    directions = {}
+    for _, new, direction, name in moves:
+        if new in directions:
+            raise ValueError("arranging sheets would overlap pin " + name)
+        directions[new] = direction
+    harness_edits, harnesses = _root_harnesses(top, root, spans, moves)
+    for first, last, replacement in sorted(edits + harness_edits, reverse=True):
+        top.text = top.text[:first] + replacement + top.text[last:]
+    scene = top._scene()
+    stationary = {point for _, point, _, _ in scene["pins"]} | {item["at"] for item in scene["labels"]}
+    untouched = [[_r(p[1:3]) for p in _children(_child(n, "pts"), "xy")]
+                 for kind in ("wire", "bus") for n in _children(scene["root"], kind)]
+    for old, new, _, name in moves:
+        if old != new and (new in stationary or any(_on(new, a, b) for a, b in untouched)):
+            raise ValueError("arranging sheets would put pin %s on existing wiring at %s" % (name, new))
+    for kind, terminals, labels in sorted(harnesses, key=lambda group: (-len(group[1]), group[0])):
+        _root_harness(top, kind, terminals, labels, directions, (10, 10, page[0] - 10, bottom))
+    top.save()
+    return {"positions": positions, "size": (width, height)}
+
+
 def _sheet_files(root):
     for item in _children(root, "sheet"):
         props = {_unq(p[1]).lower(): _unq(p[2]) for p in _children(item, "property")}
@@ -2360,11 +2909,11 @@ def copy_layout(file, ref_map, area, offset, target_area=None):
 def help(name):
     """Return a documented schematic helper's full docstring by name."""
     helpers = {helper.__name__: helper for helper in
-               (new_sheet, move_region, split_sheet, copy_layout, sheet, sheets, help,
+               (new_sheet, move_region, split_sheet, copy_layout, sheet, sheets, help, arrange_root,
                 block_grid, place_in_slot, mirror_block, info_table, place_design_block)}
     helpers["route"] = _route_schematic
     helpers.update({"Sheet." + method.__name__: method for method in
-                    (Sheet.symbols, Sheet.symbol, Sheet.wires, Sheet.labels)})
+                    (Sheet.symbols, Sheet.symbol, Sheet.wires, Sheet.labels, Sheet.place_power, Sheet.upright)})
     if name not in helpers:
         raise ValueError("unknown schematic helper %s; choose from %s" % (name, ", ".join(sorted(helpers))))
     return helpers[name].__doc__
