@@ -175,6 +175,8 @@ html, body {
   color: #c7f7dc;
 }
 
+.diagnostics__task[hidden] { display: none; }
+
 .diagnostics__task time { color: rgba(255, 255, 255, .6); }
 
 .diagnostics__log {

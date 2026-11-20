@@ -6,9 +6,12 @@ of these was done by hand. Runs inside the confined KiCad Python (3.9) with the
 board helpers; it reads only files in the copy.
 """
 
-SCHEMATIC_HELPERS = r'''
+GRID_SUFFIX = ".alx-grid.json"
+
+SCHEMATIC_HELPERS = "_GRID_SUFFIX = %r\n" % GRID_SUFFIX + r'''
 # ---- schematic helpers (text edits of .kicad_sch; KiCad has no schematic API) ----
 import math as _math
+import json as _json
 import os as _os
 import re as _re
 import uuid as _uuid
@@ -17,6 +20,7 @@ _TOKEN = _re.compile(r'\s*(\(|\)|"(?:[^"\\]|\\.)*"|[^\s()]+)')
 # Library symbols the edit named (symbols: ["FireFli_ICs:RFSW6024TR13"]), copied
 # in by the tool: the script cannot read his library itself.
 _LIBRARY_SYMBOLS = {}
+_DESIGN_BLOCKS = {}
 
 
 def _sx(text):
@@ -98,6 +102,17 @@ def _lib_pin_angles(symbol):
     return angles
 
 
+def _lib_drawings(symbol, lib):
+    """Symbol drawings for the placed unit and body style, including common drawings."""
+    unit = _child(symbol, "unit")
+    style = _child(symbol, "body_style") or _child(symbol, "convert")
+    for part in _children(lib, "symbol"):
+        owner = _unq(part[1]).rsplit("_", 2)
+        if (len(owner) != 3 or (owner[1] in ("0", unit[1] if unit else "1")
+                                and owner[2] in ("0", style[1] if style else "1"))):
+            yield part
+
+
 def _lib_outline(symbol):
     """Every drawn point of a library symbol (its body), its own coordinates (y up)."""
     points = []
@@ -107,6 +122,23 @@ def _lib_outline(symbol):
             if not isinstance(item, list):
                 continue
             head = _head(item)
+            if head == "circle":
+                x, y = map(float, _child(item, "center")[1:3])
+                radius = float(_child(item, "radius")[1])
+                points.extend(((x - radius, y - radius), (x + radius, y + radius)))
+            arc_points = [_child(item, key) for key in ("start", "mid", "end")] if head == "arc" else []
+            if arc_points and all(arc_points):
+                a, b, c = (tuple(map(float, point[1:3])) for point in arc_points)
+                ux, uy = b[0] - a[0], b[1] - a[1]
+                vx, vy = c[0] - a[0], c[1] - a[1]
+                determinant = 2 * (ux * vy - uy * vx)
+                if abs(determinant) > 1e-9:
+                    u2, v2 = ux * ux + uy * uy, vx * vx + vy * vy
+                    x = a[0] + (u2 * vy - v2 * uy) / determinant
+                    y = a[1] + (ux * v2 - vx * u2) / determinant
+                    radius = _math.hypot(a[0] - x, a[1] - y)
+                    # The whole circle conservatively bounds the arc.
+                    points.extend(((x - radius, y - radius), (x + radius, y + radius)))
             if head in ("start", "end", "mid", "xy", "center") and len(item) >= 3:
                 try:
                     points.append((float(item[1]), float(item[2])))
@@ -239,14 +271,8 @@ class Sheet:
         if lib is None:
             return {}
         at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
-        unit = _child(symbol, "unit")
-        unit = unit[1] if unit else "1"
         pins = {}
-        for part in _children(lib, "symbol"):
-            # Unit 0 is common to every unit; others only to their own.
-            owner = _unq(part[1]).rsplit("_", 2)
-            if len(owner) == 3 and owner[1] not in ("0", unit):
-                continue
+        for part in _lib_drawings(symbol, lib):
             for number, (x, y) in _lib_pins(part).items():
                 pins[number] = _placed(at, mirror[1] if mirror else None, x, y)
         return pins
@@ -352,16 +378,10 @@ class Sheet:
     def pin_direction(self, ref, pin):
         """The way a pin points out of its part on the sheet: (1, 0) right, (0, 1) down, ..."""
         symbol, lib, _ = self._placed_symbol(ref)
-        angles = {}
-        for part in _children(lib, "symbol"):
-            angles.update(_lib_pin_angles(part))
-        if str(pin) not in angles:
+        direction = self._direction_of(symbol, lib, pin) if lib is not None else None
+        if direction is None:
             raise KeyError("%s has no pin %s" % (ref, pin))
-        turn = _math.radians(angles[str(pin)] + 180.0)
-        at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
-        end = _placed(at, mirror[1] if mirror else None, _math.cos(turn), _math.sin(turn))
-        origin = _placed(at, mirror[1] if mirror else None, 0.0, 0.0)
-        return (round(end[0] - origin[0]), round(end[1] - origin[1]))
+        return direction
 
     def _stub_end(self, ref, pin, length=2.54):
         start = self.symbol(ref)["pins"][str(pin)]
@@ -371,16 +391,18 @@ class Sheet:
     def _wired_to(self, point):
         """The wires joined to point, through ends and wires they end on: (their points, their ends)."""
         wires = [tuple(pts) for pts in self.wires()]
+        root, _ = self._tree()
+        dots = {_r(_child(dot, "at")[1:3]) for dot in _children(root, "junction")}
         reached, ends, frontier = set(), {_r(point)}, [_r(point)]
         while frontier:
             here = frontier.pop()
             for index, pts in enumerate(wires):
                 if index in reached:
                     continue
-                if here in (pts[0], pts[-1]) or any(_on(here, a, b) for a, b in zip(pts, pts[1:])) \
-                        or any(_on(e, here, here) for e in (pts[0], pts[-1])):
+                if any(_on(here, a, b) for a, b in zip(pts, pts[1:])):
                     reached.add(index)
-                    for e in (pts[0], pts[-1]):
+                    attached = {dot for dot in dots if any(_on(dot, a, b) for a, b in zip(pts, pts[1:]))}
+                    for e in {pts[0], pts[-1], *attached}:
                         if e not in ends:
                             ends.add(e)
                             frontier.append(e)
@@ -422,7 +444,7 @@ class Sheet:
         self._check_segments([(a, b, "%s.%s" % (ref, pin)) for a, b in zip(points, points[1:])],
                              {own} | {_r(p) for p in allow} | ends, same)
 
-    def _check_segments(self, segments, allowed, same=()):
+    def _check_segments(self, segments, allowed, same=(), strict=False):
         """segments: (a, b, the pin it is for); refused at the first that touches what is there."""
         scene = self._scene()
         root, libs = scene["root"], scene["libs"]
@@ -430,12 +452,14 @@ class Sheet:
         # touching it joins nothing. remove_dangling clears it.
         if scene["orphans"] is None:
             scene["orphans"] = self._orphan_wires(root, libs)
-        skip = set(same) | scene["orphans"]
+        skip = set(same) | (set() if strict else scene["orphans"])
         wires = [pts for pts in scene["wires"] if tuple(pts) not in skip]
         things = [("a wire end", p) for pts in wires for p in (pts[0], pts[-1])]
         things += [("label %s" % item["name"], item["at"]) for item in scene["labels"]]
         things += [("a no-connect", point) for point in scene["no_connects"]]
         things += [("pin %s" % name, point) for name, point, _, _ in scene["pins"] if point not in allowed]
+        if strict:
+            things += [("a port or junction", point) for point in scene["ports_and_dots"]]
         pin_names = {}
         for name, point, _, _ in scene["pins"]:
             pin_names.setdefault(point, name)
@@ -615,10 +639,11 @@ class Sheet:
             if tee:
                 self.add_junction(tee)
             return [start] + points
-        raise ValueError("%s; and no clear way round within 30 mm either: move a part or join the "
-                         "pins by label" % reason)
+        raise ValueError("%s; and no clear way round within 30 mm either: move a part or supply "
+                         "clear via points" % reason)
 
-    def _route(self, ref, pin, begin, goals, target, margin=30.48, heading=None, tees=()):
+    def _route(self, ref, pin, begin, goals, target, margin=30.48, heading=None, tees=(),
+               arrival_heading=None, channels=(), strict=False, enter_pin=True, leads=()):
         """A clear grid path from begin to the first of goals that it reaches, or None.
 
         On the 1.27 mm grid, straight runs and as few turns as possible, kept within
@@ -634,30 +659,36 @@ class Sheet:
         goal = next((g for g in goals if on_grid(g)), None)
         if goal is None or not on_grid(begin):
             return None
-        arrive = {_r(goal)} | {t for t in tees if on_grid(t)}
+        arrive = ({_r(goal)} if enter_pin else set()) | {t for t in tees if on_grid(t)}
+        if not arrive:
+            return None
         scene = self._scene()
         if scene["orphans"] is None:
             scene["orphans"] = self._orphan_wires(scene["root"], scene["libs"])
         own = self.symbol(ref)["pins"][str(pin)]
         same, ends = self._wired_to(target)
-        allowed = {own, _r(target)} | arrive | ends
-        skip = set(same) | scene["orphans"]
-        x0, x1 = min(begin[0], goal[0]) - margin, max(begin[0], goal[0]) + margin
-        y0, y1 = min(begin[1], goal[1]) - margin, max(begin[1], goal[1]) + margin
+        allowed = {own, _r(target)} | arrive | (set() if strict else ends)
+        skip = set() if strict else set(same) | scene["orphans"]
+        bounds = [begin, *arrive]
+        x0, x1 = min(p[0] for p in bounds) - margin, max(p[0] for p in bounds) + margin
+        y0, y1 = min(p[1] for p in bounds) - margin, max(p[1] for p in bounds) + margin
 
         def near(*pts):
             return any(x0 - 3 <= p[0] <= x1 + 3 and y0 - 3 <= p[1] <= y1 + 3 for p in pts)
-        segments = [(c, d) for pts in scene["wires"] for c, d in zip(pts, pts[1:]) if near(c, d)]
+        segments = [(c, d) for pts in scene["wires"] for c, d in zip(pts, pts[1:])
+                    if _hits_box(c, d, (x0, y0, x1, y1))]
         live = [(c, d) for pts in scene["wires"] if tuple(pts) not in skip
-                for c, d in zip(pts, pts[1:]) if near(c, d)]
+                for c, d in zip(pts, pts[1:]) if _hits_box(c, d, (x0, y0, x1, y1))]
         wired_ends = {p for pts in scene["wires"] if tuple(pts) not in skip for p in (pts[0], pts[-1])}
+        if strict:
+            wired_ends.update(scene["ports_and_dots"])
         points = {p for p in wired_ends | {i["at"] for i in scene["labels"]} | set(scene["no_connects"])
                   | {point for _, point, _, _ in scene["pins"]} if p not in allowed and near(p)}
         all_ends = {p for pts in scene["wires"] for p in (pts[0], pts[-1])} | {i["at"] for i in scene["labels"]}
         stubs = [(point, _r((point[0] + d[0] * 2.54, point[1] + d[1] * 2.54)))
                  for _, point, power, d in scene["pins"]
                  if not power and d is not None and point not in allowed and point not in all_ends and near(point)]
-        boxes = [b for _, b in scene["parts"] if near((b[0], b[1]), (b[2], b[3]))]
+        boxes = [b for _, b in scene["parts"] if b[0] <= x1 and b[2] >= x0 and b[1] <= y1 and b[3] >= y0]
         bodies = scene["bodies"]
         block = scene["title_block"]
         cache = {}
@@ -689,14 +720,15 @@ class Sheet:
                     break
             if ok and any(_overlap(a, b, c, d) for c, d in segments):
                 ok = False
+            if ok and any(_overlap(a, b, c, d) or _on(c, a, b) for c, d in leads):
+                ok = False
             cache[key] = ok
             return ok
 
         def on_live_wire(p):
-            return p not in allowed and any(_on(p, c, d) for c, d in live)
+            return (strict or p not in allowed) and any(_on(p, c, d) for c, d in live)
         import heapq
         start = _r(begin)
-        target_pt = _r(goal)
         moves = ((grid, 0.0), (-grid, 0.0), (0.0, grid), (0.0, -grid))
         # Leaving the pin's stub the way the pin points: never back over the stub itself.
         first = (heading[0] * grid, heading[1] * grid) if heading else None
@@ -706,7 +738,8 @@ class Sheet:
         counter = 0
         while frontier:
             _, _, here, heading = heapq.heappop(frontier)
-            if here in arrive:
+            if here in arrive and (here != goal or arrival_heading is None
+                                   or heading != arrival_heading):
                 path, state = [here], (here, heading)
                 while state in came:
                     state = came[state]
@@ -722,12 +755,19 @@ class Sheet:
                 turning = heading is not None and move != heading
                 if turning and on_live_wire(here):
                     continue
-                total = cost + 1.0 + (6.0 if turning else 0.0)
+                # Prefer the open channels between declared slot lines. Turns
+                # and longer routes still cost more, and free space stays usable.
+                channel_cost = 0.0
+                if channels:
+                    axis = 0 if move[1] else 1
+                    channel_cost = 0.35 if here[axis] in channels[axis] else 0.0
+                crossing_cost = 0.15 if strict and nxt not in arrive and on_live_wire(nxt) else 0.0
+                total = cost + 1.0 + channel_cost + crossing_cost + (6.0 if turning else 0.0)
                 if total < best.get((nxt, move), float("inf")):
                     best[(nxt, move)] = total
                     came[(nxt, move)] = (here, heading)
                     counter += 1
-                    guess = (abs(nxt[0] - target_pt[0]) + abs(nxt[1] - target_pt[1])) / grid
+                    guess = min(abs(nxt[0] - p[0]) + abs(nxt[1] - p[1]) for p in arrive) / grid
                     heapq.heappush(frontier, (total + guess, counter, nxt, move))
         return None
 
@@ -748,7 +788,7 @@ class Sheet:
     def _direction_of(self, symbol, lib, number):
         """A pin's outward direction from its parsed symbol (pin_direction without re-reading)."""
         angles = {}
-        for part in _children(lib, "symbol"):
+        for part in _lib_drawings(symbol, lib):
             angles.update(_lib_pin_angles(part))
         if str(number) not in angles:
             return None
@@ -780,7 +820,8 @@ class Sheet:
             if not power and lib is not None:
                 # The part's drawn body (16 Nov: the VCTL wire was drawn straight over C56).
                 at, mirror = _child(symbol, "at"), _child(symbol, "mirror")
-                drawn = [_placed(at, mirror[1] if mirror else None, x, y) for x, y in _lib_outline(lib)]
+                drawn = [_placed(at, mirror[1] if mirror else None, x, y)
+                         for part in _lib_drawings(symbol, lib) for x, y in _lib_outline(part)]
                 if drawn:
                     xs, ys = [p[0] for p in drawn], [p[1] for p in drawn]
                     parts.append((name, (min(xs), min(ys), max(xs), max(ys))))
@@ -789,10 +830,13 @@ class Sheet:
                 ports.append((ox, oy))
                 bodies.append(((ox, oy), (ox - 1.5, oy + 0.3, ox + 1.5, oy + 5.6) if "GND" in value.upper()
                                else (ox - 1.5, oy - 5.6, ox + 1.5, oy - 0.3)))
+        ports_and_dots = {_r(_child(pin, "at")[1:3]) for item in _children(root, "sheet")
+                          for pin in _children(item, "pin")}
+        ports_and_dots.update(_r(_child(dot, "at")[1:3]) for dot in _children(root, "junction"))
         scene = {"root": root, "libs": libs, "wires": self.wires(), "labels": self.labels(),
                  "no_connects": [_r(_child(n, "at")[1:3]) for n in _children(root, "no_connect")],
                  "pins": pins, "bodies": bodies, "ports": ports, "orphans": None, "parts": parts,
-                 "values": values, "title_block": self._title_block(root)}
+                 "values": values, "title_block": self._title_block(root), "ports_and_dots": ports_and_dots}
         self._scene_cache = (self.text, scene)
         return scene
 
@@ -1629,6 +1673,16 @@ class Sheet:
         _sx(self.text)
         with open(self.path, "w") as handle:
             handle.write(self.text)
+        if getattr(self, "_wire_hops", False):
+            path = _os.path.splitext(BOARD_PATH)[0] + ".kicad_pro"
+            if _os.path.isfile(path):
+                with open(path) as handle:
+                    settings = _json.load(handle)
+                drawing = settings.setdefault("schematic", {}).setdefault("drawing", {})
+                if not drawing.get("hop_over_size_choice"):
+                    drawing["hop_over_size_choice"] = 3  # FireFli P0005 drawing setting
+                    with open(path, "w") as handle:
+                        handle.write(_json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
 
 
 def sheet(name):
@@ -1656,6 +1710,373 @@ def _walk(node):
     for item in node:
         if isinstance(item, list):
             yield from _walk(item)
+
+
+def _translate_layout(node, dx, dy, renew_ids=False):
+    for item in _walk(node):
+        if _head(item) in ("at", "xy", "start", "mid", "end", "center"):
+            item[1:3] = ["%.6f" % (float(item[1]) + dx), "%.6f" % (float(item[2]) + dy)]
+        if renew_ids and _head(item) == "uuid":
+            item[1] = _q(str(_uuid.uuid4()))
+
+
+def _apply_symbol_layout(twin, layout):
+    twin[:] = [n for n in twin if _head(n) not in ("at", "mirror")]
+    twin[3:3] = [n for n in layout if _head(n) in ("at", "mirror")]
+    props = {n[1]: n for n in _children(layout, "property")}
+    for prop in _children(twin, "property"):
+        if prop[1] in props:
+            for key in ("at", "effects"):
+                value = _child(props[prop[1]], key)
+                if value:
+                    prop[:] = [n for n in prop if _head(n) != key] + [value]
+
+
+def _block_grids(s):
+    try:
+        with open(s.path + _GRID_SUFFIX) as handle:
+            return _json.load(handle)
+    except FileNotFoundError:
+        return {}
+
+
+def _snap(value):
+    return round(round(float(value) / 1.27) * 1.27, 2)
+
+
+def block_grid(sheet, name, origin, columns, rows, col_pitch=12.7, row_pitch=7.62):
+    """Define a named placement grid in the work copy. Names are ordered left to right and top to bottom.
+
+    Origin and pitches must be on the 1.27 mm grid. Supply row names such as
+    ["rail", 1, 2, "ground"]. Returns the named column and row coordinates.
+    """
+    columns, rows = list(map(str, columns)), list(map(str, rows))
+    if (not isinstance(name, str) or not name.strip()
+            or any(not names or not all(names) or len(set(names)) != len(names) for names in (columns, rows))):
+        raise ValueError("give the block, columns and rows distinct nonempty names")
+    x, y = map(float, origin)
+    steps = (x, y, float(col_pitch), float(row_pitch))
+    if any(not _math.isfinite(n) or abs(n - _snap(n)) > 1e-6 for n in steps) or min(steps[2:]) <= 0:
+        raise ValueError("origin and positive pitches must be multiples of 1.27 mm")
+    grids = _block_grids(sheet)
+    definition = {"columns": {c: _snap(x + i * steps[2]) for i, c in enumerate(columns)},
+                  "rows": {r: _snap(y + i * steps[3]) for i, r in enumerate(rows)}}
+    grids[name] = definition
+    with open(sheet.path + _GRID_SUFFIX, "w") as handle:
+        _json.dump(grids, handle, indent=2)
+    return definition
+
+
+def _relocate_symbol(s, ref, point, rotation, mirror):
+    symbol, _, spans = s._placed_symbol(ref)
+    first, last = spans[id(symbol)]
+    at = _child(symbol, "at")
+    dx, dy = point[0] - float(at[1]), point[1] - float(at[2])
+    at[1:] = ["%g" % point[0], "%g" % point[1], "%g" % rotation]
+    symbol[:] = [n for n in symbol if _head(n) != "mirror"]
+    if mirror:
+        symbol.insert(symbol.index(at) + 1, ["mirror", mirror])
+    for field in _children(symbol, "property"):
+        pos = _child(field, "at")
+        if pos:
+            pos[1:3] = ["%g" % (float(pos[1]) + dx), "%g" % (float(pos[2]) + dy)]
+    old = s.text
+    s.text = old[:first] + _sexp(symbol) + old[last:]
+    try:
+        s.tidy_fields(ref)
+    except Exception:
+        s.text = old
+        raise
+
+
+def place_in_slot(sheet, ref, block, column, row, rotation=0):
+    """Move a symbol anchor to a named column and row and tidy its fields. Returns (x, y)."""
+    grid = _block_grids(sheet)[block]
+    point = grid["columns"][str(column)], grid["rows"][str(row)]
+    _relocate_symbol(sheet, ref, point, rotation, sheet.symbol(ref)["mirror"])
+    return point
+
+
+def mirror_block(sheet, source_block, target_block, ref_map, axis="y"):
+    """Copy slot assignments and orientations to existing twins. y flips columns, x flips rows,
+    and None gives an identical layout. Wires and symbol identities are untouched.
+    Returns destination anchors by reference.
+    """
+    grids = _block_grids(sheet)
+    source, target = grids[source_block], grids[target_block]
+    if (axis not in ("x", "y", None) or source_block == target_block
+            or len(set(ref_map.values())) != len(ref_map) or set(ref_map) & set(ref_map.values())):
+        raise ValueError("use distinct source and target blocks, a one-to-one ref_map and axis x, y or None")
+    read = {name: list(source[name].values()) for name in ("columns", "rows")}
+    write = {name: list(target[name].values()) for name in read}
+    if any(len(read[name]) != len(write[name]) for name in read):
+        raise ValueError("twin block grids need the same numbers of columns and rows")
+    if axis:
+        write["columns" if axis == "y" else "rows"].reverse()
+    original, result = sheet.text, {}
+    try:
+        for ref, twin in ref_map.items():
+            part = sheet.symbol(ref)
+            x, y = part["at"]
+            if x not in read["columns"] or y not in read["rows"]:
+                raise ValueError("%s is outside the source block's slots" % ref)
+            point = write["columns"][read["columns"].index(x)], write["rows"][read["rows"].index(y)]
+            turn, flip = part["rotation"], part["mirror"]
+            if axis:
+                turn = -turn
+                if flip and flip != axis:
+                    turn += 180
+                flip = None if flip else axis
+            _relocate_symbol(sheet, twin, point, turn % 360, flip)
+            result[twin] = point
+    except Exception:
+        sheet.text = original
+        raise
+    return result
+
+
+def _route_schematic(sheet, pin_a, pin_b):
+    """route(sheet, pin_a, pin_b) -> wire points, or [] if already wired. Pins are REF.PIN.
+
+    Runs straight out of each pin and routes on the 1.27 mm grid. Can tee
+    into the destination's existing wiring. Fails with the obstructed pins
+    and a reason if there is no clear path in the search area.
+    """
+    ref, pin = pin_a.rsplit(".", 1)
+    other, other_pin = pin_b.rsplit(".", 1)
+    start, begin = sheet._stub_end(ref, pin, 1.27)
+    target, entry = sheet._stub_end(other, other_pin, 1.27)
+    if start == target:
+        raise ValueError("%s and %s share a pin position; move a part before routing" % (pin_a, pin_b))
+    group, _ = sheet._wired_to(target)
+    if any(_on(start, a, b) for pts in group for a, b in zip(pts, pts[1:])):
+        return []
+    if not group and sheet._wired_to(start)[0]:
+        return list(reversed(_route_schematic(sheet, pin_b, pin_a)))
+    out, into = sheet.pin_direction(ref, pin), sheet.pin_direction(other, other_pin)
+    if not any(out) or not any(into) or any(_snap(v) != v for v in (*start, *target)):
+        raise ValueError("%s to %s needs orthogonal pins on the 1.27 mm grid" % (pin_a, pin_b))
+    scene = sheet._scene()
+    if {start, target}.intersection(scene["no_connects"]):
+        raise ValueError("%s to %s: remove the no-connect mark before routing" % (pin_a, pin_b))
+    for point, wanted in ((start, pin_a), (target, pin_b)):
+        overlapping = [name for name, position, _, _ in scene["pins"] if position == point and name != wanted]
+        if overlapping:
+            raise ValueError("%s shares its pin position with %s" % (wanted, ", ".join(overlapping)))
+    terminals = {p for _, p, _, _ in scene["pins"]} | scene["ports_and_dots"]
+    wires = [(a, b) for wire in sheet.wires() for a, b in zip(wire, wire[1:])]
+    tees = set()
+    for pts in group:
+        for a, b in zip(pts, pts[1:]):
+            steps = int(round(max(abs(b[0] - a[0]), abs(b[1] - a[1])) / 1.27))
+            for index in range(1, steps):
+                point = _r(tuple(u + (v - u) * index / steps for u, v in zip(a, b)))
+                # A crossing of two wires is never a tee candidate.
+                if (point not in terminals and
+                        sum(_on(point, c, d) for c, d in wires) == 1):
+                    tees.add(point)
+    grids = _block_grids(sheet)
+    lines = tuple({value for grid in grids.values() for value in grid[key].values()}
+                  for key in ("columns", "rows"))
+    # If the stubs face each other and meet or overlap, draw one straight lead.
+    if not group and out == tuple(-v for v in into) and (
+            _on(begin, start, target) or begin == target) and _on(entry, start, target) and (
+            start[0] == target[0] if out[1] else start[1] == target[1]):
+        direct = (start, target)
+        try:
+            sheet._check_segments([(start, target, pin_a)], {start, target}, strict=True)
+        except ValueError:
+            pass
+        else:
+            _draw_routed_wire(sheet, direct, wires)
+            return list(direct)
+    directions = tuple(d * 1.27 for d in into)
+    try:
+        sheet._check_segments([(start, begin, pin_a)], {start, target} | ({begin} & tees), strict=True)
+        # When the destination already has a lead, a tee provides its straight entry.
+        try:
+            sheet._check_segments([(entry, target, pin_b)], {start, target}, strict=True)
+            enter_pin = True
+        except ValueError:
+            if not tees:
+                raise
+            enter_pin = False
+        leads = [(start, begin)] + ([(target, entry)] if enter_pin else [])
+        tail = sheet._route(ref, pin, begin, [entry], target, heading=out, tees=tees,
+                            arrival_heading=directions, channels=lines if grids else (),
+                            strict=True, enter_pin=enter_pin, leads=leads)
+        if tail is None:
+            raise ValueError("no clear orthogonal path within 30.48 mm of the endpoints")
+        end = tail[-1] if tail else begin
+        tee = end in tees
+        points = _straight([start, begin, *tail] + ([] if tee else [target]))
+        allowed = {start, end} if tee else {start, target}
+        sheet._check_segments([(a, b, pin_a) for a, b in zip(points, points[1:])], allowed, strict=True)
+        if _backtracks(points):
+            raise ValueError("the leads would overlap")
+    except ValueError as error:
+        raise ValueError("%s to %s: %s" % (pin_a, pin_b, error)) from error
+    _draw_routed_wire(sheet, points, wires)
+    if tee:
+        sheet.add_junction(end)
+    return points
+
+
+def _draw_routed_wire(sheet, points, wires):
+    def crosses(a, b, c, d):
+        if a[0] == b[0] and c[1] == d[1]:
+            crossing = a[0], c[1]
+        elif a[1] == b[1] and c[0] == d[0]:
+            crossing = c[0], a[1]
+        else:
+            return False
+        return crossing not in (a, b, c, d) and _on(crossing, a, b) and _on(crossing, c, d)
+
+    if any(crosses(a, b, c, d) for a, b in zip(points, points[1:]) for c, d in wires):
+        sheet._wire_hops = True
+    sheet.add_wire(*points)
+
+
+def info_table(sheet, origin, columns_mm, rows):
+    """Draw a ruled information table with 1.016 mm cells and a bold first row.
+
+    origin is the top-left point. columns_mm lists widths. Each row supplies
+    one string per column. Returns [left, top, right, bottom].
+    """
+    from itertools import accumulate
+    x, y = map(float, origin)
+    widths = list(map(float, columns_mm))
+    rows = [list(row) for row in rows]
+    if (not widths or any(not _math.isfinite(w) or w <= 0 for w in widths)
+            or not all(_math.isfinite(n) for n in (x, y)) or not rows
+            or any(len(row) != len(widths) for row in rows)):
+        raise ValueError("give positive column widths and one cell per column in every row")
+    xs = list(accumulate([x, *widths]))
+    ys = [y + 5.08 * i for i in range(len(rows) + 1)]
+
+    def line(x1, y1, x2, y2, width):
+        sheet._append('\t(polyline (pts (xy %g %g) (xy %g %g)) (stroke (width %g) (type solid)) (uuid "%s"))'
+                      % (x1, y1, x2, y2, width, _uuid.uuid4()))
+
+    for index, cy in enumerate(ys):
+        line(xs[0], cy, xs[-1], cy, 0.3048 if index <= 1 or index == len(rows) else 0.1524)
+    for index, cx in enumerate(xs):
+        line(cx, ys[0], cx, ys[-1], 0.3048 if index in (0, len(widths)) else 0.1524)
+    for index, row in enumerate(rows):
+        for cx, cell in zip(xs, row):
+            if cell != "":
+                sheet._append('\t(text %s (at %g %g 0) (effects (font (size 1.016 1.016)%s) '
+                              '(justify left bottom)) (uuid "%s"))'
+                              % (_q(str(cell).replace("\n", "\\n")), cx + 1.27, ys[index] + 3.556,
+                                 " (thickness 0.2032) (bold yes)" if index == 0 else "", _uuid.uuid4()))
+    return [xs[0], ys[0], xs[-1], ys[-1]]
+
+
+def place_design_block(sheet, library_block, at, ref_map=None):
+    """Place a FireFli block's drawing at the specified top-left anchor (x, y).
+
+    ref_map pairs template references with symbols already on the destination
+    sheet. Bound symbols keep their UUIDs, values, fields and instances. Free
+    references are allocated for unbound symbols. Returns references, items,
+    and missing_nets for named interfaces absent from the destination sheet.
+    """
+    if library_block not in _DESIGN_BLOCKS:
+        raise ValueError("unknown FireFli design block %s; available: %s" %
+                         (library_block, ", ".join(sorted(_DESIGN_BLOCKS)) or "none"))
+    ref_map = dict(ref_map or {})
+    source, _ = _sx(_DESIGN_BLOCKS[library_block])
+    target, spans = sheet._tree()
+    source_libs, target_libs = sheet._libs(source), sheet._libs(target)
+    parts = _children(source, "symbol")
+    source_refs = [sheet._ref(n) for n in parts]
+    template_keys = {}
+    for part, ref in zip(parts, source_refs):
+        if source_refs.count(ref) > 1:
+            if not ref.endswith("?"):
+                raise ValueError("ambiguous repeated block reference " + ref)
+            ref += "@" + _unq(_child(part, "uuid")[1])
+        template_keys[id(part)] = ref
+    if (set(ref_map) - set(template_keys.values())
+            or len(ref_map) != len(set(ref_map.values())) or _children(source, "sheet")):
+        raise ValueError("a block needs unique template references, a one-to-one ref_map and no child sheets")
+    target_parts = _children(target, "symbol")
+    existing = {sheet._ref(n): n for n in target_parts}
+    if any(sum(sheet._ref(n) == ref for n in target_parts) != 1 for ref in ref_map.values()):
+        raise ValueError("each bound reference must name exactly one symbol on the destination sheet")
+    kinds = ("wire", "bus", "bus_entry", "junction", "no_connect", "label", "global_label",
+             "hierarchical_label", "symbol", "text", "text_box", "polyline", "rectangle",
+             "circle", "arc", "bezier", "image")
+    drawing = [item for item in source if _head(item) in kinds]
+    locations = [point for item in drawing for point in _geometry(item, sheet, source_libs)]
+    if not locations:
+        raise ValueError("the design block is empty")
+    anchor = tuple(_snap(min(p[axis] for p in locations)) for axis in (0, 1))
+    delta = tuple(float(v) - a for v, a in zip(at, anchor))
+    if len(delta) != 2 or any(not _math.isfinite(v) or abs(v - _snap(v)) > 1e-6 for v in delta):
+        raise ValueError("place the block at a point on the 1.27 mm grid")
+    paths, _ = _hierarchy()
+    instances = paths.get(_os.path.realpath(sheet.path), [])
+    if len(instances) != 1:
+        raise ValueError("place the block on a sheet with one unambiguous project instance")
+    project = _os.path.splitext(_os.path.basename(BOARD_PATH))[0]
+    taken = set(existing)
+    for file in paths:
+        other, _ = sheet._tree() if file == _os.path.realpath(sheet.path) else Sheet(file)._tree()
+        taken.update(sheet._ref(n) for n in _children(other, "symbol"))
+        taken.update(_unq(n[1]) for n in _walk(other) if _head(n) == "reference")
+    present_nets = {n["name"] for n in sheet.labels()} | set(sheet._scene()["values"].values())
+    present_nets.update(_unq(pin[1]) for child in _children(target, "sheet") for pin in _children(child, "pin"))
+    local_labels = [_unq(n[1]) for n in _children(source, "label")]
+    expected = {name for name in local_labels if local_labels.count(name) == 1}
+    expected.update(_unq(n[1]) for n in source if _head(n) in ("global_label", "hierarchical_label"))
+    for part in parts:
+        if sheet._ref(part).startswith("#PWR"):
+            expected.update(_unq(p[2]) for p in _children(part, "property") if _unq(p[1]) == "Value")
+    imports, replacements, blocks, refs = {}, [], [], {}
+    for item in drawing:
+        _translate_layout(item, *delta, renew_ids=True)
+        if _head(item) != "symbol":
+            blocks.append(_sexp(item))
+            continue
+        ref = sheet._ref(item)
+        key = template_keys[id(item)]
+        lib = _unq(_child(item, "lib_id")[1])
+        if key in ref_map:
+            twin = existing[ref_map[key]]
+            first, last = spans[id(twin)]
+            _apply_symbol_layout(twin, item)
+            if sheet._symbol_pins(twin, target_libs) != sheet._symbol_pins(item, source_libs):
+                raise ValueError("%s and %s have different pin positions" % (key, ref_map[key]))
+            replacements.append((first, last, _sexp(twin)))
+            refs[key] = ref_map[key]
+            continue
+        if lib in target_libs and target_libs[lib] != source_libs[lib]:
+            raise ValueError("different cached definitions of " + lib)
+        if lib not in target_libs:
+            imports[lib] = source_libs[lib]
+        new_ref = ref
+        if new_ref in taken or new_ref.endswith("?"):
+            prefix = ref.rstrip("0123456789?")
+            number = 1
+            while "%s%d" % (prefix, number) in taken:
+                number += 1
+            new_ref = "%s%d" % (prefix, number)
+        taken.add(new_ref)
+        refs[key] = new_ref
+        next(p for p in _children(item, "property") if _unq(p[1]) == "Reference")[2] = _q(new_ref)
+        item[:] = [n for n in item if _head(n) != "instances"]
+        unit = _child(item, "unit")
+        item.append(["instances", ["project", _q(project), ["path", _q(instances[0]),
+                     ["reference", _q(new_ref)], ["unit", unit[1] if unit else "1"]]]])
+        blocks.append(_sexp(item))
+    if imports:
+        end = spans[id(_child(target, "lib_symbols"))][1] - 1
+        replacements.append((end, end, "\n" + "\n".join(map(_sexp, imports.values())) + "\n"))
+    for first, last, text in sorted(replacements, reverse=True):
+        sheet.text = sheet.text[:first] + text + sheet.text[last:]
+    for block in blocks:
+        sheet._append("\t" + block)
+    return {"references": refs, "items": len(drawing), "missing_nets": sorted(expected - present_nets)}
 
 
 def _header(root, key):
@@ -1924,22 +2345,10 @@ def copy_layout(file, ref_map, area, offset, target_area=None):
     blocks = []
     for item, _ in source:
         layout = copy.deepcopy(item)
-        for n in _walk(layout):
-            if _head(n) in ("at", "xy", "start", "mid", "end", "center"):
-                n[1:3] = ["%.6f" % (float(n[1])+dx), "%.6f" % (float(n[2])+dy)]
-            if _head(n) == "uuid":
-                n[1] = _q(str(_uuid.uuid4()))
+        _translate_layout(layout, dx, dy, renew_ids=True)
         if _head(layout) == "symbol":
             twin = twins[ref_map[s._ref(layout)]]
-            twin[:] = [n for n in twin if _head(n) not in ("at", "mirror")]
-            twin.extend(n for n in layout if _head(n) in ("at", "mirror"))
-            props = {n[1]: n for n in _children(layout, "property")}
-            for prop in _children(twin, "property"):
-                if prop[1] in props:
-                    for key in ("at", "effects"):
-                        value = _child(props[prop[1]], key)
-                        if value:
-                            prop[:] = [n for n in prop if _head(n) != key] + [value]
+            _apply_symbol_layout(twin, layout)
             layout = twin
         blocks.append(_sexp(layout))
     s._cut([span for _, span in dest])
@@ -1951,7 +2360,9 @@ def copy_layout(file, ref_map, area, offset, target_area=None):
 def help(name):
     """Return a documented schematic helper's full docstring by name."""
     helpers = {helper.__name__: helper for helper in
-               (new_sheet, move_region, split_sheet, copy_layout, sheet, sheets, help)}
+               (new_sheet, move_region, split_sheet, copy_layout, sheet, sheets, help,
+                block_grid, place_in_slot, mirror_block, info_table, place_design_block)}
+    helpers["route"] = _route_schematic
     helpers.update({"Sheet." + method.__name__: method for method in
                     (Sheet.symbols, Sheet.symbol, Sheet.wires, Sheet.labels)})
     if name not in helpers:

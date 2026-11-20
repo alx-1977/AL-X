@@ -77,6 +77,154 @@ class SchematicHelperTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
         return {name: nodes for nodes, name in netlist_nets(netlist_model(output.read_text())).items()}
 
+    def test_slot_grids_can_be_reopened_mirrored_and_used_for_wiring(self):
+        from alx.providers.kicad_style import placement_warnings
+
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            top.write_text(schematic())
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+block_grid(s, "TX", (101.6, 93.98), ["in", "out"], ["rail", 1, "ground"], col_pitch=25.4)
+block_grid(s, "RX", (101.6, 144.78), ["in", "out"], ["rail", 1, "ground"], col_pitch=25.4)
+place_in_slot(s, "R1", "TX", "in", 1, rotation=90)
+place_in_slot(s, "R2", "TX", "out", 1, rotation=90)
+s.save()
+""")
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+ids = {part["ref"]: part["uuid"] for part in s.symbols()}
+assert mirror_block(s, "TX", "RX", {"R1": "R3", "R2": "R4"}) == {
+    "R3": (127, 152.4), "R4": (101.6, 152.4)}
+assert s.symbol("R3")["mirror"] == "y"
+assert ids == {part["ref"]: part["uuid"] for part in s.symbols()}
+route(s, "R1.2", "R2.1")
+assert route(s, "R1.2", "R2.1") == []
+s.save()
+""")
+            self.assertIn(frozenset({("R1", "2"), ("R2", "1")}), self.netlist(folder).values())
+            self.assertEqual(placement_warnings(top), set())
+
+    def test_routing_crosses_foreign_wire_and_tees_into_destination(self):
+        import json
+        from alx.providers.kicad import sexpr
+
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            top.write_text(schematic())
+            config = Path(folder, "t.kicad_pro")
+            config.write_text('{"schematic": {"drawing": {"hop_over_size_choice": 0}}}')
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+block_grid(s, "port", (101.6, 88.9), ["A", "B", "C"], ["rail", 1, 2, 3, "ground"])
+place_in_slot(s, "R1", "port", "A", 1, rotation=90)
+place_in_slot(s, "R2", "port", "C", 1, rotation=90)
+place_in_slot(s, "R3", "port", "B", 3)
+s.add_wire((109.22, 90.17), (109.22, 100.33))
+assert route(s, "R1.2", "R2.1") == [(105.41, 96.52), (123.19, 96.52)]
+points = route(s, "R3.1", "R2.1")
+assert points[-1] == (114.3, 96.52), points
+s.save()
+""")
+            junctions = sexpr(top.read_text()).named("junction")
+            self.assertEqual(len(junctions), 1)
+            self.assertIn(frozenset({("R1", "2"), ("R2", "1"), ("R3", "1")}), self.netlist(folder).values())
+            self.assertEqual(json.loads(config.read_text())["schematic"]["drawing"]["hop_over_size_choice"], 3)
+
+    def test_local_label_rule_exempts_hierarchy_and_buses(self):
+        from alx.providers.kicad_style import label_violations
+
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            top.write_text(schematic())
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+s.label_pin("R1", "1", "LOCAL")
+s.label_pin("R3", "1", "LOCAL")
+s.save()
+""")
+            self.netlist(folder)
+            model = netlist_model(Path(folder, "t.net").read_text())
+            before = top.read_text()
+            key = ("/LOCAL", ("R1.1", "R3.1"))
+            self.assertIn(key, label_violations(top, model))
+            fixtures = [
+                '(hierarchical_label "PORT" (at 101.6 95.25 90))',
+                '(sheet (pin "PORT" input (at 101.6 95.25 90)))',
+                '(bus (pts (xy 96.52 95.25) (xy 106.68 95.25)))',
+                '(bus_entry (at 100.33 93.98) (size 1.27 1.27))',
+            ]
+            for fixture in fixtures:
+                with self.subTest(port=fixture):
+                    top.write_text(before.rstrip()[:-1] + fixture + "\n)\n")
+                    self.assertEqual(label_violations(top, model), {})
+
+    def test_route_avoids_bodies_and_leaves_a_blocked_lead_untouched(self):
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            top.write_text(schematic())
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+block_grid(s, "port", (101.6, 93.98), ["left", "middle", "right"], ["rail", 1])
+place_in_slot(s, "R1", "port", "left", 1, rotation=90)
+place_in_slot(s, "R2", "port", "right", 1, rotation=90)
+place_in_slot(s, "R3", "port", "middle", 1)
+points = route(s, "R1.2", "R2.1")
+assert len(points) > 2 and any(y != 101.6 for x, y in points), points
+assert not any(_hits_box(a, b, (113.29, 99.07, 115.31, 104.13)) for a, b in zip(points, points[1:]))
+_, stub = s._stub_end("R4", "1", 1.27)
+s.add_label("OBSTACLE", stub)
+before = s.text
+try:
+    route(s, "R4.1", "R1.1")
+except ValueError as error:
+    assert "OBSTACLE" in str(error), str(error)
+else:
+    raise AssertionError("a blocked lead was routed")
+assert s.text == before
+s.save()
+""")
+            self.assertIn(frozenset({("R1", "2"), ("R2", "1")}), self.netlist(folder).values())
+
+    def test_block_grafting_preserves_a_bound_part_and_draws_a_ruled_table(self):
+        from alx.providers.kicad import sexpr
+        from alx.providers.kicad_style import placement_warnings
+
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder, "t.kicad_sch")
+            top.write_text(schematic())
+            self.run_script(folder, """
+s = sheet("t.kicad_sch")
+template = sheet("t.kicad_sch")
+template.remove_symbol("R3")
+template.remove_symbol("R4")
+route(template, "R1.2", "R2.1")
+template.label_pin("R2", "2", "CONTROL")
+info_table(template, (100.33, 114.3), [15, 25], [["Name", "Value"], ["Rail", "5 V"]])
+_DESIGN_BLOCKS["example"] = template.text
+old = s.symbol("R4")
+result = place_design_block(s, "example", (190.5, 50.8), {"R1": "R4"})
+assert result["missing_nets"] == ["CONTROL"], result
+assert result["references"] == {"R1": "R4", "R2": "R5"}, result
+assert s.symbol("R4")["uuid"] == old["uuid"] and s.symbol("R4")["value"] == old["value"]
+block_grid(s, "port", (101.6, 93.98), ["A", "B", "C"], ["rail", 1, "ground"], col_pitch=25.4)
+_relocate_symbol(s, "R2", (127, 101.08), 90, None)
+for y in (121.92, 127, 132.08):
+    s._append('(text "Rail: 5 V" (at 101.6 %g 0) (effects (font (size 1.016 1.016))))' % y)
+s.save()
+""")
+            self.assertIn(frozenset({("R4", "2"), ("R5", "1")}), self.netlist(folder).values())
+            tree = sexpr(top.read_text())
+            self.assertEqual(len(tree.named("polyline")), 6)
+            fonts = {item.children[1]: item.one("effects").one("font") for item in tree.named("text")}
+            self.assertEqual(fonts["Name"].one("size").children[1:], ["1.016", "1.016"])
+            self.assertEqual(fonts["Name"].one("bold").children[1:], ["yes"])
+            self.assertFalse(fonts["Rail"].named("bold"))
+            warnings = placement_warnings(top)
+            self.assertTrue(any("almost aligned" in w for w in warnings), warnings)
+            self.assertTrue(any("off the block slots" in w for w in warnings), warnings)
+            self.assertTrue(any("use info_table" in w for w in warnings), warnings)
+
     def test_new_sheet_and_region_move_keep_netlist_and_instance_identity(self):
         from alx.providers.kicad import sexpr
         with tempfile.TemporaryDirectory() as folder:

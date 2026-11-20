@@ -969,7 +969,13 @@ class CoreAgent:
                         (*retrieved_memories, *relationship_memories),
                         transient_attempts, prior_goal_provenance,
                     )
-                # Reading a goal is a step, not a mutation.
+                elif snapshot.state.status is GoalStatus.AWAITING_INPUT:
+                    snapshot = self._persist_goal(
+                        replace(snapshot.state, status=GoalStatus.ACTIVE, stop_reason=None),
+                        snapshot, conversation, retention_until, decision_provenance,
+                    )
+                # Reading another goal is a step. Reselecting the current
+                # parked goal resumes it on the Core's explicit decision.
                 continue
             decision = self._without_redundant_approval(decision)
             decision = replace(
@@ -2016,7 +2022,8 @@ class CoreAgent:
         if not any(item.goal_id == decision.goal_id for item in summaries):
             return "goal_selection_unknown"
         if already_selected:
-            if decision.intermediate and decision.goal_proposal is None:
+            if (decision.intermediate and decision.goal_proposal is None
+                    and current.status is not GoalStatus.AWAITING_INPUT):
                 return "goal_selection_redundant"
             return None
         return None

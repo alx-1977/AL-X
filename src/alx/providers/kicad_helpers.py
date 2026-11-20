@@ -291,7 +291,15 @@ def rf_radius(width):
     return max(0.5, _math.floor(3 * width * 10 + 1e-6) / 10)
 
 
-def route(board, net, start, end, width, on="F", step=None, margin=None, bend_cost=2.0, layers=None,
+def route(*args, **kwargs):
+    """Route a PCB connection or, with a Sheet, route between two REF.PINs."""
+    subject = args[0] if args else kwargs.get("sheet")
+    if "Sheet" in globals() and isinstance(subject, Sheet):
+        return _route_schematic(*args, **kwargs)
+    return _route_pcb(*args, **kwargs)
+
+
+def _route_pcb(board, net, start, end, width, on="F", step=None, margin=None, bend_cost=2.0, layers=None,
           via=(0.45, 0.2), via_cost=15.0, end_on=None, follow=None):
     """A clean path for one connection, worked out by code (17 Nov, Friedl: the switch control
     lines drawn coordinate by coordinate were "horrible at best"): from start (on layer `on`) to
@@ -318,7 +326,7 @@ def route(board, net, start, end, width, on="F", step=None, margin=None, bend_co
         reason = None
         for wider in (4.0, 8.0, 14.0):
             try:
-                return route(board, net, start, end, width, on, step, wider, bend_cost, layers, via, via_cost, end_on,
+                return _route_pcb(board, net, start, end, width, on, step, wider, bend_cost, layers, via, via_cost, end_on,
                              follow)
             except ValueError as error:
                 if "no clear path" not in str(error):

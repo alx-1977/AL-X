@@ -1,0 +1,32 @@
+# D-084a schematic readability and live-test fixes
+
+Implemented on `board-edit-capability` in the working tree based on `4347986`.
+
+## Changes and regression evidence
+
+| Work item | Result |
+| --- | --- |
+| Local labels | The edit gate refuses new same-sheet local-label joins and reports the net, pin references and label positions. The exported netlist establishes membership. The drawing establishes connections to hierarchical labels, sheet pins, buses and bus entries. Tests cover all four exemptions, rollback on refusal, a declared `label_net` with its reason in the report, and subsequent edits to a drawing with an existing join. |
+| Slot grids | `block_grid` stores named rows and columns beside the sheet in the checked work copy. `place_in_slot` sets an exact 1.27 mm anchor and tidies fields. `mirror_block` copies slot assignments and orientation to existing parts while preserving their identities and values. Tests reopen the grid, place mirrored twins and verify wiring in KiCad’s exported netlist. Free placement is available. Off-slot and almost-aligned parts produce warnings. |
+| Schematic routing | `route` takes two `REF.PIN` references, uses an orthogonal grid search, preserves straight pin leads and prefers the channels between slot lines. It avoids component bodies, unrelated pins and unintended connections. It enables KiCad wire hops for new crossings where the project has hops disabled and adds a junction when it tees into destination wiring. Tests verify an electrically separate crossing, a connected tee, a detour around a symbol body and a blocked lead that leaves the drawing intact. The existing board router and `wire_pin_to` remain available. |
+| Information tables | `info_table` draws ruled cells with 1.016 mm text and a bold header. More than two loose `Key: value` lines in one column below a defined block produce a `use info_table` warning. Tests verify the drawings and that advisory warnings allow the edit to be kept. |
+| FireFli blocks | `place_design_block` translates the drawing and cached symbols into the destination sheet. Bound parts retain their UUIDs, values and instance records. Unbound parts receive free references, including the repeated unannotated power symbols in both library templates. The result lists absent named nets. The board-agent instructions list the library names and descriptions and give brief guidance on grids, routing, tables, mirrored twins and block reuse. |
+| Goal resumption | Only an explicit re-selection of the current `awaiting_input` goal activates it. The existing goal store persists the transition. The restart regression reproduces the original dispatch refusal, resumes the same goal and runs the next call through the existing approval check. |
+| Orphan sheet deletion and rollback | A script with empty intent can delete a sheet outside the remaining project hierarchy. References from sheet symbols, the primary schematic and project settings are checked. The rollback regression creates a file and deletes the orphan before inducing a script failure, then checks that the new file is gone and the orphan is restored. The successful deletion is scoped to the work copy. |
+| Board-job status | The existing diagnostic feed shows one board-job row with the project or job ID, the latest known sheet, the call number and the last check result when available. The board agent writes the activity to the job journal and numbers the corresponding call-log entries. Tests cover updates, numbering across resumed stretches and clearing the row at the end. A JavaScript test harness verified the rendered line and its removal. |
+
+## Law compliance and implementation decisions
+
+- The authoritative drawing path is `kicad edit` → `KiCadProvider.edit` → the confined script runner and `_edit_gate` inside `_change`. The entry-point and dispatch search found zero superseded production paths. The new helpers are mechanical operations inside the existing edit capability. `place_design_block` and `copy_layout` share translation and symbol-layout mechanics.
+- Core’s existing goal selection owns resumption. The board agent supplies structured job activity to the existing diagnostic feed, and the frontend displays it as system status. User language stays in the existing reasoning path. The work introduces zero new registered capabilities or law exceptions. Existing approval and write-back boundaries apply.
+- Grid definitions are work-copy sidecars included in revision history and rollback. Newly created sidecars are omitted from project write-back. Mirror placement moves the mapped symbols. Wiring for a twin can be drawn with `route` or copied with the existing explicit layout helper.
+- Routing searches within a bounded area on the 1.27 mm grid. It reports obstructed leads, off-grid endpoints or an exhausted search. A design block requires an unambiguous destination instance and compatible pin positions for any bound parts.
+- The block’s absent-net report uses single-occurrence local labels, global and hierarchical labels, and named power rails. Repeated local names are treated as internal joins. An absent name is evidence for the board agent to assess, since the block catalogue supplies descriptions and does not declare electrical interface roles.
+
+## Verification
+
+- Both law gates passed. `git diff --check` and `node --check src/alx/interfaces/assets/app.js` passed.
+- The final `python3 -m pytest -n 6 -q -rs` run passed with **5,717 tests, 11,325 subtests and 2 skips** in 158.38 seconds. The skips were the missing RoomReader antenna before-stiffener fixture and the opt-in synthetic conversation sanity check. The test command ran outside Codex’s outer sandbox so AL/X could apply its own KiCad sandbox.
+- KiCad 10.0.8 exported netlists and PDFs after importing both actual FireFli templates into disposable sheets. `RS485_Activity_LEDs` imported 33 symbols, 49 wire items and six ruled lines. `RS485_Isolated_Port` imported 28 symbols, 67 wire items and 13 ruled lines.
+- A disposable copy of job `8ab320b33638` produced four existing label-joined nets on `RS485_Port`. `IN_D` had four pins across three label positions. `OUT_A` had four pins across four positions. `RS485_A` and `RS485_B` each had six pins across five positions. These findings are baseline evidence for the new-only gate.
+- A live board-agent redraw and Friedl’s visual acceptance of the revised RS485 drawing remain unverified. The production project, library and checked-out revision were preserved.

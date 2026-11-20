@@ -29,10 +29,10 @@ from alx.providers.credential_paths import denied
 # How layout-check readings are measured; part of every confirmation (D-081).
 MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
-from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
+from alx.providers.kicad_schematic_helpers import GRID_SUFFIX, SCHEMATIC_HELPERS
 from alx.providers.kicad_board_helpers import BOARD_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
-from alx.providers.kicad_style import violations
+from alx.providers.kicad_style import label_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
 from alx.providers.kicad_steps import (STEPS, edit_refusal, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
@@ -902,6 +902,32 @@ class KiCadProvider:
         raise KiCadError('unavailable', {'detail': 'the FireFli library is not set up in KiCad '
                                                    '(path variable FIREFLI_KICAD_LIB)'})
 
+    def _design_blocks(self):
+        try:
+            library = self._firefli_library()
+        except KiCadError:
+            return {}
+        folder = library / 'blocks/FireFli_Blocks.kicad_blocks'
+        blocks = {}
+        for path in sorted(folder.glob('*.kicad_block')):
+            name = path.stem
+            drawing = path / f'{name}.kicad_sch'
+            try:
+                if not drawing.resolve().is_relative_to(folder.resolve()) or not drawing.is_file():
+                    continue
+                metadata = path / f'{name}.json'
+                description = ''
+                if metadata.resolve().is_relative_to(folder.resolve()) and metadata.is_file():
+                    description = json.loads(metadata.read_text()).get('description', '')
+                blocks[name] = (drawing, description if isinstance(description, str) else '')
+            except (OSError, ValueError, AttributeError):
+                continue
+        return blocks
+
+    def design_block_catalog(self):
+        """Names and descriptions from the configured FireFli design-block library."""
+        return {name: description for name, (_, description) in self._design_blocks().items()}
+
     def find_part(self, arguments):
         """Parts in the FireFli library matching what is asked, with exact symbol and footprint
         names, part number, LCSC number and package (19 Nov). Changes nothing."""
@@ -1482,9 +1508,11 @@ class KiCadProvider:
             dry_run = bool(arguments.get('dry_run'))
             script = arguments.get('script')
             try:
-                postconditions = validate_postconditions(plain(arguments.get('intent', [])))
+                declared = validate_postconditions(plain(arguments.get('intent', [])))
             except ChangeError as error:
                 raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+            label_exceptions = [item for item in declared if 'label_net' in item]
+            postconditions = [item for item in declared if 'op' in item]
             sets = [item for item in postconditions if item['op'] == 'set']
             if sets and not arguments.get('work_copy_revision'):
                 raise KiCadError('arguments_unusable', {'detail': 'set needs the revision returned by select'})
@@ -1527,8 +1555,12 @@ class KiCadProvider:
                     # stay as she wrote them (2026-11-12).
                     model = None if library else self._netlist(project, meta['board'], root / 'artifacts')
                     sync = self._schematic_sync(project, meta, model) if model is not None else {}
+                    blocks = {} if library else {
+                        name: path.read_text() for name, (path, _) in self._design_blocks().items()
+                    }
                     script_path.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS
                                            + 'SCHEMATIC_SYNC = %a\n' % sync
+                                           + '_DESIGN_BLOCKS.update(%a)\n' % blocks
                                            + '_LIBRARY_FOOTPRINTS.update(%a)\n' % footprints
                                            + '_LIBRARY_SYMBOLS.update(%a)\n' % symbols
                                            + script_runner(script))
@@ -1566,13 +1598,14 @@ class KiCadProvider:
                     changed = sorted(name for name in design_inventory(snapshot).keys() | current.keys()
                                      if original.get(name) != current.get(name))
                     report = {'files_changed': changed[:200], 'files_truncated': len(changed) > 200,
-                              'board': structural_diff(facts_before, facts_after)}
-                    if library and (postconditions or any(n.endswith(('.kicad_pcb', '.kicad_sch')) for n in changed)):
+                              'board': structural_diff(facts_before, facts_after),
+                              'label_exceptions': label_exceptions}
+                    if library and (declared or any(n.endswith(('.kicad_pcb', '.kicad_sch')) for n in changed)):
                         raise KiCadError('arguments_unusable', {'detail': 'check a board work copy to edit drawings'})
-                    if not library and (changed or postconditions):
+                    if not library and (changed or declared):
                         stage = 'edit_gate'
                         report.update(self._edit_gate(root, meta, snapshot, changed, model, postconditions,
-                                                      sets, prior_drc, signatures))
+                                                      sets, prior_drc, signatures, label_exceptions))
                         if (any(name.endswith(('.kicad_sch', '.kicad_pcb')) for name in changed)
                                 and 'intent' not in arguments and not dry_run):
                             report['unmet'].append('intent is required for a drawing edit; [] for unchanged connectivity')
@@ -1726,17 +1759,47 @@ class KiCadProvider:
         files.update(entry['filename'] for entry in roots if entry.get('uuid') in represented)
         return files
 
-    def _edit_gate(self, root, meta, snapshot, changed, model, postconditions, sets, prior_drc, drc):
+    @staticmethod
+    def _schematic_references(project, board):
+        """Files referenced by a sheet symbol, primary schematic or project settings."""
+        top = (project / board).with_suffix('.kicad_sch')
+        found = {top.resolve()}
+        settings = top.with_suffix('.kicad_pro')
+        if settings.is_file():
+            roots = json.loads(settings.read_text()).get('schematic', {}).get('top_level_sheets', [])
+            found.update((top.parent / item['filename']).resolve() for item in roots)
+        for name in design_inventory(project):
+            if not name.endswith('.kicad_sch'):
+                continue
+            path = project / name
+            content = path.read_text()
+            if not content.strip():
+                continue
+            for node in sexpr(content).named('sheet'):
+                for prop in node.named('property'):
+                    if prop.children[1].lower() == 'sheetfile':
+                        found.add((path.parent / prop.children[2]).resolve())
+        return found
+
+    def _edit_gate(self, root, meta, snapshot, changed, model, postconditions, sets, prior_drc, drc,
+                   label_exceptions=()):
         from alx.providers.kicad_index import board_index
         project, board = root / 'project', meta['board']
         sheets = [name for name in changed if name.endswith('.kicad_sch')]
+        removed = [name for name in sheets if not (project / name).is_file()]
+        still_referenced = set()
+        if removed:
+            new_refs = self._schematic_references(project, board)
+            still_referenced = {name for name in removed if (project / name).resolve() in new_refs}
+            sheets = [name for name in sheets if name not in removed or name in still_referenced]
         board_items = [item for item in postconditions if item.get('side') == 'board']
         sch_items = [item for item in postconditions if item.get('side', 'schematic') == 'schematic']
-        gate = {'style': [], 'erc': [], 'drc': []}
+        gate = {'style': [], 'erc': [], 'drc': [], 'style_warnings': [], 'label_joins': []}
         problems = []
         report = {'gate': gate, 'unmet': problems}
         if any(n.endswith('.kicad_pcb') and n != board for n in changed):
             problems.append('cannot check an additional board against this work copy')
+        problems.extend(f'{name} is still referenced by the schematic hierarchy' for name in sorted(still_referenced))
         electrical = sheets or sch_items or any(n.endswith(('.kicad_pro', '.kicad_sym', 'sym-lib-table')) for n in changed)
         after = model
         if electrical:
@@ -1754,6 +1817,28 @@ class KiCadProvider:
                     issue = f'{name} ({x}, {y}): {kind}: {", ".join(pins)}'
                     gate['style'].append(issue)
                     problems.append(issue)
+            if sheets or after != model:
+                allowed = {item['label_net'] for item in label_exceptions}
+                for name in sorted(self._covered_sheets(project, board, after)):
+                    old = label_violations(snapshot / name, model)
+                    for key, issue in label_violations(project / name, after).items():
+                        prior = old.get(key)
+                        if (prior and issue['labels'] == prior['labels']
+                                and len(issue['positions']) <= len(prior['positions'])):
+                            continue
+                        if allowed & {issue['net'], *issue['labels']}:
+                            continue
+                        gate['label_joins'].append(dict(issue, sheet=name))
+                        message = (f'{name}: label-joined pins: {issue["net"]} '
+                                   f'{", ".join(issue["pins"])} at {issue["positions"]}')
+                        gate['style'].append(message)
+                        problems.append(message)
+        warn_sheets = set(sheets) | {name[:-len(GRID_SUFFIX)] for name in changed
+                                     if name.endswith('.kicad_sch' + GRID_SUFFIX)}
+        for name in sorted(warn_sheets):
+            old = placement_warnings(snapshot / name)
+            gate['style_warnings'].extend(
+                f'{name}: {warning}' for warning in sorted(placement_warnings(project / name) - old))
         if electrical or board in changed:
             before_erc, after_erc = [], []
             self._erc(root, meta, project=snapshot, findings=before_erc)
@@ -3683,6 +3768,9 @@ class KiCadProvider:
                 raise KiCadError('original_changed')
         validate()
         copied = (library_inventory if meta.get('library') else design_inventory)(root / 'project')
+        if not meta.get('library'):
+            copied = {name: digest for name, digest in copied.items()
+                      if name in meta['hashes'] or not name.endswith('.kicad_sch' + GRID_SUFFIX)}
         changed = sorted((name for name, value in copied.items() if meta['hashes'].get(name) != value),
                          key=lambda name: (name not in meta['hashes'], name))
         # Any KiCad design file may be written back: a part change edits the

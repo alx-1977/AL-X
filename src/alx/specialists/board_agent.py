@@ -85,7 +85,9 @@ your work against them before you report.
 members, or ref for one symbol's pins and connections. Use inspect for the board and \
 read_reference for datasheets and other evidence files.
 - At the start of a schematic job read /Users/friedlbasson/Desktop/VSC/FireFli-KiCad-Lib/SCHEMATIC_STANDARD.md. \
-Reusable circuits are in FireFli-KiCad-Lib/blocks/.
+Use a FireFli design block when one fits.
+- Define a block_grid, place parts with place_in_slot and mirror twin blocks with mirror_block.
+- Wire pins with route and put block information in info_table.
 - Edit the work copy through kicad edit with a script over the drawing helpers. Declare the parts \
 and connections you intend to change. Check the gate and inspect each returned crop before reporting. \
 If a crop is unavailable, use render and look. Use revert_to with a kept revision or start to undo.
@@ -143,10 +145,14 @@ class BoardJobAgent(MechanicalWorker):
         preferences: Path | None = None,
         max_seconds: float = 1800.0,
         image_source: Callable[[str], bytes | None] | None = None,
+        block_catalog: Callable[[], Mapping[str, str]] | None = None,
+        status_sink: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(model, dispatch, definitions, max_seconds=max_seconds, image_source=image_source)
         self._journal_root = Path(journal_root)
         self._preferences = preferences
+        self._block_catalog = block_catalog
+        self._status_sink = status_sink
         self._stop = threading.Event()
         self._running: str | None = None
 
@@ -175,6 +181,8 @@ class BoardJobAgent(MechanicalWorker):
             self._new_run()
             return self._work(job_id, brief, message, max_calls)
         finally:
+            if self._running is not None:
+                self._publish_status(self._running, terminal=True)
             self._running = None
             self._busy.release()
 
@@ -244,7 +252,31 @@ class BoardJobAgent(MechanicalWorker):
             journal["work_copy"] = {"work_copy_id": receipt["work_copy_id"],
                                     "work_copy_revision": receipt.get("work_copy_revision", "")}
         journal["receipts"] = (journal.get("receipts", []) + [receipt])[-RECEIPTS_KEPT:]
+        progress = journal["activity"]
+        if isinstance(result, Mapping):
+            change = result.get("change_report")
+            if isinstance(change, Mapping):
+                files = [Path(name).stem for name in change.get("files_changed", [])
+                         if isinstance(name, str) and name.endswith(".kicad_sch")]
+                if len(files) == 1:
+                    progress["sheet"] = files[0]
+                gate = change.get("gate")
+                if isinstance(gate, Mapping):
+                    progress["last_check"] = "findings" if change.get("unmet") or any(gate.values()) else "clean"
+            elif receipt.get("action") == "check" and isinstance(result.get("totals"), Mapping):
+                progress["last_check"] = "findings" if result["totals"].get("total") else "clean"
+        if progress.get("operation") in ("edit", "check") and summary.get("outcome") != "succeeded":
+            progress["last_check"] = "refused"
         self._save(job_id, journal)
+
+    def _publish_status(self, job_id, activity=None, *, terminal=False):
+        if self._status_sink is None:
+            return
+        try:
+            self._status_sink({"code": "board_job.status", "job_id": job_id,
+                               "terminal": terminal, **(activity or {})})
+        except Exception:  # A diagnostic listener cannot interrupt a board job.
+            logger.info("board job %s: activity not published", job_id)
 
     def _remember(self, journal: dict[str, Any], arguments: Mapping[str, Any], answer: str) -> None:
         """A successful read goes in the job's notebook (what was asked, the gist of the answer)."""
@@ -259,7 +291,8 @@ class BoardJobAgent(MechanicalWorker):
         kept = [n for n in journal.get("notebook", []) if n.get("asked") != note["asked"]]
         journal["notebook"] = (kept + [note])[-NOTEBOOK_KEPT:]
 
-    def _log_call(self, job_id: str, tool_use: Mapping[str, Any], summary: Mapping[str, Any], answer: str) -> None:
+    def _log_call(self, job_id: str, tool_use: Mapping[str, Any], summary: Mapping[str, Any], answer: str,
+                  call_number: int) -> None:
         """Every call in full, beside the journal and never shown to the model: what was sent
         and, when it failed, why (16 Nov: refusals could not be read while a job ran)."""
         try:
@@ -275,6 +308,7 @@ class BoardJobAgent(MechanicalWorker):
                        # A refused drawing prints its reason (16 Nov: 30 refusals logged without one).
                        "stdout": str(recovery.get("stdout") or "")[-3000:], "hint": recovery.get("hint")}
         entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "call_id": summary.get("call_id"),
+                 "call_number": call_number,
                  "capability_id": summary.get("capability_id"), "outcome": summary.get("outcome"),
                  "sent": str((tool_use.get("input") or {}).get("arguments_json", ""))[:6000],
                  "refused": returned.get("refused") if isinstance(returned, Mapping) else None,
@@ -287,7 +321,11 @@ class BoardJobAgent(MechanicalWorker):
             logger.warning("board job %s: call log not written", job_id)
 
     def _request(self, job_id: str, journal: Mapping[str, Any]) -> ModelRequest:
-        system = (f"{AGENT_INSTRUCTIONS}\nHis preferences:\n{self._preferences_text()}\n\n"
+        blocks = self._block_catalog() if self._block_catalog is not None else {}
+        catalog = "\n".join(f"- {name} — {' '.join(description.split())}"
+                            for name, description in blocks.items())
+        system = (f"{AGENT_INSTRUCTIONS}\nFireFli design blocks:\n{catalog or '(none available)'}\n"
+                  f"His preferences:\n{self._preferences_text()}\n\n"
                   f"Capabilities you may call:\n{_catalogue(tuple(self._definitions.values()))}")
         messages = [ModelMessage(ModelRole.SYSTEM, system), ModelMessage(ModelRole.USER, journal["brief"])]
         if journal["events"] or journal.get("receipts"):
@@ -320,9 +358,19 @@ class BoardJobAgent(MechanicalWorker):
         else:
             journal = self._journal(job_id)
             journal["events"].append({"alx": message})
+        if "activity" not in journal:
+            count = 0
+            if journal["events"]:
+                try:
+                    with (self._journal_root / f"{job_id}.calls.jsonl").open() as stream:
+                        count = sum(1 for line in stream if line.strip())
+                except FileNotFoundError:
+                    pass
+            journal["activity"] = {"call_number": count}
         self._save(job_id, journal)
         self._running = job_id
         self._stop.clear()
+        self._publish_status(job_id, journal["activity"])
         request = self._request(job_id, journal)
         reads = self._load_reads(job_id)
         started = monotonic()
@@ -357,6 +405,18 @@ class BoardJobAgent(MechanicalWorker):
                 except (TypeError, ValueError):
                     asked = {}
                 asked = asked if isinstance(asked, dict) else {}
+                activity = journal["activity"]
+                activity["operation"] = asked.get("action") if tool_input.get("capability_id") == "kicad" else None
+                activity["call_number"] += 1
+                project = asked.get("project_dir")
+                if isinstance(project, str):
+                    parts = Path(project).parts
+                    identifier = next((part.split("-", 1)[0] for part in reversed(parts)
+                                       if part.startswith("P") and part[1:5].isdigit()), None)
+                    activity["project"] = identifier or Path(project).stem
+                if isinstance(asked.get("sheet"), str):
+                    activity["sheet"] = Path(asked["sheet"]).stem
+                self._publish_status(job_id, activity)
                 key = _read_key(tool_input.get("capability_id"), asked)
                 if key is not None and key in reads:
                     # Read before in this job and unchanged since: the same answer, not run again.
@@ -373,7 +433,8 @@ class BoardJobAgent(MechanicalWorker):
                 calls.append(summary)
                 returned.append({**summary, "returned": json.loads(answer)})
                 self._receipt(job_id, journal, summary, answer)
-                self._log_call(job_id, completion.tool_use, summary, answer)
+                self._log_call(job_id, completion.tool_use, summary, answer, activity["call_number"])
+                self._publish_status(job_id, activity)
                 if self._stop.is_set():
                     return stopped("stopped_by_alx")
                 completion = self._model.complete(replace(request, tool_result=answer, tool_images=images))

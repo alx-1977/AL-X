@@ -72,6 +72,43 @@ class BoardAgentTests(unittest.TestCase):
     def agent(self, model):
         return BoardJobAgent(model, self.dispatch, (KICAD,), Path(self.folder.name))
 
+    def test_activity_follows_calls_and_survives_a_new_stretch(self):
+        from alx.interfaces.diagnostic_feed import VoiceDiagnosticFeed
+
+        folder = Path(self.folder.name)
+        feed, status = VoiceDiagnosticFeed(), []
+        unsubscribe, _ = feed.subscribe(lambda owner, event: status.append(event))
+        self.addCleanup(unsubscribe)
+
+        def dispatch(item):
+            result = {"files_changed": ["RS485_Port.kicad_sch"], "gate": {"style": [], "erc": []}}
+            return CapabilityAttempt(item, CapabilityAttemptDisposition.EXECUTED, True,
+                                     CapabilityResult(item.call_id, "kicad", CapabilityResultState.SUCCEEDED,
+                                                      {"action": "edit", "result": {"change_report": result}}))
+
+        model = SessionModel([call({"action": "check", "project_dir": "/Projects/P0005-TEST-original"}),
+                              call({"action": "edit"}), report("step_ready", "schematic")])
+        agent = BoardJobAgent(model, dispatch, (KICAD,), folder,
+                              block_catalog=lambda: {"RS485_Isolated_Port": "Isolated port"},
+                              status_sink=lambda event: feed.publish(None, event))
+        first = agent.work(job_id=None, brief="Draw a port", message=None, max_calls=5)
+        job = first["job_id"]
+        update = status[-2]
+        self.assertEqual((update["project"], update["sheet"], update["call_number"], update["last_check"]),
+                         ("P0005", "RS485_Port", 2, "clean"))
+        self.assertTrue(status[-1]["terminal"])
+        self.assertIn("- RS485_Isolated_Port — Isolated port", model.requests[0].messages[0].content)
+        model = SessionModel([call({"action": "edit"}), report("done", "schematic")])
+        agent = BoardJobAgent(model, dispatch, (KICAD,), folder,
+                              status_sink=lambda event: feed.publish(None, event))
+        agent.work(job_id=job, brief=None, message="Continue", max_calls=5)
+        self.assertEqual(status[-2]["call_number"], 3)
+        lines = (folder / f"{job}.calls.jsonl").read_text().splitlines()
+        self.assertEqual([json.loads(line)["call_number"] for line in lines], [1, 2, 3])
+        detach, replay = feed.subscribe(lambda owner, event: None)
+        detach()
+        self.assertEqual(replay, ())
+
     def test_edit_crops_reach_the_next_model_request(self):
         pictures = {"sheet": b"sheet PNG", "board": b"board PNG"}
         def dispatch(call):

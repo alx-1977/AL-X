@@ -147,6 +147,67 @@ class RealChangeTests(unittest.TestCase):
     def call(self, runtime, action, **arguments):
         return kicad_call(runtime.executors, action, arguments)
 
+    def test_label_join_is_new_only_and_requires_a_visible_declaration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            work = self.call(runtime, "check", project_dir=str(project)).values["work_copy_id"]
+            root, _ = runtime.provider._load(work)
+            copy = root / "project/board.kicad_sch"
+            before = copy.read_bytes()
+            script = ('s=sheet("board.kicad_sch"); s.label_pin("R1","1","SIGNAL"); '
+                      's.label_pin("R3","1","SIGNAL"); s.save()')
+            intent = [{"op": "label", "pin": pin, "net": "/SIGNAL"} for pin in ("R1.1", "R3.1")]
+            denied = self.call(runtime, "edit", work_copy_id=work, script=script, intent=intent)
+            self.assertEqual(denied.failure["code"], "change_unmet", denied.failure)
+            evidence = denied.failure["recovery"]["gate"]["label_joins"][0]
+            self.assertEqual(evidence["net"], "/SIGNAL")
+            self.assertEqual(tuple(evidence["pins"]), ("R1.1", "R3.1"))
+            self.assertEqual(len(evidence["positions"]), 2)
+            self.assertEqual(copy.read_bytes(), before)
+            declaration = {"label_net": "SIGNAL", "reason": "Connect separate blocks"}
+            kept = self.call(runtime, "edit", work_copy_id=work, script=script, intent=intent + [declaration])
+            self.assertEqual(kept.state, CapabilityResultState.SUCCEEDED, kept.failure)
+            self.assertEqual(dict(kept.values["change_report"]["label_exceptions"][0]), declaration)
+            another_edit = 's=sheet("board.kicad_sch"); s.tidy_fields("R4"); s.save()'
+            result = self.call(runtime, "edit", work_copy_id=work, script=another_edit, intent=[])
+            self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+
+    def test_unreferenced_sheet_can_be_deleted_and_failed_edits_remove_created_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            orphan = "RS485_Interface.kicad_sch"
+            (project / orphan).write_text("(kicad_sch)")
+            work = self.call(runtime, "check", project_dir=str(project)).values["work_copy_id"]
+            root, _ = runtime.provider._load(work)
+            remove = f'from pathlib import Path\nPath({orphan!r}).unlink()'
+            failure = self.call(runtime, "edit", work_copy_id=work, intent=[],
+                                script=remove + '\nPath("created.kicad_sch").write_text("(kicad_sch)")\nraise ValueError("test")')
+            self.assertEqual(failure.failure["recovery"]["rollback_status"], "restored")
+            self.assertIn("ValueError: test", failure.failure["recovery"]["stderr"])
+            self.assertFalse((root / "project/created.kicad_sch").exists())
+            self.assertTrue((root / "project" / orphan).is_file())
+            result = self.call(runtime, "edit", work_copy_id=work, intent=[], script=remove)
+            self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+            self.assertFalse((root / "project" / orphan).exists())
+            self.assertTrue((project / orphan).is_file())
+
+    def test_placement_and_loose_table_warnings_keep_the_edit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            work = self.call(runtime, "check", project_dir=str(project)).values["work_copy_id"]
+            result = self.call(runtime, "edit", work_copy_id=work, intent=[], script="""
+s = sheet("board.kicad_sch")
+block_grid(s, "port", (101.6, 93.98), ["in", "out"], ["rail", 1, "ground"], col_pitch=50.8)
+for y in (120.65, 125.73, 130.81):
+    s._append('(text "Supply: 5 V" (at 101.6 %g 0) (effects (font (size 1.016 1.016))) (uuid "%s"))'
+              % (y, _uuid.uuid4()))
+s.save()
+""")
+            self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+            warnings = result.values["change_report"]["gate"]["style_warnings"]
+            self.assertTrue(any("off the block slots" in w for w in warnings), warnings)
+            self.assertTrue(any("use info_table" in w for w in warnings), warnings)
+
     def test_select_then_set_verifies_the_ids_at_the_selected_revision(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime, project = self.runtime(folder)
@@ -349,7 +410,8 @@ move_region("board.kicad_sch", "original.kicad_sch", [90, 90, 190, 120])
             copy = next(Path(folder).rglob(work + "/project/board.kicad_sch"))
             start = copy.read_text()
             first = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work,
-                              intent=[{"op":"label", "pin":p, "net":"/OLD"} for p in ("R1.1", "R3.1")],
+                              intent=[{"op":"label", "pin":p, "net":"/OLD"} for p in ("R1.1", "R3.1")]
+                              + [{"label_net": "OLD", "reason": "Exercise cleanup and revert of a kept label net"}],
                               script='s=sheet("board.kicad_sch"); s.label_pin("R1","1","OLD"); '
                                      's.label_pin("R3","1","OLD"); s.save()')
             self.assertEqual(first.state, CapabilityResultState.SUCCEEDED, first.failure)

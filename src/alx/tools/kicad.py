@@ -61,7 +61,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
     'step_refusal': MAP, 'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I,
-    'set': array(MAP)},
+    'set': array(MAP), 'label_exceptions': array(obj({'label_net': S, 'reason': S}))},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
 COMPARISON = obj({'files': array(obj({'name': S, 'status': S, 'differing_lines': I,
                                     'line_count_truncated': B})), 'truncated': B})
@@ -121,6 +121,14 @@ _ACTION_DEFINITIONS = (
         'split_sheet(source_file,region,new_name,new_file,keep="remaining") -> {references,items,crossings}; '
         'keep="moved" retains the region on the source instance and transfers the rest.\n'
         'copy_layout(file,ref_map,area,offset,target_area=None) -> {references,items}.\n'
+        'block_grid(sheet,name,origin,columns,rows,col_pitch=12.7,row_pitch=7.62) -> named slots.\n'
+        'place_in_slot(sheet,ref,block,column,row,rotation=0) -> (x,y); '
+        'mirror_block(sheet,source_block,target_block,ref_map,axis="y") -> anchors by ref.\n'
+        'route(sheet,pin_a,pin_b) -> orthogonal wire points or [] if already wired.\n'
+        'info_table(sheet,origin,columns_mm,rows) -> table bounds.\n'
+        'place_design_block(sheet,library_block,at,ref_map=None) -> {references,items,missing_nets}.\n'
+        'Use {"label_net":"<name>","reason":"..."} in intent for a justified local label net. '
+        'Its declaration appears in the edit report. Slot and loose table text findings are warnings.\n'
         'sheet(name) -> Sheet; sheets() -> list of filenames.\n'
         'Sheet.symbols() -> list of symbol dicts; Sheet.symbol(ref) -> one dict with pins {number:(x,y)}.\n'
         'Sheet.wires() -> list of point lists; Sheet.labels() -> list of {name,kind,at}.\n'

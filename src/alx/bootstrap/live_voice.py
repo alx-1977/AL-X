@@ -1152,7 +1152,10 @@ async def run(repository_root: Path) -> None:
         board_agent = BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
                                     storage_root / "board-jobs",
                                     preferences=ALX_STORAGE.expanduser() / "Preferences" / "Schematic and layout.md",
-                                    image_source=partial(stored_image, look_runtime.store))
+                                    image_source=partial(stored_image, look_runtime.store),
+                                    block_catalog=(kicad_runtime.provider.design_block_catalog
+                                                   if kicad_runtime.provider is not None else None),
+                                    status_sink=partial(diagnostics.publish, None))
         executors.update(build_board_agent_executors(board_agent, current_call_id.get))
 
     broker = CapabilityBroker(

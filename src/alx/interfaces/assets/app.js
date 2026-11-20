@@ -5,6 +5,7 @@ const diagnosticLog = document.querySelector("#diagnostic-log");
 const consoleForm = document.querySelector("#console-form");
 const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
+const boardJobStatus = document.querySelector("#board-job-status");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
 const diagnosticDetails = document.querySelector("#diagnostic-details");
@@ -586,6 +587,17 @@ function handleControl(message) {
       showTrace(message);
     } else if (message.code === "coding.status") {
       showCodingStatus(message);
+    } else if (message.code === "board_job.status") {
+      const operation = {
+        edit: "Editing", check: "Checking", inspect_schematic: "Inspecting",
+        inspect: "Inspecting", render: "Rendering",
+      }[message.operation] ?? "Working";
+      const subject = message.sheet ? ` ${message.sheet}` : "";
+      const call = message.call_number ? ` (call ${message.call_number})` : "";
+      const check = message.last_check ? `, last check ${message.last_check}` : "";
+      boardJobStatus.textContent = message.terminal ? "" :
+        `Board job ${message.project || message.job_id} · ${operation}${subject}${call}${check}`;
+      boardJobStatus.hidden = Boolean(message.terminal);
     } else if (message.code === "microphone.audio_received") {
       detail("AL/X server received microphone audio", "ok", { at });
     } else if (message.code === "reasoning.completed") {
@@ -778,6 +790,7 @@ async function startVoice() {
     diagnostic("Voice WebSocket reported a connection error", "error");
   };
   socket.onclose = () => {
+    boardJobStatus.hidden = true;
     sending = false;
     releaseMicrophone().catch(() => {});
     setPhase("disconnected");

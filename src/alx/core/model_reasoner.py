@@ -288,6 +288,8 @@ that starts work is create, with a concise objective and explicit success criter
 or select the goal the work belongs to, and then make the call you intended.
 active_goal_required means an effectful call was made with no active goal selected:
 select or create one first, then make the call again.
+If the selected goal is awaiting_input and you decide to resume it, select that
+goal again to make it active.
 continuation_notices is shown when a response or silence would have ended the
 turn while remaining outstanding_work was still immediately executable. Nothing
 was delivered. Issue the next executable call in this turn, or park the goal

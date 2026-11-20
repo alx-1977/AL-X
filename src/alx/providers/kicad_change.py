@@ -136,7 +136,16 @@ def validate_postconditions(value):
               'set': ('kind', 'ids', 'to')}
     if not isinstance(value, list):
         raise ChangeError('intent must be a list')
+    label_nets = set()
     for i, item in enumerate(value, 1):
+        if isinstance(item, dict) and 'label_net' in item:
+            if (set(item) != {'label_net', 'reason'}
+                    or any(not isinstance(v, str) or not v.strip() for v in item.values())):
+                raise ChangeError(f'intent {i}: label_net needs a nonempty name and reason')
+            if item['label_net'] in label_nets:
+                raise ChangeError(f'intent {i}: duplicate label_net')
+            label_nets.add(item['label_net'])
+            continue
         if not isinstance(item, dict) or not isinstance(item.get('op'), str) or item['op'] not in fields:
             raise ChangeError(f'intent {i}: expected one of {", ".join(fields)}')
         required = fields[item['op']]
