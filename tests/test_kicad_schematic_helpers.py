@@ -110,6 +110,26 @@ print(json.dumps(move_region("t.kicad_sch","power.kicad_sch",[95,89,134,118])))
                 path = s.named("instances")[0].named("project")[0].named("path")[0].children[1]
                 self.assertEqual(path, f"/{uid}/{sheet_id}")
 
+    def test_split_reports_crossing_wires_and_shared_local_labels(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "t.kicad_sch").write_text(schematic())
+            report = self.run_script(folder, """
+import json
+s = sheet("t.kicad_sch")
+s.add_wire((50, 90), (200, 90))
+s.add_label("Shared", (100, 95))
+s.add_label("Shared", (150, 95))
+s.save()
+print(json.dumps(split_sheet("t.kicad_sch", [95,89,134,118], "Region", "region.kicad_sch")))
+""")
+        split = json.loads(report)
+        self.assertEqual(split["references"], ["R1", "R2"])
+        self.assertIn({"kind": "wire", "points": [[50, 90], [200, 90]]}, split["crossings"])
+        self.assertIn({"kind": "shared local label", "name": "Shared",
+                       "inside": [[100, 95]], "outside": [[150, 95]]}, split["crossings"])
+
     def test_copy_layout_moves_the_target_fields_and_wiring_and_keeps_its_values(self):
         from alx.providers.kicad import sexpr
         with tempfile.TemporaryDirectory() as folder:

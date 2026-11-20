@@ -258,7 +258,7 @@ class Sheet:
         return ""
 
     def symbols(self):
-        """Every symbol: ref, lib_id, value, at (x, y), rotation, mirror and its pins {number: (x, y)}."""
+        """List of dicts with ref, lib_id, value, at (x, y), rotation, mirror, uuid and pins {number: (x, y)}."""
         root, _ = self._tree()
         libs = self._libs(root)
         found = []
@@ -1637,7 +1637,7 @@ def sheet(name):
 
 
 def sheets():
-    """The schematic files of the copy."""
+    """List of schematic filenames at the top of the work copy."""
     root = _os.path.dirname(BOARD_PATH)
     return sorted(name for name in _os.listdir(root) if name.endswith(".kicad_sch"))
 
@@ -1691,31 +1691,48 @@ def _hierarchy():
     return paths, pages
 
 
-def new_sheet(name, file, at=None):
-    """Create a child of the project root and return its saved Sheet."""
+def _prepare_sheet(parent, paths, pages, name, file, at=None, template=None):
     if not name or file != _os.path.basename(file) or not file.endswith(".kicad_sch"):
         raise ValueError("give a sheet name and a new .kicad_sch filename")
-    top = _root_sheet()
-    root, _ = top._tree()
+    root, _ = parent._tree()
     if any(n == name for _, n, _ in _sheet_files(root)):
         raise ValueError("sheet name already in use: " + name)
-    paths, pages = _hierarchy()
     page = next(str(i) for i in range(2, len(pages) + 3) if str(i) not in pages)
     x, y = at or (25.4, 25.4 + 20.32 * len(_children(root, "sheet")))
     uid = str(_uuid.uuid4())
+    parent_path = paths[_os.path.realpath(parent.path)][0]
     project = _os.path.splitext(_os.path.basename(BOARD_PATH))[0]
-    top._append('(sheet (at %g %g) (size 25.4 12.7) (stroke (width 0.1524) (type solid)) '
-                '(fill (color 0 0 0 0)) (uuid %s) '
-                '(property "Sheetname" %s (at %g %g 0) (effects (font (size 1.27 1.27)) (justify left bottom))) '
-                '(property "Sheetfile" %s (at %g %g 0) (effects (font (size 1.27 1.27)) (justify left top))) '
-                '(instances (project %s (path %s (page %s)))))' %
-                (x, y, _q(uid), _q(name), x, y, _q(file), x, y+12.7, _q(project),
-                 _q(paths[_os.path.realpath(top.path)][0]), _q(page)))
-    with open(_os.path.join(_os.path.dirname(top.path), file), "x") as handle:
-        handle.write('(kicad_sch %s (generator "eeschema") (uuid %s) %s (lib_symbols))\n' %
-                     (_header(root, "version"), _q(str(_uuid.uuid4())), _header(root, "paper")))
-    top.save()
-    return sheet(file)
+    block = ('(sheet (at %g %g) (size 25.4 12.7) (stroke (width 0.1524) (type solid)) '
+             '(fill (color 0 0 0 0)) (uuid %s) '
+             '(property "Sheetname" %s (at %g %g 0) (effects (font (size 1.27 1.27)) (justify left bottom))) '
+             '(property "Sheetfile" %s (at %g %g 0) (effects (font (size 1.27 1.27)) (justify left top))) '
+             '(instances (project %s (path %s (page %s)))))' %
+             (x, y, _q(uid), _q(name), x, y, _q(file), x, y+12.7, _q(project), _q(parent_path), _q(page)))
+    child = Sheet.__new__(Sheet)
+    child.path = _os.path.join(_os.path.dirname(parent.path), file)
+    if _os.path.lexists(child.path):
+        raise ValueError("sheet file already exists: " + file)
+    child.text = '(kicad_sch %s (generator "eeschema") (uuid %s) %s (lib_symbols))\n' % (
+        _header(root, "version"), _q(str(_uuid.uuid4())), _header(template or root, "paper"))
+    return child, block, parent_path + "/" + uid
+
+
+def _save_new_sheet(parent, child, block):
+    _sx(child.text)
+    parent._append(block)
+    _sx(parent.text)
+    with open(child.path, "x") as handle:
+        handle.write(child.text)
+    parent.save()
+
+
+def new_sheet(name, file, at=None):
+    """Create a child of the project root and return its saved Sheet."""
+    top = _root_sheet()
+    paths, pages = _hierarchy()
+    child, block, _ = _prepare_sheet(top, paths, pages, name, file, at)
+    _save_new_sheet(top, child, block)
+    return child
 
 
 def _geometry(item, s, libs):
@@ -1773,7 +1790,12 @@ def _region(s, box):
 
 
 def move_region(source, destination, area):
-    """Move to an existing unique sheet instance; crossing items stay on the source."""
+    """Move items wholly in area [x0, y0, x1, y1] mm to an existing unique sheet instance.
+
+    Save both sheets and return references (list), items (count) and
+    crossings (wire geometry and shared local labels). Crossing items
+    stay on the source.
+    """
     src, dst = sheet(source), sheet(destination)
     if _os.path.realpath(src.path) == _os.path.realpath(dst.path):
         raise ValueError("source and destination are the same sheet")
@@ -1782,6 +1804,13 @@ def move_region(source, destination, area):
     if len(old) != 1 or len(new) != 1:
         raise ValueError("move needs a single hierarchy instance of each sheet")
     selected, crossing = _region(src, area)
+    report = _transfer_region(src, dst, old[0], new[0], selected, crossing)
+    dst.save()
+    src.save()
+    return report
+
+
+def _transfer_region(src, dst, old_path, new_path, selected, crossing):
     sr, _ = src._tree()
     dr, spans = dst._tree()
     source_libs, dest_libs = src._libs(sr), dst._libs(dr)
@@ -1796,11 +1825,11 @@ def move_region(source, destination, area):
             if lib not in dest_libs:
                 imports[lib] = source_libs[lib]
             entries = [n for n in _walk(_child(item, "instances") or []) if _head(n) == "path"]
-            if len(entries) != 1 or _unq(entries[0][1]) != old[0]:
+            if len(entries) != 1 or _unq(entries[0][1]) != old_path:
                 raise ValueError("ambiguous instance path for " + ref)
             block = src.text[span[0]:span[1]]
             blocks.append(_re.sub(r'(\(path\s+)' + _re.escape(entries[0][1]) + r'(?=\s|\))',
-                                  lambda m: m[1] + _q(new[0]), block, count=1))
+                                  lambda m: m[1] + _q(new_path), block, count=1))
         else:
             blocks.append(src.text[span[0]:span[1]])
     end = spans[id(_child(dr, "lib_symbols"))][1]-1
@@ -1808,13 +1837,70 @@ def move_region(source, destination, area):
     for block in blocks:
         dst._append(block)
     src._cut([span for _, span in selected])
-    dst.save()
-    src.save()
     return {"references": moved, "items": len(blocks), "crossings": crossing}
 
 
+def split_sheet(source_file, region, new_name, new_file, keep="remaining"):
+    """Split one unique sheet instance and save both files.
+
+    The region is [x0, y0, x1, y1] in mm. With keep="remaining", the new
+    file takes the selected region. With keep="moved", the source file
+    and sheet symbol retain the selected region and its instance path;
+    the new file takes the other items. A child splits into siblings.
+    Return references and item count transferred to the new path, plus
+    crossings (wires and shared local labels at the split). Resolve
+    crossings in the same script before asking the edit gate to keep it.
+    """
+    if keep not in ("moved", "remaining"):
+        raise ValueError('keep must be "moved" or "remaining"')
+    src = sheet(source_file)
+    paths, pages = _hierarchy()
+    instances = paths.get(_os.path.realpath(src.path), [])
+    if len(instances) != 1:
+        raise ValueError("split needs a single hierarchy instance of the source sheet")
+    old_path = instances[0]
+    parent_path = old_path.rsplit("/", 1)[0]
+    parent = src
+    if parent_path:
+        parent_file = next(file for file, entries in paths.items() if parent_path in entries)
+        if len(paths[parent_file]) != 1:
+            raise ValueError("split needs a single hierarchy instance of the parent sheet")
+        parent = sheet(parent_file)
+    selected, crossings = _region(src, region)
+    if not selected:
+        raise ValueError("no items inside the split region")
+    root, spans = src._tree()
+    if keep == "moved":
+        inside = {span[0] for _, span in selected}
+        libs = src._libs(root)
+        # Drawing objects outside the region belong to the new file. Headers
+        # and embedded data are not positioned objects.
+        selected = [(item, spans[id(item)]) for item in root if isinstance(item, list)
+                    and _head(item) not in ("lib_symbols", "title_block", "sheet_instances")
+                    and spans[id(item)][0] not in inside and _geometry(item, src, libs)]
+    if any(_head(item) == "sheet" for item, _ in selected):
+        raise ValueError("split would move a nested sheet instance")
+    tree, _ = parent._tree()
+    source_symbol = next((node for node in _children(tree, "sheet")
+                          if _unq(_child(node, "uuid")[1]) == old_path.rsplit("/", 1)[1]), None)
+    interface = {_unq(pin[1]) for pin in _children(source_symbol, "pin")} if source_symbol else set()
+    if any(_head(item) == "hierarchical_label" and _unq(item[1]) in interface for item, _ in selected):
+        raise ValueError("split would move a hierarchical label away from its parent sheet pin")
+    dst, block, new_path = _prepare_sheet(parent, paths, pages, new_name, new_file, template=root)
+    report = _transfer_region(src, dst, old_path, new_path, selected, crossings)
+    _save_new_sheet(parent, dst, block)
+    if src is not parent:
+        src.save()
+    return report
+
+
 def copy_layout(file, ref_map, area, offset, target_area=None):
-    """Replace twin geometry in a translated rectangle, retaining target identities and fields."""
+    """Replace twin geometry in a translated rectangle, retaining target identities and fields.
+
+    ref_map pairs source and target references. area and optional target_area
+    are [x0, y0, x1, y1] mm. offset is (dx, dy) mm. Save the sheet and return
+    references (the map) and items (count).
+    """
     import copy
     s = sheet(file)
     dx, dy = offset
@@ -1861,6 +1947,17 @@ def copy_layout(file, ref_map, area, offset, target_area=None):
         s._append(block)
     s.save()
     return {"references": dict(ref_map), "items": len(blocks)}
+
+def help(name):
+    """Return a documented schematic helper's full docstring by name."""
+    helpers = {helper.__name__: helper for helper in
+               (new_sheet, move_region, split_sheet, copy_layout, sheet, sheets, help)}
+    helpers.update({"Sheet." + method.__name__: method for method in
+                    (Sheet.symbols, Sheet.symbol, Sheet.wires, Sheet.labels)})
+    if name not in helpers:
+        raise ValueError("unknown schematic helper %s; choose from %s" % (name, ", ".join(sorted(helpers))))
+    return helpers[name].__doc__
+
 
 # ---- end of schematic helpers ----
 '''

@@ -81,8 +81,9 @@ shows him that step and starts your next stretch with his answer. The tools refu
 gets ahead of his approvals, so never try to.
 - His preferences, below, are how he draws. Follow every one without being told, and check \
 your work against them before you report.
-- Read before you change, cheaply: kicad inspect_schematic gives every part, pin and net of the \
-schematic, kicad inspect the board, read_reference the datasheet.
+- Read schematics with kicad inspect_schematic. Use sheet and area for a region, net for its \
+members, or ref for one symbol's pins and connections. Use inspect for the board and \
+read_reference for datasheets and other evidence files.
 - At the start of a schematic job read /Users/friedlbasson/Desktop/VSC/FireFli-KiCad-Lib/SCHEMATIC_STANDARD.md. \
 Reusable circuits are in FireFli-KiCad-Lib/blocks/.
 - Edit the work copy through kicad edit with a script over the drawing helpers. Declare the parts \

@@ -115,8 +115,17 @@ _ACTION_DEFINITIONS = (
         'unexpected pin and part changes, new FireFli style violations and new ERC/DRC errors. '
         'Failures restore the revision and name what failed. Warnings are reported. '
         'revert_to alone (an earlier revision or start) restores a kept edit. '
-        'Use new_sheet(name,file), move_region(source,destination,area), and '
-        'copy_layout(sheet,ref_map,area,offset) for schematic blocks. Additional board helpers include '
+        'Schematic helpers (areas [x0,y0,x1,y1] mm):\n'
+        'new_sheet(name,file,at=None) -> saved Sheet.\n'
+        'move_region(source,destination,area) -> {references,items,crossings}.\n'
+        'split_sheet(source_file,region,new_name,new_file,keep="remaining") -> {references,items,crossings}; '
+        'keep="moved" retains the region on the source instance and transfers the rest.\n'
+        'copy_layout(file,ref_map,area,offset,target_area=None) -> {references,items}.\n'
+        'sheet(name) -> Sheet; sheets() -> list of filenames.\n'
+        'Sheet.symbols() -> list of symbol dicts; Sheet.symbol(ref) -> one dict with pins {number:(x,y)}.\n'
+        'Sheet.wires() -> list of point lists; Sheet.labels() -> list of {name,kind,at}.\n'
+        'print(help(name)) gives the full docstring (e.g. "split_sheet" or "Sheet.symbols"). '
+        'Additional board helpers include '
         'remove_parts, place_part, route_connection, to_plane, add_keepout, remove_keepouts, '
         'remove_tracks, remove_dangling_tracks, remove_copper_shapes, add_teardrops, set_title_block, '
         'sync_from_schematic(b,place) (supply needed footprints). '
@@ -467,9 +476,11 @@ INSPECT_SCHEMATIC = CapabilityDefinition('inspect_schematic',
     'wired (wiring already ends there). library_symbols (LIBRARY:NAME, up to 10) gives each such symbol\'s pins (number, '
     'name, type, and the part\'s own notes) before it is placed, for a swap. original true reads his project as your copy was made from it. refs, nets and '
     'contains (text in a reference, value or footprint) narrow it; limit (default 200) bounds '
-    'each list. Read the schematic this way, never by printing sheet text from an edit script.',
+    'each list. For a compact read use sheet (file, optionally area [x0,y0,x1,y1] mm) for local '
+    'parts and labels, net for just one exact net and all its members, or ref for just one exact '
+    'symbol with pin geometry and connections. Use these reads for schematics and read_reference for evidence files.',
     obj({'work_copy_id': S, 'project_dir': S, 'original': B, 'refs': array(S), 'nets': array(S), 'contains': S,
-         'limit': I, 'library_symbols': array(S)}, ()),
+         'sheet': S, 'area': array(N), 'net': S, 'ref': S, 'limit': I, 'library_symbols': array(S)}, ()),
     obj({'sheets': array(MAP), 'parts': array(MAP), 'nets': array(MAP), 'library_symbols': array(MAP),
          'truncated': MAP}), SideEffect.NONE, FAILURES)
 RENDER = CapabilityDefinition('render',

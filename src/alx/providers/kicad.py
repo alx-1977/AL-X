@@ -777,14 +777,34 @@ class KiCadProvider:
                     text, '; '.join(str(path) for path in found[:5]))})
             folder = found[0]
         else:
+            storage = self._storage_root()
+            given = Path(text)
+            if storage is not None and given.parts == (text,) and given != Path('..'):
+                text = str(storage / 'Projects' / text)
+            elif given.parts[:2] == ('~', 'ALX_Storage') or given.is_relative_to(Path.home() / 'ALX_Storage'):
+                text = str(self._reference_location(text))
             folder = self._source(text)
+        conventional = folder / 'hardware' / 'kicad'
+        if conventional.is_dir():
+            conventional = self._source(conventional)
+            boards = self._project_boards(conventional)
+            if len(boards) == 1:
+                self._source(boards[0])
+                return boards[0].parent
+            raise KiCadError('unsupported_project', {'detail': self._where_boards_are(folder, boards,
+                                                                                      expected=conventional)})
         if folder.is_dir() and not any(folder.glob('*.kicad_pcb')):
-            # A project's own folder: its one board below it, backups left out.
-            below = sorted({path.parent for path in folder.rglob('*.kicad_pcb')
-                            if 'backup' not in str(path).lower() and '.history' not in path.parts})
+            # Preserve the nonstandard layout lookup for existing projects.
+            below = {board.parent for board in self._project_boards(folder)}
             if len(below) == 1:
-                return below[0]
+                return self._source(below.pop())
         return folder
+
+    @staticmethod
+    def _project_boards(folder):
+        return sorted(path for path in folder.rglob('*.kicad_pcb') if path.is_file()
+                      and not any('backup' in part.lower() or part == '.history'
+                                  for part in path.relative_to(folder).parts[:-1]))
 
     def _source(self, path):
         raw = Path(path).expanduser().absolute()
@@ -821,14 +841,13 @@ class KiCadProvider:
         raise KiCadError('arguments_unusable')
 
     @staticmethod
-    def _where_boards_are(project, boards):
-        """Why a folder is not one project, and where its boards are (15 Nov: a bare refusal)."""
-        if len(boards) > 1:
-            return 'this folder holds %d boards: %s' % (len(boards), ', '.join(b.name for b in boards[:5]))
-        below = [str(path.parent) for path in sorted(project.rglob('*.kicad_pcb'))
-                 if 'backup' not in str(path).lower() and '.history' not in path.parts][:5]
-        return ('no board at the top of this folder; boards below it are in: ' + '; '.join(below)
-                if below else 'no KiCad board in this folder')
+    def _where_boards_are(project, boards, *, expected=None):
+        """Name the candidate board paths without choosing between them."""
+        if len(boards) > 1 and expected is None:
+            return 'this folder holds %d boards: %s' % (len(boards), ', '.join(map(str, boards)))
+        candidates = sorted(set(boards) | set(KiCadProvider._project_boards(project)))
+        detail = f'expected exactly one KiCad board in {expected}' if expected else 'no KiCad board in this folder'
+        return detail + ('; candidates: ' + '; '.join(map(str, candidates)) if candidates else '; candidates: none')
 
     def inspect(self, arguments):
         """Every part, net and zone of a board, read from a copy (D-074)."""
@@ -1738,7 +1757,7 @@ class KiCadProvider:
         if electrical or board in changed:
             before_erc, after_erc = [], []
             self._erc(root, meta, project=snapshot, findings=before_erc)
-            erc = self._erc(root, meta, against_original=True, findings=after_erc)
+            erc = self._erc(root, meta, against_original=True, findings=after_erc, model=after)
             if electrical:
                 report['erc'] = erc
             gate['erc'] = self._new_findings(before_erc, after_erc, models=(model, after))
@@ -1760,35 +1779,43 @@ class KiCadProvider:
         return report
 
     @staticmethod
-    def _new_findings(before, after, models=(None, None)):
+    def _erc_context(model):
+        return design_state(model)[1], {net['name'] for net in model['nets']} if model else set()
+
+    @staticmethod
+    def _erc_key(finding, context):
+        by_pin, net_names = context
+        descriptions = [item.get('description', '') for item in finding['items']]
+        # ERC item descriptions follow KiCad's report format. Strip display details
+        # such as pin names, sheet paths and marker locations from the identity.
+        pins = [re.match(r'^Symbol (\S+)(?: (?:Hidden pin|Pin) (\S+))?(?= \[|$| Hidden pin)', description)
+                for description in descriptions]
+        if finding['type'] == 'power_pin_not_driven' and len(descriptions) == 1:
+            # KiCad can pick a different representative input on the same undriven net.
+            power = re.match(r'^Symbol #PWR\S* Hidden pin\s+\[([^,]+), Power input,', descriptions[0])
+            net = power[1] if power and power[1] in net_names else None
+            if pins[0] and pins[0][2] and not net:
+                net = by_pin.get(f'{pins[0][1]}.{pins[0][2]}')
+            if net:
+                return json.dumps([finding['type'], finding['description'], net])
+        return json.dumps([finding['type'], finding['description'],
+                           sorted((pin[1], pin[2] or '') for pin in pins if pin)])
+
+    @classmethod
+    def _new_findings(cls, before, after, models=None):
         """Subtract occurrences, keeping complete evidence for each new finding."""
         def keys(findings, model):
-            by_pin = design_state(model)[1]
-            net_names = {net['name'] for net in model['nets']} if model else set()
-            return [key(f, by_pin, net_names) for f in findings]
+            if models is not None:
+                context = cls._erc_context(model)
+                return [cls._erc_key(f, context) for f in findings]
+            return [json.dumps([f.get('sheet'), f['type'], f['severity'], f['description'],
+                                sorted(f['items'], key=str), f.get('ids') or f.get('at')], sort_keys=True)
+                    for f in findings]
 
-        def key(f, by_pin, net_names):
-            # An undriven net has one ERC marker. KiCad may choose a different
-            # representative power input on every run, even on another sheet.
-            if f['type'] == 'power_pin_not_driven' and len(f['items']) == 1:
-                item = f['items'][0]
-                description = item.get('description', '') if isinstance(item, dict) else ''
-                power = re.match(r'^Symbol #PWR\S* Hidden pin\s+\[([^,]+), Power input,', description)
-                pin = re.match(r'^Symbol (\S+) (?:Hidden pin|Pin) (\S+) \[', description)
-                net = power[1] if power and power[1] in net_names else None
-                if pin and not net:
-                    net = by_pin.get(f'{pin[1]}.{pin[2]}')
-                if net:
-                    return (f['type'], f['severity'], net)
-            # KiCad includes positions in ERC item records. Prefer persistent UUIDs so
-            # moving the same offending component does not introduce another error.
-            items = [([i.get('uuid') or i.get('pos'), i.get('description')] if isinstance(i, dict)
-                      else i) for i in f['items']]
-            return json.dumps([f.get('sheet'), f['type'], f['severity'], f['description'],
-                               sorted(items, key=str), f.get('ids') or f.get('at')], sort_keys=True)
-        old = Counter(keys(before, models[0]))
+        old_model, new_model = models if models is not None else (None, None)
+        old = Counter(keys(before, old_model))
         new = []
-        for signature, finding in zip(keys(after, models[1]), after):
+        for signature, finding in zip(keys(after, new_model), after):
             if old[signature]:
                 old[signature] -= 1
             else:
@@ -2253,19 +2280,19 @@ class KiCadProvider:
         except Exception as error:  # noqa: BLE001 - a fact for her, not a failed step
             return {'findings': [], 'omitted': 0, 'not_checked': str(error)[:200]}
 
-    def _erc(self, root, meta, signatures=None, against_original=False, *, project=None, findings=None):
+    def _erc(self, root, meta, signatures=None, against_original=False, *, project=None, findings=None, model=None):
         """KiCad's electrical rules check of the copy's schematic, grouped like the DRC.
 
         against_original: only findings his original did not already have are listed
         (totals stay whole); 16 Nov: every edit carried the whole ERC, some 30,000
         characters of his own findings, into the board agent's context.
         """
-        known = None
+        baseline = None
         if against_original:
             try:
-                known = set(map(tuple, json.loads((root / 'baseline.json').read_text())['erc']))
+                baseline = json.loads((root / 'baseline.json').read_text())['erc']
             except (OSError, ValueError, KeyError, TypeError):
-                known = None
+                pass
         schematic = ((project or root / 'project') / meta['board']).with_suffix('.kicad_sch')
         if not schematic.is_file():
             return {'checked': False, 'reason': 'no schematic beside the board', 'totals':
@@ -2279,6 +2306,30 @@ class KiCadProvider:
             sheets = list(report['sheets'])
         except (ValueError, OSError, KeyError, TypeError) as error:
             raise KiCadError('invalid_report') from error
+        context = self._erc_context(model)
+        if (signatures is not None or baseline is not None) and model is None and any(
+                finding.get('type') == 'power_pin_not_driven'
+                for sheet in sheets for finding in sheet.get('violations') or ()):
+            context = self._erc_context(self._netlist(schematic.parent, meta['board'], output.parent))
+        known = None
+        if baseline is not None:
+            # Existing work copies stored [type, description, joined item descriptions].
+            legacy = [mark for mark in baseline if isinstance(mark, list)]
+            original_context = self._erc_context(None)
+            if any(kind == 'power_pin_not_driven' for kind, _, _ in legacy):
+                try:
+                    original = self._original_view(root, meta)
+                except KiCadError as error:
+                    if str(error) != 'original_changed':
+                        raise
+                    # The old baseline still identifies findings by their recorded pins.
+                    context = original_context
+                else:
+                    original_context = self._erc_context(self._netlist(original, meta['board'], output.parent))
+            known = Counter(mark if isinstance(mark, str) else self._erc_key(
+                {'type': mark[0], 'description': mark[1],
+                 'items': [{'description': text} for text in mark[2].split('|')]}, original_context)
+                for mark in baseline)
         totals = {'error': 0, 'warning': 0, 'ignore': 0, 'total': 0}
         new = {'error': 0, 'warning': 0, 'ignore': 0}
         groups = {}
@@ -2289,17 +2340,19 @@ class KiCadProvider:
                     raise KiCadError('invalid_report')
                 totals[severity] += 1
                 totals['total'] += 1
-                mark = (kind, str(finding.get('description', '')),
-                        '|'.join(str(i.get('description', '')) for i in (finding.get('items') or ())))
+                entry = {'type': kind, 'severity': severity, 'sheet': sheet.get('path', ''),
+                         'description': str(finding.get('description', '')), 'items': finding.get('items') or []}
                 if findings is not None:
-                    findings.append({'type': kind, 'severity': severity, 'sheet': sheet.get('path', ''),
-                                     'description': mark[1], 'items': finding.get('items') or []})
-                if signatures is not None:
-                    signatures.append(list(mark))
-                if known is not None:
-                    if mark in known:
-                        continue
-                    new[severity] += 1
+                    findings.append(entry)
+                if signatures is not None or known is not None:
+                    mark = self._erc_key(entry, context)
+                    if signatures is not None:
+                        signatures.append(mark)
+                    if known is not None:
+                        if known[mark]:
+                            known[mark] -= 1
+                            continue
+                        new[severity] += 1
                 items = []
                 for item in (finding.get('items') or ())[:ITEMS_PER_FINDING]:
                     description = str(item.get('description', ''))
@@ -3126,15 +3179,21 @@ class KiCadProvider:
         is large and says nothing directly about connections (15 Nov: the board
         agent spent 26 previews reading its way around a schematic).
         """
+        area, file = arguments.get('area'), arguments.get('sheet')
+        exact_ref, exact_net = arguments.get('ref'), arguments.get('net')
+        if sum(value is not None for value in (exact_ref, exact_net, file)) > 1 or (
+                area is not None and (not file or len(area) != 4 or not all(map(math.isfinite, area))
+                                      or area[0] > area[2] or area[1] > area[3])) or (
+                (exact_ref is not None or exact_net is not None) and any(
+                    arguments.get(k) for k in ('refs', 'nets', 'contains', 'library_symbols'))):
+            raise KiCadError('arguments_unusable', {'detail': 'use ref, net, or sheet with optional '
+                                                    'ordered area [x0,y0,x1,y1] in mm'})
         named = arguments.get('project_dir') or arguments.get('work_copy_id')
         if arguments.get('project_dir') or not self._is_copy_id(named):
             # His project, read where it is: nothing is copied or written there (16 Nov:
             # five models asked for P0020's or P0009's schematic by project).
-            project = bounded(self._project(named), self.design_roots)
-            boards = sorted(project.glob('*.kicad_pcb'))
-            if len(boards) != 1:
-                raise KiCadError('unsupported_project', {'detail': self._where_boards_are(project, boards)})
-            meta, scratch = {'board': boards[0].name}, self.work_root / 'sections'
+            board = self._board_for({'project_dir': named})
+            project, meta, scratch = board.parent, {'board': board.name}, self.work_root / 'sections'
         else:
             root, meta = self._load(named)
             if meta.get('library'):
@@ -3145,7 +3204,12 @@ class KiCadProvider:
         if not schematic.is_file():
             raise KiCadError('unsupported_project', {'detail': 'no schematic beside the board'})
         model = self._netlist(project, meta['board'], scratch)
-        refs = set(arguments.get('refs') or ())
+        if exact_net is not None:
+            chosen = [{'name': net['name'], 'nodes': [f"{pin['ref']}.{pin['pin']}" for pin in net['nodes']]}
+                      for net in model['nets'] if net['name'] == exact_net]
+            return {'sheets': [], 'parts': [], 'nets': chosen, 'library_symbols': [],
+                    'truncated': {'parts': False, 'nets': False}}
+        refs = {exact_ref} if exact_ref is not None else set(arguments.get('refs') or ())
         wanted_nets = set(arguments.get('nets') or ())
         needle = str(arguments.get('contains') or '').lower()
         limit = max(1, min(int(arguments.get('limit') or 200), 1000))
@@ -3160,24 +3224,43 @@ class KiCadProvider:
             nets.append({'name': name, 'nodes': nodes})
         places = {}
         sheets = []
-        for path in sorted(project.glob('*.kicad_sch')):
+        paths = sorted(project.glob('*.kicad_sch'))
+        if exact_ref is not None:
+            paths = [project / name for name in sorted(self._covered_sheets(project, meta['board'], model))]
+        if file is not None:
+            if file not in self._covered_sheets(project, meta['board'], model):
+                raise KiCadError('unsupported_project', {'detail': f'{file} is outside the exported schematic hierarchy'})
+            paths = [project / file]
+
+        def in_area(at):
+            return area is None or (area[0] <= at[0] <= area[2] and area[1] <= at[1] <= area[3])
+
+        for path in paths:
             sheet = sexpr(path.read_text(errors='replace'))
-            labels = sorted({str(node.children[1]) for node in sheet.children
-                             if hasattr(node, 'children') and node.name in ('label', 'global_label', 'hierarchical_label')
-                             and len(node.children) > 1})
+            labels = []
+            for node in sheet.children:
+                if getattr(node, 'name', None) in ('label', 'global_label', 'hierarchical_label'):
+                    positions = node.named('at')
+                    if area is None or positions and in_area([float(v) for v in positions[0].children[1:3]]):
+                        labels.append(str(node.children[1]))
             count = 0
             for symbol in sheet.named('symbol'):
                 ref = next((str(p.children[2]) for p in symbol.named('property')
                             if len(p.children) > 2 and p.children[1] == 'Reference'), '')
                 at = symbol.named('at')
                 if ref and at:
-                    count += 1
-                    places[ref] = {'sheet': path.name, 'at': [float(v) for v in at[0].children[1:3]],
-                                   'rotation': float(at[0].children[3]) if len(at[0].children) > 3 else 0.0}
-            sheets.append({'file': path.name, 'symbols': count, 'labels': labels[:200]})
+                    position = [float(v) for v in at[0].children[1:3]]
+                    if in_area(position):
+                        count += 1
+                        places[ref] = {'sheet': path.relative_to(project).as_posix(), 'at': position,
+                                       'rotation': float(at[0].children[3]) if len(at[0].children) > 3 else 0.0}
+            sheets.append({'file': path.relative_to(project).as_posix(), 'symbols': count,
+                           'labels': sorted(set(labels))[:200]})
         parts = []
         for comp in model['components']:
             ref = comp['ref']
+            if file is not None and ref not in places:
+                continue
             item = {'ref': ref, 'value': comp['value'], 'footprint': comp['footprint'],
                     **places.get(ref, {}), 'pins': sorted(pins.get(ref, []), key=lambda p: (len(p['number']), p['number']))}
             haystack = ' '.join([ref, item['value'], item['footprint']]).lower()
@@ -3191,6 +3274,12 @@ class KiCadProvider:
             self._pin_geometry(project, meta, parts[:20])
         chosen = [net for net in nets if (not wanted_nets or net['name'] in wanted_nets)
                   and (not refs or any(node.split('.')[0] in refs for node in net['nodes']))]
+        if exact_ref is not None:
+            sheets = []
+            chosen = []
+        elif file is not None:
+            # Parts already carry their pin-to-net connections. Use net for full membership.
+            chosen = []
         # A library symbol's pins, before it is placed: what a swap's pin map needs.
         library = []
         names = [n for n in (arguments.get('library_symbols') or ())][:10]
@@ -3217,7 +3306,9 @@ class KiCadProvider:
             if not name:
                 continue
             try:
-                sheet = opened.setdefault(name, namespace['Sheet'](name))
+                if name not in opened:
+                    opened[name] = namespace['Sheet'](name)
+                sheet = opened[name]
                 placed = sheet.symbol(part['ref'])['pins']
                 ends = {p for pts in sheet.wires() for p in (pts[0], pts[-1])} | {l['at'] for l in sheet.labels()}
             except (KeyError, ValueError, IndexError):

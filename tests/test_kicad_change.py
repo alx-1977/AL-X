@@ -19,7 +19,7 @@ from alx.bootstrap.kicad import build_kicad_runtime  # noqa: E402
 from alx.contracts import CapabilityResultState  # noqa: E402
 from alx.providers.kicad_change import ChangeError, unmet, validate_postconditions  # noqa: E402
 from kicad_actions import kicad_call  # noqa: E402
-from test_kicad_schematic_helpers import APP, CLI, DEVICE, PYTHON, schematic  # noqa: E402
+from test_kicad_schematic_helpers import APP, CLI, DEVICE, PYTHON, schematic, library_symbol  # noqa: E402
 
 APP_SYMBOLS = APP / "SharedSupport/symbols"
 
@@ -198,6 +198,83 @@ class RealChangeTests(unittest.TestCase):
             self.assertEqual(copy.read_bytes(), initial)
             unknown = self.call(runtime, "edit_kicad_work_copy", work_copy_id=work, change=[])
             self.assertIn("not taken by edit: change", str(unknown.failure))
+
+    def test_split_keeps_existing_erc_error_and_symbol_instance_identities(self):
+        from alx.providers.kicad import sexpr
+        from alx.providers.kicad_index import netlist_nets
+
+        for keep in ("moved", "remaining"):
+            with self.subTest(keep=keep), tempfile.TemporaryDirectory() as folder:
+                runtime, project = self.runtime(folder)
+                top = project / "board.kicad_sch"
+                text = top.read_text().replace('(project "t"', '(project "board"')
+                definitions = []
+                for kind in ("open_collector", "power_out"):
+                    definition = library_symbol("R").replace('(symbol "R"', f'(symbol "Test:{kind}"', 1)
+                    definitions.append(definition.replace('(pin passive ', f'(pin {kind} ').replace('(symbol "R_', f'(symbol "{kind}_'))
+                    text = text.replace('(lib_id "Device:R")', f'(lib_id "Test:{kind}")', 1)
+                top.write_text(text.replace('(lib_symbols', '(lib_symbols ' + ' '.join(definitions), 1))
+                root_id = sexpr(top.read_text()).named('uuid')[0].children[1]
+                program = """
+s = sheet("board.kicad_sch")
+s.wire_pin_to("R1", "2", s.symbol("R2")["pins"]["1"])
+for ref, pin in (("R1", "1"), ("R2", "2"), ("R3", "1"), ("R3", "2"), ("R4", "1"), ("R4", "2")):
+    s.add_no_connect(s.symbol(ref)["pins"][pin])
+s.save()
+new_sheet("Original", "original.kicad_sch")
+move_region("board.kicad_sch", "original.kicad_sch", [90, 90, 190, 120])
+"""
+                # Prepare the fixture before making the checked work copy.
+                from alx.providers.kicad_helpers import HELPERS, script_runner
+                from alx.providers.kicad_schematic_helpers import SCHEMATIC_HELPERS
+                import subprocess
+                helper = Path(folder) / "fixture.py"
+                helper.write_text(HELPERS + SCHEMATIC_HELPERS + script_runner(program))
+                subprocess.run([str(PYTHON), str(helper), str(top.with_suffix('.kicad_pcb'))],
+                               cwd=project, check=True, capture_output=True, timeout=120)
+                initial = self.call(runtime, "check", project_dir=str(project))
+                self.assertEqual(initial.state, CapabilityResultState.SUCCEEDED, initial.failure)
+                report = initial.values['erc']['groups']
+                self.assertTrue(any(group['check_type'] == 'pin_to_pin' and group['severity'] == 'error'
+                                    for group in report), report)
+                work = initial.values["work_copy_id"]
+                provider = runtime.provider
+                root, meta = provider._load(work)
+                copy = root / "project"
+
+                def checked_hierarchy():
+                    model = provider._netlist(copy, meta['board'], root / 'artifacts')
+                    ids = {}
+                    for file in provider._covered_sheets(copy, meta['board'], model):
+                        tree = sexpr((copy / file).read_text())
+                        for symbol in tree.named('symbol'):
+                            path = symbol.named('instances')[0].named('project')[0].named('path')[0]
+                            ref = path.named('reference')[0].children[1]
+                            ids[ref] = (path.children[1], symbol.named('uuid')[0].children[1])
+                    for part in model['components']:
+                        self.assertEqual(ids[part['ref']][0], f"/{root_id}" + part['path'].rsplit('/', 1)[0])
+                    return ids, set(netlist_nets(model))
+
+                before, nets = checked_hierarchy()
+                def source_sheet_block():
+                    page = (copy / top.name).read_text()
+                    node = sexpr(page).named('sheet')[0]
+                    return page[node.start:node.end]
+
+                old_sheet = source_sheet_block()
+                script = f'print(split_sheet("original.kicad_sch", [95,89,134,118], "New", "new.kicad_sch", keep={keep!r}))'
+                edited = self.call(runtime, "edit", work_copy_id=work, intent=[], script=script)
+                self.assertEqual(edited.state, CapabilityResultState.SUCCEEDED, edited.failure)
+                change = edited.values['change_report']
+                self.assertEqual(change['gate']['erc'], ())
+                self.assertEqual(change['erc']['new']['total'], 0)
+                after, after_nets = checked_hierarchy()
+                self.assertEqual(nets, after_nets)
+                self.assertEqual(set(before), set(after))
+                self.assertEqual(old_sheet, source_sheet_block())
+                for ref, (path, uid) in after.items():
+                    self.assertEqual(uid, before[ref][1])
+                    self.assertEqual(path == before[ref][0], (ref in {"R1", "R2"}) == (keep == "moved"))
 
     def test_new_style_violation_is_named_and_old_ones_are_ignored(self):
         with tempfile.TemporaryDirectory() as folder:

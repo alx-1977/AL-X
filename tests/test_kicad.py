@@ -767,6 +767,22 @@ class KiCadTests(unittest.TestCase):
             EDIT_SCRIPT + "p.with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\\n')\n"))
         self.assertEqual(edited['change_report']['erc']['totals']['error'], 1)
 
+    def test_erc_identity_is_an_order_independent_multiset_of_pins(self):
+        def item(ref, number, uuid, x, details):
+            return {'description': f'Symbol {ref} Pin {number} [{details}]',
+                    'uuid': uuid, 'pos': {'x': x, 'y': 1}}
+
+        old = {'type': 'pin_to_pin', 'severity': 'error', 'sheet': '/Before/',
+               'description': 'Pins of type Open collector and Power output are connected',
+               'items': [item('U3', '4', 'old-u', 1, 'PG, Open collector, Line'),
+                         item('#FLG03', '1', 'old-p', 2, 'Power output, Line')]}
+        moved = dict(old, sheet='/After/', items=[
+            item('#FLG03', '1', 'new-p', 10, 'Power output, Line'),
+            item('U3', '4', 'new-u', 11, 'PGOOD, Open collector, Line')])
+        different_pin = dict(moved, items=[moved['items'][0], item('U3', '5', 'new-v', 11, 'PG, Open collector')])
+        self.assertEqual(KiCadProvider._new_findings([old], [moved, moved, different_pin], (None, None)),
+                         [moved, different_pin])
+
     def test_an_undriven_net_can_be_reported_at_another_pin_on_another_sheet(self):
         model = {"components": [], "nets": [{"name": name, "nodes": []} for name in ("GND", "3V3")]}
         def marker(net, sheet, uid):
@@ -1617,6 +1633,66 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
                          ('R1', 'test.kicad_sch', (10.0, 20.0), 90.0))
         self.assertEqual([(pin['number'], pin['net']) for pin in part['pins']], [('1', 'OUT'), ('2', 'GND')])
         self.assertEqual(list(read['sheets'][0]['labels']), ['OUT'])
+
+    def test_compact_schematic_reads_select_region_net_or_symbol(self):
+        (self.project / 'test.kicad_sch').write_text(
+            '(kicad_sch (symbol (lib_id "Device:R") (at 10 20 90) (property "Reference" "R1"))'
+            ' (symbol (lib_id "Device:R") (at 30 40 0) (property "Reference" "R2"))'
+            ' (label "OUT" (at 9 19 0)) (label "GND" (at 30 40 0)))')
+        self.netlists = [[('OUT', 'R1', '1'), ('OUT', 'R2', '1'), ('GND', 'R2', '2')]]
+        work = self.check()['work_copy_id']
+
+        def inspect(**filters):
+            return self.success('inspect_schematic', work_copy_id=work, **filters)
+
+        region = inspect(sheet='test.kicad_sch', area=[9, 19, 20, 30])
+        self.assertEqual([item['ref'] for item in region['parts']], ['R1'])
+        self.assertEqual(region['sheets'][0]['labels'], ('OUT',))
+        self.assertEqual(region['nets'], ())
+        net = inspect(net='OUT')
+        self.assertEqual(net['parts'], ())
+        self.assertEqual(net['sheets'], ())
+        self.assertEqual([pin for match in net['nets'] for pin in match['nodes']], ['R1.1', 'R2.1'])
+        part, = inspect(ref='R2')['parts']
+        self.assertEqual([(p['number'], p['net']) for p in part['pins']], [('1', 'OUT'), ('2', 'GND')])
+        self.assertEqual(inspect(ref='R2')['nets'], ())
+        self.failure('arguments_unusable', 'inspect_schematic', work_copy_id=work, area=[0, 0, 1, 1])
+        self.failure('unsupported_project', 'inspect_schematic', work_copy_id=work, sheet='../outside.kicad_sch')
+
+    def test_project_folder_lookup_prefers_kicad_tree_and_reports_candidates(self):
+        projects = self.root / 'ALX_Storage' / 'Projects'
+        project = projects / 'P0005-TEST-original'
+        kicad = project / 'hardware' / 'kicad'
+        target = kicad / 'Design'
+        target.parent.mkdir(parents=True)
+        shutil.copytree(self.project, target)
+        backups = kicad / 'backups'
+        backups.mkdir()
+        (backups / 'old.kicad_pcb').write_text(BOARD)
+        self.runtime.provider.design_roots = (projects,)
+        for name in (project.name, str(project), '~/ALX_Storage/Projects/' + project.name):
+            checked = self.success('check', project_dir=name)
+            _, meta = self.runtime.provider._load(checked['work_copy_id'])
+            self.assertEqual(meta['source'], str(target))
+        second = kicad / 'second.kicad_pcb'
+        second.write_text(BOARD)
+        failed = self.call('check', project_dir=project.name)
+        self.assertEqual(failed.failure['code'], 'unsupported_project')
+        detail = failed.failure['recovery']['detail']
+        self.assertIn(str(target / 'test.kicad_pcb'), detail)
+        self.assertIn(str(second), detail)
+        self.assertNotIn(str(backups), detail)
+
+    def test_edit_documents_schematic_helper_signatures_and_exposes_help(self):
+        text = self.success('edit', work_copy_id=self.check()['work_copy_id'], dry_run=True, intent=[],
+                            script='print(help("split_sheet"))\nprint(help("Sheet.symbols"))')
+        self.assertIn('Return references and item count', text['stdout'])
+        self.assertIn('lib_id, value', text['stdout'])
+        from alx.tools.kicad import CONTRACTS, KiCadAction
+        description = CONTRACTS[KiCadAction.EDIT].purpose
+        for helper in ('new_sheet(', 'move_region(', 'split_sheet(', 'copy_layout(', 'sheet(', 'sheets()',
+                       'Sheet.symbols()', 'Sheet.symbol(', 'Sheet.wires()', 'Sheet.labels()'):
+            self.assertIn(helper, description)
 
     def test_a_script_that_only_reads_pays_for_no_checks(self):
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
