@@ -28,12 +28,17 @@ def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def _canonical(node) -> str:
+# A pad's teardrop setting is routing, not placement: KiCad writes it into the
+# pad when teardrops are added (24 Nov: AL/X's teardrop pass read as moved parts).
+_ROUTING_IN_PAD = frozenset({'teardrops'})
+
+
+def _canonical(node, skip=frozenset()) -> str:
     parts = []
     for child in node.children:
         if hasattr(child, 'children'):
-            if child.name not in _VOLATILE:
-                parts.append(_canonical(child))
+            if child.name not in _VOLATILE and child.name not in skip:
+                parts.append(_canonical(child, skip))
         else:
             parts.append(json.dumps(child))
     return '(' + ' '.join(parts) + ')'
@@ -46,7 +51,7 @@ def _footprint_place(footprint, references) -> list:
     name = footprint.children[1] if len(footprint.children) > 1 and isinstance(footprint.children[1], str) else ''
     # Its pads too: a pad made larger or moved is a change to the placement
     # Friedl approved, not something to slip past it (review, 15 Nov).
-    pads = sorted(_canonical(pad) for pad in footprint.named('pad'))
+    pads = sorted(_canonical(pad, _ROUTING_IN_PAD) for pad in footprint.named('pad'))
     return [refs[0] if refs else '', name.split(':', 1)[-1],
             layer[0].children[1] if layer and len(layer[0].children) > 1 else '',
             [str(v) for v in at[0].children[1:]] if at else [], pads]
