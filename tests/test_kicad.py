@@ -1252,6 +1252,26 @@ Path(sys.argv[1]).with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\
         self.success('write_back_kicad_board', **self.write_args(moved))
         self.assertIn('(at 5 5)', (self.project / 'test.kicad_pcb').read_text())
 
+    def test_icloud_conflict_copies_in_a_work_copy_stay_out_of_his_project(self):
+        # 25 Nov: iCloud made "fp-lib-table 2", "test 2.kicad_pcb" and the like in a work copy.
+        (self.project / 'notes.txt').write_text('his own')
+        copy = self.check()['work_copy_id']
+        root = self.settings.work_root / copy / 'project'
+        (root / 'test 2.kicad_pcb').write_text((root / 'test.kicad_pcb').read_text())
+        (root / 'notes 3.txt').write_text('stale')
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.success('write_back_kicad_board', **self.write_args(self.approve(moved, 'placement')))
+        self.assertIn('(at 5 5)', (self.project / 'test.kicad_pcb').read_text())
+        self.assertFalse((self.project / 'test 2.kicad_pcb').exists())
+        self.assertFalse((self.project / 'notes 3.txt').exists())
+
+    def test_icloud_copies_need_the_plain_name_beside_them(self):
+        from alx.providers.kicad import icloud_copies
+        self.assertEqual(icloud_copies(['fp-lib-table', 'fp-lib-table 2', 'a.pretty/x.kicad_mod',
+                                        'a 12.pretty/x.kicad_mod', 'R 2.kicad_sch', 'b.json',
+                                        'b 3.json', 'Board 1.kicad_pcb', 'Board.kicad_pcb']),
+                         {'fp-lib-table 2', 'a 12.pretty/x.kicad_mod', 'b 3.json'})
+
     def test_nothing_on_the_board_changes_before_the_schematic_is_approved(self):
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
         checked = self.check()

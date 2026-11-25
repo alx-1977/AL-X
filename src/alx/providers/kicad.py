@@ -160,6 +160,30 @@ DESIGN_SUFFIXES = frozenset({'.kicad_pcb', '.kicad_pro', '.kicad_dru', '.kicad_s
 DESIGN_NAMES = frozenset({'fp-lib-table', 'sym-lib-table'})
 
 
+_ICLOUD_COPY = re.compile(r'^(?P<stem>.+) (?:[2-9]|[1-9]\d+)(?P<ext>\.[^. ]+)?$')
+
+
+def icloud_copies(names):
+    """Files iCloud Drive made beside a file as conflict copies: "fp-lib-table 2", "x 3.kicad_sch".
+
+    Work copies live under the Desktop, which iCloud syncs; on 25 Nov it made over a hundred
+    stale copies in a P0009 work copy, which refused the write-back and would have put duplicate
+    boards and sheets into his project. A name counts only when the plain name sits beside it.
+    """
+    names = set(names)
+    present = names | {'/'.join(name.split('/')[:i]) for name in names
+                       for i in range(1, name.count('/') + 1)}
+    found = set()
+    for name in names:
+        parts = name.split('/')
+        for i, part in enumerate(parts):
+            match = _ICLOUD_COPY.match(part)
+            if match and '/'.join(parts[:i] + [match['stem'] + (match['ext'] or '')]) in present:
+                found.add(name)
+                break
+    return found
+
+
 def is_design_file(name):
     """A file KiCad keeps as part of a design: boards, schematics, libraries, rules."""
     path = Path(name)
@@ -3831,8 +3855,10 @@ class KiCadProvider:
         validate()
         copied = (library_inventory if meta.get('library') else design_inventory)(root / 'project')
         if not meta.get('library'):
+            stray = icloud_copies(copied)
             copied = {name: digest for name, digest in copied.items()
-                      if name in meta['hashes'] or not name.endswith('.kicad_sch' + GRID_SUFFIX)}
+                      if name in meta['hashes'] or not (name.endswith('.kicad_sch' + GRID_SUFFIX)
+                                                        or name in stray)}
         changed = sorted((name for name, value in copied.items() if meta['hashes'].get(name) != value),
                          key=lambda name: (name not in meta['hashes'], name))
         # Any KiCad design file may be written back: a part change edits the
