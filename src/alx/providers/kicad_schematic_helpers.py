@@ -1793,7 +1793,12 @@ class Sheet:
 
     def save(self):
         """Write the sheet back, after checking it still parses."""
-        _sx(self.text)
+        try:
+            _sx(self.text)
+        except (KeyError, IndexError, ValueError) as error:
+            # Text spliced in by hand with unbalanced brackets (25 Nov: a bare KeyError).
+            raise ValueError("%s no longer parses (unbalanced brackets in text you added); nothing "
+                             "was saved. Use the Sheet helpers rather than editing s.text" % self.path) from error
         with open(self.path, "w") as handle:
             handle.write(self.text)
         if getattr(self, "_wire_hops", False):
@@ -1873,7 +1878,9 @@ def block_grid(sheet, name, origin, columns, rows, col_pitch=12.7, row_pitch=7.6
     Origin and pitches must be on the 1.27 mm grid. Supply row names such as
     ["rail", 1, 2, "ground"]. Returns the named column and row coordinates.
     """
-    columns, rows = list(map(str, columns)), list(map(str, rows))
+    # A count is accepted too and names them 1, 2, 3... (25 Nov: block_grid(..., 4, 3) failed).
+    columns, rows = ([str(i + 1) for i in range(names)] if isinstance(names, int) else list(map(str, names))
+                     for names in (columns, rows))
     if (not isinstance(name, str) or not name.strip()
             or any(not names or not all(names) or len(set(names)) != len(names) for names in (columns, rows))):
         raise ValueError("give the block, columns and rows distinct nonempty names")
@@ -2055,7 +2062,13 @@ def _upright(s, name):
 
 def place_in_slot(sheet, ref, block, column, row, rotation=0):
     """Move a symbol anchor to a named column and row and tidy its fields. Returns (x, y)."""
-    grid = _block_grids(sheet)[block]
+    grids = _block_grids(sheet)
+    # The grid block_grid returned is accepted as well as its name (25 Nov: passed twice, failed twice).
+    grid = block if isinstance(block, dict) and "columns" in block else grids.get(block)
+    if grid is None:
+        raise ValueError("no block %r on this sheet; blocks: %s" % (block, ", ".join(sorted(grids)) or "none"))
+    if str(column) not in grid["columns"] or str(row) not in grid["rows"]:
+        raise ValueError("block columns are %s and rows %s" % (list(grid["columns"]), list(grid["rows"])))
     point = grid["columns"][str(column)], grid["rows"][str(row)]
     _relocate_symbol(sheet, ref, point, rotation, sheet.symbol(ref)["mirror"])
     return point
@@ -2907,16 +2920,22 @@ def copy_layout(file, ref_map, area, offset, target_area=None):
     return {"references": dict(ref_map), "items": len(blocks)}
 
 def help(name):
-    """Return a documented schematic helper's full docstring by name."""
-    helpers = {helper.__name__: helper for helper in
-               (new_sheet, move_region, split_sheet, copy_layout, sheet, sheets, help, arrange_root,
-                block_grid, place_in_slot, mirror_block, info_table, place_design_block)}
-    helpers["route"] = _route_schematic
-    helpers.update({"Sheet." + method.__name__: method for method in
-                    (Sheet.symbols, Sheet.symbol, Sheet.wires, Sheet.labels, Sheet.place_power, Sheet.upright)})
-    if name not in helpers:
-        raise ValueError("unknown schematic helper %s; choose from %s" % (name, ", ".join(sorted(helpers))))
-    return helpers[name].__doc__
+    """Return any helper's full docstring by name ("split_sheet", "Sheet.add_wire", "add_teardrops").
+
+    Never raises: an unknown name returns the list of names (25 Nov: help() knew 19 of the
+    helpers her instructions name, and each unknown name killed the whole script)."""
+    if name == "route":
+        found = _route_schematic
+    elif isinstance(name, str) and name.startswith("Sheet."):
+        found = getattr(Sheet, name[6:], None)
+    else:
+        found = globals().get(name) if isinstance(name, str) else None
+    if callable(found) and not str(name).rsplit(".", 1)[-1].startswith("_"):
+        return found.__doc__ or "%s has no description" % name
+    names = sorted({key for key, value in globals().items()
+                    if callable(value) and not key.startswith("_") and not isinstance(value, type)}
+                   | {"Sheet." + key for key in dir(Sheet) if not key.startswith("_")} | {"route"})
+    return "no helper named %s; helpers: %s" % (name, ", ".join(names))
 
 
 # ---- end of schematic helpers ----

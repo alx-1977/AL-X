@@ -85,9 +85,14 @@ def _same_maker(asked: str, found: str) -> bool:
     return not first or first in _plain(found).split()
 
 
+_NEXAR_SPENT: set[str] = set()
+
+
 def _nexar_links(client: Any, credentials: list[tuple[str, str]], part: str,
                  manufacturer: str, tried: list) -> list[str]:
     for client_id, secret in credentials:
+        if client_id in _NEXAR_SPENT:
+            continue
         try:
             token = client.post(NEXAR_TOKEN, data={"grant_type": "client_credentials", "client_id": client_id,
                                                    "client_secret": secret, "scope": "supply.domain"}).json()
@@ -98,7 +103,11 @@ def _nexar_links(client: Any, credentials: list[tuple[str, str]], part: str,
             continue
         if answer.get("errors"):
             # A plan with no part allowance answers with an error: try the next key.
-            tried.append({"source": "nexar", "url": "", "result": str(answer["errors"][0].get("message", ""))[:120]})
+            message = str(answer["errors"][0].get("message", ""))
+            tried.append({"source": "nexar", "url": "", "result": message[:120]})
+            # A key that answered with an error is asked again only after a restart (25 Nov: its
+            # spent allowance was asked twelve times in one job).
+            _NEXAR_SPENT.add(client_id)
             continue
         links = []
         for result in ((answer.get("data") or {}).get("supSearchMpn") or {}).get("results") or []:
@@ -217,8 +226,16 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
     if candidates:
         raise DatasheetError("ambiguous_part", "%s is not one exact part number; DigiKey lists %d: call again "
                              "with the exact part_number you choose" % (part, len(candidates)), candidates)
-    raise DatasheetError("not_found", "no source gave a PDF for %s: %s" % (
-        part, "; ".join("%s %s" % (item["source"], item["result"]) for item in tried)[:400]))
+    # What is already saved under a similar name (25 Nov: twelve guessed names for the M-SoM
+    # while M524MEA's datasheet sat in the folder).
+    stem = re.sub(r"[^a-z0-9]", "", part.lower())
+    saved = sorted(path.name for path in folder.glob("*.pdf")
+                   if stem and len(stem) >= 3 and stem in re.sub(r"[^a-z0-9]", "", path.name.lower()))[:10] \
+        if folder.is_dir() else []
+    raise DatasheetError("not_found", "no source gave a PDF for %s: %s%s" % (
+        part, "; ".join("%s %s" % (item["source"], item["result"]) for item in tried)[:400],
+        ("; already in the datasheet folder: " + ", ".join(saved) + " (read one with read_reference)")
+        if saved else ""))
 
 
 __all__ = ["DatasheetError", "api_client", "fetch_datasheet"]

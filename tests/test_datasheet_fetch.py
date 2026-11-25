@@ -61,6 +61,12 @@ def part(mpn, url):
 
 
 class FetchDatasheetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from alx.providers import datasheet_fetch
+        datasheet_fetch._NEXAR_SPENT.clear()  # each test's keys start fresh
+
+    tearDown = setUp
+
     def test_the_second_nexar_key_is_tried_and_octopart_copy_kept(self) -> None:
         stand = Stand([{"errors": [{"message": "You have exceeded your part limit of 0."}]},
                        part("691325110002", "https://datasheet.octopart.com/691325110002.pdf")],

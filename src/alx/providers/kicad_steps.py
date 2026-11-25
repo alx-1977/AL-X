@@ -71,6 +71,14 @@ def board_steps(board_text: str):
     return _digest(places), copper
 
 
+def routing_added(before: Path, after: Path) -> bool:
+    """Whether a board gained copper (tracks, arcs, vias, zones, copper shapes) between two files."""
+    if not after.is_file():
+        return False
+    old = board_steps(before.read_text())[1] if before.is_file() else Counter()
+    return bool(board_steps(after.read_text())[1] - old)
+
+
 def fingerprints(project: Path, board_name: str) -> dict:
     """What each step looks like now: schematic files, placement and copper."""
     schematics = {}

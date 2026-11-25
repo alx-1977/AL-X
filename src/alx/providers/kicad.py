@@ -35,7 +35,7 @@ from alx.providers.kicad_board_helpers import BOARD_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
 from alx.providers.kicad_style import label_violations, orientation_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
-from alx.providers.kicad_steps import (STEPS, edit_refusal, fingerprints, parity_mismatches, ready,
+from alx.providers.kicad_steps import (STEPS, edit_refusal, routing_added, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
                                       step_status)
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
@@ -1530,11 +1530,16 @@ class KiCadProvider:
             if meta.get('taint'):
                 raise KiCadError('work_copy_tainted')
             # The revision she read (select's) is the one she changes (18 Nov review).
+            # Say what it is now, so one call corrects it (25 Nov: four refusals in a row, no detail).
             if (arguments.get('work_copy_revision') is not None
                     and self._revision(root, meta) != arguments['work_copy_revision']):
-                raise KiCadError('work_copy_changed')
+                raise KiCadError('work_copy_changed', {'detail': 'the copy is now at revision %s, not %s: look at '
+                                                       'it again (or take_edits if Friedl saved it in KiCad), then '
+                                                       'pass that revision' % (self._revision(root, meta),
+                                                                               arguments['work_copy_revision'])})
             if presentation is not None and self._revision(root, meta) != presentation.work_copy_revision:
-                raise KiCadError('work_copy_changed')
+                raise KiCadError('work_copy_changed', {'detail': 'the job copy moved on to revision %s since the '
+                                                       'presentation pass started' % self._revision(root, meta)})
             project = root / 'project'
             footprints = self._library_parts(arguments.get('footprints') or (), project, 'footprints')
             # From his library even where a sheet already keeps a copy: that copy may be bare
@@ -1902,9 +1907,14 @@ class KiCadProvider:
                 report['set'], wrong = set_check(sets, old_index, new_index)
                 problems.extend(wrong)
         gate['drc'] = self._new_findings(prior_drc, drc)
+        # A new connection without copper is the ratsnest a placement leaves for routing: reported,
+        # never blocking, when the edit added no copper (25 Nov: synced and placed parts showed 29
+        # unrouted connections, and routing waits on the placement, so it could never be saved).
+        unrouted_ok = board in changed and not routing_added(snapshot / board, project / board)
         for checker in ('erc', 'drc'):
             problems.extend(f'{checker.upper()} {f["type"]}: {f["description"]} {f["items"]}'
-                            for f in gate[checker] if f['severity'] == 'error')
+                            for f in gate[checker] if f['severity'] == 'error'
+                            and not (checker == 'drc' and unrouted_ok and f['type'] == 'unconnected_items'))
         return report
 
     @staticmethod
@@ -3796,6 +3806,10 @@ class KiCadProvider:
             # have (his done-lines; review, 15 Nov: approvals alone were checked).
             _totals, signatures = self._board_drc(root, meta)
             new = self._new_faults(root, signatures)
+            if not (meta.get('approvals') or {}).get('routing'):
+                # Before his routing sign-off the board goes back placed, for him to route (D-082):
+                # the ratsnest is the work he takes over, not a fault (25 Nov).
+                new = [f for f in new if f['type'] != 'unconnected_items']
             if new:
                 raise KiCadError('board_not_clean', {'new_faults': new[:20], 'count': len(new)})
 
