@@ -1243,6 +1243,15 @@ Path(sys.argv[1]).with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\
         self.assertIn('(at 5 5)', board)
         self.assertIn('(start 3 4) (end 6 4)', board)
 
+    def test_an_approved_placement_without_new_copper_goes_back_for_him_to_route(self):
+        # 25 Nov: Friedl routes for now, so a placed board is written back before any routing.
+        copy = self.check()['work_copy_id']
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(moved))
+        self.approve(moved, 'placement')
+        self.success('write_back_kicad_board', **self.write_args(moved))
+        self.assertIn('(at 5 5)', (self.project / 'test.kicad_pcb').read_text())
+
     def test_nothing_on_the_board_changes_before_the_schematic_is_approved(self):
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
         checked = self.check()

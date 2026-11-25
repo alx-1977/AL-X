@@ -3788,7 +3788,11 @@ class KiCadProvider:
             # Nothing reaches his project before he has approved every changed
             # step, and the board matches the schematic he approved (D-082).
             status = self._step_status(root, meta)
-            if not ready(status, 'routing'):
+            # A placed board with no copper she added goes back for him to route (25 Nov: Friedl routes
+            # for now; placement write-back was refused for want of a routing approval).
+            placed_only = (ready(status, 'placement')
+                           and not routing_added(source / meta['board'], root / 'project' / meta['board']))
+            if not ready(status, 'routing') and not placed_only:
                 raise KiCadError('step_not_approved', {
                     'needs': next(step for step in STEPS if status[step] not in ('unchanged', 'approved')),
                     'steps': status})
