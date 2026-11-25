@@ -416,8 +416,7 @@ class CategoryARecoveryTests(unittest.TestCase):
         outcome = self._agent(reasoner, dispatch).process(conversation(), RETENTION, 3)
         self.assertEqual(outcome.reason, "budget_exhausted")
         self.assertEqual(outcome.response,
-                         "I've stopped: this request used all my steps. Tell me to carry on and I'll continue. "
-                         "Misc is done; Semiconductors remain.")
+                         "Out of steps; say carry on. Misc is done; Semiconductors remain.")
 
 
 class StopLineTests(unittest.TestCase):
@@ -425,8 +424,8 @@ class StopLineTests(unittest.TestCase):
         from alx.core.loop import CONTINUING_LINE, stop_line
         waiting = goal(status=GoalStatus.AWAITING_INPUT, stop_reason=GoalStopReason.REQUIRED_INPUT,
                        outstanding_work=(WorkItem("work-1", "Semiconductors"),))
-        self.assertIn("used all my steps", stop_line("budget_exhausted", waiting))
-        self.assertIn("already been refused", stop_line("repeated_rejected_call", waiting))
+        self.assertIn("Out of steps", stop_line("budget_exhausted", waiting))
+        self.assertIn("refused request", stop_line("repeated_rejected_call", waiting))
         # Any other stop, such as a review in progress, may resume without him.
         self.assertIsNone(stop_line("merge_blocked", waiting))
         self.assertIsNone(stop_line("budget_exhausted", goal()))

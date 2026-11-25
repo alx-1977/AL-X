@@ -132,11 +132,12 @@ class CoreState(str, Enum):
 # refused argument told as a page that "failed to load"), so the line that
 # says whether she is waiting for him is written here, from her goal's state.
 STOP_CAUSES = {
-    "budget_exhausted": "this request used all my steps",
-    "budget_exceeded": "this task reached its step limit",
-    "repeated_rejected_call": "I repeated a request that had already been refused",
+    "budget_exhausted": "Out of steps",
+    "budget_exceeded": "Step limit reached",
+    "repeated_rejected_call": "A refused request was repeated",
 }
-WAITING_LINE = "I've stopped: %s. Tell me to carry on and I'll continue."
+# Short on purpose (25 Nov: Friedl, the stop line padded every reply).
+WAITING_LINE = "%s; say carry on."
 CONTINUING_LINE = "My planned work carries on by itself; you don't need to do anything."
 
 
@@ -182,8 +183,9 @@ def _validate_raised_mail(
 
 # Her words to Friedl, enforced rather than asked for (2026-11-13: replies of
 # 71, 78, 116 and 129 words in one morning, after the same rule as text alone
-# had been strengthened several times). The rest belongs in detail.
-RESPONSE_WORD_LIMIT = 50
+# had been strengthened several times). The rest belongs in detail. 30 since
+# 25 Nov: 46-word replies still read as reports to him.
+RESPONSE_WORD_LIMIT = 30
 
 
 def _validate_response_length(decision: AgentDecision) -> None:
