@@ -53,6 +53,10 @@ Each is one call, done and checked in code (netlist, ERC, DRC and a picture), an
 - **Add another copy of a part already on the board.** For example, "a third RFSW6024": it copies U6's symbol, footprint and fields, so there's no datasheet hunt.
 - **Replace a part with a new one** at the same pins, like J3/J9 today.
 - **Teardrops** (done today).
+- **Route or reshape a track** (added 26 Nov, from the P0009 RF job: 218 calls for four short tracks):
+  - add a track between two pads, or round an existing bend, in one call, changing only what was asked;
+  - 45° pad exits and rounded bends built in;
+  - for RF nets, the width comes from the board's stack-up for 50 Ω, and the bend radius from the width. On 26 Nov she first used 0.20 mm (about 69 Ω) until Friedl asked for proper RF calculation.
 - **Update the PCB from the schematic:** new parts placed beside related parts, removed parts deleted, nets updated.
 
 ### 4.2 One full view per job
@@ -76,6 +80,14 @@ For a change no single operation covers, she states the parts, the pins and the 
 ### 4.5 Edit directly
 
 No trial runs unless something is risky; a wrong edit is undone with one call. One picture per finished step, not per attempt.
+
+### 4.5a His own edits count as approved
+
+When Friedl saves a change on her copy himself, it counts as approved; he isn't asked to approve his own work (26 Nov: his moved parts needed a placement approval before she could clear a clearance error).
+
+### 4.5b She shows every error she reports
+
+KiCad only marks clearance errors after its checker has run, unlike Altium, so she keeps telling Friedl about them, and shows each one: a close-up picture with the spot marked, and the parts and nets named. On 26 Nov she reported three, never showed them, and the copy she opened showed nothing in KiCad.
 
 ### 4.6 You can see the count
 
@@ -103,10 +115,10 @@ Friedl sees the calls and time before and after. A tool is switched on only when
 
 ## 7. Order of work
 
-1. **The capacitor/resistor package swap (4.1) and the full view (4.2).** This is the biggest win for the least work, and today's 0402 job is the test.
+1. **The capacitor/resistor package swap and the track operation (4.1), the full view (4.2), edit directly (4.5) and his own edits and shown errors (4.5a, 4.5b).** The biggest wins for the least work. Tested on the next design.
 2. **The other single operations (4.1) and part facts on library parts (4.3).**
 3. **The batch schematic change (4.4).** At this step, test mixelpixx and kicad-sch-api against our own code, using the RF switch test.
-4. **Edit directly, and the visible count (4.5, 4.6).** Small changes to her instructions and status.
+4. **The visible count (4.6).** A small change to her status.
 
 Each step is measured on the section 6 jobs before the next one starts.
 

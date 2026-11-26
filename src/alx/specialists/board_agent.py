@@ -297,11 +297,11 @@ class BoardJobAgent(MechanicalWorker):
         for key in ("action",):
             if isinstance(values.get(key), str):
                 receipt[key] = values[key]
-        for key in ("work_copy_id", "work_copy_revision", "previewed"):
+        for key in ("work_copy_id", "work_copy_revision"):
             if isinstance(result, Mapping) and result.get(key) is not None:
                 receipt[key] = result[key]
         scope = self._presentation_scope
-        if (scope is not None and receipt.get("action") == "edit" and not receipt.get("previewed")
+        if (scope is not None and receipt.get("action") == "edit"
                 and receipt.get("work_copy_id") == scope.work_copy_id and receipt.get("work_copy_revision")):
             self._presentation_scope = replace(scope, work_copy_revision=receipt["work_copy_revision"])
             journal["work_copy"] = {"work_copy_id": scope.work_copy_id,

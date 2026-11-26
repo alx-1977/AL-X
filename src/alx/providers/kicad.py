@@ -35,7 +35,7 @@ from alx.providers.kicad_board_helpers import BOARD_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
 from alx.providers.kicad_style import label_violations, orientation_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
-from alx.providers.kicad_steps import (STEPS, edit_refusal, original_of, routing_added, fingerprints, parity_mismatches, ready,
+from alx.providers.kicad_steps import (STEPS, edit_refusal, his_own_steps, original_of, routing_added, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
                                       step_status)
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
@@ -64,12 +64,6 @@ MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024 * 1024
 
 
-class _Preview(Exception):
-    """A dry-run edit's result, carried out through the restore path."""
-
-    def __init__(self, result):
-        super().__init__('preview')
-        self.result = result
 
 
 class KiCadError(Exception):
@@ -1554,14 +1548,14 @@ class KiCadProvider:
                 raise KiCadError('arguments_unusable', {'detail': 'presentation edits must redraw the job work copy'})
         with self._locked(arguments['work_copy_id']):
             if arguments.get('revert_to') is not None:
-                if set(arguments) - {'work_copy_id', 'revert_to', 'dry_run'}:
+                if set(arguments) - {'work_copy_id', 'revert_to'}:
                     raise KiCadError('arguments_unusable', {'detail': 'revert_to goes alone'})
-                # 18 Nov review: a "preview" of a revert reverted for real.
-                if arguments.get('dry_run'):
-                    raise KiCadError('arguments_unusable', {'detail': 'revert_to cannot be previewed; the '
-                                                            'history lists what each revision changed'})
                 return self._revert(arguments)
-            dry_run = bool(arguments.get('dry_run'))
+            if 'dry_run' in arguments:
+                # Edit directly (26 Nov: 61 of 105 edits in one job were trial runs, each then done
+                # again for real). An edit his order or the gate refuses is undone anyway, with why.
+                raise KiCadError('arguments_unusable', {'detail': 'there are no trial runs: edit directly. '
+                                                        'A refused edit is undone with the reason; revert_to undoes a kept one'})
             script = arguments.get('script')
             try:
                 declared = validate_postconditions(plain(arguments.get('intent', [])))
@@ -1683,16 +1677,14 @@ class KiCadProvider:
                                                       sets, prior_drc, signatures, label_exceptions,
                                                       orientation_exceptions, presentation=presentation is not None))
                         if (any(name.endswith(('.kicad_sch', '.kicad_pcb')) for name in changed)
-                                and 'intent' not in arguments and not dry_run):
+                                and 'intent' not in arguments):
                             report['unmet'].append('intent is required for a drawing edit; [] for unchanged connectivity')
-                        if report['unmet'] and not dry_run:
+                        if report['unmet']:
                             raise KiCadError('change_unmet', {k: report[k] for k in ('unmet', 'gate')})
                     if not library and changed:
                         report['compared_to_original'] = self._compared(root, meta, signatures)
-                        if refusal and not dry_run:
+                        if refusal:
                             raise KiCadError('step_not_approved', refusal)
-                        if dry_run and refusal:
-                            report['step_refusal'] = refusal
                     # Friedl's taper rule on the edited board, so she sees a step
                     # before she shows anything (2026-11-12, finished 2026-11-13).
                     # A script that only read changed nothing to check (15 Nov: 26
@@ -1722,9 +1714,7 @@ class KiCadProvider:
                             break
                     truncated = (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
                     report.update(file_diffs=diffs, diffs_truncated=truncated)
-                    if truncated and not dry_run:
-                        # A preview is undone, so it keeps no evidence (18 Nov review: it promised
-                        # before and after copies that the undo then deleted).
+                    if truncated:
                         # The report is cut short: keep before and after copies and the
                         # complete diff as evidence that later edits never delete.
                         # The snapshot itself becomes the before copy, still under the taint.
@@ -1748,11 +1738,6 @@ class KiCadProvider:
                                       before_copy_path=str(evidence / 'before'),
                                       after_copy_path=str(evidence / 'after'))
                     script_path.unlink(missing_ok=True)
-                    if dry_run:
-                        # Seen, then undone: the copy goes back exactly as it was.
-                        raise _Preview({'work_copy_id': arguments['work_copy_id'], 'stdout': stdout[:16000],
-                                        'stderr': stderr[:16000], 'change_report': report, 'before': before,
-                                        'after': after, 'steps': steps, 'previewed': True})
                     if not library and changed:
                         from alx.providers.kicad_drawing import drawings
                         report['drawings'] = drawings(self, snapshot, project, changed,
@@ -1762,8 +1747,7 @@ class KiCadProvider:
                         copy_change.keep_snapshot_at = evidence / 'before'
                     result = {'work_copy_id': arguments['work_copy_id'],
                               'stdout': stdout[:16000], 'stderr': stderr[:16000],
-                              'change_report': report, 'before': before, 'after': after, 'steps': steps,
-                              'previewed': False}
+                              'change_report': report, 'before': before, 'after': after, 'steps': steps}
                     if not library:
                         # Seen as it happens, not first at write-back: parts new to his project that are
                         # not FireFli library parts, which write_back will refuse (19 Nov 2026).
@@ -1790,8 +1774,6 @@ class KiCadProvider:
                     work_copy_tainted=not restored, baseline_eligible=restored, stage=stage)
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise
-                if isinstance(error, _Preview) and restored:
-                    return dict(error.result, work_copy_revision=self._revision(root))
                 code = str(error) if isinstance(error, KiCadError) else (
                     'cli_timeout' if isinstance(error, KICAD_CLI_TIMEOUT) else 'verification_failed')
                 raise KiCadError(code, recovery) from error
@@ -2204,8 +2186,7 @@ class KiCadProvider:
                 if any(name.endswith('.kicad_sch') for name in changed):
                     report['erc'] = self._erc(root, meta, against_original=True)
         return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision, 'stdout': '',
-                'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps,
-                'previewed': False}
+                'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps}
 
     def export(self, arguments):
         with self._locked(arguments['work_copy_id']):
@@ -3709,6 +3690,7 @@ class KiCadProvider:
                     return found
                 old, new = places((project / board).read_text()), places((folder / board).read_text())
                 moved = sorted(ref for ref in new if old.get(ref) != new[ref])
+            steps_before = None if meta.get('library') else fingerprints(project, meta['board'])
             # One kept change: all of it or none of it (a failed copy no longer leaves half his edit).
             with self._change(root, meta) as copy_change:
                 for name in changed:
@@ -3723,7 +3705,10 @@ class KiCadProvider:
                     raise KiCadError('verification_failed', {'detail': 'his window saved again while his edit was '
                                                              'being taken; take it again'})
                 after = self._revision(root, meta)
-                copy_change.meta = dict(meta, view=dict(view, revision=after, files=theirs))
+                approvals = meta.get('approvals') or {}
+                if steps_before is not None:
+                    approvals = his_own_steps(approvals, steps_before, fingerprints(project, meta['board']))
+                copy_change.meta = dict(meta, view=dict(view, revision=after, files=theirs), approvals=approvals)
             return {'changed': changed, 'deleted': deleted, 'moved': moved[:80], 'moved_total': len(moved),
                     'work_copy_revision': after}
 

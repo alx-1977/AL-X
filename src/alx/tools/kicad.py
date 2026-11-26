@@ -60,7 +60,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'step_refusal': MAP, 'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I,
+    'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I,
     'set': array(MAP), 'label_exceptions': array(obj({'label_net': S, 'reason': S})),
     'orientation_exceptions': array(obj({'orientation': S, 'reason': S}))},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
@@ -142,10 +142,9 @@ _ACTION_DEFINITIONS = (
         'remove_parts, place_part, route_connection, to_plane, add_keepout, remove_keepouts, '
         'remove_tracks, remove_dangling_tracks, remove_copper_shapes, add_teardrops, set_title_block, '
         'sync_from_schematic(b,place) (supply needed footprints). '
-        'argv[1] is the board. dry_run true runs it, reports everything it would change '
-        '(printed output, change report, DRC, comparison with his original, and step_refusal if '
-        'his order would refuse it) and puts the copy back as it was: look before you change, '
-        'never raise an error to undo. A script cannot start programs: check a copy with check '
+        'argv[1] is the board. Edit directly: there are no trial runs. An edit his order or the '
+        'checks refuse is undone and says why; revert_to undoes a kept one in one call. Never raise '
+        'an error to undo. A script cannot start programs: check a copy with check '
         'work_copy_id. Kernel confines writes to its project folder, including '
         'child processes. May edit board, project and rules freely. Returns a bounded plain '
         'change report, structural board diff and DRC totals before/after. Failed edits '
@@ -210,12 +209,12 @@ _ACTION_DEFINITIONS = (
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
         obj({'work_copy_id': S, 'script': S, 'intent': array(MAP), 'footprints': array(S), 'symbols': array(S),
-             'dry_run': B, 'revert_to': S, 'work_copy_revision': S}, ('work_copy_id',)),
+             'revert_to': S, 'work_copy_revision': S}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
-             'previewed': B, 'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
+             'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
             ('work_copy_id', 'work_copy_revision', 'stdout', 'stderr', 'change_report', 'before', 'after',
-             'steps', 'previewed')),
+             'steps')),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('export_kicad_manufacturing',
         'Export Gerbers and drill files from an untainted work copy through KiCad CLI. '

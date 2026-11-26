@@ -150,6 +150,24 @@ def step_status(original: dict, approvals: dict, current: dict) -> dict:
     return status
 
 
+def his_own_steps(approvals: dict, before: dict, after: dict) -> dict:
+    """Approvals with each step Friedl changed himself counted as approved as he saved it.
+
+    26 Nov: he moved four parts in KiCad and saved, and was then asked to approve his own
+    placement before a clearance fix could go in. Only the steps his edit changed: her work in
+    other steps still needs his approval.
+    """
+    approvals = dict(approvals)
+    for index, step in enumerate(STEPS):
+        if before[step] != after[step]:
+            approvals[step] = {name: after[name] for name in STEPS[:index + 1]}
+            if step == 'placement':
+                approvals[step]['routing_seen'] = after['routing']
+            if step == 'routing':
+                approvals.pop('routing_due', None)
+    return approvals
+
+
 def ready(status: dict, step: str) -> bool:
     """Every step up to and including this one is unchanged or approved."""
     return all(status[name] in ('unchanged', 'approved', 'adjusted') for name in STEPS[:STEPS.index(step) + 1])

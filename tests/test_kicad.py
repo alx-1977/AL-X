@@ -1469,9 +1469,6 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         recovery = result.failure['recovery']
         self.assertEqual(recovery['gate']['drc'][0]['type'], 'clearance')
         self.assertEqual(recovery['rollback_status'], 'restored')
-        preview = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
-                               script=EDIT_SCRIPT, dry_run=True)
-        self.assertEqual(preview['change_report']['compared_to_original']['new'], 1)
 
     def test_an_edit_gets_the_library_footprints_it_names(self):
         """Her script cannot read his library; the footprints it names go in with it."""
@@ -1588,6 +1585,25 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], revert_to='start')
         self.assertEqual((work / window_board.name).read_text(), BOARD)
 
+    def test_a_step_he_changed_himself_counts_as_approved(self):
+        """26 Nov: he moved four parts in KiCad and saved, then had to approve his own placement
+        before a clearance fix could go in. Only the steps he changed: hers still need his yes."""
+        checked = self.check()
+        provider = self.runtime.provider
+        provider.render_folder = self.root / 'renders'
+        provider.viewer_settle_seconds = 0
+        provider.open_viewer = lambda what, path, index: type('V', (), {'terminate': lambda self: None})()
+        provider.capture_screen = lambda target: Path(target).write_bytes(b'png')
+        shown = Path(self.success('open_in_kicad', work_copy_id=checked['work_copy_id'], what='board')['opened'][0])
+        shown.write_text(BOARD.replace('(uuid "footprint-id")', '(at 5 5) (uuid "footprint-id")', 1))
+        taken = self.success('take_edits', work_copy_id=checked['work_copy_id'])
+        self.assertEqual(list(taken['moved']), ['U1'])
+        # Copper may go on at once: his placement needs no approval of his own.
+        routed = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                              script=self.ADD_TRACK, intent=[])
+        self.assertEqual(routed['steps']['placement'], 'approved')
+        self.assertEqual(routed['steps']['routing'], 'needs_approval')
+
     def test_taking_his_edits_is_all_or_nothing_and_includes_deletions(self):
         """18 Nov review: a failure part-way left half his edit in; a file he deleted stayed."""
         (self.project / 'notes.kicad_dru').write_text('(version 1)')
@@ -1644,24 +1660,20 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         self.failure('arguments_unusable', 'check_kicad_board', work_copy_id=checked['work_copy_id'],
                      project_dir=str(self.project))
 
-    def test_a_dry_run_shows_the_change_and_puts_the_copy_back(self):
-        """15 Nov: the board agent crashed six scripts on purpose to see a change undone."""
+    def test_there_are_no_trial_runs(self):
+        """26 Nov: 61 of 105 edits in one job were trial runs, each then done again for real.
+        A refused edit is undone with the reason, so a trial run adds nothing."""
         checked = self.check()
         copy = next(self.storage.rglob(checked['work_copy_id'] + '/project/test.kicad_pcb'))
-        seen = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
-                            script=EDIT_SCRIPT + "print('would move')", dry_run=True)
-        self.assertTrue(seen['previewed'])
-        self.assertIn('would move', seen['stdout'])
-        self.assertEqual(seen['change_report']['files_changed'], ('test.kicad_pcb',))
-        self.assertEqual(seen['work_copy_revision'], checked['work_copy_revision'])
+        self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                     script=EDIT_SCRIPT, dry_run=True)
         self.assertEqual(copy.read_text(), BOARD)
-        # Copper before the placement is approved: shown as refused, nothing kept, no error.
-        refused = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
-                               script=self.MOVE_U1 + self.ADD_TRACK.split('\n', 3)[3], dry_run=True)
-        self.assertEqual(refused['change_report']['step_refusal']['needs'], 'placement')
+        # Copper before the placement is approved: refused, undone, and says which step he must see.
+        refused = self.call('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
+                            script=self.MOVE_U1 + self.ADD_TRACK.split('\n', 3)[3])
+        self.assertEqual(refused.failure['code'], 'step_not_approved')
+        self.assertEqual(refused.failure['recovery']['needs'], 'placement')
         self.assertEqual(copy.read_text(), BOARD)
-        kept = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
-        self.assertFalse(kept['previewed'])
 
     def test_an_edit_that_leaves_the_board_alone_runs_no_drc(self):
         """15 Nov: each schematic edit ran the whole-board DRC twice, 25 s an edit."""
@@ -1670,7 +1682,7 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=EDIT_SCRIPT)
         self.calls.clear()
         self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script=self.CHANGE_SCHEMATIC,
-                     dry_run=True)
+                     intent=[])
         self.assertEqual([call for call in self.calls if call[1:3] == ['pcb', 'drc']], [])
         self.calls.clear()
         # A change to the rules is a change to the result.
@@ -1759,7 +1771,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         self.assertNotIn(str(backups), detail)
 
     def test_edit_documents_schematic_helper_signatures_and_exposes_help(self):
-        text = self.success('edit', work_copy_id=self.check()['work_copy_id'], dry_run=True, intent=[],
+        text = self.success('edit', work_copy_id=self.check()['work_copy_id'], intent=[],
                             script='print(help("split_sheet"))\nprint(help("Sheet.symbols"))')
         self.assertIn('Return references and item count', text['stdout'])
         self.assertIn('lib_id, value', text['stdout'])
@@ -1773,8 +1785,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         (self.project / 'test.kicad_sch').write_text('(kicad_sch (version 1))\n')
         checked = self.check()
         self.calls.clear()
-        read = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="print('look')",
-                            dry_run=True)
+        read = self.success('edit_kicad_work_copy', work_copy_id=checked['work_copy_id'], script="print('look')")
         self.assertEqual(read['change_report']['files_changed'], ())
         self.assertEqual([call[1:4] for call in self.calls if call[0] != '/usr/bin/sandbox-exec'], [])
 
@@ -1838,9 +1849,9 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
         self.assertEqual(reverted.state, CapabilityResultState.FAILED)
         self.assertEqual(len(entries()), 1)
         self.assertEqual(KiCadProvider(self.settings, self.execute_cli)._revision(root), first['work_copy_revision'])
-        # A preview of a revert is refused, never carried out.
+        # A revert takes nothing else, so nothing else is carried out with it.
         self.failure('arguments_unusable', 'edit_kicad_work_copy', work_copy_id=checked['work_copy_id'],
-                     revert_to='start', dry_run=True)
+                     revert_to='start', script=EDIT_SCRIPT)
         self.assertEqual(len(entries()), 1)
 
     def test_failed_edit_restores_entire_copy_and_absent_files(self):
