@@ -29,7 +29,9 @@ class KiCadSettings:
             return Path(environment.get(name, str(default))).expanduser().resolve()
 
         storage = storage_root.expanduser().resolve()
-        work = path('ALX_KICAD_WORK_ROOT', storage / 'kicad')
+        # ".nosync": iCloud Drive leaves the folder alone. Work copies sat under the Desktop, which
+        # it syncs, and its conflict copies broke write-backs (25 Nov) and step checks (26 Nov).
+        work = path('ALX_KICAD_WORK_ROOT', storage / 'kicad.nosync')
         if work == storage or not work.is_relative_to(storage):
             raise ConfigurationError('ALX_KICAD_WORK_ROOT must be under AL/X storage')
         roots = tuple(Path(p).expanduser().resolve() for p in environment.get(
