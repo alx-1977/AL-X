@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -239,6 +240,56 @@ def _where(o: Mapping[str, Any]) -> list[float] | None:
     if o.get("start") and o.get("end"):
         return [(o["start"][0] + o["end"][0]) / 2, (o["start"][1] + o["end"][1]) / 2]
     return None
+
+
+VIEW_MARGIN_MM = 2.0
+COPPER = ("track", "arc", "via", "zone", "teardrop")
+# A net with a pour, or more copper than this, runs across the board (ground, supplies): only
+# its copper near the job is part of the job's picture.
+BOARD_WIDE_ITEMS = 40
+
+
+def view(index: Mapping[str, Any], *, refs: Iterable[str] | None = None, nets: Iterable[str] | None = None,
+         area: Iterable[float] | None = None) -> list[dict[str, Any]]:
+    """The whole picture of a job in one reading (26 Nov: one RF job made 70 selects, one kind at a
+    time): the named parts with their fields and pads; all copper of their nets and of the nets
+    named, a board-wide net's only near the job; and every other pad, copper item and keepout in
+    the area: the one given, else the named parts' extent (the nets' without parts) plus
+    VIEW_MARGIN_MM."""
+    refs = set(refs or ())
+    objects = index["objects"]
+    mine = [o for o in objects if o["kind"] in ("part", "field", "pad") and o.get("ref") in refs]
+    nets = set(nets or ()) | {o["net"] for o in mine if o["kind"] == "pad" and o.get("net")}
+    sizes = Counter(o.get("net") for o in objects if o["kind"] in COPPER)
+    wide = {o.get("net") for o in objects if o["kind"] == "zone"} | {
+        net for net, count in sizes.items() if count > BOARD_WIDE_ITEMS}
+    if area is not None:
+        x0, y0, x1, y1 = list(area)
+        box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+    else:
+        # Around the parts when parts are named (a control net may cross the board); else the nets.
+        spots = [_where(o) for o in mine] if mine else [_where(o) for o in objects if o["kind"] in COPPER
+                                                        and o.get("net") in nets - wide]
+        spots = [s for s in spots if s]
+        if not spots:
+            raise ValueError("view needs refs, nets or an area that are on this board")
+        box = (min(s[0] for s in spots) - VIEW_MARGIN_MM, min(s[1] for s in spots) - VIEW_MARGIN_MM,
+               max(s[0] for s in spots) + VIEW_MARGIN_MM, max(s[1] for s in spots) + VIEW_MARGIN_MM)
+
+    def inside(o):
+        spot = _where(o)
+        if spot:
+            return box[0] <= spot[0] <= box[2] and box[1] <= spot[1] <= box[3]
+        return any(box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3] for p in o.get("outline") or ())
+    chosen = {o["id"] for o in mine}
+    found = list(mine)
+    for o in objects:
+        if o["id"] in chosen:
+            continue
+        if (o["kind"] in COPPER and o.get("net") in nets - wide) or (
+                o["kind"] in COPPER + ("keepout", "pad") and inside(o)):
+            found.append(o)
+    return found
 
 
 def select(index: Mapping[str, Any], kind: str, *, refs: Iterable[str] | None = None,

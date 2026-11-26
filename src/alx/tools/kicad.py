@@ -433,11 +433,17 @@ SELECT = CapabilityDefinition('select',
     '[x0, y0, x1, y1] mm, reads (a board text\'s exact words), ids. count is how many match; objects '
     'lists them up to limit (default 100); named true leaves out parts without a designator (logos). '
     'work_copy_revision is the revision read: pass it to the edit that uses these object IDs, '
-    'and the edit is refused if the copy has changed since.',
+    'and the edit is refused if the copy has changed since. kind view is the whole picture of a job '
+    'in one call, every kind together (each object says its kind; counts per kind): the parts named '
+    'in refs with their fields and pads, all copper of their nets and of nets named (a ground or '
+    'supply net\'s only near the job), and every other pad, copper item and keepout around them '
+    '(area, or their extent plus 2 mm); limit defaults to 400. Start a board job with it rather than '
+    'one select per kind.',
     obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'kind': S, 'refs': array(S), 'nets': array(S),
          'layer': S, 'name': S, 'value': S, 'footprint': S, 'area': array(N), 'reads': S, 'ids': array(S),
          'named': B, 'limit': I}, ('kind',)),
-    obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S, 'work_copy_revision': S},
+    obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S, 'work_copy_revision': S,
+         'counts': MAP},
         ('kind', 'count', 'objects', 'truncated')),
     SideEffect.NONE, FAILURES)
 

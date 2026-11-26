@@ -8,7 +8,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.providers.kicad_index import board_index, net_groups, netlist_model, netlist_nets, pad_nets, select  # noqa: E402
+from alx.providers.kicad_index import (  # noqa: E402
+    BOARD_WIDE_ITEMS, board_index, net_groups, netlist_model, netlist_nets, pad_nets, select, view,
+)
 
 BOARD = '''(kicad_pcb
 \t(net 0 "")
@@ -72,6 +74,30 @@ class BoardIndexTests(unittest.TestCase):
         self.assertEqual(select(self.index, "text", reads="Keepout")[0]["thickness"], 0.254)
         with self.assertRaises(ValueError):
             select(self.index, "everything")
+
+    def test_a_view_is_the_whole_picture_of_a_job_in_one_reading(self):
+        """26 Nov: one RF job made 70 selects, one kind at a time."""
+        board = BOARD.replace(')\n)', ')\n\t(segment (start 30 40) (end 33 40) (width 0.2) (layer "B.Cu") (net "VCC")'
+                                         ' (uuid "seg-vcc"))\n\t(segment (start 11 21) (end 11.5 21) (width 0.2)'
+                                         ' (layer "F.Cu") (net "SIG") (uuid "seg-near"))\n\t(segment (start 80 80)'
+                                         ' (end 81 80) (width 0.2) (layer "F.Cu") (net "SIG") (uuid "seg-far"))\n)')
+        seen = {o["id"]: o["kind"] for o in view(board_index(board), refs=["R1"])}
+        # The part, its fields and pads; all of its signal net's copper, even far off (C1's end of VCC)...
+        for expected in ("fp-r1", "ref-r1", "val-r1", "pad-r1-1", "pad-r1-2", "seg-vcc"):
+            self.assertIn(expected, seen)
+        # ...a board-wide net (GND has a pour) and another net's copper only near the part.
+        self.assertIn("seg-near", seen)
+        self.assertNotIn("seg-far", seen)
+        self.assertNotIn("C1.1", seen)
+        self.assertNotIn("zone-1", seen)
+        with self.assertRaises(ValueError):
+            view(board_index(board), refs=["R9"])
+
+    def test_a_net_with_much_copper_counts_as_board_wide(self):
+        far = "".join('\t(segment (start %d 90) (end %d 91) (width 0.2) (layer "F.Cu") (net "VCC") (uuid "v%d"))\n'
+                      % (100 + i, 100 + i, i) for i in range(BOARD_WIDE_ITEMS + 1))
+        seen = {o["id"] for o in view(board_index(BOARD.replace(')\n)', ')\n' + far + ')')), refs=["R1"])}
+        self.assertFalse(any(name.startswith("v") and name[1:].isdigit() for name in seen))
 
     def test_outline_geometry_is_part_of_the_index(self):
         """19 Nov recheck: an Edge.Cuts endpoint moved 10 mm passed the whole-board check."""

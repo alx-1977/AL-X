@@ -1000,7 +1000,7 @@ class KiCadProvider:
     def select(self, arguments):
         """Find Similar on a board: the objects of one kind matching every filter, from the board
         index of this revision (18 Nov). Changes nothing."""
-        from alx.providers.kicad_index import select
+        from alx.providers.kicad_index import select, view
         revision, library = None, False
         if self._is_copy_id(arguments.get('work_copy_id')):
             # Read under the copy's lock, so the revision it reports is the one it read (19 Nov recheck).
@@ -1019,15 +1019,21 @@ class KiCadProvider:
                                                    'area', 'reads', 'ids', 'named') if arguments.get(key) is not None
                    and not (library and key == 'footprint')}
         try:
-            found = select(index, arguments['kind'], **filters)
+            if arguments['kind'] == 'view':
+                if set(filters) - {'refs', 'nets', 'area'}:
+                    raise ValueError('a view takes refs, nets and area only')
+                found = view(index, **filters)
+            else:
+                found = select(index, arguments['kind'], **filters)
         except (TypeError, ValueError) as error:
             raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
-        limit = max(1, min(int(arguments.get('limit') or 100), 500))
+        limit = max(1, min(int(arguments.get('limit') or (400 if arguments['kind'] == 'view' else 100)), 500))
         # Polygon outlines can run to thousands of points: shown as their count.
         shown = [{key: (len(value) if key in ('outline', 'points') else value) for key, value in item.items()}
                  for item in found[:limit]]
+        counts = dict(Counter(item['kind'] for item in found)) if arguments['kind'] == 'view' else None
         return {'kind': arguments['kind'], 'count': len(found), 'objects': shown,
-                'truncated': len(found) > limit, 'board': board.name,
+                'truncated': len(found) > limit, 'board': board.name, **({'counts': counts} if counts else {}),
                 **({'work_copy_revision': revision} if revision else {})}
 
     def _copper_in(self, board, arguments):

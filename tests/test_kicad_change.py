@@ -256,6 +256,18 @@ s.save()
             self.assertTrue(any("off the block slots" in w for w in warnings), warnings)
             self.assertTrue(any("use info_table" in w for w in warnings), warnings)
 
+    def test_a_view_through_the_tool_gives_every_kind_with_counts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            work = self.call(runtime, "check_kicad_board", project_dir=str(project)).values["work_copy_id"]
+            parts = self.call(runtime, "select", work_copy_id=work, kind="part").values["objects"]
+            seen = self.call(runtime, "select", work_copy_id=work, kind="view", refs=[parts[0]["ref"]]).values
+            self.assertEqual(seen["kind"], "view")
+            self.assertEqual(sum(seen["counts"].values()), seen["count"])
+            self.assertIn("part", seen["counts"])
+            refused = self.call(runtime, "select", work_copy_id=work, kind="view", refs=[parts[0]["ref"]], name="x")
+            self.assertEqual(refused.failure["code"], "arguments_unusable")
+
     def test_select_then_set_verifies_the_ids_at_the_selected_revision(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime, project = self.runtime(folder)
