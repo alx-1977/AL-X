@@ -1656,6 +1656,8 @@ p.write_text(p.read_text().replace('(net 2 "B")', '(net 1 "A")'))
         again = self.success('check_kicad_board', work_copy_id=checked['work_copy_id'])
         self.assertEqual(again['work_copy_id'], checked['work_copy_id'])
         self.assertEqual(again['compared_to_original']['new'], 1)
+        # Every error is counted for him, each with a close-up where KiCad gave a position.
+        self.assertEqual(again['errors_to_show']['count'], 1)
         self.failure('arguments_unusable', 'check_kicad_board')
         self.failure('arguments_unusable', 'check_kicad_board', work_copy_id=checked['work_copy_id'],
                      project_dir=str(self.project))

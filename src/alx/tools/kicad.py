@@ -52,6 +52,8 @@ ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, '
 
 LAYOUT_RULES = obj({'findings': array(StructuredSchema(ValueKind.OBJECT)), 'omitted': I,
                     'not_checked': S}, ('findings', 'omitted'))
+# Every DRC error with a close-up ready for show_on_screen (26 Nov: reported to him, never shown).
+ERRORS = obj({'count': I, 'shown': array(MAP)}, ('count', 'shown'))
 CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'file_diffs': array(obj({'name': S, 'diff': S, 'truncated': B})), 'diffs_truncated': B, 'board': obj({
     'layers': SECTION, 'setup': SECTION, 'stackup': SECTION,
@@ -60,7 +62,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I,
+    'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I, 'errors_to_show': ERRORS,
     'set': array(MAP), 'label_exceptions': array(obj({'label_net': S, 'reason': S})),
     'orientation_exceptions': array(obj({'orientation': S, 'reason': S}))},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
@@ -98,12 +100,15 @@ _ACTION_DEFINITIONS = (
         "KiCad's board-against-schematic check (schematic_parity) reads only the first sheet: "
         'run make_hierarchical on the copy first, and write it back with his approval. '
         'work_copy_id instead of project_dir checks one of your copies again as it is now; '
-        'compared_to_original says what is new against his original.',
+        'compared_to_original says what is new against his original. errors_to_show lists every '
+        'DRC error (count) with a close-up view of the spot, its nets in red: KiCad shows him none '
+        'until its own checker runs, so when you tell him of an error, show it (show_on_screen with '
+        'that view); an edit report carries the same.',
         obj({'project_dir': S, 'work_copy_id': S}, ()), obj({'work_copy_id': S, 'work_copy_revision': S,
             'custom_rule_citations': RULE_CITATIONS, 'work_copy_tainted': B, 'baseline_eligible': B,
             'totals': TOTALS, 'violations': array(GROUP), 'unconnected_items': array(GROUP),
             'schematic_parity': array(GROUP), 'erc': ERC, 'layout_rules': LAYOUT_RULES,
-            'compared_to_original': MAP}),
+            'compared_to_original': MAP, 'errors_to_show': ERRORS}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('edit_kicad_work_copy',
         'Run one bounded Python script on the work copy. Declare intent as a list of postconditions. '

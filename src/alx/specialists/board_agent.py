@@ -311,6 +311,14 @@ class BoardJobAgent(MechanicalWorker):
                                     "work_copy_revision": receipt.get("work_copy_revision", "")}
         journal["receipts"] = (journal.get("receipts", []) + [receipt])[-RECEIPTS_KEPT:]
         progress = journal["activity"]
+        if isinstance(result, Mapping) and summary.get("outcome") == "succeeded":
+            # The DRC errors of the copy as last checked, for the report (26 Nov: three were
+            # reported to Friedl and never shown). Kept with the revision they belong to.
+            change = result.get("change_report") if isinstance(result.get("change_report"), Mapping) else {}
+            errors = result.get("errors_to_show") or change.get("errors_to_show")
+            if isinstance(errors, Mapping) and result.get("work_copy_revision"):
+                journal["errors_to_show"] = dict(errors, work_copy_id=result.get("work_copy_id"),
+                                                 work_copy_revision=result["work_copy_revision"])
         if isinstance(result, Mapping):
             change = result.get("change_report")
             if isinstance(change, Mapping):
@@ -434,6 +442,13 @@ class BoardJobAgent(MechanicalWorker):
 
     def _finish(self, job_id: str, journal: dict[str, Any], calls: list, outcome: dict[str, Any]) -> dict[str, Any]:
         self._save(job_id, journal)
+        report = outcome.get("report") if isinstance(outcome.get("report"), Mapping) else {}
+        errors = journal.get("errors_to_show") or {}
+        if report and all(errors.get(key) == report.get(key) for key in ("work_copy_id", "work_copy_revision")):
+            # Attached mechanically, never from what the agent wrote: the errors of the very
+            # revision it reports, so AL/X can show him each one.
+            outcome = dict(outcome, errors_to_show={"count": errors.get("count", 0),
+                                                    "shown": list(errors.get("shown", ()))})
         return {"job_id": job_id, "calls": calls, **outcome}
 
     def _work(self, job_id: str | None, brief: str | None, message: str | None,

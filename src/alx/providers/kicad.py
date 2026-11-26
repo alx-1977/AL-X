@@ -35,6 +35,7 @@ from alx.providers.kicad_board_helpers import BOARD_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
 from alx.providers.kicad_style import label_violations, orientation_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
+from alx.providers.kicad_errors import errors_to_show
 from alx.providers.kicad_steps import (STEPS, edit_refusal, his_own_steps, original_of, routing_added, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
                                       step_status)
@@ -1683,6 +1684,7 @@ class KiCadProvider:
                             raise KiCadError('change_unmet', {k: report[k] for k in ('unmet', 'gate')})
                     if not library and changed:
                         report['compared_to_original'] = self._compared(root, meta, signatures)
+                        report['errors_to_show'] = errors_to_show(arguments['work_copy_id'], signatures)
                         if refusal:
                             raise KiCadError('step_not_approved', refusal)
                     # Friedl's taper rule on the edited board, so she sees a step
@@ -2730,6 +2732,7 @@ class KiCadProvider:
         (root / 'baseline.json').write_text(json.dumps(dict(baseline, erc=erc_signatures)))
         result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
         result['compared_to_original'] = self._compared(root, meta, signatures)
+        result['errors_to_show'] = errors_to_show(work_id, signatures)
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
 
     def _check_copy(self, work_copy_id):
@@ -2747,6 +2750,7 @@ class KiCadProvider:
             result['erc'] = self._erc(root, meta, against_original=True)
             result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
             result['compared_to_original'] = self._compared(root, meta, signatures)
+            result['errors_to_show'] = errors_to_show(work_copy_id, signatures)
             return dict(result, work_copy_id=work_copy_id, work_copy_revision=self._revision(root))
 
     def copy_library(self, arguments):
