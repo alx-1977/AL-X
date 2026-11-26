@@ -93,6 +93,18 @@ class BoardIndexTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             view(board_index(board), refs=["R9"])
 
+    def test_a_view_finds_what_crosses_or_covers_the_area(self):
+        """26 Nov review: a track through the area with both ends outside, and a keepout covering
+        all of it, are obstacles there too."""
+        board = BOARD.replace(')\n)', ')\n\t(segment (start 0 50) (end 100 50) (width 0.2) (layer "F.Cu")'
+                                         ' (net "SIG") (uuid "seg-across"))\n\t(zone (net 0) (net_name "")'
+                                         ' (layers "F.Cu") (uuid "keep-all") (keepout (tracks not_allowed))'
+                                         ' (polygon (pts (xy 0 0) (xy 200 0) (xy 200 200) (xy 0 200))))\n)')
+        seen = {o["id"] for o in view(board_index(board), area=[45, 45, 55, 55])}
+        self.assertIn("seg-across", seen)
+        self.assertIn("keep-all", seen)
+        self.assertNotIn("seg-across", {o["id"] for o in view(board_index(board), area=[45, 60, 55, 70])})
+
     def test_a_net_with_much_copper_counts_as_board_wide(self):
         far = "".join('\t(segment (start %d 90) (end %d 91) (width 0.2) (layer "F.Cu") (net "VCC") (uuid "v%d"))\n'
                       % (100 + i, 100 + i, i) for i in range(BOARD_WIDE_ITEMS + 1))

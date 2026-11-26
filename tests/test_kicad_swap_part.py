@@ -18,7 +18,8 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
 
 from alx.providers.kicad_passives import (decode, generator_entry, jlc_candidates, jlc_listing,  # noqa: E402
                                           with_entry, with_lcsc_row)
-from alx.providers.kicad_swap import board_fields, expand_refs, library_fields, placed_symbols  # noqa: E402
+from alx.providers.kicad_swap import (board_fields, board_script, expand_refs, library_fields,  # noqa: E402
+                                      placed_symbols, schematic_refs)
 
 GENERATOR = '''PARTS = (
     # Taiyo Yuden X5R / X7R
@@ -138,7 +139,18 @@ class SwapPieces(unittest.TestCase):
                 '(kicad_sch\n\t(symbol\n\t\t(lib_id "Device:C")\n\t\t(property "Reference" "C1")\n'
                 '\t\t(instances (project "p" (path "/x" (reference "C1")) (path "/y" (reference "C7"))))\n\t)\n'
                 '\t(symbol\n\t\t(lib_id "power:GND")\n\t\t(property "Reference" "#PWR01")\n\t)\n)\n')
-            self.assertEqual(placed_symbols(Path(folder)), {"C1": "Device:C", "C7": "Device:C"})
+            shared = ("Device:C", "C1", ("C1", "C7"))
+            placed = placed_symbols(Path(folder))
+            self.assertEqual(placed, {"C1": shared, "C7": shared})
+            # One symbol serves both uses of the sheet: C7 alone cannot change, both together can.
+            with self.assertRaisesRegex(ValueError, "also changes C1"):
+                schematic_refs(placed, ["C7"])
+            self.assertEqual(schematic_refs(placed, ["C7", "C1"]), ["C1"])
+
+    def test_a_part_that_keeps_its_footprint_takes_only_the_fields(self):
+        script = board_script(["R1", "R2"], "Lib:F", {"Value": "1k"}, keep=("R2",))
+        self.assertIn("if ref not in ['R2']:", script)
+        self.assertIn("set_field(board, ref, name, value)", script)
 
 
 FIREFLI = Path("/Users/friedlbasson/Desktop/VSC/FireFli-KiCad-Lib")
@@ -198,8 +210,8 @@ class RealSwap(unittest.TestCase):
             self.assertEqual(first.state, CapabilityResultState.SUCCEEDED, first.failure)
             self.assertEqual((first.values["side"], list(first.values["swapped"])), ("schematic", ["R1", "R2"]))
             copy = runtime.provider._load(work)[0] / "project"
-            self.assertEqual(placed_symbols(copy)["R1"], RESISTOR)
-            self.assertEqual(placed_symbols(copy)["R3"], "Device:R")
+            self.assertEqual(placed_symbols(copy)["R1"][0], RESISTOR)
+            self.assertEqual(placed_symbols(copy)["R3"][0], "Device:R")
             early = call("swap_part", work_copy_id=work, refs=["R1-R2"], part=RESISTOR)
             self.assertEqual(early.failure["code"], "step_not_approved", early.failure)
             # He approves what he was shown (17 Nov): the copy is opened for him first.
@@ -221,6 +233,20 @@ class RealSwap(unittest.TestCase):
             self.assertIn('"RC0603FR-0710KL"', board)
             done = call("swap_part", work_copy_id=work, refs=["R1-R2"], part=RESISTOR)
             self.assertEqual(done.values["side"], "none", done.failure)
+            # A value change on the same footprint: the board keeps the pads and takes the new fields.
+            other = "FireFli_Resistors:RC0603FR-07100KL"
+            value = call("swap_part", work_copy_id=work, refs=["R1"], part=other)
+            self.assertEqual(value.values["side"], "schematic", value.failure)
+            call("open_in_kicad", work_copy_id=work, what="schematic")
+            again = call("approve_step", work_copy_id=work, step="schematic",
+                         work_copy_revision=value.values["work_copy_revision"])
+            self.assertEqual(again.state, CapabilityResultState.SUCCEEDED, again.failure)
+            fields = call("swap_part", work_copy_id=work, refs=["R1"], part=other)
+            self.assertEqual((fields.values["side"], list(fields.values["swapped"])), ("board", ["R1"]), fields.failure)
+            board = (copy / "board.kicad_pcb").read_text()
+            self.assertIn('"RC0603FR-07100KL"', board)
+            self.assertEqual(board.count('(footprint "FireFli_Resistors:R_0603_1608Metric"'), 2)
+            self.assertEqual(call("swap_part", work_copy_id=work, refs=["R1"], part=other).values["side"], "none")
 
 
 @unittest.skipUnless(_firefli_configured(), "KiCad or the FireFli library is not installed")

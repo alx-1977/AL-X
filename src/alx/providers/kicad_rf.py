@@ -125,17 +125,21 @@ def round_bends(board, net, radius=None, on=None):
         for pad_ in footprint.Pads():
             if pad_.GetNetCode() == mine:
                 stops.add(key(xy(pad_.GetPosition())))
-    ends = {}
+    ends, meeting = {}, {}
     for item in segments:
         for end in (xy(item.GetStart()), xy(item.GetEnd())):
             ends.setdefault((item.GetLayer(), item.GetWidth(), key(end)), []).append(item)
+            # Every track of the net ending here on this layer, whatever its width: a narrower
+            # branch makes the point a junction, never a corner to round away.
+            meeting[(item.GetLayer(), key(end))] = meeting.get((item.GetLayer(), key(end)), 0) + 1
     used, rounded, runs, left = set(), 0, 0, []
     for item in segments:
         if id(item) in used:
             continue
         group = (item.GetLayer(), item.GetWidth())
         def inner(point):
-            return key(point) not in stops and len(ends.get(group + (key(point),), ())) == 2
+            return (key(point) not in stops and len(ends.get(group + (key(point),), ())) == 2
+                    and meeting.get((group[0], key(point))) == 2)
         chain, points = [item], [xy(item.GetStart()), xy(item.GetEnd())]
         used.add(id(item))
         for forward in (True, False):

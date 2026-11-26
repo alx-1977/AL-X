@@ -1090,7 +1090,7 @@ class KiCadProvider:
         keeping their nets and taking the part's fields. Through edit, so every check applies."""
         from alx.providers.kicad_index import board_index
         from alx.providers.kicad_swap import (board_fields, board_script, expand_refs, library_fields,
-                                              placed_symbols, schematic_script)
+                                              placed_symbols, schematic_refs, schematic_script)
         try:
             refs = expand_refs(arguments.get('refs'))
         except ValueError as error:
@@ -1114,19 +1114,32 @@ class KiCadProvider:
         if unknown:
             raise KiCadError('arguments_unusable', {'detail': 'not on the schematic: %s' % ', '.join(unknown)})
         base = {'work_copy_id': work_copy_id, 'part': part, 'footprint': footprint}
-        on_schematic = [ref for ref in refs if placed[ref] != part]
+        on_schematic = [ref for ref in refs if placed[ref][0] != part]
         if on_schematic:
+            try:
+                symbols = schematic_refs(placed, on_schematic)
+            except ValueError as error:
+                raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
             edited = self.edit({'work_copy_id': work_copy_id, 'work_copy_revision': revision,
-                                'script': schematic_script(on_schematic, part), 'symbols': [part],
+                                'script': schematic_script(symbols, part), 'symbols': [part],
                                 'intent': [{'op': 'swap', 'ref': ref, 'part': part} for ref in on_schematic]})
             return dict(edited, **base, side='schematic', swapped=on_schematic,
                         next='show him the schematic and approve_step schematic; then swap_part again for the board')
-        on_board = board_state(board_index((project / meta['board']).read_text()))[0]
+        index = board_index((project / meta['board']).read_text())
+        on_board = board_state(index)[0]
         missing = [ref for ref in refs if ref not in on_board]
         if missing:
             raise KiCadError('arguments_unusable', {'detail': 'not on the board: %s (update the board from the '
                                                     'schematic first)' % ', '.join(missing)})
-        to_change = [ref for ref in refs if on_board[ref] != footprint]
+        wanted = board_fields(fields)
+        has = {}
+        for o in index['objects']:
+            if o['kind'] == 'field' and o.get('ref') in refs:
+                has.setdefault(o['ref'], {})[o['name']] = o['value']
+        # A value or reel change keeps the footprint; the board still takes the new part's fields.
+        new_footprint = [ref for ref in refs if on_board[ref] != footprint]
+        to_change = [ref for ref in refs if ref in new_footprint
+                     or any(has.get(ref, {}).get(name) != value for name, value in wanted.items())]
         if not to_change:
             return dict(base, work_copy_revision=revision, side='none', swapped=[],
                         next='every part named is already %s on the schematic and %s on the board' % (part, footprint))
@@ -1137,10 +1150,11 @@ class KiCadProvider:
                                                    'detail': 'show him the swapped schematic and approve_step '
                                                              'schematic before the board changes'})
         edited = self.edit({'work_copy_id': work_copy_id, 'work_copy_revision': revision,
-                            'script': board_script(to_change, footprint, board_fields(fields)),
+                            'script': board_script(to_change, footprint, wanted,
+                                                   keep=tuple(ref for ref in to_change if ref not in new_footprint)),
                             'footprints': [footprint.replace(':', '/', 1)],
                             'intent': [{'op': 'swap', 'side': 'board', 'ref': ref, 'part': footprint}
-                                       for ref in to_change]})
+                                       for ref in new_footprint]})
         return dict(edited, **base, side='board', swapped=to_change,
                     next='show him the placement (tracks to the old pads may now end short of the new ones) '
                          'and approve_step placement before any routing')

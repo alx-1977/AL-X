@@ -242,6 +242,39 @@ def _where(o: Mapping[str, Any]) -> list[float] | None:
     return None
 
 
+def _segment_meets(a, b, box) -> bool:
+    """Whether the straight line a-b crosses or lies in the box (x0, y0, x1, y1): Liang-Barsky."""
+    low, high = 0.0, 1.0
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    for step, room in ((-dx, a[0] - box[0]), (dx, box[2] - a[0]), (-dy, a[1] - box[1]), (dy, box[3] - a[1])):
+        if step == 0:
+            if room < 0:
+                return False
+            continue
+        t = room / step
+        if step < 0:
+            low = max(low, t)
+        else:
+            high = min(high, t)
+        if low > high:
+            return False
+    return True
+
+
+def _outline_meets(points, box) -> bool:
+    """Whether a closed outline and the box overlap: an edge crosses it, or it holds the box whole."""
+    points = [p for p in points if len(p) >= 2]
+    if not points:
+        return False
+    if any(_segment_meets(a, b, box) for a, b in zip(points, points[1:] + points[:1])):
+        return True
+    x, y, held = box[0], box[1], False
+    for a, b in zip(points, points[1:] + points[:1]):
+        if (a[1] > y) != (b[1] > y) and x < a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]):
+            held = not held
+    return held
+
+
 VIEW_MARGIN_MM = 2.0
 COPPER = ("track", "arc", "via", "zone", "teardrop")
 # A net with a pour, or more copper than this, runs across the board (ground, supplies): only
@@ -277,10 +310,15 @@ def view(index: Mapping[str, Any], *, refs: Iterable[str] | None = None, nets: I
                max(s[0] for s in spots) + VIEW_MARGIN_MM, max(s[1] for s in spots) + VIEW_MARGIN_MM)
 
     def inside(o):
+        # By its real shape (26 Nov review): a track crossing the area with both ends outside, or a
+        # keepout covering all of it, is an obstacle in it all the same.
+        if o.get("outline"):
+            return _outline_meets(o["outline"], box)
+        if o.get("start") and o.get("end"):
+            path = [o["start"]] + ([o["mid"]] if o.get("mid") else []) + [o["end"]]
+            return any(_segment_meets(a, b, box) for a, b in zip(path, path[1:]))
         spot = _where(o)
-        if spot:
-            return box[0] <= spot[0] <= box[2] and box[1] <= spot[1] <= box[3]
-        return any(box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3] for p in o.get("outline") or ())
+        return bool(spot) and box[0] <= spot[0] <= box[2] and box[1] <= spot[1] <= box[3]
     chosen = {o["id"] for o in mine}
     found = list(mine)
     for o in objects:

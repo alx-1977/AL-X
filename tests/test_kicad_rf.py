@@ -134,6 +134,18 @@ print("result", done["rounded"], len(done["left"]), before == after)
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
         self.assertIn("result 0 1 True", done.stdout)
 
+    def test_a_narrower_branch_keeps_its_junction(self):
+        script = '''
+b = load()
+add_track(b, "ARC", [(60, 60), (64, 60), (64, 64)], 0.38)
+add_track(b, "ARC", [(64, 60), (68, 56)], 0.2)
+done = round_bends(b, "ARC")
+print("result", done["rounded"])
+'''
+        done = run(script, self.board)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        self.assertIn("result 0", done.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

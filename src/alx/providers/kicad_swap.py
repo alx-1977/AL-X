@@ -50,9 +50,10 @@ def library_fields(symbol_block: str) -> dict[str, str]:
     return fields
 
 
-def placed_symbols(folder: Path) -> dict[str, str]:
-    """Every placed symbol's library ID by reference, across the project's sheets, including
-    each instance reference of a sheet used more than once."""
+def placed_symbols(folder: Path) -> dict[str, tuple[str, str, tuple[str, ...]]]:
+    """Every placed symbol by reference, across the project's sheets: (library ID, the symbol's own
+    Reference, every reference it carries). A sheet used more than once gives one symbol several
+    references; changing it changes them all."""
     found = {}
     for sheet in sorted(Path(folder).rglob('*.kicad_sch')):
         if any(piece.startswith('.') or piece == 'backups' or piece.endswith('-backups')
@@ -61,12 +62,28 @@ def placed_symbols(folder: Path) -> dict[str, str]:
         source = sheet.read_text(errors='replace')
         for match in re.finditer(r'\n\t\(symbol\n\t\t\(lib_id "((?:[^"\\]|\\.)*)"\)(.*?)\n\t\)', source, re.S):
             body = match.group(2)
-            names = re.findall(r'\(property "Reference" "((?:[^"\\]|\\.)*)"', body)[:1]
-            names += re.findall(r'\(reference "((?:[^"\\]|\\.)*)"\)', body)
+            own = re.findall(r'\(property "Reference" "((?:[^"\\]|\\.)*)"', body)[:1]
+            names = own + re.findall(r'\(reference "((?:[^"\\]|\\.)*)"\)', body)
+            names = tuple(dict.fromkeys(_unescape(n) for n in names if not n.startswith('#')))
+            if not own or not names:
+                continue
             for name in names:
-                if not name.startswith('#'):
-                    found[_unescape(name)] = _unescape(match.group(1))
+                found[name] = (_unescape(match.group(1)), _unescape(own[0]), names)
     return found
+
+
+def schematic_refs(placed: dict, refs: list[str]) -> list[str]:
+    """The symbols to swap for these references, by their own Reference. A shared sheet's symbol
+    serves every use of the sheet, so all its references must be asked for together."""
+    out = []
+    for ref in refs:
+        _lib_id, own, names = placed[ref]
+        left = [name for name in names if name not in refs]
+        if left:
+            raise ValueError('%s is on a sheet used more than once: swapping it also changes %s. Name them '
+                             'all, or give that use its own sheet first' % (ref, ', '.join(left)))
+        out.append(own)
+    return list(dict.fromkeys(out))
 
 
 def schematic_script(refs: list[str], part: str) -> str:
@@ -93,21 +110,23 @@ print(json.dumps({"swapped": done, "joined": joined}))
 ''' % (sorted(refs), part)
 
 
-def board_script(refs: list[str], footprint: str, fields: dict[str, str]) -> str:
+def board_script(refs: list[str], footprint: str, fields: dict[str, str], keep: tuple = ()) -> str:
     """Each named footprint becomes `footprint` in its place, every pad keeping its net, with the
-    new part's fields; the zones are poured again."""
+    new part's fields; refs in keep already have the footprint and take only the fields. The zones
+    are poured again."""
     return '''import json
 board, unconnected = load(), {}
 for ref in %r:
-    got = replace_part(board, ref, %r)
-    if got["unconnected"]:
-        unconnected[ref] = got["unconnected"]
+    if ref not in %r:
+        got = replace_part(board, ref, %r)
+        if got["unconnected"]:
+            unconnected[ref] = got["unconnected"]
     for name, value in %r.items():
         set_field(board, ref, name, value)
 refill(board)
 save(board)
 print(json.dumps({"unconnected": unconnected}))
-''' % (sorted(refs), footprint.replace(':', '/', 1), fields)
+''' % (sorted(refs), sorted(keep), footprint.replace(':', '/', 1), fields)
 
 
 def board_fields(fields: dict[str, str]) -> dict[str, str]:
@@ -115,4 +134,5 @@ def board_fields(fields: dict[str, str]) -> dict[str, str]:
             if name not in NOT_ON_BOARD and not name.startswith(('ki_', 'Sim.'))}
 
 
-__all__ = ['board_fields', 'board_script', 'expand_refs', 'library_fields', 'placed_symbols', 'schematic_script']
+__all__ = ['board_fields', 'board_script', 'expand_refs', 'library_fields', 'placed_symbols', 'schematic_refs',
+           'schematic_script']

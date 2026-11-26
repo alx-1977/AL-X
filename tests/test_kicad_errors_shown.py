@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from alx.contracts import (  # noqa: E402
     CapabilityAttempt, CapabilityAttemptDisposition, CapabilityResult, CapabilityResultState,
 )
-from alx.providers.kicad_errors import SHOWN, errors_to_show  # noqa: E402
+from alx.providers.kicad_errors import errors_to_show  # noqa: E402
 from alx.specialists.board_agent import BoardJobAgent  # noqa: E402
 from test_board_agent import KICAD, SessionModel, call, report  # noqa: E402
 
@@ -34,9 +34,15 @@ class ErrorsToShowTests(unittest.TestCase):
         self.assertEqual(view["nets"], ["/BHL_RoomReaderV2_uC/Radio_Select", "/Charger.Charger_INT"])
         self.assertEqual(set(view["marks"].values()), {"bad"})
 
-    def test_all_are_counted_and_the_first_few_shown(self):
-        shown = errors_to_show("w" * 32, [CLEARANCE] * (SHOWN + 3) + [dict(CLEARANCE, at=None)])
-        self.assertEqual((shown["count"], len(shown["shown"])), (SHOWN + 4, SHOWN))
+    def test_every_placed_error_is_shown(self):
+        shown = errors_to_show("w" * 32, [CLEARANCE] * 9 + [dict(CLEARANCE, at=None)])
+        self.assertEqual((shown["count"], len(shown["shown"])), (10, 9))
+
+    def test_the_parts_of_a_pad_error_are_drawn(self):
+        pads = dict(CLEARANCE, items=["Pad 2 [GND] of U12 on F.Cu", "Pad 1 [VCC] of C3 on F.Cu"])
+        view = errors_to_show("w" * 32, [pads])["shown"][0]["view"]
+        self.assertEqual(view["refs"], ["C3", "U12"])
+        self.assertEqual(errors_to_show("w" * 32, [CLEARANCE])["shown"][0]["view"]["refs"], [])
 
 
 class ReportCarriesErrorsTests(unittest.TestCase):
