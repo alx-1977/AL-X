@@ -52,6 +52,8 @@ ERC = obj({'checked': B, 'reason': S, 'totals': TOTALS, 'top_level_sheets': I, '
 
 LAYOUT_RULES = obj({'findings': array(StructuredSchema(ValueKind.OBJECT)), 'omitted': I,
                     'not_checked': S}, ('findings', 'omitted'))
+# Every DRC error with a close-up ready for show_on_screen (26 Nov: reported to him, never shown).
+ERRORS = obj({'count': I, 'shown': array(MAP)}, ('count', 'shown'))
 CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'file_diffs': array(obj({'name': S, 'diff': S, 'truncated': B})), 'diffs_truncated': B, 'board': obj({
     'layers': SECTION, 'setup': SECTION, 'stackup': SECTION,
@@ -60,7 +62,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'step_refusal': MAP, 'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I,
+    'gate': MAP, 'drawings': array(MAP), 'unmet': array(S), 'reverted_edits': I, 'errors_to_show': ERRORS,
     'set': array(MAP), 'label_exceptions': array(obj({'label_net': S, 'reason': S})),
     'orientation_exceptions': array(obj({'orientation': S, 'reason': S}))},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
@@ -98,12 +100,15 @@ _ACTION_DEFINITIONS = (
         "KiCad's board-against-schematic check (schematic_parity) reads only the first sheet: "
         'run make_hierarchical on the copy first, and write it back with his approval. '
         'work_copy_id instead of project_dir checks one of your copies again as it is now; '
-        'compared_to_original says what is new against his original.',
+        'compared_to_original says what is new against his original. errors_to_show lists every '
+        'DRC error (count) with a close-up view of the spot, its nets in red: KiCad shows him none '
+        'until its own checker runs, so when you tell him of an error, show it (show_on_screen with '
+        'that view); an edit report carries the same.',
         obj({'project_dir': S, 'work_copy_id': S}, ()), obj({'work_copy_id': S, 'work_copy_revision': S,
             'custom_rule_citations': RULE_CITATIONS, 'work_copy_tainted': B, 'baseline_eligible': B,
             'totals': TOTALS, 'violations': array(GROUP), 'unconnected_items': array(GROUP),
             'schematic_parity': array(GROUP), 'erc': ERC, 'layout_rules': LAYOUT_RULES,
-            'compared_to_original': MAP}),
+            'compared_to_original': MAP, 'errors_to_show': ERRORS}),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('edit_kicad_work_copy',
         'Run one bounded Python script on the work copy. Declare intent as a list of postconditions. '
@@ -140,12 +145,16 @@ _ACTION_DEFINITIONS = (
         'print(help(name)) gives the full docstring (e.g. "split_sheet" or "Sheet.symbols"). '
         'Additional board helpers include '
         'remove_parts, place_part, route_connection, to_plane, add_keepout, remove_keepouts, '
+        'rf_width(b, impedance=50, on, gap) (an RF width from the board\'s stack-up, grounded coplanar '
+        'with gap to the pour, else microstrip; line_impedance(b, width, on, gap) the other way), '
+        'round_bends(b, net, radius) (every corner of a net\'s tracks a tangent arc, nothing else '
+        'changed), route_connection(..., impedance=50, gap=) for an RF line: route with these, never '
+        'by hand-built tracks and arcs, '
         'remove_tracks, remove_dangling_tracks, remove_copper_shapes, add_teardrops, set_title_block, '
         'sync_from_schematic(b,place) (supply needed footprints). '
-        'argv[1] is the board. dry_run true runs it, reports everything it would change '
-        '(printed output, change report, DRC, comparison with his original, and step_refusal if '
-        'his order would refuse it) and puts the copy back as it was: look before you change, '
-        'never raise an error to undo. A script cannot start programs: check a copy with check '
+        'argv[1] is the board. Edit directly: there are no trial runs. An edit his order or the '
+        'checks refuse is undone and says why; revert_to undoes a kept one in one call. Never raise '
+        'an error to undo. A script cannot start programs: check a copy with check '
         'work_copy_id. Kernel confines writes to its project folder, including '
         'child processes. May edit board, project and rules freely. Returns a bounded plain '
         'change report, structural board diff and DRC totals before/after. Failed edits '
@@ -210,12 +219,12 @@ _ACTION_DEFINITIONS = (
         'new_findings), how many it no longer has (resolved), and schematic/board disagreements '
         'that are new (schematic_vs_board_new) - judge the work by these, not by totals.',
         obj({'work_copy_id': S, 'script': S, 'intent': array(MAP), 'footprints': array(S), 'symbols': array(S),
-             'dry_run': B, 'revert_to': S, 'work_copy_revision': S}, ('work_copy_id',)),
+             'revert_to': S, 'work_copy_revision': S}, ('work_copy_id',)),
         obj({'work_copy_id': S, 'work_copy_revision': S, 'stdout': S, 'stderr': S,
              'change_report': CHANGE_REPORT, 'before': TOTALS, 'after': TOTALS, 'steps': MAP,
-             'previewed': B, 'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
+             'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
             ('work_copy_id', 'work_copy_revision', 'stdout', 'stderr', 'change_report', 'before', 'after',
-             'steps', 'previewed')),
+             'steps')),
         SideEffect.NONE, FAILURES),
     CapabilityDefinition('export_kicad_manufacturing',
         'Export Gerbers and drill files from an untainted work copy through KiCad CLI. '
@@ -424,11 +433,17 @@ SELECT = CapabilityDefinition('select',
     '[x0, y0, x1, y1] mm, reads (a board text\'s exact words), ids. count is how many match; objects '
     'lists them up to limit (default 100); named true leaves out parts without a designator (logos). '
     'work_copy_revision is the revision read: pass it to the edit that uses these object IDs, '
-    'and the edit is refused if the copy has changed since.',
+    'and the edit is refused if the copy has changed since. kind view is the whole picture of a job '
+    'in one call, every kind together (each object says its kind; counts per kind): the parts named '
+    'in refs with their fields and pads, all copper of their nets and of nets named (a ground or '
+    'supply net\'s only near the job), and every other pad, copper item and keepout around them '
+    '(area, or their extent plus 2 mm); limit defaults to 400. Start a board job with it rather than '
+    'one select per kind.',
     obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'kind': S, 'refs': array(S), 'nets': array(S),
          'layer': S, 'name': S, 'value': S, 'footprint': S, 'area': array(N), 'reads': S, 'ids': array(S),
          'named': B, 'limit': I}, ('kind',)),
-    obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S, 'work_copy_revision': S},
+    obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S, 'work_copy_revision': S,
+         'counts': MAP},
         ('kind', 'count', 'objects', 'truncated')),
     SideEffect.NONE, FAILURES)
 
@@ -439,10 +454,41 @@ FIND_PART = CapabilityDefinition('find_part',
     'name or read library files. query: words that must all appear (part number, kind or description, '
     'e.g. "comparator", "74LVC1G123", "TVS"); value: a component value compared as a number ("1u", '
     '"100n", "4k7"); package: text in the footprint or package ("0603", "DFN"); kind: the library or '
-    'reference letter ("Capacitors", "R", "IC"). count 0 means the part is not in the library yet.',
+    'reference letter ("Capacitors", "R", "IC"). count 0 means the part is not in the library yet; '
+    'for a capacitor value and chip size (0402-1812) jlc_candidates then lists what JLC stocks under his '
+    'brand rule (Taiyo Yuden X5R/X7R, YAGEO C0G) with ratings, LCSC number and stock as of '
+    'jlc_catalogue_date: choose one and add_passive it.',
     obj({'query': S, 'value': S, 'package': S, 'kind': S, 'limit': I}, ()),
-    obj({'count': I, 'parts': array(MAP), 'truncated': B, 'library': S, 'hint': S},
+    obj({'count': I, 'parts': array(MAP), 'truncated': B, 'library': S, 'hint': S,
+         'jlc_candidates': array(MAP), 'jlc_catalogue_date': S},
         ('count', 'parts', 'truncated')),
+    SideEffect.NONE, FAILURES)
+
+ADD_PASSIVE = CapabilityDefinition('add_passive',
+    'Add a capacitor from find_part\'s jlc_candidates to a copy_library work copy of the FireFli library, '
+    'in one call: its line in the library generator, its LCSC number, then the generator and KiCad\'s '
+    're-save, as the library\'s build does. mpn is the exact part number. No datasheet reading or code '
+    'reading is needed. Then write_back the library copy with his approval, and swap_part.',
+    obj({'work_copy_id': S, 'mpn': S}),
+    obj({'symbol': S, 'footprint': S, 'part': MAP, 'lcsc': S, 'jlc_library': S, 'stock': I,
+         'work_copy_id': S, 'work_copy_revision': S, 'next': S}),
+    SideEffect.NONE, FAILURES)
+
+SWAP_PART = CapabilityDefinition('swap_part',
+    'Change parts on a board work copy to one library part at the same pins ("C94-C96 to 0402", a '
+    'value change, a reel variant), one step of his order per call. part is the library symbol '
+    'LIBRARY:NAME from find_part; refs may hold ranges ("C94-C96"). The first call swaps the schematic '
+    'symbols in place (value, footprint and fields from the library part; a moved pin is wired back) '
+    'and returns the edit report; show him and approve_step schematic. The next call swaps the board '
+    'footprints in place, every pad keeping its net and taking the part\'s fields; show him the '
+    'placement. Every check of edit applies, and a refused swap is undone with why. side says which '
+    'was done (none when both already match).',
+    obj({'work_copy_id': S, 'refs': array(S), 'part': S}),
+    obj({'work_copy_id': S, 'work_copy_revision': S, 'part': S, 'footprint': S, 'side': S,
+         'swapped': array(S), 'next': S, 'stdout': S, 'stderr': S, 'change_report': CHANGE_REPORT,
+         'before': TOTALS, 'after': TOTALS, 'steps': MAP,
+         'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
+        ('work_copy_id', 'work_copy_revision', 'part', 'footprint', 'side', 'swapped', 'next')),
     SideEffect.NONE, FAILURES)
 
 ADD_PART = CapabilityDefinition('add_part',
@@ -579,6 +625,8 @@ class KiCadAction(str, Enum):
     ADD_PART = 'add_part'
     OPEN_IN_KICAD = 'open_in_kicad'
     TAKE_EDITS = 'take_edits'
+    SWAP_PART = 'swap_part'
+    ADD_PASSIVE = 'add_passive'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -604,6 +652,8 @@ CONTRACTS = {
     KiCadAction.ADD_PART: ADD_PART,
     KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
     KiCadAction.TAKE_EDITS: TAKE_EDITS,
+    KiCadAction.SWAP_PART: SWAP_PART,
+    KiCadAction.ADD_PASSIVE: ADD_PASSIVE,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
@@ -611,7 +661,8 @@ FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
     KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS,
-    KiCadAction.SELECT, KiCadAction.FIND_PART, KiCadAction.ADD_PART))
+    KiCadAction.SELECT, KiCadAction.FIND_PART, KiCadAction.ADD_PART, KiCadAction.SWAP_PART,
+    KiCadAction.ADD_PASSIVE))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -675,7 +726,9 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.FIND_PART: provider.find_part,
                KiCadAction.ADD_PART: provider.add_part,
                KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad,
-               KiCadAction.TAKE_EDITS: provider.take_edits}
+               KiCadAction.TAKE_EDITS: provider.take_edits,
+               KiCadAction.SWAP_PART: provider.swap_part,
+               KiCadAction.ADD_PASSIVE: provider.add_passive}
 
     def invoke(arguments):
         code = 'arguments_unusable'

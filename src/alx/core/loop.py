@@ -184,20 +184,23 @@ def _validate_raised_mail(
 # Her words to Friedl, enforced rather than asked for (2026-11-13: replies of
 # 71, 78, 116 and 129 words in one morning, after the same rule as text alone
 # had been strengthened several times). The rest belongs in detail. 30 since
-# 25 Nov: 46-word replies still read as reports to him.
+# 25 Nov: 46-word replies still read as reports to him. She aims for 30; only
+# a clearly longer reply is refused (Friedl, 26 Nov: replies of 31-38 words were
+# refused 14 times in one morning, each a full extra model call).
 RESPONSE_WORD_LIMIT = 30
+RESPONSE_WORD_REFUSAL = 40
 
 
 def _validate_response_length(decision: AgentDecision) -> None:
-    """Refuse a reply longer than Friedl wants to hear, unless she judged he asked for detail."""
-    if (decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT
+    """Refuse a reply clearly longer than Friedl wants to hear, unless she judged he asked for detail."""
+    if (decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_REFUSAL
             and not decision.detail_asked):
         # Her count with it, so one correction is enough (15 Nov: a board
         # agent's report was refused twice and never reached him).
         raise DecisionValidationError(
             "response_over_%d_words: yours has %d; say the outcome and anything he must decide in "
             "%d words or fewer; figures, checks and background go in detail"
-            % (RESPONSE_WORD_LIMIT, len(decision.response.split()), RESPONSE_WORD_LIMIT))
+            % (RESPONSE_WORD_REFUSAL, len(decision.response.split()), RESPONSE_WORD_LIMIT))
 
 
 @dataclass(frozen=True, slots=True)
@@ -876,14 +879,16 @@ class CoreAgent:
                 # session (D-065), so a different slip later in a long turn
                 # is corrected too rather than ending it.
                 LOGGER.info("Core decision rejected by validation: %s", error.reason)
-                self._emit_refusal("decision_rejected", conversation_id)
                 if (not self._already_refused(refused_calls, "decision_rejected", error.reason)
                         and step_index + 1 < step_budget):
+                    # A draft she corrects is not shown to Friedl as a refusal (26 Nov: a reply a
+                    # few words long flashed "Step refused" fourteen times in one morning).
                     refused_calls = (*refused_calls, {
                         "reason": "decision_rejected", "subject": error.reason,
                     })
                     continue
                 # The same rejection again, or no step left: nothing further.
+                self._emit_refusal("decision_rejected", conversation_id)
                 if origin is CognitionOrigin.PERSON_TURN:
                     # A person is never left in silence. One response-only
                     # step, which can only speak, says what could not start.

@@ -256,6 +256,18 @@ s.save()
             self.assertTrue(any("off the block slots" in w for w in warnings), warnings)
             self.assertTrue(any("use info_table" in w for w in warnings), warnings)
 
+    def test_a_view_through_the_tool_gives_every_kind_with_counts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            work = self.call(runtime, "check_kicad_board", project_dir=str(project)).values["work_copy_id"]
+            parts = self.call(runtime, "select", work_copy_id=work, kind="part").values["objects"]
+            seen = self.call(runtime, "select", work_copy_id=work, kind="view", refs=[parts[0]["ref"]]).values
+            self.assertEqual(seen["kind"], "view")
+            self.assertEqual(sum(seen["counts"].values()), seen["count"])
+            self.assertIn("part", seen["counts"])
+            refused = self.call(runtime, "select", work_copy_id=work, kind="view", refs=[parts[0]["ref"]], name="x")
+            self.assertEqual(refused.failure["code"], "arguments_unusable")
+
     def test_select_then_set_verifies_the_ids_at_the_selected_revision(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime, project = self.runtime(folder)
@@ -288,9 +300,6 @@ s.save()
                 refused = edit(script_, intent=declaration)
                 self.assertEqual(refused.failure["code"], "change_unmet", refused.failure)
                 self.assertIn(detail, refused.failure["recovery"]["unmet"])
-                self.assertEqual(copy.read_bytes(), initial)
-                preview = edit(script_, intent=declaration, dry_run=True)
-                self.assertIn(detail, preview.values["change_report"]["unmet"])
                 self.assertEqual(copy.read_bytes(), initial)
             missing = edit(script)
             self.assertIn("intent is required", str(missing.failure))
@@ -642,7 +651,7 @@ class OneWayToChangeACopyTests(unittest.TestCase):
         self.assertEqual(owners, {"snapshot": {"_change"}, "history": {"_change"}, "restore": {"_change"}})
         users = {method.name for method in provider.body if isinstance(method, ast.FunctionDef)
                  and "self._change(" in ast.get_source_segment(source, method)}
-        self.assertEqual(users, {"edit", "make_hierarchical", "take_edits", "_revert", "add_part"})
+        self.assertEqual(users, {"edit", "make_hierarchical", "take_edits", "_revert", "add_part", "add_passive"})
 
 if __name__ == "__main__":
     unittest.main()

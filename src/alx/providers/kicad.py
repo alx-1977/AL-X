@@ -32,10 +32,12 @@ MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_schematic_helpers import GRID_SUFFIX, SCHEMATIC_HELPERS
 from alx.providers.kicad_board_helpers import BOARD_HELPERS
+from alx.providers.kicad_rf import RF_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
 from alx.providers.kicad_style import label_violations, orientation_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
-from alx.providers.kicad_steps import (STEPS, edit_refusal, original_of, routing_added, fingerprints, parity_mismatches, ready,
+from alx.providers.kicad_errors import errors_to_show
+from alx.providers.kicad_steps import (STEPS, edit_refusal, his_own_steps, original_of, routing_added, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
                                       step_status)
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
@@ -64,12 +66,6 @@ MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024 * 1024
 
 
-class _Preview(Exception):
-    """A dry-run edit's result, carried out through the restore path."""
-
-    def __init__(self, result):
-        super().__init__('preview')
-        self.result = result
 
 
 class KiCadError(Exception):
@@ -313,9 +309,12 @@ def _non_library_parts(folder):
 
 def _library_file(folder, name):
     """A library's own file: KiCad's, its catalogue (catalogue/*.csv: every part's maker, MPN and
-    LCSC number), its 3D models (3dmodels/*.3dshapes/*.step) and SPICE models (spice/*)."""
+    LCSC number), its 3D models (3dmodels/*.3dshapes/*.step) and SPICE models (spice/*), and the
+    generator the resistors and capacitors are built by (generator/*.py, its lcsc.csv), so a part
+    added to a copy is added where the next build keeps it (26 Nov 2026)."""
     folder, lower = Path(folder), name.lower()
-    return (is_design_file(name) or (folder.name == 'catalogue' and lower.endswith('.csv'))
+    return (is_design_file(name) or (folder.name in ('catalogue', 'generator') and lower.endswith('.csv'))
+            or (folder.name == 'generator' and lower.endswith('.py'))
             or (folder.name.endswith('.3dshapes') and lower.endswith(('.step', '.stp')))
             or (folder.name == 'spice' and lower.endswith(('.lib', '.cir', '.mod', '.sp', '.spi', '.spice', '.txt',
                                                          '.sub', '.ckt'))))
@@ -999,12 +998,171 @@ class KiCadProvider:
         if not found['count']:
             found['hint'] = ('not in the FireFli library: a new part is created in a copy_library work copy '
                              'from its datasheet, then used by its exact name')
+            offered = self._jlc_capacitors(arguments)
+            if offered is not None:
+                found.update(offered)
+                found['hint'] = ('not in the FireFli library yet. jlc_candidates are the capacitors JLC stocks '
+                                 'for it under his brand rule: choose one (same or better dielectric, voltage '
+                                 'and tolerance than the part it replaces) and add_passive it to a copy_library '
+                                 'work copy; write that back with his approval, then swap_part')
         return found
+
+    def _jlc_capacitors(self, arguments):
+        """JLC's capacitors for a value and chip size the library lacks, or None when the
+        question is not one (no value, no size, or not a capacitor)."""
+        from alx.providers.kicad_parts import value_of
+        from alx.providers.kicad_passives import CACHE, catalogue_date, jlc_candidates
+        kind = str(arguments.get('kind') or '').strip().casefold()
+        farads = value_of(str(arguments.get('value') or ''))
+        size = re.search(r'\b(0402|0603|0805|1210|1812)\b', str(arguments.get('package') or ''))
+        if farads is None or size is None or kind not in ('', 'c', 'capacitor', 'capacitors'):
+            return None
+        if kind == '' and not re.search(r'(?i)[pnuµ]f?$', str(arguments.get('value')).strip()):
+            return None
+        cache = self._firefli_library() / CACHE
+        try:
+            listed = jlc_candidates(cache, farads * 1e12, size.group(1))
+        except (FileNotFoundError, OSError):
+            return {'jlc_candidates': [], 'jlc_catalogue_date': 'no local JLC catalogue (generator/lookup_lcsc.py makes it)'}
+        return {'jlc_candidates': listed, 'jlc_catalogue_date': catalogue_date(cache)}
+
+    def add_passive(self, arguments):
+        """A capacitor from JLC's catalogue into a copy_library work copy, through the library's own
+        generator: its line in generator/capacitors.py, its LCSC number in generator/lcsc.csv, then the
+        generator and KiCad's re-save, exactly as build.sh does (26 Nov 2026)."""
+        from alx.providers.kicad_passives import CACHE, decode, jlc_listing, with_entry, with_lcsc_row
+        mpn = str(arguments.get('mpn') or '').strip()
+        part = decode(mpn)
+        if part is None:
+            raise KiCadError('arguments_unusable', {'detail': '%r is not a Taiyo Yuden X5R/X7R or YAGEO CC C0G '
+                                                    'part number in 0402-1812: take one from find_part\'s '
+                                                    'jlc_candidates' % mpn})
+        with self._locked(arguments['work_copy_id']):
+            root, meta = self._load(arguments['work_copy_id'])
+            if not meta.get('library'):
+                raise KiCadError('arguments_unusable', {'detail': 'add_passive needs a copy_library work copy'})
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            project = root / 'project'
+            generator = project / 'generator' / 'capacitors.py'
+            table = project / 'generator' / 'lcsc.csv'
+            if not generator.is_file() or not table.is_file():
+                raise KiCadError('arguments_unusable', {'detail': 'this copy is not the FireFli library (no '
+                                                        'generator/capacitors.py and generator/lcsc.csv)'})
+            listing = jlc_listing(self._firefli_library() / CACHE, mpn, part['manufacturer'])
+            if listing is None:
+                raise KiCadError('arguments_unusable', {'detail': 'JLC lists %s not once in its catalogue: take one '
+                                                        'from find_part\'s jlc_candidates' % mpn})
+            try:
+                source = with_entry(generator.read_text(encoding='utf-8'), part, listing['lcsc'])
+                rows = with_lcsc_row(table.read_text(encoding='utf-8'), mpn, listing['lcsc'], listing['jlc_library'])
+            except ValueError as error:
+                raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+            if self.execute_python is None:
+                raise KiCadError('engine_unavailable')
+            script = root / ('generate-' + uuid.uuid4().hex + '.py')
+            script.write_text('import runpy, sys\nsys.path.insert(0, %r)\nrunpy.run_path(%r, run_name="__main__")\n'
+                              % (str(generator.parent), str(generator)))
+            try:
+                with self._change(root, meta):
+                    generator.write_text(source, encoding='utf-8')
+                    table.write_text(rows, encoding='utf-8')
+                    executed = self.execute_python(str(self.settings.kicad_python), script, project / '.library')
+                    if executed.returncode:
+                        raise KiCadError('script_failed', {'detail': 'the library generator stopped',
+                                                           'stderr': (executed.stderr or '')[-4000:]})
+                    # KiCad re-saves the files in its own format, which also proves it reads them.
+                    self._run('sym', 'upgrade', '--force', project / 'symbols' / 'FireFli_Capacitors.kicad_sym')
+                    self._run('fp', 'upgrade', '--force', project / 'footprints' / 'FireFli_Capacitors.pretty')
+            finally:
+                script.unlink(missing_ok=True)
+            return {'symbol': 'FireFli_Capacitors:%s' % mpn,
+                    'footprint': 'FireFli_Capacitors:C_%s_%sMetric' % (part['size'], {
+                        '0402': '1005', '0603': '1608', '0805': '2012', '1210': '3225', '1812': '4532'}[part['size']]),
+                    'part': {k: v for k, v in part.items() if k not in ('pf', 'volts')}, **listing,
+                    'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': self._revision(root),
+                    'next': 'write_back this library copy with his approval (project_dir is the library folder), '
+                            'then swap_part on the board copy'}
+
+    def swap_part(self, arguments):
+        """Parts changed to one library part at the same pins, a step of his order per call (26 Nov):
+        the schematic symbols first; once he approved the schematic, the board footprints, pads
+        keeping their nets and taking the part's fields. Through edit, so every check applies."""
+        from alx.providers.kicad_index import board_index
+        from alx.providers.kicad_swap import (board_fields, board_script, expand_refs, library_fields,
+                                              placed_symbols, schematic_refs, schematic_script)
+        try:
+            refs = expand_refs(arguments.get('refs'))
+        except ValueError as error:
+            raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+        part = str(arguments.get('part') or '').strip()
+        if not refs or not re.fullmatch(r'[^/\\:]+:[^/\\:]+', part):
+            raise KiCadError('arguments_unusable', {'detail': 'refs (e.g. ["C94-C96"]) and part, the library '
+                                                    'symbol LIBRARY:NAME from find_part'})
+        work_copy_id = arguments['work_copy_id']
+        root, meta = self._load(work_copy_id)
+        if meta.get('library'):
+            raise KiCadError('arguments_unusable', {'detail': 'swap_part needs a board work copy'})
+        project = root / 'project'
+        revision = self._revision(root, meta)
+        fields = library_fields(self._library_parts([part], project, 'symbols')[part])
+        footprint = fields.get('Footprint', '')
+        if not re.fullmatch(r'[^/\\:]+:[^/\\:]+', footprint):
+            raise KiCadError('arguments_unusable', {'detail': '%s names no footprint (LIBRARY:NAME)' % part})
+        placed = placed_symbols(project)
+        unknown = [ref for ref in refs if ref not in placed]
+        if unknown:
+            raise KiCadError('arguments_unusable', {'detail': 'not on the schematic: %s' % ', '.join(unknown)})
+        base = {'work_copy_id': work_copy_id, 'part': part, 'footprint': footprint}
+        on_schematic = [ref for ref in refs if placed[ref][0] != part]
+        if on_schematic:
+            try:
+                symbols = schematic_refs(placed, on_schematic)
+            except ValueError as error:
+                raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+            edited = self.edit({'work_copy_id': work_copy_id, 'work_copy_revision': revision,
+                                'script': schematic_script(symbols, part), 'symbols': [part],
+                                'intent': [{'op': 'swap', 'ref': ref, 'part': part} for ref in on_schematic]})
+            return dict(edited, **base, side='schematic', swapped=on_schematic,
+                        next='show him the schematic and approve_step schematic; then swap_part again for the board')
+        index = board_index((project / meta['board']).read_text())
+        on_board = board_state(index)[0]
+        missing = [ref for ref in refs if ref not in on_board]
+        if missing:
+            raise KiCadError('arguments_unusable', {'detail': 'not on the board: %s (update the board from the '
+                                                    'schematic first)' % ', '.join(missing)})
+        wanted = board_fields(fields)
+        has = {}
+        for o in index['objects']:
+            if o['kind'] == 'field' and o.get('ref') in refs:
+                has.setdefault(o['ref'], {})[o['name']] = o['value']
+        # A value or reel change keeps the footprint; the board still takes the new part's fields.
+        new_footprint = [ref for ref in refs if on_board[ref] != footprint]
+        to_change = [ref for ref in refs if ref in new_footprint
+                     or any(has.get(ref, {}).get(name) != value for name, value in wanted.items())]
+        if not to_change:
+            return dict(base, work_copy_revision=revision, side='none', swapped=[],
+                        next='every part named is already %s on the schematic and %s on the board' % (part, footprint))
+        status = step_status(self._original_steps(root, meta), meta.get('approvals', {}),
+                             fingerprints(project, meta['board']))
+        if not ready(status, 'schematic'):
+            raise KiCadError('step_not_approved', {'needs': 'schematic', 'steps': status,
+                                                   'detail': 'show him the swapped schematic and approve_step '
+                                                             'schematic before the board changes'})
+        edited = self.edit({'work_copy_id': work_copy_id, 'work_copy_revision': revision,
+                            'script': board_script(to_change, footprint, wanted,
+                                                   keep=tuple(ref for ref in to_change if ref not in new_footprint)),
+                            'footprints': [footprint.replace(':', '/', 1)],
+                            'intent': [{'op': 'swap', 'side': 'board', 'ref': ref, 'part': footprint}
+                                       for ref in new_footprint]})
+        return dict(edited, **base, side='board', swapped=to_change,
+                    next='show him the placement (tracks to the old pads may now end short of the new ones) '
+                         'and approve_step placement before any routing')
 
     def select(self, arguments):
         """Find Similar on a board: the objects of one kind matching every filter, from the board
         index of this revision (18 Nov). Changes nothing."""
-        from alx.providers.kicad_index import select
+        from alx.providers.kicad_index import select, view
         revision, library = None, False
         if self._is_copy_id(arguments.get('work_copy_id')):
             # Read under the copy's lock, so the revision it reports is the one it read (19 Nov recheck).
@@ -1023,15 +1181,21 @@ class KiCadProvider:
                                                    'area', 'reads', 'ids', 'named') if arguments.get(key) is not None
                    and not (library and key == 'footprint')}
         try:
-            found = select(index, arguments['kind'], **filters)
+            if arguments['kind'] == 'view':
+                if set(filters) - {'refs', 'nets', 'area'}:
+                    raise ValueError('a view takes refs, nets and area only')
+                found = view(index, **filters)
+            else:
+                found = select(index, arguments['kind'], **filters)
         except (TypeError, ValueError) as error:
             raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
-        limit = max(1, min(int(arguments.get('limit') or 100), 500))
+        limit = max(1, min(int(arguments.get('limit') or (400 if arguments['kind'] == 'view' else 100)), 500))
         # Polygon outlines can run to thousands of points: shown as their count.
         shown = [{key: (len(value) if key in ('outline', 'points') else value) for key, value in item.items()}
                  for item in found[:limit]]
+        counts = dict(Counter(item['kind'] for item in found)) if arguments['kind'] == 'view' else None
         return {'kind': arguments['kind'], 'count': len(found), 'objects': shown,
-                'truncated': len(found) > limit, 'board': board.name,
+                'truncated': len(found) > limit, 'board': board.name, **({'counts': counts} if counts else {}),
                 **({'work_copy_revision': revision} if revision else {})}
 
     def _copper_in(self, board, arguments):
@@ -1554,14 +1718,14 @@ class KiCadProvider:
                 raise KiCadError('arguments_unusable', {'detail': 'presentation edits must redraw the job work copy'})
         with self._locked(arguments['work_copy_id']):
             if arguments.get('revert_to') is not None:
-                if set(arguments) - {'work_copy_id', 'revert_to', 'dry_run'}:
+                if set(arguments) - {'work_copy_id', 'revert_to'}:
                     raise KiCadError('arguments_unusable', {'detail': 'revert_to goes alone'})
-                # 18 Nov review: a "preview" of a revert reverted for real.
-                if arguments.get('dry_run'):
-                    raise KiCadError('arguments_unusable', {'detail': 'revert_to cannot be previewed; the '
-                                                            'history lists what each revision changed'})
                 return self._revert(arguments)
-            dry_run = bool(arguments.get('dry_run'))
+            if 'dry_run' in arguments:
+                # Edit directly (26 Nov: 61 of 105 edits in one job were trial runs, each then done
+                # again for real). An edit his order or the gate refuses is undone anyway, with why.
+                raise KiCadError('arguments_unusable', {'detail': 'there are no trial runs: edit directly. '
+                                                        'A refused edit is undone with the reason; revert_to undoes a kept one'})
             script = arguments.get('script')
             try:
                 declared = validate_postconditions(plain(arguments.get('intent', [])))
@@ -1624,7 +1788,7 @@ class KiCadProvider:
                     blocks = {} if library else {
                         name: path.read_text() for name, (path, _) in self._design_blocks().items()
                     }
-                    script_path.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS
+                    script_path.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS + RF_HELPERS
                                            + 'SCHEMATIC_SYNC = %a\n' % sync
                                            + '_DESIGN_BLOCKS.update(%a)\n' % blocks
                                            + '_LIBRARY_FOOTPRINTS.update(%a)\n' % footprints
@@ -1683,16 +1847,15 @@ class KiCadProvider:
                                                       sets, prior_drc, signatures, label_exceptions,
                                                       orientation_exceptions, presentation=presentation is not None))
                         if (any(name.endswith(('.kicad_sch', '.kicad_pcb')) for name in changed)
-                                and 'intent' not in arguments and not dry_run):
+                                and 'intent' not in arguments):
                             report['unmet'].append('intent is required for a drawing edit; [] for unchanged connectivity')
-                        if report['unmet'] and not dry_run:
+                        if report['unmet']:
                             raise KiCadError('change_unmet', {k: report[k] for k in ('unmet', 'gate')})
                     if not library and changed:
                         report['compared_to_original'] = self._compared(root, meta, signatures)
-                        if refusal and not dry_run:
+                        report['errors_to_show'] = errors_to_show(arguments['work_copy_id'], signatures)
+                        if refusal:
                             raise KiCadError('step_not_approved', refusal)
-                        if dry_run and refusal:
-                            report['step_refusal'] = refusal
                     # Friedl's taper rule on the edited board, so she sees a step
                     # before she shows anything (2026-11-12, finished 2026-11-13).
                     # A script that only read changed nothing to check (15 Nov: 26
@@ -1722,9 +1885,7 @@ class KiCadProvider:
                             break
                     truncated = (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
                     report.update(file_diffs=diffs, diffs_truncated=truncated)
-                    if truncated and not dry_run:
-                        # A preview is undone, so it keeps no evidence (18 Nov review: it promised
-                        # before and after copies that the undo then deleted).
+                    if truncated:
                         # The report is cut short: keep before and after copies and the
                         # complete diff as evidence that later edits never delete.
                         # The snapshot itself becomes the before copy, still under the taint.
@@ -1748,11 +1909,6 @@ class KiCadProvider:
                                       before_copy_path=str(evidence / 'before'),
                                       after_copy_path=str(evidence / 'after'))
                     script_path.unlink(missing_ok=True)
-                    if dry_run:
-                        # Seen, then undone: the copy goes back exactly as it was.
-                        raise _Preview({'work_copy_id': arguments['work_copy_id'], 'stdout': stdout[:16000],
-                                        'stderr': stderr[:16000], 'change_report': report, 'before': before,
-                                        'after': after, 'steps': steps, 'previewed': True})
                     if not library and changed:
                         from alx.providers.kicad_drawing import drawings
                         report['drawings'] = drawings(self, snapshot, project, changed,
@@ -1762,8 +1918,7 @@ class KiCadProvider:
                         copy_change.keep_snapshot_at = evidence / 'before'
                     result = {'work_copy_id': arguments['work_copy_id'],
                               'stdout': stdout[:16000], 'stderr': stderr[:16000],
-                              'change_report': report, 'before': before, 'after': after, 'steps': steps,
-                              'previewed': False}
+                              'change_report': report, 'before': before, 'after': after, 'steps': steps}
                     if not library:
                         # Seen as it happens, not first at write-back: parts new to his project that are
                         # not FireFli library parts, which write_back will refuse (19 Nov 2026).
@@ -1790,8 +1945,6 @@ class KiCadProvider:
                     work_copy_tainted=not restored, baseline_eligible=restored, stage=stage)
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise
-                if isinstance(error, _Preview) and restored:
-                    return dict(error.result, work_copy_revision=self._revision(root))
                 code = str(error) if isinstance(error, KiCadError) else (
                     'cli_timeout' if isinstance(error, KICAD_CLI_TIMEOUT) else 'verification_failed')
                 raise KiCadError(code, recovery) from error
@@ -2204,8 +2357,7 @@ class KiCadProvider:
                 if any(name.endswith('.kicad_sch') for name in changed):
                     report['erc'] = self._erc(root, meta, against_original=True)
         return {'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': revision, 'stdout': '',
-                'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps,
-                'previewed': False}
+                'stderr': '', 'change_report': report, 'before': totals, 'after': totals, 'steps': steps}
 
     def export(self, arguments):
         with self._locked(arguments['work_copy_id']):
@@ -2749,6 +2901,7 @@ class KiCadProvider:
         (root / 'baseline.json').write_text(json.dumps(dict(baseline, erc=erc_signatures)))
         result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
         result['compared_to_original'] = self._compared(root, meta, signatures)
+        result['errors_to_show'] = errors_to_show(work_id, signatures)
         return dict(result, work_copy_id=work_id, work_copy_revision=self._revision(root))
 
     def _check_copy(self, work_copy_id):
@@ -2766,6 +2919,7 @@ class KiCadProvider:
             result['erc'] = self._erc(root, meta, against_original=True)
             result['layout_rules'] = self._layout_rules(root / 'project' / meta['board'])
             result['compared_to_original'] = self._compared(root, meta, signatures)
+            result['errors_to_show'] = errors_to_show(work_copy_id, signatures)
             return dict(result, work_copy_id=work_copy_id, work_copy_revision=self._revision(root))
 
     def copy_library(self, arguments):
@@ -3709,6 +3863,7 @@ class KiCadProvider:
                     return found
                 old, new = places((project / board).read_text()), places((folder / board).read_text())
                 moved = sorted(ref for ref in new if old.get(ref) != new[ref])
+            steps_before = None if meta.get('library') else fingerprints(project, meta['board'])
             # One kept change: all of it or none of it (a failed copy no longer leaves half his edit).
             with self._change(root, meta) as copy_change:
                 for name in changed:
@@ -3723,7 +3878,10 @@ class KiCadProvider:
                     raise KiCadError('verification_failed', {'detail': 'his window saved again while his edit was '
                                                              'being taken; take it again'})
                 after = self._revision(root, meta)
-                copy_change.meta = dict(meta, view=dict(view, revision=after, files=theirs))
+                approvals = meta.get('approvals') or {}
+                if steps_before is not None:
+                    approvals = his_own_steps(approvals, steps_before, fingerprints(project, meta['board']))
+                copy_change.meta = dict(meta, view=dict(view, revision=after, files=theirs), approvals=approvals)
             return {'changed': changed, 'deleted': deleted, 'moved': moved[:80], 'moved_total': len(moved),
                     'work_copy_revision': after}
 

@@ -27,7 +27,8 @@ BOARD_AGENT_KICAD_ACTIONS = tuple(item.value for item in (
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.FETCH_DATASHEET, KiCadAction.RENDER,
     KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS, KiCadAction.SELECT, KiCadAction.FIND_PART,
-    KiCadAction.ADD_PART, KiCadAction.COPY_LIBRARY))
+    KiCadAction.ADD_PART, KiCadAction.COPY_LIBRARY, KiCadAction.SWAP_PART,
+    KiCadAction.ADD_PASSIVE))
 
 
 def board_agent_call_refusal(call: CapabilityCall) -> CapabilityAttempt | None:
@@ -56,7 +57,10 @@ DEFINITION = CapabilityDefinition(
     "record his yes with kicad approve_step; and pass on what he said with job_id and message, in "
     "his words: the next stretch starts from the job's journal. stop true with job_id stops a "
     "running stretch at once (stopped says whether one was running); only that stops it. It "
-    "cannot approve steps, open windows on his screen or write back: those stay with you. Its "
+    "cannot approve steps, open windows on his screen or write back: those stay with you. "
+    "errors_to_show lists the DRC errors of the reported revision (count), each with a close-up "
+    "view: KiCad shows him none until its own checker runs, so tell him of them and show each "
+    "with show_on_screen, that view as it is. Its "
     "calls go through the same gate as yours, with no approvals. calls lists every call it made. "
     "max_calls bounds each stretch (default %d, at most %d), as do 30 minutes. One job runs at a "
     "time." % (DEFAULT_CALLS, MAX_CALLS),
@@ -73,6 +77,7 @@ DEFINITION = CapabilityDefinition(
         "status": _STRING,
         "stop_reason": _STRING,
         "report": StructuredSchema(ValueKind.OBJECT),
+        "errors_to_show": StructuredSchema(ValueKind.OBJECT),
         "calls": StructuredSchema(ValueKind.ARRAY, items=StructuredSchema(ValueKind.OBJECT)),
         "stopped": StructuredSchema(ValueKind.BOOLEAN),
     }, ("job_id", "status"), extra_properties=False),
