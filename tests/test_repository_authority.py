@@ -123,6 +123,13 @@ class RealRepositoryHarness(unittest.TestCase):
     def perform(self, operation: Operation, **arguments):
         return self.authority.perform(RepositoryRequest(operation, arguments))
 
+    def test_main_contains_is_false_when_git_cannot_answer(self):
+        # Review of #247: a git timeout raised out of the restart tool instead of answering.
+        def timing_out(*args, **kwargs):
+            raise subprocess.TimeoutExpired("git", 1)
+        authority = RepositoryAuthority(self.system, runner=timing_out)
+        self.assertFalse(authority.main_contains("a" * 40))
+
     def commit(self, name: str, content: str = "work\n") -> str:
         (self.local / name).write_text(content)
         git(self.local, "add", name)

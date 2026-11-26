@@ -278,7 +278,10 @@ class RepositoryAuthority:
         """
         if not valid_sha(commit):
             return False
-        return self._run(("git", "merge-base", "--is-ancestor", commit, "refs/heads/main")).returncode == 0
+        try:
+            return self._run(("git", "merge-base", "--is-ancestor", commit, "refs/heads/main")).returncode == 0
+        except RepositoryAuthorityError:
+            return False
 
     def _sha_of(self, revision: str) -> str:
         """What this revision points at now, or "" when it names nothing."""

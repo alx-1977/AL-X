@@ -150,6 +150,11 @@ class LibraryCopyTests(unittest.TestCase):
             footprint = (project / "footprints" / "FireFli_ICs.pretty" / "SN74LVC1G123DQER.kicad_mod").read_text()
             self.assertIn('${FIREFLI_KICAD_LIB}/3dmodels/FireFli_ICs.3dshapes/SN74LVC1G123DQER.step', footprint)
             self.assertIn("3dmodels/FireFli_ICs.3dshapes/SN74LVC1G123DQER.step", library_inventory(project))
+            # His library has no FireFli_ICs.3dshapes folder yet: write-back makes it (review of #247).
+            self.assertFalse((root / "3dmodels").exists())
+            provider.write_back({"work_copy_id": copy["work_copy_id"], "project_dir": str(root),
+                                 "work_copy_revision": provider._revision(settings.work_root / copy["work_copy_id"])})
+            self.assertTrue((root / "3dmodels" / "FireFli_ICs.3dshapes" / "SN74LVC1G123DQER.step").is_file())
             with self.assertRaises(KiCadError):
                 provider.add_part(part)
             # Without its SPICE model or a reason there is none, a part is not added.

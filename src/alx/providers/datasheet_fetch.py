@@ -50,7 +50,12 @@ def _digikey_candidates(client: Any, token: str, client_id: str, part: str, manu
     if response.status_code != 200:
         return []
     found, seen = [], set()
-    answer = response.json()
+    try:
+        answer = response.json()
+    except ValueError:
+        return []
+    if not isinstance(answer, Mapping):
+        return []
     # DigiKey puts parts whose number matches exactly in ExactMatches and the rest in Products
     # (19 Nov 2026: BAT54WS came back as "not found" with its matches in ExactMatches).
     for product in ((answer.get("ExactMatches") or []) + (answer.get("Products") or []))[:40]:

@@ -374,7 +374,7 @@ def test_refused_tokens_use_saved_login_once_notice(tmp_path, profile_http, answ
     notice = facts['authentication_notice']
     assert notice.startswith('The Claude setup token was refused because ')
     assert 'the normal dedicated Claude login is being used' in notice
-    assert 'Tell Friedl' in notice
+    assert ('Tell Friedl' in notice) == isinstance(answer, dict)
     assert other.setup_token_notice_facts() == facts
     assert token not in notice + caplog.text + repr(subscription._setup_token_profile), 'credential leaked'
 
@@ -521,3 +521,25 @@ def test_usage_masks_unlabelled_token_before_evidence_is_returned(redraw):
         assert fragment not in json.dumps(result), 'usage failure leaked credential fragment'
     assert '[masked]' in result['screen_capture']
     assert 'raw_output_tail' not in result
+
+
+def test_a_check_that_could_not_finish_is_tried_again_and_never_calls_the_key_expired(
+        tmp_path, profile_http, monkeypatch):
+    import subprocess
+    fake, _ = profile_http
+    fake.raises = subprocess.TimeoutExpired('claude', 30)
+    model, runner = model_at(tmp_path, sentinel())
+    model.verify_identity()
+    first = model.setup_token_notice_facts()
+    assert 'Tell Friedl' not in first['authentication_notice']
+    model.verify_identity()
+    assert fake.call_count == 1  # Not re-run on every turn.
+    clock = [subscription.monotonic() + subscription.SETUP_TOKEN_RECHECK_SECONDS + 1]
+    monkeypatch.setattr(subscription, 'monotonic', lambda: clock[0])
+    model.verify_identity()
+    assert fake.call_count == 2
+    assert model.setup_token_notice_facts() == first  # Same refusal, same notice.
+    fake.raises = None
+    clock[0] += subscription.SETUP_TOKEN_RECHECK_SECONDS + 1
+    assert model.verify_identity().subscription_type == 'setup_token'
+    assert model.setup_token_notice_facts() == {}

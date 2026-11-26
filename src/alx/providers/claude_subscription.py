@@ -55,7 +55,7 @@ import shutil
 import sys
 import subprocess  # noqa: S404 - the governed reasoning transport, not an execution site
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -102,6 +102,10 @@ class _SetupTokenProfile:
     subscription: str | None = None
     refusal: str | None = None
     notice_id: str = field(default_factory=lambda: uuid4().hex)
+    # A check that could not finish says nothing about the key: it is tried
+    # again after a while, and the key is not called expired (review of #247).
+    transient: bool = False
+    checked_at: float = field(default_factory=lambda: monotonic())
 
     @property
     def notice(self) -> str | None:
@@ -109,9 +113,13 @@ class _SetupTokenProfile:
             return None
         return (
             "The Claude setup token was refused because " + self.refusal
-            + "; the normal dedicated Claude login is being used. Tell Friedl in one line"
-            " that AL/X's year-long Claude key needs renewing."
+            + "; the normal dedicated Claude login is being used."
+            + ("" if self.transient else
+               " Tell Friedl in one line that AL/X's year-long Claude key needs renewing.")
         )
+
+
+SETUP_TOKEN_RECHECK_SECONDS = 600
 
 
 _setup_token_profile: _SetupTokenProfile | None = None
@@ -148,7 +156,7 @@ def _lookup_setup_token(token: str, executable: str,
     Friedl having issued it from her login. Never retain an exception or CLI
     output in a refusal: either could carry the credential.
     """
-    reason = "Claude could not check it"
+    reason, transient = "Claude could not check it", True
     try:
         status = _token_status(executable, token, runner)
     except subprocess.TimeoutExpired:
@@ -159,20 +167,28 @@ def _lookup_setup_token(token: str, executable: str,
         if not isinstance(status, Mapping):
             reason = "Claude's answer about it was unreadable"
         elif status.get("loggedIn") is not True:
-            reason = "Claude did not accept it (it may have expired or been revoked)"
+            reason, transient = "Claude did not accept it (it may have expired or been revoked)", False
         elif status.get("authMethod") != "oauth_token" or status.get("apiProvider") != "firstParty":
-            reason = "it is not a Claude subscription key"
+            reason, transient = "it is not a Claude subscription key", False
         else:
             return _SetupTokenProfile(token, subscription="setup_token")
-    return _SetupTokenProfile(token, refusal=reason)
+    return _SetupTokenProfile(token, refusal=reason, transient=transient)
 
 
 def _validated_setup_token(token: str, executable: str,
                            runner: Callable[..., Any]) -> _SetupTokenProfile:
     global _setup_token_profile
     with _setup_token_lock:
-        if _setup_token_profile is None or _setup_token_profile.token != token:
-            _setup_token_profile = _lookup_setup_token(token, executable, runner)
+        previous = _setup_token_profile
+        if (previous is None or previous.token != token
+                or (previous.transient
+                    and monotonic() - previous.checked_at >= SETUP_TOKEN_RECHECK_SECONDS)):
+            fresh = _lookup_setup_token(token, executable, runner)
+            if (previous is not None and previous.token == token
+                    and fresh.refusal is not None and fresh.refusal == previous.refusal):
+                # The same refusal again is the same notice, not a new one to deliver.
+                fresh = replace(fresh, notice_id=previous.notice_id)
+            _setup_token_profile = fresh
         return _setup_token_profile
 
 

@@ -45,7 +45,8 @@ RECEIPTS_KEPT = 40
 NOTEBOOK_KEPT = 80
 # Reads whose answer cannot change during a job: kept, and an identical call answered from
 # them without running again. Reads of the work copy are never kept: edits change it.
-UNCHANGING_READS = ("read_reference", "fetch_datasheet", "find_part")
+# find_part is not here: the library grows during a job (add_part, write-back), review of #247.
+UNCHANGING_READS = ("read_reference", "fetch_datasheet")
 
 
 def _read_key(capability_id: Any, arguments: Mapping[str, Any]) -> str | None:

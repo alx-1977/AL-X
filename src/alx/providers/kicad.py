@@ -163,12 +163,14 @@ DESIGN_NAMES = frozenset({'fp-lib-table', 'sym-lib-table'})
 _ICLOUD_COPY = re.compile(r'^(?P<stem>.+) (?:[2-9]|[1-9]\d+)(?P<ext>\.[^. ]+)?$')
 
 
-def icloud_copies(names):
+def icloud_copies(names, folder=None):
     """Files iCloud Drive made beside a file as conflict copies: "fp-lib-table 2", "x 3.kicad_sch".
 
     Work copies live under the Desktop, which iCloud syncs; on 25 Nov it made over a hundred
     stale copies in a P0009 work copy, which refused the write-back and would have put duplicate
-    boards and sheets into his project. A name counts only when the plain name sits beside it.
+    boards and sheets into his project. A name counts only when the plain name sits beside it,
+    and, given the folder, when no other design file names it: a new sheet "Sensor 2" that the
+    hierarchy uses is his design (review of #247).
     """
     names = set(names)
     present = names | {'/'.join(name.split('/')[:i]) for name in names
@@ -181,6 +183,14 @@ def icloud_copies(names):
             if match and '/'.join(parts[:i] + [match['stem'] + (match['ext'] or '')]) in present:
                 found.add(name)
                 break
+    if folder is not None and found:
+        named = set()
+        for name in names - found:
+            if Path(name).suffix in ('.kicad_sch', '.kicad_pro') or Path(name).name in DESIGN_NAMES:
+                with suppress(OSError):
+                    text = (Path(folder) / name).read_text(errors='replace')
+                    named |= {copy for copy in found if Path(copy).name in text}
+        found -= named
     return found
 
 
@@ -273,7 +283,10 @@ def _non_library_parts(folder):
     """(reference, lib_id) of every placed symbol in a folder's schematics that is not a FireFli
     library part; power symbols and flags (#PWR, #FLG) are not parts."""
     found = []
-    for sheet in sorted(Path(folder).glob('*.kicad_sch')):
+    for sheet in sorted(Path(folder).rglob('*.kicad_sch')):
+        if any(part.startswith('.') or part == 'backups' or part.endswith('-backups')
+               for part in sheet.relative_to(folder).parts[:-1]):
+            continue
         try:
             source = sheet.read_text(errors='replace')
         except OSError:
@@ -918,9 +931,9 @@ class KiCadProvider:
                           key=lambda p: [int(x) for x in re.findall(r'\d+', p.name)] or [0])
         for config in reversed(versions):
             try:
-                found = (json.loads((config / 'kicad_common.json').read_text())
-                         .get('environment', {}).get('vars') or {}).get('FIREFLI_KICAD_LIB')
-            except (OSError, ValueError):
+                found = ((json.loads((config / 'kicad_common.json').read_text())
+                         .get('environment') or {}).get('vars') or {}).get('FIREFLI_KICAD_LIB')
+            except (OSError, ValueError, AttributeError):
                 continue
             if found:
                 return Path(found).expanduser()
@@ -3023,9 +3036,9 @@ class KiCadProvider:
         variables = {'KIPRJMOD': str(project)}
         if config and (config / 'kicad_common.json').is_file():
             try:
-                variables.update(json.loads((config / 'kicad_common.json').read_text())
-                                 .get('environment', {}).get('vars') or {})
-            except ValueError:
+                variables.update((json.loads((config / 'kicad_common.json').read_text())
+                                  .get('environment') or {}).get('vars') or {})
+            except (ValueError, AttributeError):
                 pass
         tables = {}
         table_name = 'fp-lib-table' if kind == 'footprints' else 'sym-lib-table'
@@ -3737,6 +3750,9 @@ class KiCadProvider:
             if status[step] != 'unchanged':
                 previous = approvals.get(step) or {}
                 approvals[step] = {name: current[name] for name in STEPS[:index + 1]}
+                if step == 'placement':
+                    # The copper he saw with this placement, for a write-back before any routing.
+                    approvals[step]['routing_seen'] = current['routing']
                 # D-082b: approving a placement again, after it moved from what he approved, does not
                 # stand in for the routing sign-off; routing stays due until he approves it seeing this
                 # placement (19 Nov recheck: a second placement approval cleared the need).
@@ -3814,8 +3830,11 @@ class KiCadProvider:
             status = self._step_status(root, meta)
             # A placed board with no copper she added goes back for him to route (25 Nov: Friedl routes
             # for now; placement write-back was refused for want of a routing approval).
+            # Copper removed after his placement approval still needs his routing approval (review of #247).
+            copper = fingerprints(root / 'project', meta['board'])['routing']
+            seen = ((meta.get('approvals') or {}).get('placement') or {}).get('routing_seen')
             placed_only = (ready(status, 'placement')
-                           and not routing_added(source / meta['board'], root / 'project' / meta['board']))
+                           and copper in (self._original_steps(root, meta)['routing'], seen))
             if not ready(status, 'routing') and not placed_only:
                 raise KiCadError('step_not_approved', {
                     'needs': next(step for step in STEPS if status[step] not in ('unchanged', 'approved')),
@@ -3855,7 +3874,7 @@ class KiCadProvider:
         validate()
         copied = (library_inventory if meta.get('library') else design_inventory)(root / 'project')
         if not meta.get('library'):
-            stray = icloud_copies(copied)
+            stray = icloud_copies(copied, root / 'project')
             copied = {name: digest for name, digest in copied.items()
                       if name in meta['hashes'] or not (name.endswith('.kicad_sch' + GRID_SUFFIX)
                                                         or name in stray)}
@@ -3892,7 +3911,11 @@ class KiCadProvider:
         def beside(name, kind):
             target = source / name
             if not target.parent.is_dir():
-                raise KiCadError('unsupported_project')
+                # A new part can bring the library's first folder of its kind (3dmodels/<lib>.3dshapes,
+                # spice); a design write-back never adds folders (review of #247, 26 Nov).
+                if not meta.get('library') or not target.parent.resolve().is_relative_to(source.resolve()):
+                    raise KiCadError('unsupported_project')
+                target.parent.mkdir(parents=True, exist_ok=True)
             fd, value = tempfile.mkstemp(prefix='.' + target.name + '.' + kind + '-', dir=target.parent)
             os.close(fd)
             path = Path(value)

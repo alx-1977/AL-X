@@ -88,5 +88,12 @@ class Datasheets(unittest.TestCase):
         self.assertEqual(len(asked), 2)  # token and query, once
 
 
+def test_find_part_is_asked_afresh_because_the_library_grows_during_a_job():
+    # Review of #247: a cached "not found" told her to make a part she had just added.
+    from alx.specialists.board_agent import _read_key
+    assert _read_key("kicad", {"action": "find_part", "query": "74LVC1G123"}) is None
+    assert _read_key("kicad", {"action": "fetch_datasheet", "part": "74LVC1G123"}) is not None
+
+
 if __name__ == "__main__":
     unittest.main()

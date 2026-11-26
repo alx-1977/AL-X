@@ -1265,6 +1265,38 @@ Path(sys.argv[1]).with_suffix('.kicad_sch').write_text('(kicad_sch (version 2))\
         self.assertFalse((self.project / 'test 2.kicad_pcb').exists())
         self.assertFalse((self.project / 'notes 3.txt').exists())
 
+    def test_a_new_sheet_the_hierarchy_names_is_not_taken_for_an_icloud_copy(self):
+        from alx.providers.kicad import icloud_copies
+        folder = self.project
+        (folder / 'Sensor.kicad_sch').write_text('(kicad_sch)')
+        (folder / 'Sensor 2.kicad_sch').write_text('(kicad_sch)')
+        (folder / 'Old 2.kicad_sch').write_text('(kicad_sch)')
+        (folder / 'Old.kicad_sch').write_text('(kicad_sch)')
+        (folder / 'Root.kicad_sch').write_text('(property "Sheetfile" "Sensor 2.kicad_sch")')
+        names = ['Sensor.kicad_sch', 'Sensor 2.kicad_sch', 'Old.kicad_sch', 'Old 2.kicad_sch', 'Root.kicad_sch']
+        self.assertEqual(icloud_copies(names, folder), {'Old 2.kicad_sch'})
+
+    REMOVE_TRACKS = """
+import re, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(re.sub(r' \\(segment [^()]*(\\([^()]*\\)[^()]*)*\\)', '', p.read_text()))
+"""
+
+    def test_copper_removed_after_the_placement_approval_needs_his_routing_approval(self):
+        board = self.project / 'test.kicad_pcb'
+        board.write_text(board.read_text()[:-1] + ' (segment (start 3 4) (end 6 4) (width 0.25) (layer "F.Cu")))')
+        copy = self.check()['work_copy_id']
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.approve(moved, 'placement')
+        stripped = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.REMOVE_TRACKS)
+        self.assertNotIn('segment', (self.settings.work_root / copy / 'project' / 'test.kicad_pcb').read_text())
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(stripped))
+        # Shown to him with the tracks gone, the placement approval covers it.
+        self.approve(stripped, 'placement')
+        self.success('write_back_kicad_board', **self.write_args(stripped))
+        self.assertNotIn('segment', board.read_text())
+
     def test_icloud_copies_need_the_plain_name_beside_them(self):
         from alx.providers.kicad import icloud_copies
         self.assertEqual(icloud_copies(['fp-lib-table', 'fp-lib-table 2', 'a.pretty/x.kicad_mod',
