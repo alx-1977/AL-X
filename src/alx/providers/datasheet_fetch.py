@@ -27,14 +27,55 @@ NEXAR_TOKEN = "https://identity.nexar.com/connect/token"
 NEXAR_API = "https://api.nexar.com/graphql"
 DIGIKEY_TOKEN = "https://api.digikey.com/v1/oauth2/token"
 DIGIKEY_DETAILS = "https://api.digikey.com/products/v4/search/{}/productdetails"
+DIGIKEY_KEYWORD = "https://api.digikey.com/products/v4/search/keyword"
 NEXAR_QUERY = ("query($q:String!){supSearchMpn(q:$q, limit:3){results{part{mpn manufacturer{name} "
                "bestDatasheet{url} documentCollections{name documents{name url}}}}}}")
 
 
 class DatasheetError(Exception):
-    def __init__(self, code: str, detail: str = "") -> None:
+    def __init__(self, code: str, detail: str = "", candidates: list | None = None) -> None:
         super().__init__(code)
-        self.code, self.detail = code, detail
+        self.code, self.detail, self.candidates = code, detail, list(candidates or ())
+
+
+def _digikey_candidates(client: Any, token: str, client_id: str, part: str, manufacturer: str) -> list[dict]:
+    """Parts DigiKey lists for a number that is not one exact part (19 Nov 2026: "74LVC1G123" is
+    a family: several makers and packages). Each with maker, package and description, so AL/X
+    chooses the exact part; nothing is chosen here."""
+    try:
+        response = client.post(DIGIKEY_KEYWORD, json={"Keywords": part, "Limit": 25, "Offset": 0},
+                               headers={"Authorization": "Bearer %s" % token, "X-DIGIKEY-Client-Id": client_id})
+    except Exception:  # noqa: BLE001 - no list is no list
+        return []
+    if response.status_code != 200:
+        return []
+    found, seen = [], set()
+    try:
+        answer = response.json()
+    except ValueError:
+        return []
+    if not isinstance(answer, Mapping):
+        return []
+    # DigiKey puts parts whose number matches exactly in ExactMatches and the rest in Products
+    # (19 Nov 2026: BAT54WS came back as "not found" with its matches in ExactMatches).
+    for product in ((answer.get("ExactMatches") or []) + (answer.get("Products") or []))[:40]:
+        number = str(product.get("ManufacturerProductNumber", ""))
+        if number in seen:
+            continue
+        seen.add(number)
+        maker = str((product.get("Manufacturer") or {}).get("Name", ""))
+        if manufacturer and not _same_maker(manufacturer, maker):
+            continue
+        parameters = {str(p.get("ParameterText", "")): str(p.get("ValueText", ""))
+                      for p in product.get("Parameters") or [] if isinstance(p, Mapping)}
+        found.append({
+            "part_number": str(product.get("ManufacturerProductNumber", "")),
+            "manufacturer": maker,
+            "package": parameters.get("Supplier Device Package") or parameters.get("Package / Case", ""),
+            "description": str((product.get("Description") or {}).get("ProductDescription", ""))[:120],
+            "has_datasheet": bool(product.get("DatasheetUrl")),
+        })
+    return [item for item in found if item["part_number"]]
 
 
 def _plain(name: str) -> str:
@@ -49,9 +90,14 @@ def _same_maker(asked: str, found: str) -> bool:
     return not first or first in _plain(found).split()
 
 
+_NEXAR_SPENT: set[str] = set()
+
+
 def _nexar_links(client: Any, credentials: list[tuple[str, str]], part: str,
                  manufacturer: str, tried: list) -> list[str]:
     for client_id, secret in credentials:
+        if client_id in _NEXAR_SPENT:
+            continue
         try:
             token = client.post(NEXAR_TOKEN, data={"grant_type": "client_credentials", "client_id": client_id,
                                                    "client_secret": secret, "scope": "supply.domain"}).json()
@@ -62,7 +108,11 @@ def _nexar_links(client: Any, credentials: list[tuple[str, str]], part: str,
             continue
         if answer.get("errors"):
             # A plan with no part allowance answers with an error: try the next key.
-            tried.append({"source": "nexar", "url": "", "result": str(answer["errors"][0].get("message", ""))[:120]})
+            message = str(answer["errors"][0].get("message", ""))
+            tried.append({"source": "nexar", "url": "", "result": message[:120]})
+            # A key that answered with an error is asked again only after a restart (25 Nov: its
+            # spent allowance was asked twelve times in one job).
+            _NEXAR_SPENT.add(client_id)
             continue
         links = []
         for result in ((answer.get("data") or {}).get("supSearchMpn") or {}).get("results") or []:
@@ -85,7 +135,7 @@ def _nexar_links(client: Any, credentials: list[tuple[str, str]], part: str,
 
 
 def _digikey_links(client: Any, credentials: tuple[str, str] | None, part: str, manufacturer: str,
-                   tried: list) -> list[str]:
+                   tried: list, candidates: list | None = None) -> list[str]:
     if not credentials:
         return []
     client_id, secret = credentials
@@ -101,6 +151,8 @@ def _digikey_links(client: Any, credentials: tuple[str, str] | None, part: str, 
         return []
     if response.status_code != 200:
         tried.append({"source": "digikey", "url": "", "result": "HTTP %d" % response.status_code})
+        if response.status_code == 404 and candidates is not None:
+            candidates.extend(_digikey_candidates(client, token, client_id, part, manufacturer))
         return []
     product = response.json().get("Product") or {}
     # The product DigiKey returns must be the part, and the maker, asked for
@@ -149,7 +201,8 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
     # DigiKey first: free and unlimited. Nexar's allowance is small and its
     # paid plan is not an option (Friedl, 2026-11-13), so it is asked only
     # when DigiKey's link gives no PDF (Würth refuses automated downloads).
-    sources = (("digikey", lambda: _digikey_links(client, digikey, part, manufacturer, tried)),
+    candidates: list[dict] = []
+    sources = (("digikey", lambda: _digikey_links(client, digikey, part, manufacturer, tried, candidates)),
                ("nexar", lambda: _nexar_links(client, nexar, part, manufacturer, tried)))
     for source, find in sources:
         links = find()
@@ -175,8 +228,19 @@ def fetch_datasheet(part: str, manufacturer: str, folder: Path, *, client: Any,
             pending.write_text(json.dumps(dict(identity, source=source, url=link)))
             pending.replace(record)
             return {"path": str(target), "source": source, "url": link, "tried": tried}
-    raise DatasheetError("not_found", "no source gave a PDF for %s: %s" % (
-        part, "; ".join("%s %s" % (item["source"], item["result"]) for item in tried)[:400]))
+    if candidates:
+        raise DatasheetError("ambiguous_part", "%s is not one exact part number; DigiKey lists %d: call again "
+                             "with the exact part_number you choose" % (part, len(candidates)), candidates)
+    # What is already saved under a similar name (25 Nov: twelve guessed names for the M-SoM
+    # while M524MEA's datasheet sat in the folder).
+    stem = re.sub(r"[^a-z0-9]", "", part.lower())
+    saved = sorted(path.name for path in folder.glob("*.pdf")
+                   if stem and len(stem) >= 3 and stem in re.sub(r"[^a-z0-9]", "", path.name.lower()))[:10] \
+        if folder.is_dir() else []
+    raise DatasheetError("not_found", "no source gave a PDF for %s: %s%s" % (
+        part, "; ".join("%s %s" % (item["source"], item["result"]) for item in tried)[:400],
+        ("; already in the datasheet folder: " + ", ".join(saved) + " (read one with read_reference)")
+        if saved else ""))
 
 
 __all__ = ["DatasheetError", "api_client", "fetch_datasheet"]

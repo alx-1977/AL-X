@@ -403,7 +403,7 @@ print(json.dumps({'stiffener': moved_stiffener, 'notes': moved_notes,
                   + '\nWINDOW = ' + repr(window) + '\nEXPORT_LAYERS = '
                   + repr(list(reference_layers)) + '\n' + script)
         edited = _succeeded(runtime, 'edit_kicad_work_copy', {
-            'work_copy_id': work_id, 'script': script})
+            'work_copy_id': work_id, 'intent': [], 'script': script})
         evidence = json.loads(edited['stdout'])
         report = edited['change_report']['board']
         assert not report['truncated']
@@ -422,7 +422,7 @@ print(json.dumps({'stiffener': moved_stiffener, 'notes': moved_notes,
                    for item in report['items_added'])
         exported = _succeeded(runtime, 'export_kicad_manufacturing', {
             'work_copy_id': work_id, 'output_dir': 'production', 'renames': renames,
-            'separate_drills': True, 'drill_origin': 'plot',
+            'separate_drills': True,
             'compare_with': str(reference.resolve())})
         files = exported['files_written']
         assert any(Path(p).name == 'pib_0.15.gbr' for p in files)

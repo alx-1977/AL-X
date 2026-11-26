@@ -688,6 +688,9 @@ class SessionResilienceTests(unittest.TestCase):
             MID_EXCHANGE_RECOVERABLE_REASONS,
             frozenset({
                 "reasoner_error", "memory_persistence_error",
+                # 19 Nov 2026: a refused speech request ends one reply's audio, not the
+                # session; her words are already on the screen.
+                "speech_synthesis_error",
             }),
         )
         # Every mid-exchange reason must also be recoverable at all.

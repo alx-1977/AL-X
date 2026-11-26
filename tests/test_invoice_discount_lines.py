@@ -195,5 +195,41 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(self.xero.bills, {})
 
 
+    def elevenlabs(self, **overrides):
+        """ElevenLabs KBYCKWMS-0007 (19 Nov 2026): 220.00 less a 121.00 Black Friday discount,
+        VAT 14.85 = 15 % of the 99.00 net, total 113.85."""
+        self.xero = FakeXero()
+        self.xero.contacts = ({"Name": "Eleven Labs Inc.", "ContactID": "c-2", "ContactStatus": "ACTIVE"},)
+        self.xero.history = ()
+        self.xero.accounts = ({"Code": "310", "Status": "ACTIVE", "TaxType": "INPUT3"},)
+        self.xero.tax_rates = ({"TaxType": "INPUT3", "Status": "ACTIVE", "EffectiveRate": "15.0000"},)
+        values = greptile(supplier_name="Eleven Labs Inc.", invoice_number="KBYCKWMS-0007",
+                          subtotal="220.00", tax_amount="14.85", total="113.85", amount_due="113.85",
+                          description="Creator (per subscription) Nov 19, 2026-Nov 19, 2027",
+                          adjustments=[{"description": "Black Friday 2026 Promo (55% off)", "amount": "-121.00"}])
+        values.update(overrides)
+        fields = checked_invoice(values)
+        return xero_executors(
+            self.xero, FakeMail(), lambda: "call-1", lambda *_: fields, "310", "INPUT3",
+        )[CAPTURE_INVOICE](arguments())
+
+    def test_vat_proven_on_the_discounted_net_is_carried_on_each_line(self) -> None:
+        result = self.elevenlabs()
+        self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
+        self.assertTrue(result.values["completed"], result.values.get("detail"))
+        posted = self.xero.bills[result.values["bill"]["invoice_id"]]
+        lines = [(Decimal(str(line["UnitAmount"])), Decimal(str(line["TaxAmount"])), line["TaxType"])
+                 for line in posted["LineItems"]]
+        self.assertEqual(lines, [(Decimal("220.00"), Decimal("33.00"), "INPUT3"),
+                                 (Decimal("-121.00"), Decimal("-18.15"), "INPUT3")])
+        self.assertEqual(posted["LineAmountTypes"], "Exclusive")
+        self.assertEqual(result.values["bill"]["total"], "113.85")
+
+    def test_vat_that_is_not_the_rate_on_the_net_is_still_returned(self) -> None:
+        result = self.elevenlabs(tax_amount="15.00", total="114.00", amount_due="114.00")
+        self.assertFalse(result.values["completed"])
+        self.assertEqual(result.values["returned_for"], "tax_allocation_unresolved")
+        self.assertEqual(self.xero.bills, {})
+
 if __name__ == "__main__":
     unittest.main()

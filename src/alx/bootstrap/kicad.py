@@ -4,8 +4,9 @@ from functools import partial
 from pathlib import Path
 
 from alx.config.settings import KiCadSettings
-from alx.providers.coding_process import (build_swift_program, run_confined_converter, run_kicad_cli,
-                                         run_kicad_engine, run_kicad_python)
+from alx.providers.coding_process import (build_swift_program, capture_screen, run_confined_converter,
+                                         run_kicad_cli, run_kicad_engine, run_kicad_python,
+                                         start_kicad_viewer)
 from alx.providers.kicad import KiCadProvider
 from alx.safety import AuthorityPolicy
 from alx.tools.kicad import DEFINITIONS, FREE_ACTIONS, KICAD, build_kicad_executors
@@ -29,6 +30,7 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
                                              timeout_seconds=settings.cli_timeout_seconds),
                              partial(run_kicad_python, runner=runner,
                                      timeout_seconds=settings.script_timeout_seconds))
+    provider.image_store = storage_root / "looks"
     provider.engine_paths = {
         name: Path(environment.get(key, default)).expanduser().absolute()
         for name, key, default in (
@@ -47,6 +49,17 @@ def build_kicad_runtime(call_id_source, environment, storage_root, runner=None):
     storage = Path(environment.get('ALX_STORAGE_ROOT', ALX_STORAGE)).expanduser().resolve()
     provider.reference_roots = tuple(dict.fromkeys((*provider.design_roots, storage)))
     provider.datasheet_folder = storage / 'Datasheets'
+    # Maker and SamacSys downloads Friedl drops for a new part (3D and SPICE models; 19 Nov 2026).
+    provider.parts_inbox = storage / 'Parts-Inbox'
+    # Drawings she and her board agent look at (render), and KiCad's own windows (open_in_kicad).
+    provider.render_folder = storage / 'Whiteboard' / 'alx-renders'
+    applications = Path(environment.get('ALX_KICAD_APPLICATIONS', '/Applications/KiCad/KiCad.app/Contents/Applications'))
+
+    def open_viewer(what, path, index):
+        app = 'eeschema' if what == 'schematic' else 'pcbnew'
+        return start_kicad_viewer(applications / (app + '.app'), path, runner=runner)
+    provider.open_viewer = open_viewer
+    provider.capture_screen = partial(capture_screen, runner=runner)
     nexar = [(environment[a], environment[b]) for a, b in (
         ('NEXAR_CLIENT_ID', 'NEXAR_CLIENT_SECRET'), ('NEXAR_EVAL_CLIENT_ID', 'NEXAR_EVAL_CLIENT_SECRET'))
         if environment.get(a) and environment.get(b)]

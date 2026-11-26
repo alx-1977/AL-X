@@ -211,6 +211,55 @@ class TextToSpeechSettings:
     stability: float
     similarity_boost: float
     speaker_boost: bool
+    api_version: str = ""
+
+
+def _text_to_speech_settings(environment: Mapping[str, str]) -> TextToSpeechSettings:
+    """Her voice, from whichever provider ALX_TTS_PROVIDER names (19 Nov 2026).
+
+    Each provider reads its own key, voice and model, so switching is one line:
+    ElevenLabs: ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, ALX_TTS_MODEL and the
+    pronunciation dictionary. Cartesia: CARTESIA_API_KEY, CARTESIA_VOICE_ID,
+    CARTESIA_TTS_MODEL (default sonic-3) and CARTESIA_TTS_API_VERSION (default
+    2026-08-14, Cartesia's current version for speech). ALX_TTS_API_KEY / ALX_TTS_VOICE_ID still override either when set.
+    """
+    provider = _required(environment, "ALX_TTS_PROVIDER")
+    common = dict(
+        output_format=environment.get("ALX_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
+        timeout_seconds=_positive_integer(environment, "ALX_TTS_TIMEOUT_SECONDS", 60),
+        speed=_number_in_range(environment, "ALX_TTS_SPEED", 0.7, 1.2, 1.0),
+        stability=_number_in_range(environment, "ALX_TTS_STABILITY", 0.0, 1.0, 0.5),
+        similarity_boost=_number_in_range(environment, "ALX_TTS_SIMILARITY_BOOST", 0.0, 1.0, 0.75),
+        speaker_boost=_boolean(environment, "ALX_TTS_SPEAKER_BOOST", True),
+    )
+    if provider.strip().lower() == "cartesia":
+        return TextToSpeechSettings(
+            provider="cartesia",
+            model=environment.get("CARTESIA_TTS_MODEL", "").strip() or "sonic-3",
+            api_key=_credential(environment, "ALX_TTS_API_KEY", "CARTESIA_API_KEY"),
+            voice_id=_configured(environment, "ALX_TTS_VOICE_ID", "CARTESIA_VOICE_ID"),
+            base_url=_configured(environment, "CARTESIA_TTS_BASE_URL", "CARTESIA_BASE_URL",
+                                 "https://api.cartesia.ai").rstrip("/"),
+            pronunciation_dictionary_id="",
+            pronunciation_dictionary_version_id="",
+            # Speaking has its own API version: Cartesia's current one is 2026-08-14
+            # (19 Nov 2026; the version hearing uses was refused for speech).
+            api_version=_configured(environment, "CARTESIA_TTS_API_VERSION", "CARTESIA_TTS_VERSION",
+                                    "2026-08-14"),
+            **common,
+        )
+    return TextToSpeechSettings(
+        provider=provider,
+        model=_required(environment, "ALX_TTS_MODEL"),
+        api_key=_credential(environment, "ALX_TTS_API_KEY", "ELEVENLABS_API_KEY"),
+        voice_id=_configured(environment, "ALX_TTS_VOICE_ID", "ELEVENLABS_VOICE_ID"),
+        base_url=_configured(environment, "ALX_TTS_BASE_URL", "ELEVENLABS_BASE_URL",
+                             "https://api.elevenlabs.io").rstrip("/"),
+        pronunciation_dictionary_id=_required(environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_ID"),
+        pronunciation_dictionary_version_id=_required(
+            environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID"),
+        **common,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +356,8 @@ class XeroSettings:
     # supplied to the import capability. It is a name, not a Xero identifier:
     # the contact is resolved by exact name at run time, as V1 did.
     dhl_supplier_name: str
+    # D-022a: DHL freight (export carriage) posts to Freight & Courier, No VAT.
+    freight_account: str = "425"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "XeroSettings":
@@ -345,6 +396,9 @@ class XeroSettings:
             ).strip(),
             clearance_account=environment.get(
                 "ALX_XERO_CLEARANCE_ACCOUNT", "425"
+            ).strip(),
+            freight_account=environment.get(
+                "ALX_XERO_FREIGHT_ACCOUNT", "425"
             ).strip(),
             dhl_supplier_name=environment.get(
                 "ALX_XERO_DHL_SUPPLIER_NAME", "DHL International (Pty) Ltd"
@@ -855,6 +909,46 @@ def worker_settings(
     return replace(reasoning, model=model)
 
 
+# D-083: the board agent's model. Judgement on a layout is Opus's (D-070).
+BOARD_AGENT_DEFAULT_MODEL = "claude-opus-5-5"
+
+
+BOARD_AGENT_CODEX_DEFAULT_MODEL = "gpt-6-astra"
+
+
+def board_agent_settings(
+    environment: Mapping[str, str], reasoning: "ReasoningSettings",
+) -> "ReasoningSettings":
+    """The board agent's model: the Core's login and transport, Opus by default (D-083);
+    ALX_BOARD_AGENT_PROVIDER=codex_subscription runs it on Codex (Astra by default) through
+    Friedl's ChatGPT login (16 Nov)."""
+    provider = environment.get("ALX_BOARD_AGENT_PROVIDER", "").strip() or reasoning.provider
+    # ALX_BOARD_AGENT_EFFORT: low, medium, high or max (16 Nov: models benchmarked at set efforts).
+    effort = environment.get("ALX_BOARD_AGENT_EFFORT", "").strip().lower()
+    if effort and effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigurationError("ALX_BOARD_AGENT_EFFORT must be low, medium, high, xhigh or max")
+    if provider == CODEX_SUBSCRIPTION_PROVIDER:
+        model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_CODEX_DEFAULT_MODEL
+        return replace(reasoning, provider=provider, model=model, effort=effort or "high")
+    model = environment.get("ALX_BOARD_AGENT_MODEL", "").strip() or BOARD_AGENT_DEFAULT_MODEL
+    # "none": the CLI's own effort, as the Core's subscription turn has no dial.
+    return replace(reasoning, model=model, effort=effort or "none")
+
+
+def board_presentation_settings(
+    environment: Mapping[str, str], reasoning: "ReasoningSettings",
+) -> "ReasoningSettings":
+    """The board agent's presentation model uses a subscription transport."""
+    provider = environment.get("ALX_BOARD_PRESENT_PROVIDER", "").strip() or CLAUDE_SUBSCRIPTION_PROVIDER
+    if provider not in (CLAUDE_SUBSCRIPTION_PROVIDER, CODEX_SUBSCRIPTION_PROVIDER):
+        raise ConfigurationError("ALX_BOARD_PRESENT_PROVIDER must be claude_subscription or codex_subscription")
+    model = environment.get("ALX_BOARD_PRESENT_MODEL", "").strip() or BOARD_AGENT_DEFAULT_MODEL
+    effort = environment.get("ALX_BOARD_PRESENT_EFFORT", "").strip().lower() or "medium"
+    if effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigurationError("ALX_BOARD_PRESENT_EFFORT must be low, medium, high, xhigh or max")
+    return replace(reasoning, provider=provider, model=model, effort=effort, api_key="")
+
+
 def autonomous_due_check_seconds(environment: Mapping[str, str]) -> float:
     """How promptly a matured request is noticed. Not a cognition cadence.
 
@@ -1209,6 +1303,9 @@ class RuntimeSettings:
     autonomous_first_pass: "ReasoningSettings | None"
     # D-070: the worker that carries out mechanical briefs for her.
     worker: "ReasoningSettings"
+    # D-083: the board agent that does a whole KiCad board job for her.
+    board_agent: "ReasoningSettings"
+    board_presentation: "ReasoningSettings"
     # D-028 coding jobs. Independent of the conversational Core.
     coding: "CodingSettings"
     speech_to_text: SpeechToTextSettings
@@ -1246,6 +1343,8 @@ class RuntimeSettings:
             autonomous=autonomous,
             autonomous_first_pass=autonomous_first_pass_settings(environment, autonomous),
             worker=worker_settings(environment, reasoning),
+            board_agent=board_agent_settings(environment, reasoning),
+            board_presentation=board_presentation_settings(environment, reasoning),
             coding=_coding_settings(environment),
             speech_to_text=SpeechToTextSettings(
                 provider=_required(environment, "ALX_STT_PROVIDER"),
@@ -1275,40 +1374,7 @@ class RuntimeSettings:
                     environment, "ALX_STT_TURN_END_TIMEOUT_MS", 640, 11200
                 ),
             ),
-            text_to_speech=TextToSpeechSettings(
-                provider=_required(environment, "ALX_TTS_PROVIDER"),
-                model=_required(environment, "ALX_TTS_MODEL"),
-                api_key=_credential(environment, "ALX_TTS_API_KEY", "ELEVENLABS_API_KEY"),
-                voice_id=_configured(
-                    environment, "ALX_TTS_VOICE_ID", "ELEVENLABS_VOICE_ID"
-                ),
-                base_url=_configured(
-                    environment,
-                    "ALX_TTS_BASE_URL",
-                    "ELEVENLABS_BASE_URL",
-                    "https://api.elevenlabs.io",
-                ).rstrip("/"),
-                output_format=environment.get("ALX_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
-                timeout_seconds=_positive_integer(environment, "ALX_TTS_TIMEOUT_SECONDS", 60),
-                pronunciation_dictionary_id=_required(
-                    environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_ID"
-                ),
-                pronunciation_dictionary_version_id=_required(
-                    environment, "ALX_TTS_PRONUNCIATION_DICTIONARY_VERSION_ID"
-                ),
-                speed=_number_in_range(
-                    environment, "ALX_TTS_SPEED", 0.7, 1.2, 1.0
-                ),
-                stability=_number_in_range(
-                    environment, "ALX_TTS_STABILITY", 0.0, 1.0, 0.5
-                ),
-                similarity_boost=_number_in_range(
-                    environment, "ALX_TTS_SIMILARITY_BOOST", 0.0, 1.0, 0.75
-                ),
-                speaker_boost=_boolean(
-                    environment, "ALX_TTS_SPEAKER_BOOST", True
-                ),
-            ),
+            text_to_speech=_text_to_speech_settings(environment),
         )
 
 

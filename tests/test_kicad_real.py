@@ -117,7 +117,7 @@ print('confined')
             checked = kicad_call(runtime.executors, 'check_kicad_board', {'project_dir': str(project)})
             self.assertEqual(checked.state, CapabilityResultState.SUCCEEDED, checked.failure)
             exported = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-                'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production',
+                'work_copy_id': checked.values['work_copy_id'], 'work_copy_revision': checked.values['work_copy_revision'], 'output_dir': 'production',
                 'renames': {'F.Cu': 'top.gbr', 'F.Silkscreen': 'silk.gbr'}, 'zip_name': 'maker.zip'})
             self.assertEqual(exported.state, CapabilityResultState.SUCCEEDED, exported.failure)
             self.assertIn('X', (project / 'production/top.gbr').read_text())
@@ -144,7 +144,7 @@ print('confined')
                 for group in checked.values[key]))
             edited = kicad_call(runtime.executors, 'edit_kicad_work_copy', {
                 'work_copy_id': checked.values['work_copy_id'],
-                'script': '''
+                'intent': [], 'script': '''
 import sys
 import pcbnew
 board = pcbnew.LoadBoard(sys.argv[1])
@@ -167,8 +167,8 @@ pcbnew.SaveBoard(sys.argv[1], board)
                 'id': 'd8478024-7b53-4e3c-b624-b00426b46aed', 'kind': 'gr_text',
                 'before': ('F.SilkS',), 'after': ('User.1',)},))
             exported = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
-                'work_copy_id': checked.values['work_copy_id'], 'output_dir': 'production',
-                'renames': {'User.1': 'pib_0.15.gbr'}, 'zip_name': 'production.zip'})
+                'work_copy_id': checked.values['work_copy_id'], 'work_copy_revision': edited.values['work_copy_revision'],
+                'output_dir': 'production', 'renames': {'User.1': 'pib_0.15.gbr'}, 'zip_name': 'production.zip'})
             self.assertEqual(exported.state, CapabilityResultState.SUCCEEDED, exported.failure)
             self.assertTrue((project / 'production/pib_0.15.gbr').is_file())
             self.assertEqual({p.name: p.read_bytes() for p in project.iterdir() if p.is_file()}, before)

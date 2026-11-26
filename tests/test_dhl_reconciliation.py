@@ -1368,6 +1368,7 @@ def executor_for(mail, xero, supplier_name: str = "DHL EXPRESS", processed_mailb
         supplier_name,
         clock=lambda: datetime(2026, 8, 31, tzinfo=UTC),
         processed_mailbox=processed_mailbox,
+        freight_account="425",
     )[XeroAction.IMPORT_DHL]
 
 
@@ -1747,16 +1748,70 @@ class DhlImportLifecycleTests(unittest.TestCase):
         self.assertEqual(result.values["stage"], "dhl_invoice")
         self.assertEqual(self.xero.created, 1)
 
-    def test_freight_is_recognised_and_returned_without_a_xero_write(self) -> None:
-        self.xero.list_accounts = lambda: (_ for _ in ()).throw(
-            AssertionError("freight classification must not touch Xero")
-        )
-        result = self.executor(
-            {"documents": [source_for(self.mail, "freight_csv", "40")]}
-        )
-        self.assertFalse(result.values["completed"])
+    FREIGHT_HEADER = (b"Line Type,Invoice Number,Shipment Number,Invoice Date,Due Date,Currency,"
+                      b"Total amount (incl. VAT),Total Tax,Weight Charge,XC1 Code,XC1 Name,XC1 Charge,"
+                      b"XC1 Discount,XC1 Tax,XC1 Total\n")
+
+    def freight(self, row=b"S,CPTIR00273840,1921099471,20260831,20260907,ZAR,508.76,0.00,400.00,"
+                          b"FF,FUEL SURCHARGE,180.00,-71.24,0.00,108.76\n", executor=None):
+        """An export's carriage: the weight charge and a discounted fuel surcharge (D-022a)."""
+        self.mail.payloads["freight_csv"] = ("CPTIR00273840.csv", "text/csv", self.FREIGHT_HEADER + row)
+        return (executor or self.executor)({"documents": [
+            source_for(self.mail, "freight_csv", "40"), source_for(self.mail, "duty_pdf", "40")]})
+
+    def test_freight_posts_each_charge_to_freight_and_courier_with_no_vat(self) -> None:
+        """15 Nov: CPTR001032278 had no way to be booked; Friedl chose Freight & Courier, no VAT."""
+        result = self.freight()
+        self.assertTrue(result.values["completed"], result.values)
         self.assertEqual(result.values["stage"], "dhl_freight_invoice")
-        self.assertEqual(result.values["returned_for"], "freight_not_authorised")
+        bill = result.values["bill"]
+        self.assertEqual(bill["Status"], "AUTHORISED")
+        self.assertEqual(Decimal(bill["Total"]), Decimal("508.76"))
+        self.assertEqual([line["AccountCode"] for line in bill["LineItems"]], ["425", "425"])
+        self.assertEqual([Decimal(str(line["UnitAmount"])) for line in bill["LineItems"]],
+                         [Decimal("400.00"), Decimal("108.76")])
+        self.assertTrue(all(line["TaxAmount"] == 0 for line in bill["LineItems"]))
+        self.assertEqual(bill["LineAmountTypes"], "NoTax")
+        self.assertIn("DHL freight; waybill 1921099471", bill["Reference"])
+
+    def test_a_weight_discount_is_its_own_negative_line(self) -> None:
+        """16 Nov: CPTR001032278's weight discount of -3,297.15 was left out; refused as not adding up."""
+        header = (b"Line Type,Invoice Number,Shipment Number,Invoice Date,Due Date,Currency,"
+                  b"Total amount (incl. VAT),Total Tax,Invoice Fee,Weight Charge,Weight Tax (VAT),"
+                  b"Discount 1,Discount 1 Amount,Discount 2,Discount 2 Amount,"
+                  b"XC1 Code,XC1 Name,XC1 Charge,XC1 Discount,XC1 Tax,XC1 Total\n")
+        row = (b"S,CPTR001032278,1921099471,20261110,20261117,ZAR,6111.25,0.00,,7327.00,0.00,"
+               b"W,-3297.15,,0,FF,FUEL SURCHARGE,3713.49,-1632.09,0.00,2081.40\n")
+        evidence = DhlImportAnalyzerAdapter().invoice_evidence(header + row)
+        self.assertTrue(evidence["verified"], evidence["problems"])
+        self.assertEqual([(line["code"], line["amount"]) for line in evidence["lines"]],
+                         [("WEIGHT", "7327.00"), ("DISC1", "-3297.15"), ("FF", "2081.40")])
+        self.assertEqual(evidence["lines"][1]["description"], "Discount 1 (W)")
+
+    def test_the_real_freight_export_reads_as_weight_and_fuel(self) -> None:
+        evidence = DhlImportAnalyzerAdapter().invoice_evidence(
+            (FIXTURES / "mybill_freight_sanitized.csv").read_bytes())
+        self.assertTrue(evidence["verified"], evidence["problems"])
+        self.assertEqual([(line["code"], line["amount"]) for line in evidence["lines"]],
+                         [("WEIGHT", "3425.00"), ("FF", "773.66")])
+
+    def test_freight_that_does_not_add_up_or_states_tax_is_not_posted(self) -> None:
+        short = self.freight(b"S,CPTIR00273840,1921099471,20260831,20260907,ZAR,508.76,0.00,400.00,"
+                             b"FF,FUEL SURCHARGE,180.00,-71.24,0.00,100.00\n")
+        self.assertFalse(short.values["completed"])
+        self.assertEqual(short.values["returned_for"], "invoice_does_not_reconcile")
+        taxed = self.freight(b"S,CPTIR00273840,1921099471,20260831,20260907,ZAR,508.76,15.00,400.00,"
+                             b"FF,FUEL SURCHARGE,180.00,-71.24,0.00,108.76\n")
+        self.assertEqual(taxed.values["returned_for"], "invoice_tax_present")
+        self.assertEqual(self.xero.created, 0)
+
+    def test_freight_needs_its_account_in_the_organisation(self) -> None:
+        executor = build_dhl_executors(
+            self.mail, DhlImportAnalyzerAdapter(), self.xero, lambda: "call-1", "820", "426", "425",
+            "DHL EXPRESS", clock=lambda: datetime(2026, 8, 31, tzinfo=UTC), freight_account="999",
+        )[XeroAction.IMPORT_DHL]
+        result = self.freight(executor=executor)
+        self.assertEqual(result.failure["code"], "account_mapping_invalid")
         self.assertEqual(self.xero.created, 0)
 
     def test_customs_documents_draft_a_provisional_bill(self) -> None:

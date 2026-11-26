@@ -677,6 +677,43 @@ def _bill_values(bill: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _tax_rate(account: Any, tax_type: str) -> Decimal | None:
+    """The effective rate (percent) of a live tax type in this organisation, or None."""
+    for item in account.list_tax_rates():
+        if str(item.get("TaxType") or "") == tax_type and str(item.get("Status") or "") == "ACTIVE":
+            try:
+                return Decimal(str(item.get("EffectiveRate")))
+            except (InvalidOperation, ValueError):
+                return None
+    return None
+
+
+def _proven_deduction_tax(subtotal: str, adjustments: Any, tax_amount: str, rate: Decimal | None,
+                          line_amount_types: str) -> list[str] | None:
+    """Each line's VAT when the invoice's VAT is exactly `rate` on the net after deductions.
+
+    One correct answer or None: the subtotal line and each deduction carry the rate,
+    rounded per line like Xero, any cent of rounding on the subtotal line. Exclusive
+    VAT only; the stated VAT must match the rate on the net to the cent."""
+    if rate is None or rate <= 0 or line_amount_types != "Exclusive":
+        return None
+    try:
+        base = Decimal(str(subtotal))
+        amounts = [Decimal(str(item["amount"])) for item in adjustments]
+        tax = Decimal(str(tax_amount))
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return None
+    net = base + sum(amounts)
+    cent = Decimal("0.01")
+    if net <= 0 or abs((net * rate / 100).quantize(cent, rounding=ROUND_HALF_UP) - tax) > cent / 2:
+        return None
+    lines = [(value * rate / 100).quantize(cent, rounding=ROUND_HALF_UP) for value in [base] + amounts]
+    lines[0] += tax - sum(lines)
+    if abs(lines[0] - (base * rate / 100)) > cent:
+        return None
+    return [format(value, "f") for value in lines]
+
+
 def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decimal]:
     values = arguments.get("line_items")
     if not isinstance(values, (tuple, list)) or not values:
@@ -697,9 +734,11 @@ def _line_items(arguments: StructuredData) -> tuple[list[dict[str, Any]], Decima
             Decimal("0.0001"), rounding=ROUND_HALF_UP
         )
         tax_amount = _decimal(item.get("tax_amount"), "tax_amount")
-        if quantity <= 0 or tax_amount < 0:
-            raise ValueError("line_items")
         base = quantity * unit_amount
+        # A deduction line (negative amount) carries its VAT negative too; VAT never
+        # runs against its line's sign (19 Nov 2026: a discount's -18.15 VAT).
+        if quantity <= 0 or (tax_amount < 0 and base >= 0) or (tax_amount > 0 and base < 0):
+            raise ValueError("line_items")
         # Xero rounds each line before summing the bill, while retaining the
         # supplied quantity and four-decimal unit-price precision.
         rounded_base = base.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -1759,12 +1798,39 @@ def build_xero_executors(
 
         resolved_lines = None
         adjustments = tuple(invoice.get("adjustments") or ())
-        if adjustments and invoice_lines is None:
-            # A discount or credit is entered as its own negative line, the
-            # way Friedl enters them in Xero. Splitting VAT across a deduction
-            # is a judgment, so a taxed invoice with deductions is returned.
-            if _decimal_or_zero(invoice["tax_amount"]) != 0:
-                return returned("tax_allocation_unresolved", "VAT across a discount or credit is not stated", invoice)
+        if adjustments and invoice_lines is None and _decimal_or_zero(invoice["tax_amount"]) != 0:
+            # A discount or credit is entered as its own negative line, the way
+            # Friedl enters them in Xero. How VAT falls across a deduction is a
+            # judgment unless the figures prove it: when the VAT is exactly the
+            # supplier's rate on the net after deductions, every line carries that
+            # rate (19 Nov 2026, ElevenLabs KBYCKWMS-0007: 220.00 less 121.00 = 99.00,
+            # VAT 14.85 = 15 % of 99.00). Anything else is still returned.
+            try:
+                rate = _tax_rate(account, coding["tax_type"])
+            except XeroAccessError as error:
+                return failed(capability_id, error.code, error)
+            taxed = _proven_deduction_tax(invoice["subtotal"], adjustments, invoice["tax_amount"], rate,
+                                          coding["line_amount_types"])
+            if taxed is None:
+                return returned("tax_allocation_unresolved",
+                                "VAT across a discount or credit is not stated, and it is not the %s%% "
+                                "rate on the net after deductions" % (rate if rate is not None else "?"), invoice)
+            resolved_lines = [
+                {
+                    "description": description,
+                    "quantity": "1",
+                    "unit_amount": amount,
+                    "account_code": coding["account_code"],
+                    "tax_type": coding["tax_type"],
+                    "tax_amount": tax,
+                }
+                for description, amount, tax in zip(
+                    [invoice["description"] or "Supplier invoice"] + [a["description"] for a in adjustments],
+                    [invoice["subtotal"]] + [a["amount"] for a in adjustments],
+                    taxed,
+                )
+            ]
+        elif adjustments and invoice_lines is None:
             resolved_lines = [
                 {
                     "description": invoice["description"] or "Supplier invoice",

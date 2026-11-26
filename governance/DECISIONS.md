@@ -346,6 +346,16 @@ This file records approved product and architecture decisions that guide impleme
 - **Unproven at approval.** No duty-tax-paid invoice had been posted to the live organisation when this was recorded. Account 426, its No VAT default and the DHL contact were each confirmed read-only against the live FireFli organisation.
 - **Review condition.** Revisit if a duty-tax-paid invoice posts against the wrong account, if a freight or customs invoice is misclassified as duty tax paid, if an invoice carrying tax reaches a NoTax posting, or before freight handling is added.
 
+## D-022a — DHL freight invoices post to Freight & Courier, No VAT
+
+- **Date:** 2026-11-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-15** ("You can use the freight/courier account in xero. there is NO VAT yes as it is export"). The first real freight invoice, CPTR001032278 (R6,561.25, outbound Express 12:00, no VAT), arrived on 13 Nov. D-022 recognised it and returned it unposted, as it said it would until a real one was inspected; `capture_supplier_invoice` refuses DHL documents (D-021), so nothing could book it.
+- **Freight accounting.** A freight invoice (D-022's discriminator: a weight charge) posts like duty tax paid: one line for the weight charge, then each extra charge (the fuel surcharge) at its net amount after discount, every line to `ALX_XERO_FREIGHT_ACCOUNT` (425, Freight & Courier) with `NoTax`. Account 425 defaults to a VAT rate in Xero, so the lines are posted NoTax and the draft's total is read back and compared before it is authorised, as for every DHL bill.
+- **Reconciliation is self-consistency only**, as for duty tax paid: the weight charge and the charges must add up to the invoice total, and an invoice stating any tax is refused. The CSV is the evidence; the PDF is attached.
+- **One capability.** A branch of `process_dhl_import` sharing the duty-tax-paid stage, not a new path. The freight account is checked live only when a freight invoice is posted.
+- **Boundary.** No new Law exception. Authority unchanged (D-018).
+
 ## D-023 — Self-directed research authority
 
 - **Date:** 2026-09-01
@@ -3067,3 +3077,77 @@ This grants no authority a single goal update lacks: completion still requires s
   - A footprint names a library work copy, never a board path.
 - **A shaped pad measured arm by arm (2026-11-14).** Würth dimensions the L-shaped feed pad 4 of 7488918022 arm by arm (strip height 1.2; edges 0.6 and 14.0), and a pad could only be measured whole. A reading may now name one arm by a point on it, in mm from the part's centre: `{pad_size: REF.PAD, at: [x, y], axis}` is the width of the pad's copper on the line through that point, and `REF.PAD@x,y:left|right|top|bottom` is the edge of its copper there. Pads that share a number are measured as one pad; a custom pad is often drawn beside a tiny pad of the same number. Proven on P0020's AE1: all ten of Würth's numbers match. The FireFli library copy fails on pad 4, which there is only a 0.025 mm dot.
 - **Boundary.** No new Law exception; the worker gains no write.
+
+## D-082 — Board work in his order: schematic, placement, routing, write-back
+
+- **Date:** 2026-11-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-15** ("In theory Schematic ALWAYS comes first, even on board EDIT… I prefer schematic first", agreeing the order schematic → placement → routing → write-back, each locked until he approves it; and earlier, on the done-lines of 14 Nov, "Aside from that it looks ok"). On 14 Nov she swapped P0009's RF switches without ever changing the placement, routed around the old positions by coordinates, and reported a clean DRC on a layout he called the worst since the Eagle autorouter. Nothing made her stop after placing the parts, and nothing compared her copy with his original beyond a total.
+- **The order.** A board work copy has three steps: the schematic files, the placement (where every part sits, on which side, turned how, and which footprint it is), and the copper (tracks, arcs, vias and zones; KiCad's recomputed fill, identifiers and net names are not part of it). A step he has not changed needs no approval. A changed step needs his approval through `approve_step`, which needs his approval of that exact call like any write, of the revision he saw. An approval holds only while that step and every step before it stay as he saw them; changing an approved step needs it, and every later one, approved again.
+- **What an edit may do.** Until the schematic is approved (or unchanged), the board cannot change: no part moves and no copper is removed. Until the placement is approved too, no copper is added. An edit that gets ahead is undone, and `step_not_approved` names the step he must see. A library copy has no steps.
+- **Write-back.** A board copy is written to his project only when every changed step is approved and the board disagrees with the schematic nowhere his original did not. The comparison is pin by pin across every sheet, from KiCad's own netlist, because KiCad's parity check reads only the first sheet of an Altium import. A part on one side only is named; a part with no connected pad (a logo, a hole) is not a part here.
+- **Judged against his original.** When the copy is made, every DRC finding and every schematic/board disagreement of his original is kept with it. Each edit reports what is new against that, and what is no longer found, so a total that hides a new problem behind a fixed one cannot pass for clean.
+- **Tightened after an independent review (2026-11-15).** The placement includes each part's pads, so a pad made larger or moved is a change to it; copper drawn as a shape on a copper layer (a taper, a feed) is copper. Write-back also refuses a board whose DRC finds an error or an unconnected item his original did not have (`board_not_clean`), whatever was approved. A DRC result is reused while the board, its rules and its project settings are unchanged; KiCad's own schematic-parity check, which reads only the first sheet, stays out of that result and of the comparison with his original, which use the pin-by-pin check across every sheet.
+- **New boards.** The same steps from an empty board; no second tool.
+- **Boundary.** The gate reads fingerprints of files, never his words; what to change and when to ask stay hers. Every write to his files still needs his approval of that exact call (D-080 lets her list `approve_step` and the write-back in one go). No new Law exception.
+
+## D-083 — A board agent does a whole board job in one session
+
+- **Date:** 2026-11-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-15** ("1. Yes. This is how you did it correct? 2. It can run on Opus", to: an agent set up like her coding agent that does the whole job, making the layout choices itself, in one continuous session with only the KiCad tool, looking at its own drawings, stopping at each step for his answer through her; "I am happy for ALX to appoint an agent to do the job so she stays available. I prefer the way you did the work"). In the morning's rehearsal of the P0009 switch swap, reaching the schematic step took 132 reasoning rounds in 15 fresh sessions, each rebuilding her full briefing, and with her week's allowance mostly spent already, it ran out. Two parts at that rate makes a board of P0008's size (about 360 parts) out of reach. The same job done by Claude Code on 14 Nov took one continuous session, big scripted steps and his steering.
+- **The agent.** `delegate_board_job` hands a whole KiCad board job (an edit of one of his boards, or a new board) to the board agent. It runs on `ALX_BOARD_AGENT_MODEL` (default `claude-opus-5-5`) on her Claude login. It holds only the `kicad` capability, limited to the actions that change nothing of his (inspect, check, edit, read_reference, analyse_copper, simulate, check_layout, make_hierarchical, fetch_datasheet, render), and `look`. It cannot approve a step, write back, export, confirm readings, copy his library or open windows on his screen. Its calls go through her broker and gate with her permissions and none of her approvals.
+- **Judgement inside the job (Law 1, bounded second loop).** Within her brief the agent makes the engineering choices: where parts go, how tracks run, what the datasheet requires. Friedl approved this knowingly, as for the coding agent and the worker (D-070). What his words mean and what to tell him stay with AL/X: she writes the brief, shows him each step, records his approvals and passes on what he said.
+- **A fresh session per stretch (amended the same day).** The agent works until the end of a step, a question it cannot settle from his drawings or datasheets, the end of the job or a dead end, and reports through `report_step`, which ends that stretch. Her next call, with his answer, starts a new session from the job's journal (the brief, every report and every answer, kept in her storage) and his preferences (`ALX_Storage/Preferences/Schematic and layout.md`, given to every stretch). The rehearsal that day first kept one session paused between steps: it carried twenty full-page pictures and every result forward, and its steps re-read 28 million tokens. A stretch is bounded by calls (default 80, at most 200) and 30 minutes, and she can stop it at once (`stop`); she had told him she had stopped it when nothing could. The agent's `kicad` description lists only its own actions.
+- **Seeing and showing.** `kicad render` draws a copy, or his original as the copy was made from it, as a PDF in ALX_Storage to read with `look`: the schematic, the board, or the placement without copper, with every pad outline and number. `kicad open_in_kicad` opens her copy in KiCad's own window on his screen, in front, and his design beside it when he wants to compare (fresh copies made for looking, so nothing done there changes either), closes the windows of an earlier call, and returns a screenshot for her to look at before she speaks (Friedl, 15 Nov: "We can show actual KiCAD screens if needed... we need to get to a point where ALX becomes useful").
+- **Measure.** The same P0009 job, with usage compared against the morning's rehearsal.
+- **Boundary.** D-082's order and approvals are unchanged; the agent's work is gated by them like hers. No new Law exception; `governance/EXCEPTIONS.md` remains empty.
+
+## D-084 — Board edits as structured changes, carried out and checked by code (amends D-061)
+
+- **Date:** 2026-11-15
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-15** ("ok... we can try this", to: the agent writes a precise change form instead of its own scripts, and tested code does the drawing and checks the result; and "yes that is ok" to a first version covering what the P0009 job needs, growing from there). That day's rehearsals spent most of their model steps finding their way around and drawing stroke by stroke: 31 edit scripts in one schematic step, 26 of them only reading, and five guesses at a GND symbol. An independent review (Codex, `.alx/reviews/2026-11-15-board-work-independent-review.md`) recommended this change.
+- **Decision.** `kicad edit` takes `change`: a list of operations with exact references, pins, nets and places (schematic: remove symbols, swap a symbol, wire pin to pin, label a pin, power or ground a pin, mark no-connects, tidy fields; board: remove parts with the copper only they used, replace or add a footprint, place a part, draw tracks with arc bends, add vias, remove tracks). Code checks that every operation names something that exists, carries them out in one confined run in his drawing style, and then verifies the result against the change from KiCad's own netlist and board: every declared connection holds and nothing else is joined. A change that does not hold is undone and every unmet item named. The model decides what the change is; code decides nothing about meaning and returns any ambiguity (a name it cannot find, two candidates) to her.
+- **Free scripting is retired as the change surface.** The board agent may edit only through `change`. Arbitrary scripts remain for AL/X only until the change operations cover every edit she still needs, then the script route, its runner and its description are deleted (Law 0); until then no new behaviour is added to it.
+- **Boundary.** D-082's order, approvals and write-back checks are unchanged. No new Law exception.
+
+## D-084a — Board edits as checked scripts over a tested operation library (amends D-084)
+
+- **Date:** 2026-11-20
+- **Decision owner:** Friedl
+- **Status: APPROVED in principle by Friedl, 2026-11-20.** His words: "I agree with this... I have seen too many failed calls in ALXs terminal. I am happy to try your way." The detailed build plan goes to him before coding.
+- **Background.** On 20 Nov, Claude did P0005 directly, the job AL/X's board agent had failed:
+  - move RS485 to its own sheet;
+  - redesign the activity LEDs;
+  - redraw both sheets to a new standard.
+  It worked by scripting edits on a project copy and checking every result: a full net comparison, a style check, ERC with no new findings, and looking at a render. The fixed `change` operations could not express creating a sheet or a redraw. The run was heavy (171 model steps), so cost stays the risk to watch. Friedl: KiCad is the UI; AL/X needs reasoning plus execution, and must not be limited where it is not needed.
+- **Decision.** There is one change path. The board agent writes a script against a tested library of operations. The D-084 operations become that library's functions, and the library grows when a script works and is worth keeping. Every script, whether it is one call or custom, passes the same code-run gate before anything is shown to him:
+  - `netcompare`: the result's connections equal the declared intent, and nothing else changed;
+  - `stylecheck`: the FireFli schematic standard;
+  - ERC: no new findings;
+  - a render the agent looks at.
+  A change that fails the gate is undone, and the failure is named. The standard, checker and design blocks live in the FireFli library (`SCHEMATIC_STANDARD.md`, `tools/`, `blocks/`).
+- **Still to settle in the plan:**
+  - image viewing for the agent's own render only (D-083a turned Codex image viewing off);
+  - which model runs the agent;
+  - context bounds (D-084's review: 40–60k working context);
+  - how the deleted `script` route and its runner come back as this single path (Law 0).
+- **Boundary.** D-082's order, approvals and write-back checks are unchanged. His files are written only on his yes. No new Law exception.
+
+## D-083a — The board agent may run on Codex (Astra) (amends D-065, D-083)
+
+- **Date:** 2026-11-16
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-16** ("change the model to GPT ASTRA", for the next board test, after the Claude board agent's run stopped on a drawing-tool gap; and earlier the same day: "run the same test using Sol 6 (coding agent model) and see how that does. This will be the most cost effective way to run ALX").
+- **Decision.** `ALX_BOARD_AGENT_PROVIDER=codex_subscription` runs the board agent on a Codex model (`gpt-6-astra` by default, high effort) through Friedl's ChatGPT login, never an API key. `CodexSubscriptionAgentModel` gives it AL/X's tools natively through the same bridge and pause as D-065: the Codex CLI runs with the bridge as its only MCP server, offering exactly the request's tools, approved in advance at the bridge because each call still goes through the broker and safety gate. Codex's own tools are switched off (shell, unified exec, image viewing, apps, plugins, browser and computer use, image generation, sub-agents, goals, tool suggestions, memories, web search); code mode stays because it is how Codex reaches MCP tools, and the read-only sandbox holds its patch tool. Probed 16 Nov: from code mode it could not read a file, run a command or reach the network. Requests without tools stay one-turn reviews.
+- **Process boundary.** As D-065 for Claude, the Codex transport binds one more launcher, `subprocess.Popen`, used only by the shared native session with a fixed argv and no shell; `tests/test_sandbox_capability.py` enforces it and still rejects any other launch site.
+- **Boundary.** The board agent's tools, journal, call log, stop and step gates are unchanged. Claude stays the default. No Law exception.
+
+## D-082b — He approves what he was shown; a nudged part does not reopen placement (amends D-082)
+
+- **Date:** 2026-11-17
+- **Decision owner:** Friedl
+- **Status: APPROVED by Friedl, 2026-11-17** ("These steps are ok - schematic, then placement, then routing. But she has been asking approval about a single capacitor three times now without showing it to me once so I really have no idea what I approved anyway").
+- **Decision.** The three steps stay. `approve_step` is refused unless the exact revision being approved was opened for him in KiCad (`open_in_kicad` records the revision it showed). A part moved after the placement was approved, while the schematic is unchanged, leaves placement `adjusted`, not `needs_approval`: copper may still be added, and the routing approval he gives next, seeing the board, covers the adjusted placement. Write-back still needs every step approved.
+- **Boundary.** Her copy only; write-back and his files are unchanged. No Law exception.

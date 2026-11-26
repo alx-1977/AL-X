@@ -61,6 +61,12 @@ def part(mpn, url):
 
 
 class FetchDatasheetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from alx.providers import datasheet_fetch
+        datasheet_fetch._NEXAR_SPENT.clear()  # each test's keys start fresh
+
+    tearDown = setUp
+
     def test_the_second_nexar_key_is_tried_and_octopart_copy_kept(self) -> None:
         stand = Stand([{"errors": [{"message": "You have exceeded your part limit of 0."}]},
                        part("691325110002", "https://datasheet.octopart.com/691325110002.pdf")],
@@ -158,6 +164,55 @@ class FetchDatasheetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, self.assertRaises(DatasheetError):
             fetch_datasheet("691325110002", "", Path(folder), client=stand, nexar=[("k", "s")], digikey=None, download=stand.download)
 
+
+class FamilyNumberTests(unittest.TestCase):
+    """19 Nov 2026: "74LVC1G123" is a family (several makers and packages); DigiKey's exact lookup
+    answered 404 and the board agent was told only "not found". The parts DigiKey lists come back,
+    each with maker and package, for AL/X to choose the exact one."""
+
+    def test_a_family_number_returns_the_parts_with_their_packages(self) -> None:
+        class DigiKey:
+            def post(self, url, data=None, json=None, headers=None):
+                if "token" in url:
+                    return SimpleNamespace(json=lambda: {"access_token": "t"})
+                assert url.endswith("/search/keyword") and json["Keywords"] == "74LVC1G123", url
+                return SimpleNamespace(status_code=200, json=lambda: {"Products": [
+                    {"ManufacturerProductNumber": "SN74LVC1G123DCUR", "Manufacturer": {"Name": "Texas Instruments"},
+                     "Description": {"ProductDescription": "IC MONOSTABLE 8VSSOP"}, "DatasheetUrl": "//ti.com/a.pdf",
+                     "Parameters": [{"ParameterText": "Supplier Device Package", "ValueText": "8-VSSOP"}]},
+                    {"ManufacturerProductNumber": "74LVC1G123GD,125", "Manufacturer": {"Name": "Nexperia USA Inc."},
+                     "Description": {"ProductDescription": "IC MONOSTABLE 8XSON"}, "DatasheetUrl": "",
+                     "Parameters": [{"ParameterText": "Package / Case", "ValueText": "8-XFDFN"}]}]})
+
+            def get(self, url, headers=None):
+                return SimpleNamespace(status_code=404, json=lambda: {})
+
+        with tempfile.TemporaryDirectory() as folder, self.assertRaises(DatasheetError) as raised:
+            fetch_datasheet("74LVC1G123", "", Path(folder), client=DigiKey(), nexar=[], digikey=("id", "s"),
+                            download=lambda url: b"")
+        self.assertEqual(raised.exception.code, "ambiguous_part")
+        self.assertEqual([(c["part_number"], c["package"]) for c in raised.exception.candidates],
+                         [("SN74LVC1G123DCUR", "8-VSSOP"), ("74LVC1G123GD,125", "8-XFDFN")])
+        self.assertTrue(raised.exception.candidates[0]["has_datasheet"])
+
+    def test_exact_matches_are_listed_too(self) -> None:
+        class DigiKey:
+            def post(self, url, data=None, json=None, headers=None):
+                if "token" in url:
+                    return SimpleNamespace(json=lambda: {"access_token": "t"})
+                return SimpleNamespace(status_code=200, json=lambda: {"ExactMatches": [
+                    {"ManufacturerProductNumber": "BAT54WS-7-F", "Manufacturer": {"Name": "Diodes Incorporated"},
+                     "Description": {"ProductDescription": "DIODE SCHOTTKY 30V SOD323"}, "DatasheetUrl": "x",
+                     "Parameters": [{"ParameterText": "Supplier Device Package", "ValueText": "SOD-323"}]}],
+                    "Products": []})
+
+            def get(self, url, headers=None):
+                return SimpleNamespace(status_code=404, json=lambda: {})
+
+        with tempfile.TemporaryDirectory() as folder, self.assertRaises(DatasheetError) as raised:
+            fetch_datasheet("BAT54WS", "", Path(folder), client=DigiKey(), nexar=[], digikey=("id", "s"),
+                            download=lambda url: b"")
+        self.assertEqual([c["part_number"] for c in raised.exception.candidates], ["BAT54WS-7-F"])
 
 if __name__ == "__main__":
     unittest.main()

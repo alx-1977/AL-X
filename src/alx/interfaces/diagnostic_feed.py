@@ -39,6 +39,7 @@ class VoiceDiagnosticFeed:
     _STATE_KEYS = {
         "task.status": ("task_id",),
         "coding.status": ("job_id",),
+        "board_job.status": ("job_id",),
         # A limit pause stays shown to a screen that connects during it.
         "reasoning.paused": ("kind",),
     }
@@ -129,7 +130,7 @@ class VoiceDiagnosticFeed:
         key = (event["code"], *(event.get(name) for name in fields))
         if event["code"] == "task.status":
             released = event.get("state") in self._SETTLED_TASK_STATES
-        elif event["code"] == "coding.status":
+        elif event["code"] in ("coding.status", "board_job.status"):
             released = bool(event.get("terminal"))
         elif event["code"] == "reasoning.paused":
             released = event.get("state") == "resumed"

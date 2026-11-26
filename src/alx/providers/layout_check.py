@@ -120,7 +120,8 @@ def _at(text: str) -> list[float]:
 
 
 def _feature(point: Any) -> tuple:
-    """REF.PAD:anchor, REF.PAD@x,y:edge or REF:centre, e.g. AE2.3:left or AE1.4@1.5,6.4:bottom.
+    """REF.PAD:anchor, REF.PAD@x,y:edge, REF.keepout:edge or REF:centre, e.g. AE2.3:left,
+    AE1.4@1.5,6.4:bottom or AE1.keepout:bottom (an edge of the part's own keep-out, 17 Nov).
 
     @x,y (mm from the part's centre) names one arm of a shaped pad: the edge
     of the pad's copper on the line through that point (14 Nov: Würth's
@@ -131,6 +132,14 @@ def _feature(point: Any) -> tuple:
     name, anchor = point.rsplit(":", 1)
     if anchor not in ANCHORS:
         raise ValueError("an anchor is one of " + ", ".join(ANCHORS))
+    if name.startswith("net="):
+        # net=NET@x,y:edge, the edge of that net's copper (tracks, shapes, pours, pads) on the line
+        # through the point, mm from the part's centre (17 Nov: Würth dimensions a ground strip
+        # and a feed interruption to their copper edges).
+        net, marker, at = name[4:].rpartition("@")
+        if not marker or not net or anchor == "centre":
+            raise ValueError("net=NET@x,y:left|right|top|bottom names the edge of a net's copper")
+        return "@net", net, anchor, _at(at)
     name, marker, at = name.partition("@")
     ref, _, pad = name.partition(".")
     if not ref:
@@ -243,6 +252,10 @@ def pad_shape(ref, number):
 
 def point(feature):
     ref, number, where = feature[:3]
+    if ref == "@net":
+        at = feature[3]
+        low, high = run_through(net_copper(number), at, "x" if where in ("left", "right") else "y")
+        return {"left": (low, at[1]), "right": (high, at[1]), "top": (at[0], low), "bottom": (at[0], high)}[where]
     if len(feature) == 4:
         # One arm of a shaped pad: its edge on the line through the point.
         at = feature[3]
@@ -261,7 +274,21 @@ def point(feature):
         shape.AddOutline(chain)
         x0, y0, _, _ = box_mm(shape)
         return x0, y0
-    x0, y0, x1, y1 = box_mm(pad_shape(ref, number))
+    if number == "keepout":
+        # The part's own keep-out (in its footprint), else the board keep-out nearest it.
+        footprint = board.FindFootprintByReference(ref)
+        if footprint is None:
+            raise ValueError("no part %s on this board" % ref)
+        areas = [z for z in footprint.Zones() if z.GetIsRuleArea()]
+        if not areas:
+            middle = footprint.GetPosition()
+            areas = sorted((z for z in board.Zones() if z.GetIsRuleArea()),
+                           key=lambda z: z.GetBoundingBox().Distance(middle))[:1]
+        if not areas:
+            raise ValueError("no keep-out at %s" % ref)
+        x0, y0, x1, y1 = box_mm(areas[0].Outline())
+    else:
+        x0, y0, x1, y1 = box_mm(pad_shape(ref, number))
     return {"centre": ((x0 + x1) / 2, (y0 + y1) / 2), "left": (x0, (y0 + y1) / 2),
             "right": (x1, (y0 + y1) / 2), "top": ((x0 + x1) / 2, y0),
             "bottom": ((x0 + x1) / 2, y1)}[where]
@@ -319,7 +346,8 @@ def run_through(shape, at, axis, name="pad"):
 
 def keepout_size(axis):
     best = None
-    for zone in board.Zones():
+    # A part's own keep-out (the antenna footprint's clearance, 17 Nov) is measured too.
+    for zone in list(board.Zones()) + [z for fp in board.GetFootprints() for z in fp.Zones()]:
         if not zone.GetIsRuleArea():
             continue
         x0, y0, x1, y1 = box_mm(zone.Outline())

@@ -5,6 +5,7 @@ const diagnosticLog = document.querySelector("#diagnostic-log");
 const consoleForm = document.querySelector("#console-form");
 const consoleInput = document.querySelector("#console-input");
 const diagnosticStage = document.querySelector("#diagnostic-stage");
+const boardJobStatus = document.querySelector("#board-job-status");
 const diagnosticElapsed = document.querySelector("#diagnostic-elapsed");
 const diagnosticClear = document.querySelector("#diagnostic-clear");
 const diagnosticDetails = document.querySelector("#diagnostic-details");
@@ -147,6 +148,30 @@ function reasoningTokens(message) {
   return `Tokens · input ${count(message.input_tokens)} · cached ${count(message.cached_tokens)} · cache write ${count(message.cache_write_tokens)} · output ${count(message.output_tokens)} · reasoning ${count(message.reasoning_tokens)} · total ${count(message.total_tokens)}`;
 }
 
+// What a failure code means, in plain words beside the code (Friedl, 15 Nov:
+// "they are not clear as to what they are"). Fixed technical descriptions.
+const reasonMeanings = {
+  script_failed: "KiCad script crashed",
+  decision_rejected: "step rejected: malformed decision",
+  reasoner_error: "model call failed (limit or login)",
+  path_denied: "path outside allowed folders",
+  arguments_unusable: "call had wrong or missing fields",
+  work_copy_tainted: "work copy untrusted after an interrupted edit",
+  work_copy_changed: "work copy changed since that revision",
+  step_not_approved: "step not yet approved by Friedl",
+  schematic_board_differ: "board and schematic disagree",
+  unavailable: "tool or service unavailable",
+  worker_busy: "helper already busy",
+  worker_failed: "helper run failed",
+  dispatch_interrupted: "interrupted by a restart",
+  core_selected_silence: "nothing to say",
+  board_agent_action_not_allowed: "action not allowed to the board agent",
+  worker_action_not_allowed: "action not allowed to the helper",
+  input_invalid: "call did not match the tool's fields",
+  cli_failed: "KiCad command failed",
+  cli_timeout: "KiCad command timed out",
+};
+
 const traceTones = {
   started: "active", waiting: "active", completed: "ok", info: "info",
   refused: "error", failed: "error",
@@ -158,7 +183,10 @@ function showTrace(message) {
   if (message.reference && message.reference !== message.label) parts.push(message.reference);
   if (message.count !== undefined) parts.push(`${message.count} steps`);
   if (message.duration_ms !== undefined) parts.push(seconds(message.duration_ms));
-  if (message.reason_code) parts.push(message.reason_code);
+  if (message.reason_code) {
+    const meaning = reasonMeanings[message.reason_code];
+    parts.push(meaning ? `${message.reason_code} (${meaning})` : message.reason_code);
+  }
   const subsystem = String(message.subsystem ?? "").toUpperCase();
   diagnostic(parts.join(" · "), traceTones[message.status] ?? "info", "SYSTEM", {
     subsystem, at: message.at, background: message.background === true,
@@ -559,6 +587,17 @@ function handleControl(message) {
       showTrace(message);
     } else if (message.code === "coding.status") {
       showCodingStatus(message);
+    } else if (message.code === "board_job.status") {
+      const operation = {
+        edit: "Editing", check: "Checking", inspect_schematic: "Inspecting",
+        inspect: "Inspecting", render: "Rendering",
+      }[message.operation] ?? "Working";
+      const subject = message.sheet ? ` ${message.sheet}` : "";
+      const call = message.call_number ? ` (call ${message.call_number})` : "";
+      const check = message.last_check ? `, last check ${message.last_check}` : "";
+      boardJobStatus.textContent = message.terminal ? "" :
+        `Board job ${message.project || message.job_id} · ${operation}${subject}${call}${check}`;
+      boardJobStatus.hidden = Boolean(message.terminal);
     } else if (message.code === "microphone.audio_received") {
       detail("AL/X server received microphone audio", "ok", { at });
     } else if (message.code === "reasoning.completed") {
@@ -612,7 +651,15 @@ function handleControl(message) {
       const transport = message.transport === "websocket" ? "WebSocket" : "HTTP stream";
       detail(`TTS ${transport} connected · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
     } else if (message.code === "tts.first_audio_byte") {
-      detail(`First audio byte received from ElevenLabs · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
+      const speaker = message.provider === "cartesia" ? "Cartesia" : "ElevenLabs";
+      detail(`First audio byte received from ${speaker} · ${seconds(message.elapsed_ms)}`, "ok", { subsystem: "VOICE", at });
+    } else if (message.code === "tts.refused") {
+      // The provider's own status code (quota_exceeded, invalid_api_key, ...): a
+      // technical cause, not AL/X speaking. 19 Nov 2026 the console showed only
+      // speech_synthesis_error while ElevenLabs credit had run out.
+      const speaker = message.provider === "cartesia" ? "Cartesia" : "ElevenLabs";
+      diagnostic(`Speech provider refused · ${speaker} · ${message.reason ?? "unknown"} (HTTP ${message.status_code ?? "?"})`,
+        "error", "SYSTEM", { subsystem: "VOICE", at });
 
     } else if (message.code === "task.status") {
       // A live row rather than a log line: an outstanding task is a state the
@@ -743,6 +790,7 @@ async function startVoice() {
     diagnostic("Voice WebSocket reported a connection error", "error");
   };
   socket.onclose = () => {
+    boardJobStatus.hidden = true;
     sending = false;
     releaseMicrophone().catch(() => {});
     setPhase("disconnected");

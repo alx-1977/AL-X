@@ -52,6 +52,17 @@ class ToolImage:
             raise ValueError("a tool image has data")
 
 
+def result_images(values, image_source):
+    """Resolve only PNGs named in the result envelope, for this continuation."""
+    digests = values.get("image_sha256s", ())
+    if "image_sha256" in values:
+        digests = (values["image_sha256"],)
+    if not isinstance(digests, (list, tuple)):
+        return ()
+    return tuple(ToolImage("image/png", data) for digest in digests if isinstance(digest, str)
+                 and (data := image_source(digest)))
+
+
 @dataclass(frozen=True, slots=True)
 class ModelRequest:
     """A model request created by AL/X reasoning, not by a frontend."""
@@ -120,7 +131,7 @@ class ModelRequest:
         object.__setattr__(self, "output_schema", freeze_data(self.output_schema))
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive when set")
-        if self.kind not in ("core", "specialist", "research", "coding", "worker"):
+        if self.kind not in ("core", "specialist", "research", "coding", "worker", "board_agent"):
             raise ValueError("kind must be core, specialist, research, coding, or worker")
         if self.reserved_usd < 0:
             raise ValueError("reserved_usd must not be negative")

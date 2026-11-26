@@ -16,7 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alx.providers.kicad_hierarchy import make_hierarchical, netlist_nets  # noqa: E402
+from alx.providers.kicad_hierarchy import make_hierarchical  # noqa: E402
+from alx.providers.kicad_index import netlist_model, netlist_nets  # noqa: E402
 from alx.providers.kicad_hierarchy import connect_with_sheet_pins, _top_sheet  # noqa: E402
 from alx.providers.kicad_top_layout import crossing_count, layout  # noqa: E402
 
@@ -259,7 +260,7 @@ class MakeHierarchicalTests(unittest.TestCase):
                 result = subprocess.run([cli, "sch", "export", "netlist", "--output", str(output),
                                          str(project / "scanner.kicad_sch")], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                return netlist_nets(output.read_text())
+                return netlist_nets(netlist_model(output.read_text()))
 
             before = export("before")
             self.assertEqual(len(before), 7)  # three wires, two members of each bus
@@ -411,7 +412,7 @@ class MakeHierarchicalTests(unittest.TestCase):
 			)
 		)
 	))'''
-        self.assertEqual(netlist_nets(netlist), {frozenset({("C64", "2"), ("AE2", "4")}): "/RFID/FEED"})
+        self.assertEqual(netlist_nets(netlist_model(netlist)), {frozenset({("C64", "2"), ("AE2", "4")}): "/RFID/FEED"})
 
 
 if __name__ == "__main__":

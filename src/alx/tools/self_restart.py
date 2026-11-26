@@ -23,7 +23,7 @@ from alx.contracts import (
     ValueKind,
 )
 
-_FAILURES = ("nothing_new_to_run", "coding_job_running", "unavailable")
+_FAILURES = ("nothing_new_to_run", "running_unmerged_work", "coding_job_running", "unavailable")
 
 _STRING = StructuredSchema(ValueKind.STRING)
 _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
@@ -31,8 +31,9 @@ _BOOLEAN = StructuredSchema(ValueKind.BOOLEAN)
 CONTRACT = CapabilityDefinition(
     CodeAction.RESTART.value,
     "Restart yourself onto committed main, so code you have merged goes live. "
-    "Refused with nothing_new_to_run when you already run main's commit, and "
-    "with coding_job_running while a coding job is running. The restart starts "
+    "Refused with nothing_new_to_run when you already run main's commit, with "
+    "running_unmerged_work when you run a branch main does not hold yet (a restart "
+    "would drop that work), and with coding_job_running while a coding job is running. The restart starts "
     "a few seconds after this returns and takes about half a minute; Friedl's "
     "page reconnects by itself, and your goals, plans and conversations carry "
     "on from durable state.",
@@ -51,6 +52,7 @@ CONTRACT = CapabilityDefinition(
 def build_self_restart_executors(
     running_commit: Callable[[], str],
     main_commit: Callable[[], str],
+    main_contains: Callable[[str], bool],
     reserve: Callable[[], bool],
     release: Callable[[], None],
     restart: Callable[[], None],
@@ -69,6 +71,10 @@ def build_self_restart_executors(
             return failed("unavailable", reason="commit_unknown")
         if running == main:
             return failed("nothing_new_to_run", running_commit=running)
+        # Started from a branch main does not hold: main is not newer, it lacks
+        # that branch's work (19 Nov 2026: a restart onto main dropped it).
+        if not main_contains(running):
+            return failed("running_unmerged_work", running_commit=running, main_commit=main)
         # Atomic with starting a coding job: either a job is running and the
         # restart is refused, or no job may start until the process stops. A
         # check alone left the launcher's few seconds for a planned job to

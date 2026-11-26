@@ -132,11 +132,12 @@ class CoreState(str, Enum):
 # refused argument told as a page that "failed to load"), so the line that
 # says whether she is waiting for him is written here, from her goal's state.
 STOP_CAUSES = {
-    "budget_exhausted": "this request used all my steps",
-    "budget_exceeded": "this task reached its step limit",
-    "repeated_rejected_call": "I repeated a request that had already been refused",
+    "budget_exhausted": "Out of steps",
+    "budget_exceeded": "Step limit reached",
+    "repeated_rejected_call": "A refused request was repeated",
 }
-WAITING_LINE = "I've stopped: %s. Tell me to carry on and I'll continue."
+# Short on purpose (25 Nov: Friedl, the stop line padded every reply).
+WAITING_LINE = "%s; say carry on."
 CONTINUING_LINE = "My planned work carries on by itself; you don't need to do anything."
 
 
@@ -182,17 +183,21 @@ def _validate_raised_mail(
 
 # Her words to Friedl, enforced rather than asked for (2026-11-13: replies of
 # 71, 78, 116 and 129 words in one morning, after the same rule as text alone
-# had been strengthened several times). The rest belongs in detail.
-RESPONSE_WORD_LIMIT = 50
+# had been strengthened several times). The rest belongs in detail. 30 since
+# 25 Nov: 46-word replies still read as reports to him.
+RESPONSE_WORD_LIMIT = 30
 
 
 def _validate_response_length(decision: AgentDecision) -> None:
     """Refuse a reply longer than Friedl wants to hear, unless she judged he asked for detail."""
     if (decision.response is not None and len(decision.response.split()) > RESPONSE_WORD_LIMIT
             and not decision.detail_asked):
+        # Her count with it, so one correction is enough (15 Nov: a board
+        # agent's report was refused twice and never reached him).
         raise DecisionValidationError(
-            "response_over_%d_words: say the outcome and anything he must decide; "
-            "figures, checks and background go in detail" % RESPONSE_WORD_LIMIT)
+            "response_over_%d_words: yours has %d; say the outcome and anything he must decide in "
+            "%d words or fewer; figures, checks and background go in detail"
+            % (RESPONSE_WORD_LIMIT, len(decision.response.split()), RESPONSE_WORD_LIMIT))
 
 
 @dataclass(frozen=True, slots=True)
@@ -966,7 +971,13 @@ class CoreAgent:
                         (*retrieved_memories, *relationship_memories),
                         transient_attempts, prior_goal_provenance,
                     )
-                # Reading a goal is a step, not a mutation.
+                elif snapshot.state.status is GoalStatus.AWAITING_INPUT:
+                    snapshot = self._persist_goal(
+                        replace(snapshot.state, status=GoalStatus.ACTIVE, stop_reason=None),
+                        snapshot, conversation, retention_until, decision_provenance,
+                    )
+                # Reading another goal is a step. Reselecting the current
+                # parked goal resumes it on the Core's explicit decision.
                 continue
             decision = self._without_redundant_approval(decision)
             decision = replace(
@@ -2013,7 +2024,8 @@ class CoreAgent:
         if not any(item.goal_id == decision.goal_id for item in summaries):
             return "goal_selection_unknown"
         if already_selected:
-            if decision.intermediate and decision.goal_proposal is None:
+            if (decision.intermediate and decision.goal_proposal is None
+                    and current.status is not GoalStatus.AWAITING_INPUT):
                 return "goal_selection_redundant"
             return None
         return None
@@ -2648,6 +2660,19 @@ class CoreAgent:
         self._evidence_scheduled.intersection_update(current_evidence)
         self._evidence_settled.intersection_update(current_evidence)
         return tuple(jobs)
+
+    def planned_dispatch_withdrawn(self, job: PlannedDispatch) -> bool:
+        """Whether a started planned call's plan is gone: cancelled, finished or replaced.
+
+        Read only. A running call cannot be undone by the plan, so its worker
+        is asked to stop through the capability's own cancel (15 Nov: she
+        cancelled a board job's plan and the agent ran on).
+        """
+        try:
+            plan = self._store.load(job.goal_id).state.execution_plan
+        except Exception:  # noqa: BLE001 - unknown is not withdrawn
+            return False
+        return plan is None or plan.plan_id != job.plan_id or plan.status in PLAN_TERMINAL
 
     def begin_planned_dispatch(self, job: PlannedDispatch) -> PlannedDispatch | None:
         """Cross the dispatch boundary, or decline to. Under the lock.

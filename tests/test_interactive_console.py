@@ -212,11 +212,19 @@ class FrameHandlingTests(unittest.TestCase):
         server = self._server()
         queue: asyncio.Queue[str] = asyncio.Queue()
         server._typed_queues["c1"] = [queue]
-        server._queue_typed_turn("c1", payload)
+        server._queue_typed_turn("c1", payload, queue)
         drained = []
         while not queue.empty():
             drained.append(queue.get_nowait())
         return drained
+
+    def test_a_line_goes_only_to_the_screen_it_was_typed_on(self) -> None:
+        """15 Nov: with two screens of one conversation open, one line ran two turns."""
+        server = self._server()
+        mine, other = asyncio.Queue(), asyncio.Queue()
+        server._typed_queues["c1"] = [mine, other]
+        server._queue_typed_turn("c1", json.dumps({"type": TYPED_FRAME, "content": "hello"}), mine)
+        self.assertEqual((mine.qsize(), other.qsize()), (1, 0))
 
     def test_a_valid_frame_is_queued(self) -> None:
         payload = json.dumps({"type": TYPED_FRAME, "content": "hello"})
@@ -412,7 +420,7 @@ class ServerToSessionWiringTests(unittest.TestCase):
         server._typed_queues["c1"] = [registered]
 
         server._queue_typed_turn(
-            "c1", json.dumps({"type": TYPED_FRAME, "content": "are you there?"})
+            "c1", json.dumps({"type": TYPED_FRAME, "content": "are you there?"}), registered
         )
         asyncio.run(server._exchange_once(object(), "c1"))
         self.assertIs(seen["typed"], registered)

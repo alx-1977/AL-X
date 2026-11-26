@@ -40,14 +40,35 @@ class RealRoundTripTests(unittest.TestCase):
             runtime = build_kicad_runtime(lambda: "call", {"ALX_KICAD_DESIGN_ROOTS": str(root / "designs")},
                                           root / "storage")
 
+            provider = runtime.provider
+            provider.render_folder = root / "renders"
+            provider.viewer_settle_seconds = 0
+            provider.open_viewer = lambda what, path, index: type("V", (), {"terminate": lambda self: None})()
+            provider.capture_screen = lambda target: Path(target).write_bytes(b"png")
+
             def success(name, **arguments):
+                if name == "approve_step":
+                    # He approves what he was shown (D-082b): the copy is opened for him first.
+                    kicad_call(runtime.executors, "open_in_kicad",
+                               {"work_copy_id": arguments["work_copy_id"], "what": "board"})
                 result = kicad_call(runtime.executors, name, arguments)
                 self.assertEqual(result.state, CapabilityResultState.SUCCEEDED, result.failure)
                 return result.values
 
+            # Copper left floating is a new unconnected item his original did not
+            # have: approved or not, it is not written (review, 15 Nov).
+            floating = success("check_kicad_board", project_dir=str(project))
+            refused = kicad_call(runtime.executors, "edit_kicad_work_copy", {
+                "work_copy_id": floating["work_copy_id"], "intent": [],
+                "script": 'b = load()\nadd_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])\n'
+                          'refill(b)\nsave(b)\n'})
+            self.assertEqual(refused.failure["code"], "change_unmet")
+            self.assertEqual(refused.failure["recovery"]["gate"]["drc"][0]["type"], "unconnected_items")
+            self.assertNotIn("(xy 30 2)", (project / "board.kicad_pcb").read_text())
+            # Copper joined to the net's own copper is written.
             checked = success("check_kicad_board", project_dir=str(project))
-            edited = success("edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], script=(
-                'b = load()\nadd_copper(b, "SIDE", "F", [(30, 2), (31, 2), (31, 3), (30, 3)])\n'
+            edited = success("edit_kicad_work_copy", work_copy_id=checked["work_copy_id"], intent=[], script=(
+                'b = load()\nadd_copper(b, "SIDE", "F", [(26, 2), (28, 2), (28, 3), (26, 3)])\n'
                 'refill(b)\nsave(b)\n'))
             # KiCad completes this minimal project file on save; the settings
             # file it also writes is not reported as a design change.
@@ -56,6 +77,10 @@ class RealRoundTripTests(unittest.TestCase):
             # KiCad's settings file appeared in her copy on save, and is not the design.
             work = root / "storage"
             self.assertTrue(list(work.rglob(checked["work_copy_id"] + "/project/board.kicad_prl")))
+            # Copper drawn as a shape is routing, which he approves before it is written (D-082).
+            self.assertEqual(edited["steps"]["routing"], "needs_approval")
+            success("approve_step", step="routing", work_copy_id=edited["work_copy_id"],
+                    work_copy_revision=edited["work_copy_revision"])
             written = success("write_back_kicad_board", work_copy_id=edited["work_copy_id"],
                               work_copy_revision=edited["work_copy_revision"], project_dir=str(project))
             self.assertIn("board.kicad_pcb", [Path(path).name for path in written["written"]])

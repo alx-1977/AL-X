@@ -21,10 +21,12 @@ from alx.providers import (
     CartesiaTranscriber,
     ClaudeSubscriptionReasoningModel,
     CodexSubscriptionReasoningModel,
+    CodexSubscriptionAgentModel,
     ElevenLabsSynthesizer,
     OpenAIReasoningModel,
     XAIReasoningModel,
 )
+from alx.providers.cartesia_tts import CartesiaSynthesizer
 from alx.providers.claude_subscription import (
     SubscriptionIdentityError, subscription_cli_present,
 )
@@ -55,6 +57,9 @@ class RuntimeProviders:
     autonomous_first_pass: ReasoningModel | None
     # D-070: the worker's model, on her own Claude login.
     worker: ReasoningModel
+    # D-083: the board agent's model, on her own Claude login.
+    board_agent: ReasoningModel
+    board_presentation: ReasoningModel
     # D-028 coding jobs. Independent of the conversational Core. None when
     # unconfigured or unusable, which leaves the capability unregistered.
     coding: ReasoningModel | None
@@ -285,6 +290,26 @@ def build_runtime_providers(
         oauth_token=settings.claude_oauth_token,
         session_record_dir=session_record_dir,
     )
+    def board_model(config):
+        if config.provider == CODEX_SUBSCRIPTION_PROVIDER:
+            if not codex_subscription_cli_present():
+                raise ConfigurationError("the Codex CLI is required for the board agent on Codex")
+            return CodexSubscriptionAgentModel(
+                config.model, config.timeout_seconds, telemetry_sink=telemetry_sink,
+                effort=config.effort if config.effort != "none" else "high",
+            )
+        return ClaudeSubscriptionReasoningModel(
+            config.model,
+            config.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+            config_dir=settings.core_claude_config_dir,
+            expected_account=settings.core_claude_account,
+            oauth_token=settings.claude_oauth_token,
+            session_record_dir=session_record_dir,
+            effort=config.effort if config.effort != "none" else "",
+        )
+    board_agent = board_model(settings.board_agent)
+    board_presentation = board_model(settings.board_presentation)
     coding = _build_coding_model(settings, telemetry_sink)
     coding_session = _build_coding_session(settings)
 
@@ -297,7 +322,7 @@ def build_runtime_providers(
     # would make being heard a precondition for thinking, and telling the Core
     # about it would let a missing speaker change what she says.
     speech_configured = settings.text_to_speech.provider.strip().lower() != "none"
-    if speech_configured and settings.text_to_speech.provider != "elevenlabs":
+    if speech_configured and settings.text_to_speech.provider not in ("elevenlabs", "cartesia"):
         raise ConfigurationError(
             f"text-to-speech provider adapter is not installed: {settings.text_to_speech.provider}"
         )
@@ -307,6 +332,8 @@ def build_runtime_providers(
         autonomous=autonomous,
         autonomous_first_pass=autonomous_first_pass,
         worker=worker,
+        board_agent=board_agent,
+        board_presentation=board_presentation,
         coding=coding,
         coding_session=coding_session,
         # Wrapped, not replaced. The gate decides which audio is worth
@@ -328,7 +355,16 @@ def build_runtime_providers(
             ),
             settings.speech_to_text.sample_rate_hz,
         ),
-        text_to_speech=None if not speech_configured else ElevenLabsSynthesizer(
+        text_to_speech=None if not speech_configured else CartesiaSynthesizer(
+            settings.text_to_speech.model,
+            settings.text_to_speech.api_key,
+            settings.text_to_speech.voice_id,
+            settings.text_to_speech.base_url,
+            settings.text_to_speech.api_version,
+            settings.text_to_speech.output_format,
+            settings.text_to_speech.timeout_seconds,
+            telemetry_sink=telemetry_sink,
+        ) if settings.text_to_speech.provider == "cartesia" else ElevenLabsSynthesizer(
             settings.text_to_speech.model,
             settings.text_to_speech.api_key,
             settings.text_to_speech.voice_id,

@@ -253,18 +253,25 @@ class PlanWorkers:
     def __init__(self, core: Any, core_turn_lock: asyncio.Lock,
                  attention: PlanAttentionSource | None = None,
                  cancel_dispatch: Callable[[Any], None] | None = None,
-                 reconcile_replies: Callable[[], Any] | None = None) -> None:
+                 reconcile_replies: Callable[[], Any] | None = None,
+                 cancel_withdrawn: Callable[[Any], None] | None = None) -> None:
         self._core = core
         self._lock = core_turn_lock
         self._attention = attention
         # A capability's own cancel, where one exists (a coding job). Asked,
         # never relied on: shutdown still waits for the call to return.
         self._cancel_dispatch = cancel_dispatch or (lambda _job: None)
+        # A started call whose plan she withdrew, stopped where its capability
+        # says a withdrawal should stop it (a board job does; a coding job
+        # finishes, as the dispatch boundary promises).
+        self._cancel_withdrawn = cancel_withdrawn or (lambda _job: None)
         # Stores a finish or cancel reply a failure kept from the conversation.
         self._reconcile_replies = reconcile_replies
         self._tasks: set[asyncio.Task] = set()
         # Workers past the dispatch boundary, by task: these are waited for.
         self._started: dict[asyncio.Task, Any] = {}
+        # Started calls whose plan was withdrawn and whose cancel was asked.
+        self._withdrawn: set[Any] = set()
         self._stopping = False
 
     async def advance(self) -> int:
@@ -277,6 +284,24 @@ class PlanWorkers:
             jobs = await run_core_worker(self._core.advance_due_plans)
             if self._attention is not None:
                 await run_core_worker(self._attention.settle)
+            started = tuple(self._started.values())
+        # A started call whose plan she cancelled or replaced is asked to stop
+        # through its capability's own cancel, once.
+        withdrawn = getattr(self._core, "planned_dispatch_withdrawn", None)
+        for job in started:
+            key = job.call.call_id
+            if key in self._withdrawn or withdrawn is None:
+                continue
+            try:
+                gone = await run_core_worker(withdrawn, job)
+            except Exception:  # noqa: BLE001 - asked again on the next tick
+                continue
+            if gone:
+                self._withdrawn.add(key)
+                try:
+                    self._cancel_withdrawn(job)
+                except Exception as error:  # noqa: BLE001 - the call is still waited for
+                    LOGGER.warning("Planned step cancel request failed: %s", type(error).__name__)
         for job in jobs:
             self._start(job)
         return len(jobs)
@@ -356,7 +381,9 @@ class PlanWorkers:
                 return
         finally:
             if task is not None:
-                self._started.pop(task, None)
+                gone = self._started.pop(task, None)
+                if gone is not None:
+                    self._withdrawn.discard(gone.call.call_id)
         for item in following:
             self._start(item)
 

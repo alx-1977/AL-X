@@ -266,14 +266,34 @@ class WorkerLimitTests(unittest.TestCase):
                 self.assertFalse(refused.implementation_invoked)
         self.assertIsNotNone(worker_call_refusal(CapabilityCall("w-3", MAIL, {})))
         # A capability without a limit is left to the gate.
-        self.assertIsNone(worker_call_refusal(CapabilityCall("w-4", "kicad", {"action": "inspect"})))
+        self.assertIsNone(worker_call_refusal(CapabilityCall("w-4", "look", {"path": "a.pdf"})))
+
+    def test_the_worker_edits_kicad_copies_only_by_structured_change(self) -> None:
+        """18 Nov review: the worker could reach every kicad action, free scripts included."""
+        self.assertIsNone(worker_call_refusal(CapabilityCall("w-5", "kicad", {"action": "inspect"})))
+        self.assertIsNone(worker_call_refusal(CapabilityCall(
+            "w-6", "kicad", {"action": "edit", "work_copy_id": "c", "change": [{"op": "title_block"}]})))
+        scripted = worker_call_refusal(CapabilityCall(
+            "w-7", "kicad", {"action": "edit", "work_copy_id": "c", "script": "b = load()"}))
+        self.assertEqual(scripted.reason_code, "worker_script_not_allowed")
+        self.assertFalse(scripted.implementation_invoked)
+        for action in ("open_in_kicad", "approve_step", "write_back", "take_edits", "export"):
+            with self.subTest(action=action):
+                refused = worker_call_refusal(CapabilityCall("w-8", "kicad", {"action": action}))
+                self.assertEqual(refused.reason_code, "worker_action_not_allowed")
 
     def test_the_runtime_checks_the_limit_before_her_broker(self) -> None:
         source = (ROOT / "src/alx/bootstrap/live_voice.py").read_text(encoding="utf-8")
         function = next(node for node in ast.walk(ast.parse(source))
                         if isinstance(node, ast.FunctionDef) and node.name == "worker_dispatch")
         rendered = ast.unparse(function)
-        self.assertLess(rendered.index("worker_call_refusal(call)"), rendered.index("broker.dispatch"))
+        self.assertLess(rendered.index("worker_call_refusal(call)"), rendered.index("delegated_dispatch(call)"))
+        # The board agent applies its own limits, never the worker's (review of #247).
+        board = ast.unparse(next(node for node in ast.walk(ast.parse(source))
+                                 if isinstance(node, ast.FunctionDef) and node.name == "board_agent_dispatch"))
+        self.assertIn("board_agent_call_refusal(call)", board)
+        self.assertNotIn("worker_call_refusal", board)
+        self.assertNotIn("worker_dispatch", board)
 
     def test_a_refused_call_reaches_the_worker_as_rejected(self) -> None:
         from alx.specialists.worker import MechanicalWorker

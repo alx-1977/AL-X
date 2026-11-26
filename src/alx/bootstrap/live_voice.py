@@ -144,6 +144,13 @@ from alx.tools.self_diagnosis import (
     build_self_diagnosis_executors,
 )
 from alx.specialists.worker import MechanicalWorker
+from alx.specialists.board_agent import BoardJobAgent
+from alx.bootstrap.look import ALX_STORAGE
+from alx.tools.board_agent import (
+    BOARD_AGENT_CAPABILITIES, BOARD_AGENT_KICAD_ACTIONS, DEFINITION as BOARD_AGENT_DEFINITION,
+    board_agent_call_refusal, build_board_agent_executors,
+)
+from alx.tools.kicad import KICAD as KICAD_CAPABILITY, definition_for as kicad_definition_for
 from alx.tools.worker import (
     DEFINITION as WORKER_DEFINITION, WORKER_CAPABILITIES, build_worker_executors,
     worker_call_refusal,
@@ -289,7 +296,7 @@ _SERVICES: dict[str, tuple[str, str]] = {
     "grok_subscription": ("Grok", "src/alx/providers/grok_subscription.py"),
     "elevenlabs": ("ElevenLabs", "src/alx/providers/elevenlabs.py, "
                    "src/alx/providers/elevenlabs_pronunciation.py"),
-    "cartesia": ("Cartesia", "src/alx/providers/cartesia.py"),
+    "cartesia": ("Cartesia", "src/alx/providers/cartesia.py, src/alx/providers/cartesia_tts.py"),
 }
 
 
@@ -959,6 +966,7 @@ async def run(repository_root: Path) -> None:
         restart_part = CodePart(build_self_restart_executors(
             lambda: running_commit_of(CODE_ROOT, repository_runtime.authority),
             repository_runtime.authority.main_commit,
+            repository_runtime.authority.main_contains,
             lambda: coding_runtime is None or coding_runtime.agent.reserve_for_restart(),
             lambda: coding_runtime is not None and coding_runtime.agent.release_restart(),
             lambda: start_restart(
@@ -1062,6 +1070,7 @@ async def run(repository_root: Path) -> None:
                 xero_settings.dhl_supplier_name,
                 xero_settings.unattended_bill_writes,
                 processed_mailbox=mail_settings.processed_mailbox,
+                freight_account=xero_settings.freight_account,
             ),
         )
         register(xero_runtime.definitions, TraceSubsystem.XERO)
@@ -1095,8 +1104,12 @@ async def run(repository_root: Path) -> None:
     # outside its limit on a capability it holds is refused before the broker.
     def worker_dispatch(call):
         refusal = worker_call_refusal(call)
-        if refusal is not None:
-            return refusal
+        return refusal if refusal is not None else delegated_dispatch(call)
+
+    # Her broker and gate for a delegate, with her permissions and nothing she was granted per call; each
+    # delegate applies only its own limits first (19 Nov review of #247: the board agent's calls
+    # went through the worker's narrower list, so make_hierarchical and take_edits always failed).
+    def delegated_dispatch(call):
         token = current_call_id.set(call.call_id)
         try:
             return broker.dispatch(call, AuthorityContext(
@@ -1119,6 +1132,32 @@ async def run(repository_root: Path) -> None:
                              image_source=partial(stored_image, look_runtime.store)),
             current_call_id.get,
         ))
+
+    # D-083: the board agent does a whole board job, through the same broker
+    # and gate, with her permissions and none of her approvals.
+    def board_agent_dispatch(call):
+        refusal = board_agent_call_refusal(call)
+        return refusal if refusal is not None else delegated_dispatch(call)
+
+    # Its kicad description lists only its own actions (D-083).
+    board_agent = None
+    board_agent_definitions = tuple(
+        kicad_definition_for(BOARD_AGENT_KICAD_ACTIONS) if item.capability_id == KICAD_CAPABILITY else item
+        for item in registry.list_definitions()
+        if item.capability_id in BOARD_AGENT_CAPABILITIES
+    )
+    if board_agent_definitions:
+        register((BOARD_AGENT_DEFINITION,), TraceSubsystem.WORKER)
+        policies[BOARD_AGENT_DEFINITION.capability_id] = AuthorityPolicy(frozenset({"self.read"}))
+        board_agent = BoardJobAgent(providers.board_agent, board_agent_dispatch, board_agent_definitions,
+                                    storage_root / "board-jobs",
+                                    presentation_model=providers.board_presentation,
+                                    preferences=ALX_STORAGE.expanduser() / "Preferences" / "Schematic and layout.md",
+                                    image_source=partial(stored_image, look_runtime.store),
+                                    block_catalog=(kicad_runtime.provider.design_block_catalog
+                                                   if kicad_runtime.provider is not None else None),
+                                    status_sink=partial(diagnostics.publish, None))
+        executors.update(build_board_agent_executors(board_agent, current_call_id.get))
 
     broker = CapabilityBroker(
         registry, SafetyGate(policies), executors,
@@ -1533,13 +1572,19 @@ async def run(repository_root: Path) -> None:
     )
     idle_goal_source.recover(autonomous_budget)
     occasion_sources.append(idle_goal_source)
+    def planned_cancel(job):
+        if job.call.capability_id == BOARD_AGENT_DEFINITION.capability_id and board_agent is not None:
+            board_agent.stop()
+        elif coding_runtime is not None:
+            coding_runtime.agent.cancel(job.call.call_id)
+
     plan_workers = PlanWorkers(
         core, core_turn_lock, plan_source,
-        # The one capability with its own cancel: a running coding job.
-        cancel_dispatch=(
-            None if coding_runtime is None
-            else lambda job: coding_runtime.agent.cancel(job.call.call_id)
-        ),
+        # The capabilities with their own cancel: a running coding job, and a
+        # running board job (D-083), which also stops when she withdraws its plan.
+        cancel_dispatch=planned_cancel,
+        cancel_withdrawn=lambda job: (board_agent.stop() if board_agent is not None and
+                                      job.call.capability_id == BOARD_AGENT_DEFINITION.capability_id else None),
         reconcile_replies=lambda: (
             gateway.reconcile_plan_announcements(),
             gateway.deliver_plan_stop_notes(lambda turn: server.deliver(

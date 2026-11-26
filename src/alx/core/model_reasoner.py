@@ -10,7 +10,7 @@ from typing import Any
 
 from alx.contracts.continuity import AutonomousSpendAuthority
 from alx.contracts.cognition import AutonomousRequestUnbounded
-from alx.contracts.models import input_token_upper_bound
+from alx.contracts.models import input_token_upper_bound, result_images
 from alx.contracts.result_summary import bound_result
 from alx.contracts.mail import MailReference
 from alx.contracts.trace import MAX_TRACE_REFERENCE_CHARACTERS, TraceSink, TraceStatus, TraceSubsystem, emit_trace
@@ -226,10 +226,17 @@ its DRC is clean. Unchecked, it is not a proposal yet. If the same fix fails twi
 reason, stop, read the failing check and the rule behind it, and try a different
 approach; if still stuck, tell Friedl plainly what is blocking you.
 Your own steps are the most expensive part of you: each one re-reads your whole context on
-your Core model. When a job needs many mechanical steps, such as board checks, edits on your
-work copies, copper analyses or circuit simulations, write one brief and hand it to your worker
+your Core model. A board job, changing one of his boards or making a new one (its schematic,
+placement and routing), goes whole to your board agent with delegate_board_job, a job already
+under way included: it works in one session and stops at each step for you to show him with
+kicad open_in_kicad and pass on his answer. A finishing change one tested helper does whole on
+a board he has placed and routed, such as teardrops, you do yourself: kicad check with his
+project_dir for a copy, one edit (add_teardrops, refill, save), then open_in_kicad.
+Normally choose delegate_board_job with job_id and pass "presentation" once the schematic is step_ready, before showing it to Friedl.
+For other many-step mechanical work, such as board
+checks, copper analyses or circuit simulations, write one brief and hand it to your worker
 with delegate_mechanical_work, then judge its report yourself. Keep for yourself what needs
-judgement, and anything that needs a general program, which the worker cannot run.
+judgement, and anything that needs a general program, which neither can run.
 When terminal_checkpoint_reason is set, this step can only speak: tell Friedl in a line or two
 where the work stands and what remains. budget_exhausted means this turn used all its steps;
 the goal is saved, and he can tell you to carry on. Your reply is opened for you with whether
@@ -285,6 +292,8 @@ that starts work is create, with a concise objective and explicit success criter
 or select the goal the work belongs to, and then make the call you intended.
 active_goal_required means an effectful call was made with no active goal selected:
 select or create one first, then make the call again.
+If the selected goal is awaiting_input and you decide to resume it, select that
+goal again to make it active.
 continuation_notices is shown when a response or silence would have ended the
 turn while remaining outstanding_work was still immediately executable. Nothing
 was delivered. Issue the next executable call in this turn, or park the goal
@@ -580,7 +589,10 @@ def _records(value: Any, record_type: type, field_name: str) -> tuple[Any, ...]:
         if record_type is ProgressRecord:
             records.append(
                 ProgressRecord(
-                    item["id"], item["summary"], _strings(item["evidence_refs"], "evidence_refs")
+                    # Left out means none: the schema says empty when a record
+                    # rests on no evidence. Six of her steps were rejected for
+                    # leaving it out on 15 Nov, each a whole Opus round wasted.
+                    item["id"], item["summary"], _strings(item.get("evidence_refs", ()), "evidence_refs")
                 )
             )
         elif record_type is WorkItem:
@@ -1349,7 +1361,7 @@ def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
 RESPONSE_FIELD: Mapping[str, Any] = {
     "type": "string",
     "description": (
-        "What you say to Friedl, spoken aloud, at most 50 words unless detail_asked (longer is refused): the outcome in a few words, and anything "
+        "What you say to Friedl, spoken aloud, at most 30 words unless detail_asked (longer is refused): the outcome in a few words, and anything "
         "he must act on or decide, e.g. \"Captured and approved.\" Figures, "
         "identifiers, checks, method and background go in detail, unless he asked for them. A report only when he asks for one. "
         "For a status question: the dates and anything he must act on, not journeys, reasons or reassurance. "
@@ -1500,7 +1512,7 @@ def _schema_parts() -> dict[str, Any]:
             "detail_asked": {"type": "boolean", "description": (
                 "true only when Friedl's latest message asks for more than the outcome: to "
                 "explain, list, describe, compare or report. Then response may be longer than "
-                "50 words. false for everything else, including a plain question.")},
+                "30 words. false for everything else, including a plain question.")},
             "detail": DETAIL_FIELD,
             "raised_mail_observations": {
                 "type": "array",
@@ -1914,9 +1926,7 @@ class ModelReasoner:
         result = None if attempt is None else attempt.result
         if result is None or result.state is not CapabilityResultState.SUCCEEDED:
             return ()
-        digest = (result.values or {}).get("image_sha256")
-        data = self._image_source(digest) if isinstance(digest, str) else None
-        return () if not data else (ToolImage("image/png", data),)
+        return result_images(result.values or {}, self._image_source)
 
     def _continue(self, request: ModelRequest, result: str,
                   images: tuple[ToolImage, ...] = ()):

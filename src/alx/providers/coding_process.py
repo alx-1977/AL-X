@@ -481,12 +481,67 @@ def run_kicad_cli(executable, arguments, *, runner=None, timeout_seconds=600):
     )
 
 
+class _Viewer:
+    """A KiCad window opened through Launch Services, closed by its process id."""
+
+    def __init__(self, pids):
+        self.pids = tuple(pids)
+
+    def terminate(self):
+        for pid in self.pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+
+def start_kicad_viewer(application, path, *, runner=None, settle_seconds=10.0):
+    """One of KiCad's own windows on his screen, in front, showing a copy made for looking (D-083).
+
+    Opened as a new instance through Launch Services, which brings it to the
+    front as a double-click would (15 Nov: started directly, both windows
+    opened behind his browser). It stays open until he closes it or a later
+    call closes it, by the process id found for it.
+    """
+    application = Path(application)
+    binary = application / 'Contents' / 'MacOS' / application.stem
+
+    def running():
+        found = run_coding_subprocess(subprocess.run if runner is None else runner,
+                                      ['/usr/bin/pgrep', '-f', str(binary)], shell=False, check=False,
+                                      timeout=10, capture_output=True, text=True)
+        return {int(item) for item in (found.stdout or '').split() if item.isdigit()}
+    before = running()
+    opened = run_coding_subprocess(subprocess.run if runner is None else runner,
+                                   ['/usr/bin/open', '-n', '-a', str(application), str(path)], shell=False,
+                                   check=False, timeout=30, capture_output=True, text=True)
+    # A window counts only when one is seen (18 Nov review: a failed launch was taken as shown).
+    if getattr(opened, 'returncode', 0):
+        raise OSError('KiCad did not open: %s' % (getattr(opened, 'stderr', '') or '').strip()[:200])
+    deadline = monotonic() + settle_seconds
+    while monotonic() < deadline:
+        new = running() - before
+        if new:
+            return _Viewer(new)
+        sleep(0.25)
+    raise OSError('no KiCad window appeared within %g s' % settle_seconds)
+
+
+def capture_screen(target, *, runner=None, timeout_seconds=30):
+    """A picture of his screen, for her to look at what she showed him (D-083)."""
+    return run_coding_subprocess(
+        subprocess.run if runner is None else runner, ['/usr/sbin/screencapture', '-x', str(target)],
+        shell=False, check=False, timeout=timeout_seconds, capture_output=True, text=True,
+        stop_descendants=True,
+    )
+
+
 def run_kicad_engine(executable, arguments, directory, *, runner=None, timeout_seconds=600):
     """Analysis engines share the managed process-group execution boundary."""
     return run_coding_subprocess(
         subprocess.run if runner is None else runner, [str(executable), *map(str, arguments)],
         cwd=str(directory), shell=False, check=False, timeout=timeout_seconds,
-        capture_output=True, text=True, stop_descendants=True,
+        capture_output=True, text=True, errors='replace', stop_descendants=True,
     )
 
 

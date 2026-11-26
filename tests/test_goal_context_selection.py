@@ -643,6 +643,27 @@ class BlockedDispatchTests(Fixture):
         )
         self.assert_one_explanation_then_checkpoint(reasoner, selected=True)
 
+    def test_reselecting_the_current_awaiting_input_goal_after_restart_resumes_dispatch(self):
+        self.store.create(paused_goal(), "conversation-1", RETENTION)
+        self.store.close()
+        self.store = SQLiteGoalStore(self.root / "goals.sqlite3")
+        reasoner = Queued(
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(goal_id="goal-a"),
+            AgentDecision(call=removal(), approval_proposal=approval()),
+            AgentDecision(goal_proposal=GoalProposal(GoalMutationKind.UPDATE, outstanding_work=())),
+            AgentDecision(response="Removed."),
+        )
+        outcome = self.agent(reasoner).process(conversation(), RETENTION, 25)
+        self.assertEqual(outcome.state, CoreState.RESPONDED)
+        self.assertEqual(reasoner.contexts[2].refused_calls[0]["reason"], "active_goal_required")
+        self.assertEqual(self.broker.executed, 1)
+        goal = self.store.load("goal-a").state
+        self.assertEqual(goal.status, GoalStatus.ACTIVE)
+        self.assertIsNone(goal.stop_reason)
+        self.assertEqual(reasoner.contexts[3].active_goal.outstanding_work, paused_goal().outstanding_work)
+
     def test_effectful_call_without_any_goal_is_one_decision(self) -> None:
         reasoner = Queued(
             AgentDecision(call=removal(), approval_proposal=approval()),
