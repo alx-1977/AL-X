@@ -1,6 +1,6 @@
 # AL/X's KiCad work: why it takes hundreds of calls, and the plan to fix it
 
-25 Nov 2026. For Friedl's approval before anything is built.
+25 Nov 2026. Approved by Friedl on 26 Nov 2026, without call targets.
 
 ## 1. What happened
 
@@ -93,15 +93,13 @@ If one of them does 4.1 or 4.4 better than our own code, it's adopted behind the
 
 ## 6. Proof before it goes live
 
-Three test jobs, replayed on copies and measured:
+There are no call targets or limits: every job should simply be as efficient as possible. Each new tool is proven on three test jobs, replayed on copies:
 
-| Test | Today | Target |
-|---|---|---|
-| C94–C96 to 0402, including new library parts | 148+ calls | under 10 calls, 5 minutes |
-| P0009: add the third RF switch, then update the PCB | 541 calls | under 40 calls, 30 minutes |
-| P0005: teardrops | 48 calls | under 5 calls |
+- P0009: C94–C96 to 0402, including the new library parts (148+ calls today);
+- P0009: add the third RF switch, then update the PCB (541 calls today);
+- P0005: teardrops (48 calls today).
 
-If a step doesn't meet its target, it isn't switched on.
+Friedl sees the calls and time before and after. A tool is switched on only when it is clearly better, and it keeps being improved while it still wastes calls.
 
 ## 7. Order of work
 
@@ -110,12 +108,10 @@ If a step doesn't meet its target, it isn't switched on.
 3. **The batch schematic change (4.4).** At this step, test mixelpixx and kicad-sch-api against our own code, using the RF switch test.
 4. **Edit directly, and the visible count (4.5, 4.6).** Small changes to her instructions and status.
 
-Each step is measured against section 6 before the next one starts.
+Each step is measured on the section 6 jobs before the next one starts.
 
 **Who builds it:** I'd do steps 1 and 4 myself, since they're small and need care with your existing tool. Steps 2 and 3 suit Codex on Sol at medium effort, with me reviewing.
 
-## 8. What I need from you
+## 8. Decision
 
-1. Is this the right direction?
-2. Are the targets in section 6 right?
-3. Is the split in section 7 (Claude, then Codex) OK?
+26 Nov 2026: Friedl approved the direction and the split, with no call targets.
