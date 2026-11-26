@@ -1,4 +1,4 @@
-"""OAuth profile validation and login fallback, without real credentials or network."""
+"""Setup-token check through the CLI and login fallback, without real credentials or network."""
 
 import json
 import traceback
@@ -22,6 +22,8 @@ from alx.providers.claude_subscription import (
     SubscriptionIdentityError,
 )
 from alx.providers.claude_usage import ClaudeUsageReader
+
+REAL_TOKEN_STATUS = subscription._token_status
 
 
 
@@ -284,18 +286,40 @@ def test_old_request_cannot_acknowledge_new_refusal_even_with_identical_wording(
     assert model.setup_token_notice_facts() == newer
 
 
+class TokenStatus:
+    """Stands in for the CLI's auth status of the token alone; status 403 means refused."""
+
+    def __init__(self):
+        self.status = 200
+        self.answer = None
+        self.raises = None
+        self.calls = []
+
+    def __call__(self, executable, token, runner):
+        self.calls.append((executable, token))
+        if self.raises is not None:
+            raise self.raises
+        if self.answer is not None:
+            return self.answer
+        if self.status != 200:
+            return {'loggedIn': False, 'authMethod': 'none', 'apiProvider': 'firstParty'}
+        return {'loggedIn': True, 'authMethod': 'oauth_token', 'apiProvider': 'firstParty'}
+
+    @property
+    def call_count(self):
+        return len(self.calls)
+
+    def assert_not_called(self):
+        assert not self.calls
+
+
 @pytest.fixture(autouse=True)
 def profile_http(monkeypatch):
     monkeypatch.setattr(subscription, '_setup_token_profile', None)
     monkeypatch.setattr(subscription, '_setup_token_notice_acknowledged', None)
-    with patch.object(subscription.http.client, 'HTTPSConnection') as factory:
-        response = factory.return_value.getresponse.return_value
-        response.status = 200
-        response.read.return_value = json.dumps({
-            'account': {'email': ACCOUNT},
-            'organization': {'organization_type': 'claude_team'},
-        }).encode()
-        yield factory, response
+    fake = TokenStatus()
+    monkeypatch.setattr(subscription, '_token_status', fake)
+    yield fake, fake
 
 
 def model_at(tmp_path, token, model_type=ClaudeSubscriptionReasoningModel):
@@ -310,110 +334,92 @@ def model_at(tmp_path, token, model_type=ClaudeSubscriptionReasoningModel):
                       }), runner
 
 
-@pytest.mark.parametrize('plan', ['claude_pro', 'claude_max', 'claude_team'])
 @pytest.mark.parametrize('model_type', [ClaudeSubscriptionReasoningModel,
                                        ClaudeSubscriptionResearchModel])
-def test_profile_accepts_only_dedicated_subscription(tmp_path, profile_http, plan, model_type):
-    factory, response = profile_http
-    response.read.return_value = json.dumps({
-        'account': {'email': ACCOUNT}, 'organization': {'organization_type': plan},
-    }).encode()
+def test_a_subscription_token_the_cli_accepts_replaces_the_saved_login(tmp_path, profile_http, model_type):
+    fake, _ = profile_http
     token = sentinel()
     model, runner = model_at(tmp_path, token, model_type)
-    assert model.verify_identity().subscription_type == plan
+    assert model.verify_identity().subscription_type == 'setup_token'
     model.complete(request())
     model.verify_identity()
-    assert len(runner.calls) == 1  # No CLI auth-status check of a setup token.
-    factory.assert_called_once_with('api.anthropic.com', timeout=10)
-    connection = factory.return_value
-    connection.set_debuglevel.assert_called_once_with(0)
-    assert connection.request.call_count == 1
-    args, kwargs = connection.request.call_args
-    assert args == ('GET', '/api/oauth/profile')
-    headers = kwargs['headers']
-    assert bool(headers.pop('Authorization') == 'Bearer ' + token), 'wrong credential'
-    assert headers == {'User-Agent': 'claude-code/2.1.316',
-                       'Content-Type': 'application/json', 'Cache-Control': 'no-cache'}
+    assert len(runner.calls) == 1  # Checked once, then cached: no saved-login check.
+    assert fake.call_count == 1
+    assert bool(fake.calls[0] == ('claude', token)), 'wrong credential checked'
     assert bool(runner.calls[0]['env'].get('CLAUDE_CODE_OAUTH_TOKEN') == token), 'wrong credential'
     assert model.setup_token_notice_facts() == {}
-    connection.close.assert_called_once()
 
 
-@pytest.mark.parametrize('bad_profile', [
-    {}, [], None, {'account': {}, 'organization': {}},
-    {'account': {'email': ACCOUNT}},
-    {'account': {'email': ACCOUNT}, 'organization': {'organization_type': None}},
-    {'account': {'email': 'ALX@fire-fli.co.za'}, 'organization': {'organization_type': 'claude_pro'}},
-    {'account': {'email': ACCOUNT + ' '}, 'organization': {'organization_type': 'claude_pro'}},
-    {'account': {'email': 'other@example.test'}, 'organization': {'organization_type': 'claude_max'}},
-    *[{'account': {'email': ACCOUNT}, 'organization': {'organization_type': plan}}
-      for plan in ['api', 'console', 'claude_free', 'unknown', 'claude_enterprise']],
-    {'account': {'email': ACCOUNT}, 'organization': {
-        'organization_type': 'claude_team', 'billing_type': 'usage_based'}},
+@pytest.mark.parametrize('answer', [
+    {}, [], None, 'text',
+    {'loggedIn': False, 'authMethod': 'oauth_token', 'apiProvider': 'firstParty'},
+    {'loggedIn': 'yes', 'authMethod': 'oauth_token', 'apiProvider': 'firstParty'},
+    {'loggedIn': True, 'authMethod': 'api_key', 'apiProvider': 'firstParty'},
+    {'loggedIn': True, 'authMethod': 'claude.ai', 'apiProvider': 'firstParty'},
+    {'loggedIn': True, 'authMethod': 'oauth_token', 'apiProvider': 'bedrock'},
 ])
-def test_rejected_profiles_use_saved_login_once_notice(tmp_path, profile_http, bad_profile, caplog):
-    factory, response = profile_http
-    response.read.return_value = json.dumps(bad_profile).encode()
+def test_refused_tokens_use_saved_login_once_notice(tmp_path, profile_http, answer, caplog):
+    fake, _ = profile_http
+    fake.answer = answer if answer is not None else 0
     token = sentinel()
     model, runner = model_at(tmp_path, token)
     assert model.verify_identity().account == ACCOUNT  # The normal CLI login.
     model.complete(request())
     other, _ = model_at(tmp_path, token, ClaudeSubscriptionResearchModel)
     other.verify_identity()
-    assert factory.call_count == 1
+    assert fake.call_count == 1
     for call in runner.calls:
         assert set(call['env']) == {'CLAUDE_CONFIG_DIR'}
     facts = model.setup_token_notice_facts()
     notice = facts['authentication_notice']
     assert notice.startswith('The Claude setup token was refused because ')
-    assert notice.endswith('the normal dedicated Claude login is being used.')
+    assert 'the normal dedicated Claude login is being used' in notice
+    assert 'Tell Friedl' in notice
     assert other.setup_token_notice_facts() == facts
-    assert model.setup_token_notice_facts() == facts
     assert token not in notice + caplog.text + repr(subscription._setup_token_profile), 'credential leaked'
 
 
-@pytest.mark.parametrize('failure', ['network', 'timeout', 'bad_json', 'duplicate', 'too_large',
-                                   'non200', 'redirect', 'request', 'read'])
-def test_lookup_failures_never_escape_or_forward_secrets(tmp_path, profile_http, failure, caplog):
-    factory, response = profile_http
+@pytest.mark.parametrize('failure', ['missing_cli', 'timeout', 'bad_json', 'other'])
+def test_check_failures_never_escape_or_forward_secrets(tmp_path, profile_http, failure, caplog):
+    import subprocess
+    fake, _ = profile_http
     token = sentinel()
-    connection = factory.return_value
-    if failure == 'network':
-        connection.getresponse.side_effect = OSError(token)
-    elif failure == 'timeout':
-        connection.getresponse.side_effect = TimeoutError(token)
-    elif failure == 'bad_json':
-        response.read.return_value = token.encode()
-    elif failure == 'duplicate':
-        response.read.return_value = (
-            '{"account":{"email":"other@example.test","email":"' + ACCOUNT
-            + '"},"organization":{"organization_type":"claude_pro"}}'
-        ).encode()
-    elif failure == 'too_large':
-        response.read.return_value = b'x' * 65_537
-    elif failure in {'non200', 'redirect'}:
-        response.status = 401 if failure == 'non200' else 302
-        response.headers = {'Location': 'https://invalid.test/' + token}
-    elif failure == 'request':
-        connection.request.side_effect = ValueError(token)
-    else:
-        response.read.side_effect = RuntimeError(token)
+    fake.raises = {'missing_cli': FileNotFoundError(token),
+                   'timeout': subprocess.TimeoutExpired(token, 30),
+                   'bad_json': json.JSONDecodeError(token, token, 0),
+                   'other': RuntimeError(token)}[failure]
     model, runner = model_at(tmp_path, token)
     model.verify_identity()
     model.complete(request())
-    assert factory.call_count == 1
+    assert fake.call_count == 1
     assert all('CLAUDE_CODE_OAUTH_TOKEN' not in call['env'] for call in runner.calls)
     facts = model.setup_token_notice_facts()
     notice = facts['authentication_notice']
     assert notice and token not in notice + caplog.text, 'credential leaked'
-    assert model.setup_token_notice_facts() == facts
-    # A subsequent local-login failure cannot retain the HTTP exception.
     runner.status_stdout = 'invalid'
     with pytest.raises(SubscriptionIdentityError) as raised:
         model.verify_identity()
     assert raised.value.__context__ is None
     assert raised.value.__cause__ is None
     assert token not in ''.join(traceback.format_exception(raised.value)), 'credential leaked'
+
+
+def test_the_token_is_checked_alone_in_an_empty_configuration(tmp_path, monkeypatch):
+    import subprocess
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs, argv=argv, empty=not any(Path(kwargs['env']['CLAUDE_CONFIG_DIR']).iterdir()))
+        return subprocess.CompletedProcess(argv, 0, json.dumps(
+            {'loggedIn': True, 'authMethod': 'oauth_token', 'apiProvider': 'firstParty'}), '')
+
+    monkeypatch.setattr(subscription, '_token_status', REAL_TOKEN_STATUS)
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'not-for-the-check')
+    token = sentinel()
+    assert subscription._lookup_setup_token(token, '/bin/claude', run).subscription == 'setup_token'
+    assert seen['argv'] == ['/bin/claude', 'auth', 'status', '--json']
+    assert set(seen['env']) == {'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN'}
+    assert seen['empty'] and seen['shell'] is False
 
 
 def test_no_token_does_not_lookup_or_change_login(tmp_path, profile_http):

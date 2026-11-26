@@ -34,9 +34,9 @@ spending Friedl's money on a decision he did not make.
 **AL/X's own identity.** The Core reasons as a dedicated Claude account, held
 in its own Claude Code configuration directory (`ALX_CLAUDE_CONFIG_DIR`). The
 child is given exactly that directory, and any inherited `CLAUDE_CONFIG_DIR`
-is dropped. Only a setup token verified through Anthropic's OAuth profile for
-alx@fire-fli.co.za on a supported subscription may override the saved login;
-otherwise it is excluded and a diagnostic returns to the Core.
+is dropped. Only a setup token the CLI itself reports as a first-party subscription
+token may override the saved login; otherwise it is excluded and a diagnostic
+returns to the Core.
 Before the first turn the directory's login is verified through the CLI's machine-readable
 `auth status --json`: signed in, through a claude.ai subscription login, at
 that directory, and as the expected account when one is configured. Anything
@@ -49,7 +49,6 @@ from uuid import uuid4
 
 import base64
 import json
-import http.client
 import logging
 import os
 import shutil
@@ -110,7 +109,8 @@ class _SetupTokenProfile:
             return None
         return (
             "The Claude setup token was refused because " + self.refusal
-            + "; the normal dedicated Claude login is being used."
+            + "; the normal dedicated Claude login is being used. Tell Friedl in one line"
+            " that AL/X's year-long Claude key needs renewing."
         )
 
 
@@ -119,77 +119,60 @@ _setup_token_lock = Lock()
 _setup_token_notice_acknowledged: str | None = None
 
 
-def _unique_profile_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in fields:
-            raise ValueError("ambiguous account profile")
-        fields[key] = value
-    return fields
+def _token_status(executable: str, token: str, runner: Callable[..., Any]) -> Any:
+    """The CLI's own `auth status --json` for the setup token alone.
 
-
-def _lookup_setup_token(token: str) -> _SetupTokenProfile:
-    """One fixed OAuth endpoint, without redirects, proxies or HTTP diagnostics.
-
-    Claude Code 2.1.316's embedded iv/Xs/cmr functions use this endpoint,
-    these headers and organization_type values (not the API-key profile).
-    Never retain an external exception or response in a refusal.
+    Run in an empty configuration directory, so no saved login can answer
+    for it, and with nothing else inherited.
     """
-    connection = None
-    reason = "Anthropic's account lookup could not be reached"
+    with TemporaryDirectory(prefix="alx-claude-token-") as directory:
+        from alx.providers.coding_process import run_coding_subprocess
+        completed = run_coding_subprocess(
+            runner, [executable, "auth", "status", "--json"],
+            capture_output=True, text=True, timeout=IDENTITY_CHECK_TIMEOUT_SECONDS,
+            env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""),
+                 "CLAUDE_CONFIG_DIR": directory, "CLAUDE_CODE_OAUTH_TOKEN": token},
+            cwd=directory, shell=False, check=False,
+        )
+    return json.loads(completed.stdout)
+
+
+def _lookup_setup_token(token: str, executable: str,
+                        runner: Callable[..., Any]) -> _SetupTokenProfile:
+    """Accept the token when the CLI reports it as a first-party subscription token.
+
+    A `claude setup-token` key carries only inference scope, so Anthropic's
+    account profile refuses it (403, 26 Nov 2026) and its account cannot be
+    read back. It is a subscription credential, never an API key, so nothing
+    it runs is billed as metered usage; that it is AL/X's account rests on
+    Friedl having issued it from her login. Never retain an exception or CLI
+    output in a refusal: either could carry the credential.
+    """
+    reason = "Claude could not check it"
     try:
-        connection = http.client.HTTPSConnection("api.anthropic.com", timeout=10)
-        connection.set_debuglevel(0)
-        connection.request("GET", "/api/oauth/profile", headers={
-            "User-Agent": "claude-code/2.1.316",
-            "Authorization": "Bearer " + token,
-            "Content-Type": "application/json",
-            "Cache-Control": "no-cache",
-        })
-        response = connection.getresponse()
-        if response.status != 200:
-            reason = "Anthropic did not approve the account lookup"
-        else:
-            reason = "Anthropic's account details were incomplete or unreadable"
-            body = response.read(65_537)
-            if len(body) <= 65_536:
-                profile = json.loads(body, object_pairs_hook=_unique_profile_fields)
-                account = profile.get("account") if isinstance(profile, dict) else None
-                organization = profile.get("organization") if isinstance(profile, dict) else None
-                if isinstance(account, dict) and isinstance(organization, dict):
-                    email = account.get("email")
-                    plan = organization.get("organization_type")
-                    if isinstance(email, str) and isinstance(plan, str):
-                        if email != "alx@fire-fli.co.za":
-                            reason = "it belongs to a different account"
-                        elif (plan not in {"claude_pro", "claude_max", "claude_team"}
-                              or organization.get("billing_type") not in {
-                                  None, "stripe_subscription", "stripe_subscription_contracted",
-                                  "apple_subscription", "google_play_subscription",
-                              }):
-                            reason = "it does not confirm a supported Claude subscription"
-                        else:
-                            return _SetupTokenProfile(token, subscription=plan)
-    except TimeoutError:
-        reason = "Anthropic's account lookup timed out"
+        status = _token_status(executable, token, runner)
+    except subprocess.TimeoutExpired:
+        reason = "Claude's check of it timed out"
     except Exception:
-        # Even malformed headers and unexpected HTTP/parser errors fail closed;
-        # their messages can contain the request credential or response body.
-        pass
-    finally:
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
+        status = None
+    else:
+        if not isinstance(status, Mapping):
+            reason = "Claude's answer about it was unreadable"
+        elif status.get("loggedIn") is not True:
+            reason = "Claude did not accept it (it may have expired or been revoked)"
+        elif status.get("authMethod") != "oauth_token" or status.get("apiProvider") != "firstParty":
+            reason = "it is not a Claude subscription key"
+        else:
+            return _SetupTokenProfile(token, subscription="setup_token")
     return _SetupTokenProfile(token, refusal=reason)
 
 
-def _validated_setup_token(token: str) -> _SetupTokenProfile:
+def _validated_setup_token(token: str, executable: str,
+                           runner: Callable[..., Any]) -> _SetupTokenProfile:
     global _setup_token_profile
     with _setup_token_lock:
         if _setup_token_profile is None or _setup_token_profile.token != token:
-            _setup_token_profile = _lookup_setup_token(token)
+            _setup_token_profile = _lookup_setup_token(token, executable, runner)
         return _setup_token_profile
 
 
@@ -719,7 +702,7 @@ class ClaudeSubscriptionReasoningModel:
         if self._config_dir is not None:
             environment["CLAUDE_CONFIG_DIR"] = self._config_dir
         if (self._oauth_token is not None
-                and _validated_setup_token(self._oauth_token).subscription is not None):
+                and _validated_setup_token(self._oauth_token, self._executable, self._runner).subscription is not None):
             environment["CLAUDE_CODE_OAUTH_TOKEN"] = self._oauth_token
         return environment
 
@@ -758,13 +741,13 @@ class ClaudeSubscriptionReasoningModel:
     def verify_identity(self) -> SubscriptionIdentity:
         """Confirm the dedicated configuration is AL/X's subscription login.
 
-        Setup tokens use the cached Anthropic profile lookup; a refused token
+        Setup tokens use the cached CLI check of the token alone; a refused token
         uses the normal `claude auth status --json` saved-login check. Raises
         `SubscriptionIdentityError` rather than letting any other identity
         answer.
         """
         if self._oauth_token is not None:
-            profile = _validated_setup_token(self._oauth_token)
+            profile = _validated_setup_token(self._oauth_token, self._executable, self._runner)
             if profile.subscription is not None:
                 return SubscriptionIdentity(
                     self._config_dir or "", "alx@fire-fli.co.za", "claude.ai",
