@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -150,6 +151,20 @@ class LibraryCopyTests(unittest.TestCase):
             footprint = (project / "footprints" / "FireFli_ICs.pretty" / "SN74LVC1G123DQER.kicad_mod").read_text()
             self.assertIn('${FIREFLI_KICAD_LIB}/3dmodels/FireFli_ICs.3dshapes/SN74LVC1G123DQER.step', footprint)
             self.assertIn("3dmodels/FireFli_ICs.3dshapes/SN74LVC1G123DQER.step", library_inventory(project))
+            # A part whose last file fails is put back whole and can be added again (Greptile on #247).
+            other = dict(part, mpn="SN74LVC1G123DCTR")
+            symbols_before = (project / "symbols" / "FireFli_ICs.kicad_sym").read_text()
+            real_write = Path.write_text
+            def failing(path, *args, **kwargs):
+                if path.suffix == ".csv":
+                    raise OSError("disk full")
+                return real_write(path, *args, **kwargs)
+            with unittest.mock.patch.object(Path, "write_text", failing):
+                with self.assertRaises(OSError):
+                    provider.add_part(other)
+            self.assertEqual((project / "symbols" / "FireFli_ICs.kicad_sym").read_text(), symbols_before)
+            self.assertFalse((project / "footprints" / "FireFli_ICs.pretty" / "SN74LVC1G123DCTR.kicad_mod").exists())
+            provider.add_part(other)
             # His library has no FireFli_ICs.3dshapes folder yet: write-back makes it (review of #247).
             self.assertFalse((root / "3dmodels").exists())
             provider.write_back({"work_copy_id": copy["work_copy_id"], "project_dir": str(root),
@@ -194,6 +209,24 @@ class LibraryCopyTests(unittest.TestCase):
                     {"number": "3", "x": 0.35, "y": 0, "width": 0.4, "height": 0.7}]},
                 "spice": {"file": "2N7002 (SPICE MODEL).LIB", "model": "F2N7002", "pins": {"1": "1", "2": "3", "3": "2"}}})
             self.assertEqual(added["symbol"], "FireFli_ICs:2N7002")
+            # The symbol points the simulator at the model (review of #247: the Sim fields were dropped).
+            symbols = (settings.work_root / copy["work_copy_id"] / "project" / "symbols" / "FireFli_ICs.kicad_sym").read_text()
+            self.assertIn('(property "Sim.Name" "F2N7002"', symbols)
+            self.assertIn('(property "Sim.Pins"', symbols)
+            # A model file that carries commands is refused before ngspice reads it.
+            (inbox / "evil.lib").write_text(".SUBCKT X 1 2\nR1 1 2 1k\n.ENDS\n.control\nshell touch "
+                                            + str(folder / "ran") + "\n.endc\n")
+            with self.assertRaises(KiCadError) as refused:
+                provider.add_part({
+                    "work_copy_id": copy["work_copy_id"], "library": "ICs", "mpn": "EVIL", "manufacturer": "X",
+                    "description": "R", "datasheet": "https://example.test/x.pdf", "reference": "R",
+                    "pins": [{"number": "1", "name": "A", "type": "passive"}, {"number": "2", "name": "B", "type": "passive"}],
+                    "footprint": {"package": "pads", "body": [1, 0.5], "height": 0.35, "pads": [
+                        {"number": "1", "x": -0.4, "y": 0, "width": 0.4, "height": 0.5},
+                        {"number": "2", "x": 0.4, "y": 0, "width": 0.4, "height": 0.5}]},
+                    "spice": {"file": "evil.lib", "model": "X", "pins": {"1": "1", "2": "2"}}})
+            self.assertIn(".control", refused.exception.recovery["detail"])
+            self.assertFalse((folder / "ran").exists())
             # Without a folder, the copy is of the FireFli library.
             self.assertTrue(provider.copy_library({})["work_copy_id"])
 

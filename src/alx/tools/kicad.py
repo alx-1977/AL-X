@@ -440,7 +440,7 @@ FIND_PART = CapabilityDefinition('find_part',
     'e.g. "comparator", "74LVC1G123", "TVS"); value: a component value compared as a number ("1u", '
     '"100n", "4k7"); package: text in the footprint or package ("0603", "DFN"); kind: the library or '
     'reference letter ("Capacitors", "R", "IC"). count 0 means the part is not in the library yet.',
-    obj({'query': S, 'value': S, 'package': S, 'kind': S, 'limit': I}),
+    obj({'query': S, 'value': S, 'package': S, 'kind': S, 'limit': I}, ()),
     obj({'count': I, 'parts': array(MAP), 'truncated': B, 'library': S, 'hint': S},
         ('count', 'parts', 'truncated')),
     SideEffect.NONE, FAILURES)

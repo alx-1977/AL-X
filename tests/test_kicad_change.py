@@ -642,7 +642,7 @@ class OneWayToChangeACopyTests(unittest.TestCase):
         self.assertEqual(owners, {"snapshot": {"_change"}, "history": {"_change"}, "restore": {"_change"}})
         users = {method.name for method in provider.body if isinstance(method, ast.FunctionDef)
                  and "self._change(" in ast.get_source_segment(source, method)}
-        self.assertEqual(users, {"edit", "make_hierarchical", "take_edits", "_revert"})
+        self.assertEqual(users, {"edit", "make_hierarchical", "take_edits", "_revert", "add_part"})
 
 if __name__ == "__main__":
     unittest.main()

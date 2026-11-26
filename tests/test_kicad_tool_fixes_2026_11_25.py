@@ -95,5 +95,12 @@ def test_find_part_is_asked_afresh_because_the_library_grows_during_a_job():
     assert _read_key("kicad", {"action": "fetch_datasheet", "part": "74LVC1G123"}) is not None
 
 
+
+def test_find_part_takes_any_one_filter():
+    # Greptile on #247: every filter was required, so {"query": "comparator"} was refused.
+    from alx.tools.kicad import FIND_PART
+    assert FIND_PART.input_schema.required == ()
+
+
 if __name__ == "__main__":
     unittest.main()

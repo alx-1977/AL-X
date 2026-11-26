@@ -155,6 +155,10 @@ def not_design(source):
     return {source / name for name in names}
 
 
+SPICE_MODEL_DIRECTIVES = frozenset({'.model', '.subckt', '.ends', '.param', '.func', '.global', '.end',
+                                    '.options', '.option'})
+
+
 DESIGN_SUFFIXES = frozenset({'.kicad_pcb', '.kicad_pro', '.kicad_dru', '.kicad_sch', '.kicad_sym',
                              '.kicad_mod', '.kicad_wks'})
 DESIGN_NAMES = frozenset({'fp-lib-table', 'sym-lib-table'})
@@ -2879,7 +2883,16 @@ class KiCadProvider:
                 raise KiCadError('arguments_unusable', {'detail': 'spice file is one of: %s, or a file in Parts-Inbox'
                                                         % (', '.join(files) or 'none in the download')})
             source = candidate.read_bytes()
-        models = spice_models(source.decode('latin-1', 'replace'))
+        text = source.decode('latin-1', 'replace')
+        # A maker's file is model data. Any other directive (.control and its shell, .include, .lib)
+        # is refused before ngspice reads it (review of #247), as clean_deck does for circuits.
+        for line in text.splitlines():
+            word = (line.split() or [''])[0].lower()
+            if word.startswith('.') and word not in SPICE_MODEL_DIRECTIVES:
+                raise KiCadError('arguments_unusable', {'detail': '%s holds %s, which is not model data; '
+                                                        'only %s are taken' % (wanted, word,
+                                                        ', '.join(sorted(SPICE_MODEL_DIRECTIVES)))})
+        models = spice_models(text)
         model = models.get(str(spec['model']))
         if model is None:
             raise KiCadError('arguments_unusable', {'detail': '%s defines %s, not %s' % (
@@ -2995,16 +3008,18 @@ class KiCadProvider:
                                                + str(arguments['spice_none']).strip())))
             row = {**{k: v for k, v in fields.items() if not k.startswith('Sim.')}, 'Note': note}
             new_catalogue = with_catalogue_row(catalogue.read_text(), row)
-            symbols_file.write_text(new_library)
-            if footprint_text is not None:
-                (pretty / (name + '.kicad_mod')).write_text(footprint_text)
-                shapes = project / '3dmodels' / (stem + '.3dshapes')
-                shapes.mkdir(parents=True, exist_ok=True)
-                (shapes / (name + '.step')).write_bytes(model.pop('step'))
-            if spice is not None:
-                (project / 'spice').mkdir(exist_ok=True)
-                (project / 'spice' / spice['file']).write_bytes(spice.pop('source'))
-            catalogue.write_text(new_catalogue)
+            # One change: kept whole, with an undo entry, or put back whole (review of #247).
+            with self._change(root, meta):
+                symbols_file.write_text(new_library)
+                if footprint_text is not None:
+                    (pretty / (name + '.kicad_mod')).write_text(footprint_text)
+                    shapes = project / '3dmodels' / (stem + '.3dshapes')
+                    shapes.mkdir(parents=True, exist_ok=True)
+                    (shapes / (name + '.step')).write_bytes(model.pop('step'))
+                if spice is not None:
+                    (project / 'spice').mkdir(exist_ok=True)
+                    (project / 'spice' / spice['file']).write_bytes(spice.pop('source'))
+                catalogue.write_text(new_catalogue)
             return {'symbol': '%s:%s' % (stem, name), 'footprint': footprint_field, 'catalogue': row,
                     'built': dict(built or {'shared': footprint_field}, **({'model': model} if model else {}),
                                   **({'spice': {k: v for k, v in spice.items() if k != 'fields'}} if spice else {})),
@@ -3833,7 +3848,8 @@ class KiCadProvider:
             # Copper removed after his placement approval still needs his routing approval (review of #247).
             copper = fingerprints(root / 'project', meta['board'])['routing']
             seen = ((meta.get('approvals') or {}).get('placement') or {}).get('routing_seen')
-            placed_only = (ready(status, 'placement')
+            placed_only = (all(status[step] in ('unchanged', 'approved') for step in ('schematic', 'placement'))
+                           and not (meta.get('approvals') or {}).get('routing_due')
                            and copper in (self._original_steps(root, meta)['routing'], seen))
             if not ready(status, 'routing') and not placed_only:
                 raise KiCadError('step_not_approved', {

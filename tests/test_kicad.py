@@ -1297,6 +1297,20 @@ p.write_text(re.sub(r' \\(segment [^()]*(\\([^()]*\\)[^()]*)*\\)', '', p.read_te
         self.success('write_back_kicad_board', **self.write_args(stripped))
         self.assertNotIn('segment', board.read_text())
 
+    def test_a_part_moved_after_the_placement_approval_still_needs_his_routing_approval(self):
+        # Greptile on #247: an adjusted placement made the placement-only write-back skip routing.
+        copy = self.check()['work_copy_id']
+        moved = self.success('edit_kicad_work_copy', work_copy_id=copy, script=self.MOVE_U1)
+        self.approve(moved, 'placement')
+        nudged = self.success('edit_kicad_work_copy', work_copy_id=copy, script="""
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('(at 5 5)', '(at 6 5)'))
+""")
+        self.assertEqual(nudged['steps']['placement'], 'adjusted')
+        self.failure('step_not_approved', 'write_back_kicad_board', **self.write_args(nudged))
+
     def test_icloud_copies_need_the_plain_name_beside_them(self):
         from alx.providers.kicad import icloud_copies
         self.assertEqual(icloud_copies(['fp-lib-table', 'fp-lib-table 2', 'a.pretty/x.kicad_mod',

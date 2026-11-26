@@ -129,7 +129,9 @@ def build_symbol(name: str, fields: dict[str, str], pins: list[dict[str, Any]]) 
     out.append(prop("Reference", fields.get("Reference", "U"), (-half_w, half_h + 1.27), False))
     out.append(prop("Value", fields.get("Value", name), (-half_w, -half_h - 1.27 - (GRID if placed["bottom"] else 0)),
                     False))
-    for key in ("Footprint", "Datasheet", "Description", "Manufacturer", "MPN", "LCSC"):
+    # The Sim fields point KiCad's simulator at the maker's model (review of #247).
+    for key in ("Footprint", "Datasheet", "Description", "Manufacturer", "MPN", "LCSC",
+                *sorted(k for k in fields if k.startswith("Sim."))):
         if fields.get(key):
             out.append(prop(key, fields[key], (0, 0), True))
     out.append('\t\t(symbol %s\n\t\t\t(rectangle\n\t\t\t\t(start %s %s)\n\t\t\t\t(end %s %s)\n\t\t\t\t(stroke\n'
