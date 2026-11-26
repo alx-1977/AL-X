@@ -32,6 +32,7 @@ MEASURING = 2
 from alx.providers.kicad_helpers import HELPERS, script_runner
 from alx.providers.kicad_schematic_helpers import GRID_SUFFIX, SCHEMATIC_HELPERS
 from alx.providers.kicad_board_helpers import BOARD_HELPERS
+from alx.providers.kicad_rf import RF_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
 from alx.providers.kicad_style import label_violations, orientation_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
@@ -1619,7 +1620,7 @@ class KiCadProvider:
                     blocks = {} if library else {
                         name: path.read_text() for name, (path, _) in self._design_blocks().items()
                     }
-                    script_path.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS
+                    script_path.write_text(HELPERS + SCHEMATIC_HELPERS + BOARD_HELPERS + RF_HELPERS
                                            + 'SCHEMATIC_SYNC = %a\n' % sync
                                            + '_DESIGN_BLOCKS.update(%a)\n' % blocks
                                            + '_LIBRARY_FOOTPRINTS.update(%a)\n' % footprints

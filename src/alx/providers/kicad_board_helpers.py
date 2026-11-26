@@ -173,7 +173,8 @@ def add_keepout(b, outline, layers=None, name=None, no_tracks=True, no_vias=True
     return {"corners": len(outline), "layers": layers.CuStack().size()}
 
 
-def route_connection(b, start, end, width=None, layers=None, follow=None, radius=None, net=None, on=None):
+def route_connection(b, start, end, width=None, layers=None, follow=None, radius=None, net=None, on=None,
+                     impedance=None, gap=None):
     # One connection, path found by code: 45-degree bends, as few bends and vias as it
     # can, clear of everything (17 Nov). from/to: REF.PAD or [x, y]; the net comes from
     # the pads; it may cross to another layer through vias.
@@ -196,6 +197,9 @@ def route_connection(b, start, end, width=None, layers=None, follow=None, radius
     # His style (17 Nov), from his own board: its usual width and via, its routing layers;
     # an RF-wide line (0.3 mm and up) stays on its own layer with arcs at his RF radius.
     profile = style(b)
+    if impedance and not width:
+        # An RF line's width from the board's stack-up (26 Nov: worked out by hand six times).
+        width = rf_width(b, impedance, sides[0], gap)
     width = float(width or profile["width"])
     rf = width >= 0.3
     route_layers = layers or ([sides[0]] if rf and sides[0] == sides[1] else None)
