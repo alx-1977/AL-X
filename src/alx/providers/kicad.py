@@ -35,7 +35,7 @@ from alx.providers.kicad_board_helpers import BOARD_HELPERS
 from alx.providers.kicad_change import ChangeError, board_state, design_state, plain, set_check, unmet, validate_postconditions
 from alx.providers.kicad_style import label_violations, orientation_violations, placement_warnings, violations
 from alx.providers.kicad_rules import check_layout_rules
-from alx.providers.kicad_steps import (STEPS, edit_refusal, routing_added, fingerprints, parity_mismatches, ready,
+from alx.providers.kicad_steps import (STEPS, edit_refusal, original_of, routing_added, fingerprints, parity_mismatches, ready,
                                         shown_mismatch,
                                       step_status)
 from alx.providers.reference_file import reference_path, read_reference, archive_entries, read_bytes, credential_path
@@ -192,8 +192,11 @@ def icloud_copies(names, folder=None):
         for name in names - found:
             if Path(name).suffix in ('.kicad_sch', '.kicad_pro') or Path(name).name in DESIGN_NAMES:
                 with suppress(OSError):
-                    text = (Path(folder) / name).read_text(errors='replace')
-                    named |= {copy for copy in found if Path(copy).name in text}
+                    content = (Path(folder) / name).read_text(errors='replace')
+                    # Named in full, as a quoted file or the end of a quoted path: "Charger 2.kicad_sch"
+                    # is not named by "MyCharger 2.kicad_sch".
+                    named |= {copy for copy in found
+                              if re.search(r'["/]%s"' % re.escape(Path(copy).name), content)}
         found -= named
     return found
 
@@ -2730,8 +2733,7 @@ class KiCadProvider:
         # His original as it was copied: each step's fingerprint, every DRC
         # finding and every schematic/board disagreement, so later work is
         # judged against it (D-082).
-        steps = fingerprints(root / 'project', meta['board'])
-        steps.pop('copper')
+        steps = original_of(fingerprints(root / 'project', meta['board']))
         self._save_metadata(root, dict(meta, original_steps=steps))
         # The schematic is checked too, errors and warnings, aiming for a
         # clean result like the DRC (Friedl, 2026-11-13).
@@ -3272,9 +3274,7 @@ class KiCadProvider:
         # still his project, which write-back proves unchanged.
         if meta.get('original_steps'):
             return meta['original_steps']
-        steps = fingerprints(Path(meta['source']), meta['board'])
-        steps.pop('copper')
-        return steps
+        return original_of(fingerprints(Path(meta['source']), meta['board']))
 
     def _step_status(self, root, meta):
         current = fingerprints(root / 'project', meta['board'])

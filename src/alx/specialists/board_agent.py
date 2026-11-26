@@ -53,7 +53,8 @@ def _read_key(capability_id: Any, arguments: Mapping[str, Any]) -> str | None:
     """The key of a read whose answer cannot change during the job, or None."""
     if capability_id != "kicad" or arguments.get("action") not in UNCHANGING_READS:
         return None
-    if "runtime/kicad/" in str(arguments.get("path", "")) or arguments.get("work_copy_id"):
+    path = str(arguments.get("path", ""))
+    if "runtime/kicad/" in path or "runtime/kicad.nosync/" in path or arguments.get("work_copy_id"):
         return None
     return json.dumps([capability_id, dict(arguments)], sort_keys=True, default=str)
 

@@ -372,7 +372,7 @@ class KiCadTests(unittest.TestCase):
         history.mkdir(parents=True)
         (history / 'config').write_text('[core]')
         checked = self.check()
-        copy = self.storage / 'kicad' / checked['work_copy_id'] / 'project'
+        copy = self.storage / 'kicad.nosync' / checked['work_copy_id'] / 'project'
         self.assertTrue((copy / 'test.kicad_pcb').exists())
         self.assertFalse((copy / '.history').exists())
         # KiCad saving its history meanwhile does not block writing back.
@@ -437,7 +437,7 @@ class KiCadTests(unittest.TestCase):
         (self.project / 'test-backups' / 'old.zip').write_bytes(b'zip')
         (self.project / 'test.kicad_prl').write_text('{"board": {"active_layer": 0}}')
         result = self.fixed()
-        root = self.storage / 'kicad' / result['work_copy_id'] / 'project'
+        root = self.storage / 'kicad.nosync' / result['work_copy_id'] / 'project'
         self.assertFalse((root / 'backups').exists())
         self.assertFalse((root / 'test-backups').exists())
         self.assertFalse((root / 'test.kicad_prl').exists())
@@ -2302,7 +2302,7 @@ Path(sys.argv[1]).with_suffix('.kicad_dru').write_text('(version 1)')
             result = kicad_call(runtime.executors, 'export_kicad_manufacturing', {
                 'work_copy_id': checked['work_copy_id'], 'work_copy_revision': checked['work_copy_revision'], 'output_dir': 'production'})
         self.assertEqual(result.state, CapabilityResultState.FAILED)
-        metadata = json.loads((self.storage / 'kicad' / checked['work_copy_id'] / 'metadata.json').read_text())
+        metadata = json.loads((self.storage / 'kicad.nosync' / checked['work_copy_id'] / 'metadata.json').read_text())
         self.assertEqual(len(metadata['exports']), 1)
         (name, digest), = metadata['exports'].items()
         import hashlib

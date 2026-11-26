@@ -81,40 +81,58 @@ def routing_added(before: Path, after: Path) -> bool:
 
 def fingerprints(project: Path, board_name: str) -> dict:
     """What each step looks like now: schematic files, placement and copper."""
+    from alx.providers.kicad import icloud_copies
     schematics = {}
     for path in sorted(project.rglob('*.kicad_sch')):
         if path.is_file() and not path.is_symlink():
             relative = path.relative_to(project).as_posix()
             if not any(part.startswith('.') for part in relative.split('/')):
                 schematics[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    # iCloud's conflict copies ("Charger 2.kicad_sch") are not his schematic: on 26 Nov they made
+    # an unchanged schematic read as changed, and a routing-only job asked for his approval again.
+    # The digest with them is kept too: approvals given before then were recorded with it.
+    with_copies = _digest(schematics)
+    for copy in icloud_copies(schematics, folder=project):
+        schematics.pop(copy)
     board = project / board_name
     placement, copper = board_steps(board.read_text()) if board.is_file() else (_digest([]), Counter())
     return {'schematic': _digest(schematics), 'placement': placement,
-            'routing': _digest(sorted(copper.items())), 'copper': dict(copper)}
+            'routing': _digest(sorted(copper.items())), 'copper': dict(copper),
+            'schematic_with_copies': with_copies}
+
+
+def original_of(steps: dict) -> dict:
+    """The fingerprints a work copy keeps as its original: the steps alone."""
+    return {name: steps[name] for name in STEPS}
 
 
 def step_status(original: dict, approvals: dict, current: dict) -> dict:
     """Each step: unchanged, approved, or needs_approval; a step needs every one before it."""
+    def same(name, stored):
+        # A schematic recorded before 26 Nov may include iCloud's copies (see fingerprints).
+        return stored is not None and (stored == current[name] or (
+            name == 'schematic' and stored == current.get('schematic_with_copies')))
+
     status, earlier_ok = {}, True
     for index, step in enumerate(STEPS):
         record = approvals.get(step) or {}
-        held = all(record.get(name) == current[name] for name in STEPS[:index + 1])
+        held = all(same(name, record.get(name)) for name in STEPS[:index + 1])
         later = approvals.get('routing') or {}
-        if current[step] == original.get(step):
+        if same(step, original.get(step)):
             state = 'unchanged'
         elif held and record:
             state = 'approved'
-        elif (step == 'placement' and later and all(later.get(name) == current[name]
+        elif (step == 'placement' and later and all(same(name, later.get(name))
                                                       for name in ('schematic', 'placement'))):
             # His routing approval saw the placement as it now is.
             state = 'approved'
-        elif step == 'placement' and record and record.get('schematic') == current['schematic']:
+        elif step == 'placement' and record and same('schematic', record.get('schematic')):
             # Parts nudged after he approved the placement, while routing (17 Nov: C1 moved 0.2 mm
             # for Würth's gap, and he was asked three times, blind). Shown with the routed board.
             state = 'adjusted'
         else:
             state = 'needs_approval'
-        covered = all(later.get(name) == current[name] for name in ('schematic', 'placement'))
+        covered = all(same(name, later.get(name)) for name in ('schematic', 'placement'))
         placed = approvals.get('placement') or {}
         if step == 'routing' and state == 'unchanged' and not covered and (
                 status.get('placement') == 'adjusted' or approvals.get('routing_due')
