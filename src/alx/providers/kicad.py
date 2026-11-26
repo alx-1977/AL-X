@@ -188,16 +188,21 @@ def icloud_copies(names, folder=None):
                 found.add(name)
                 break
     if folder is not None and found:
-        named = set()
-        for name in names - found:
-            if Path(name).suffix in ('.kicad_sch', '.kicad_pro') or Path(name).name in DESIGN_NAMES:
-                with suppress(OSError):
-                    content = (Path(folder) / name).read_text(errors='replace')
-                    # Named in full, as a quoted file or the end of a quoted path: "Charger 2.kicad_sch"
-                    # is not named by "MyCharger 2.kicad_sch".
-                    named |= {copy for copy in found
-                              if re.search(r'["/]%s"' % re.escape(Path(copy).name), content)}
-        found -= named
+        # A copy a kept file names is kept too, and then read in turn: a sheet "A 2" that the
+        # top sheet uses may itself use "B 2" (review of #248).
+        to_read = names - found
+        while to_read and found:
+            named = set()
+            for name in to_read:
+                if Path(name).suffix in ('.kicad_sch', '.kicad_pro') or Path(name).name in DESIGN_NAMES:
+                    with suppress(OSError):
+                        content = (Path(folder) / name).read_text(errors='replace')
+                        # Named in full, as a quoted file or the end of a quoted path: "Charger 2.kicad_sch"
+                        # is not named by "MyCharger 2.kicad_sch".
+                        named |= {copy for copy in found
+                                  if re.search(r'["/]%s"' % re.escape(Path(copy).name), content)}
+            found -= named
+            to_read = named
     return found
 
 

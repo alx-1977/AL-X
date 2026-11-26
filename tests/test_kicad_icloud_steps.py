@@ -37,6 +37,16 @@ class StepCheckIgnoresICloudCopies(unittest.TestCase):
         (self.project / 'Charger 2.kicad_sch').write_text('(kicad_sch (version 20250114) (junction))\n')
         self.assertNotEqual(fingerprints(self.project, 'board.kicad_pcb')['schematic'], after)
 
+    def test_a_named_sheet_inside_a_named_sheet_still_counts(self):
+        (self.project / 'top.kicad_sch').write_text(TOP.replace('Charger.kicad_sch', 'A 2.kicad_sch'))
+        (self.project / 'A.kicad_sch').write_text('(kicad_sch)\n')
+        (self.project / 'A 2.kicad_sch').write_text('(kicad_sch (sheet (property "Sheetfile" "B 2.kicad_sch")))\n')
+        (self.project / 'B.kicad_sch').write_text('(kicad_sch)\n')
+        (self.project / 'B 2.kicad_sch').write_text('(kicad_sch)\n')
+        before = fingerprints(self.project, 'board.kicad_pcb')['schematic']
+        (self.project / 'B 2.kicad_sch').write_text('(kicad_sch (junction))\n')
+        self.assertNotEqual(fingerprints(self.project, 'board.kicad_pcb')['schematic'], before)
+
     def test_a_real_schematic_change_still_counts(self):
         before = fingerprints(self.project, 'board.kicad_pcb')['schematic']
         (self.project / 'Charger.kicad_sch').write_text('(kicad_sch (version 20250114) (junction))\n')
