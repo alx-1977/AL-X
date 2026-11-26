@@ -454,10 +454,41 @@ FIND_PART = CapabilityDefinition('find_part',
     'name or read library files. query: words that must all appear (part number, kind or description, '
     'e.g. "comparator", "74LVC1G123", "TVS"); value: a component value compared as a number ("1u", '
     '"100n", "4k7"); package: text in the footprint or package ("0603", "DFN"); kind: the library or '
-    'reference letter ("Capacitors", "R", "IC"). count 0 means the part is not in the library yet.',
+    'reference letter ("Capacitors", "R", "IC"). count 0 means the part is not in the library yet; '
+    'for a capacitor value and chip size (0402-1812) jlc_candidates then lists what JLC stocks under his '
+    'brand rule (Taiyo Yuden X5R/X7R, YAGEO C0G) with ratings, LCSC number and stock as of '
+    'jlc_catalogue_date: choose one and add_passive it.',
     obj({'query': S, 'value': S, 'package': S, 'kind': S, 'limit': I}, ()),
-    obj({'count': I, 'parts': array(MAP), 'truncated': B, 'library': S, 'hint': S},
+    obj({'count': I, 'parts': array(MAP), 'truncated': B, 'library': S, 'hint': S,
+         'jlc_candidates': array(MAP), 'jlc_catalogue_date': S},
         ('count', 'parts', 'truncated')),
+    SideEffect.NONE, FAILURES)
+
+ADD_PASSIVE = CapabilityDefinition('add_passive',
+    'Add a capacitor from find_part\'s jlc_candidates to a copy_library work copy of the FireFli library, '
+    'in one call: its line in the library generator, its LCSC number, then the generator and KiCad\'s '
+    're-save, as the library\'s build does. mpn is the exact part number. No datasheet reading or code '
+    'reading is needed. Then write_back the library copy with his approval, and swap_part.',
+    obj({'work_copy_id': S, 'mpn': S}),
+    obj({'symbol': S, 'footprint': S, 'part': MAP, 'lcsc': S, 'jlc_library': S, 'stock': I,
+         'work_copy_id': S, 'work_copy_revision': S, 'next': S}),
+    SideEffect.NONE, FAILURES)
+
+SWAP_PART = CapabilityDefinition('swap_part',
+    'Change parts on a board work copy to one library part at the same pins ("C94-C96 to 0402", a '
+    'value change, a reel variant), one step of his order per call. part is the library symbol '
+    'LIBRARY:NAME from find_part; refs may hold ranges ("C94-C96"). The first call swaps the schematic '
+    'symbols in place (value, footprint and fields from the library part; a moved pin is wired back) '
+    'and returns the edit report; show him and approve_step schematic. The next call swaps the board '
+    'footprints in place, every pad keeping its net and taking the part\'s fields; show him the '
+    'placement. Every check of edit applies, and a refused swap is undone with why. side says which '
+    'was done (none when both already match).',
+    obj({'work_copy_id': S, 'refs': array(S), 'part': S}),
+    obj({'work_copy_id': S, 'work_copy_revision': S, 'part': S, 'footprint': S, 'side': S,
+         'swapped': array(S), 'next': S, 'stdout': S, 'stderr': S, 'change_report': CHANGE_REPORT,
+         'before': TOTALS, 'after': TOTALS, 'steps': MAP,
+         'not_library_parts': obj({'parts': array(S), 'detail': S}, ('parts', 'detail'))},
+        ('work_copy_id', 'work_copy_revision', 'part', 'footprint', 'side', 'swapped', 'next')),
     SideEffect.NONE, FAILURES)
 
 ADD_PART = CapabilityDefinition('add_part',
@@ -594,6 +625,8 @@ class KiCadAction(str, Enum):
     ADD_PART = 'add_part'
     OPEN_IN_KICAD = 'open_in_kicad'
     TAKE_EDITS = 'take_edits'
+    SWAP_PART = 'swap_part'
+    ADD_PASSIVE = 'add_passive'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -619,6 +652,8 @@ CONTRACTS = {
     KiCadAction.ADD_PART: ADD_PART,
     KiCadAction.OPEN_IN_KICAD: OPEN_IN_KICAD,
     KiCadAction.TAKE_EDITS: TAKE_EDITS,
+    KiCadAction.SWAP_PART: SWAP_PART,
+    KiCadAction.ADD_PASSIVE: ADD_PASSIVE,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
@@ -626,7 +661,8 @@ FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.ANALYSE_COPPER, KiCadAction.SIMULATE, KiCadAction.CHECK_LAYOUT,
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
     KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS,
-    KiCadAction.SELECT, KiCadAction.FIND_PART, KiCadAction.ADD_PART))
+    KiCadAction.SELECT, KiCadAction.FIND_PART, KiCadAction.ADD_PART, KiCadAction.SWAP_PART,
+    KiCadAction.ADD_PASSIVE))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -690,7 +726,9 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.FIND_PART: provider.find_part,
                KiCadAction.ADD_PART: provider.add_part,
                KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad,
-               KiCadAction.TAKE_EDITS: provider.take_edits}
+               KiCadAction.TAKE_EDITS: provider.take_edits,
+               KiCadAction.SWAP_PART: provider.swap_part,
+               KiCadAction.ADD_PASSIVE: provider.add_passive}
 
     def invoke(arguments):
         code = 'arguments_unusable'

@@ -309,9 +309,12 @@ def _non_library_parts(folder):
 
 def _library_file(folder, name):
     """A library's own file: KiCad's, its catalogue (catalogue/*.csv: every part's maker, MPN and
-    LCSC number), its 3D models (3dmodels/*.3dshapes/*.step) and SPICE models (spice/*)."""
+    LCSC number), its 3D models (3dmodels/*.3dshapes/*.step) and SPICE models (spice/*), and the
+    generator the resistors and capacitors are built by (generator/*.py, its lcsc.csv), so a part
+    added to a copy is added where the next build keeps it (26 Nov 2026)."""
     folder, lower = Path(folder), name.lower()
-    return (is_design_file(name) or (folder.name == 'catalogue' and lower.endswith('.csv'))
+    return (is_design_file(name) or (folder.name in ('catalogue', 'generator') and lower.endswith('.csv'))
+            or (folder.name == 'generator' and lower.endswith('.py'))
             or (folder.name.endswith('.3dshapes') and lower.endswith(('.step', '.stp')))
             or (folder.name == 'spice' and lower.endswith(('.lib', '.cir', '.mod', '.sp', '.spi', '.spice', '.txt',
                                                          '.sub', '.ckt'))))
@@ -995,7 +998,152 @@ class KiCadProvider:
         if not found['count']:
             found['hint'] = ('not in the FireFli library: a new part is created in a copy_library work copy '
                              'from its datasheet, then used by its exact name')
+            offered = self._jlc_capacitors(arguments)
+            if offered is not None:
+                found.update(offered)
+                found['hint'] = ('not in the FireFli library yet. jlc_candidates are the capacitors JLC stocks '
+                                 'for it under his brand rule: choose one (same or better dielectric, voltage '
+                                 'and tolerance than the part it replaces) and add_passive it to a copy_library '
+                                 'work copy; write that back with his approval, then swap_part')
         return found
+
+    def _jlc_capacitors(self, arguments):
+        """JLC's capacitors for a value and chip size the library lacks, or None when the
+        question is not one (no value, no size, or not a capacitor)."""
+        from alx.providers.kicad_parts import value_of
+        from alx.providers.kicad_passives import CACHE, catalogue_date, jlc_candidates
+        kind = str(arguments.get('kind') or '').strip().casefold()
+        farads = value_of(str(arguments.get('value') or ''))
+        size = re.search(r'\b(0402|0603|0805|1210|1812)\b', str(arguments.get('package') or ''))
+        if farads is None or size is None or kind not in ('', 'c', 'capacitor', 'capacitors'):
+            return None
+        if kind == '' and not re.search(r'(?i)[pnuµ]f?$', str(arguments.get('value')).strip()):
+            return None
+        cache = self._firefli_library() / CACHE
+        try:
+            listed = jlc_candidates(cache, farads * 1e12, size.group(1))
+        except (FileNotFoundError, OSError):
+            return {'jlc_candidates': [], 'jlc_catalogue_date': 'no local JLC catalogue (generator/lookup_lcsc.py makes it)'}
+        return {'jlc_candidates': listed, 'jlc_catalogue_date': catalogue_date(cache)}
+
+    def add_passive(self, arguments):
+        """A capacitor from JLC's catalogue into a copy_library work copy, through the library's own
+        generator: its line in generator/capacitors.py, its LCSC number in generator/lcsc.csv, then the
+        generator and KiCad's re-save, exactly as build.sh does (26 Nov 2026)."""
+        from alx.providers.kicad_passives import CACHE, decode, jlc_listing, with_entry, with_lcsc_row
+        mpn = str(arguments.get('mpn') or '').strip()
+        part = decode(mpn)
+        if part is None:
+            raise KiCadError('arguments_unusable', {'detail': '%r is not a Taiyo Yuden X5R/X7R or YAGEO CC C0G '
+                                                    'part number in 0402-1812: take one from find_part\'s '
+                                                    'jlc_candidates' % mpn})
+        with self._locked(arguments['work_copy_id']):
+            root, meta = self._load(arguments['work_copy_id'])
+            if not meta.get('library'):
+                raise KiCadError('arguments_unusable', {'detail': 'add_passive needs a copy_library work copy'})
+            if meta.get('taint'):
+                raise KiCadError('work_copy_tainted')
+            project = root / 'project'
+            generator = project / 'generator' / 'capacitors.py'
+            table = project / 'generator' / 'lcsc.csv'
+            if not generator.is_file() or not table.is_file():
+                raise KiCadError('arguments_unusable', {'detail': 'this copy is not the FireFli library (no '
+                                                        'generator/capacitors.py and generator/lcsc.csv)'})
+            listing = jlc_listing(self._firefli_library() / CACHE, mpn, part['manufacturer'])
+            if listing is None:
+                raise KiCadError('arguments_unusable', {'detail': 'JLC lists %s not once in its catalogue: take one '
+                                                        'from find_part\'s jlc_candidates' % mpn})
+            try:
+                source = with_entry(generator.read_text(encoding='utf-8'), part, listing['lcsc'])
+                rows = with_lcsc_row(table.read_text(encoding='utf-8'), mpn, listing['lcsc'], listing['jlc_library'])
+            except ValueError as error:
+                raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+            if self.execute_python is None:
+                raise KiCadError('engine_unavailable')
+            script = root / ('generate-' + uuid.uuid4().hex + '.py')
+            script.write_text('import runpy, sys\nsys.path.insert(0, %r)\nrunpy.run_path(%r, run_name="__main__")\n'
+                              % (str(generator.parent), str(generator)))
+            try:
+                with self._change(root, meta):
+                    generator.write_text(source, encoding='utf-8')
+                    table.write_text(rows, encoding='utf-8')
+                    executed = self.execute_python(str(self.settings.kicad_python), script, project / '.library')
+                    if executed.returncode:
+                        raise KiCadError('script_failed', {'detail': 'the library generator stopped',
+                                                           'stderr': (executed.stderr or '')[-4000:]})
+                    # KiCad re-saves the files in its own format, which also proves it reads them.
+                    self._run('sym', 'upgrade', '--force', project / 'symbols' / 'FireFli_Capacitors.kicad_sym')
+                    self._run('fp', 'upgrade', '--force', project / 'footprints' / 'FireFli_Capacitors.pretty')
+            finally:
+                script.unlink(missing_ok=True)
+            return {'symbol': 'FireFli_Capacitors:%s' % mpn,
+                    'footprint': 'FireFli_Capacitors:C_%s_%sMetric' % (part['size'], {
+                        '0402': '1005', '0603': '1608', '0805': '2012', '1210': '3225', '1812': '4532'}[part['size']]),
+                    'part': {k: v for k, v in part.items() if k not in ('pf', 'volts')}, **listing,
+                    'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': self._revision(root),
+                    'next': 'write_back this library copy with his approval (project_dir is the library folder), '
+                            'then swap_part on the board copy'}
+
+    def swap_part(self, arguments):
+        """Parts changed to one library part at the same pins, a step of his order per call (26 Nov):
+        the schematic symbols first; once he approved the schematic, the board footprints, pads
+        keeping their nets and taking the part's fields. Through edit, so every check applies."""
+        from alx.providers.kicad_index import board_index
+        from alx.providers.kicad_swap import (board_fields, board_script, expand_refs, library_fields,
+                                              placed_symbols, schematic_script)
+        try:
+            refs = expand_refs(arguments.get('refs'))
+        except ValueError as error:
+            raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+        part = str(arguments.get('part') or '').strip()
+        if not refs or not re.fullmatch(r'[^/\\:]+:[^/\\:]+', part):
+            raise KiCadError('arguments_unusable', {'detail': 'refs (e.g. ["C94-C96"]) and part, the library '
+                                                    'symbol LIBRARY:NAME from find_part'})
+        work_copy_id = arguments['work_copy_id']
+        root, meta = self._load(work_copy_id)
+        if meta.get('library'):
+            raise KiCadError('arguments_unusable', {'detail': 'swap_part needs a board work copy'})
+        project = root / 'project'
+        revision = self._revision(root, meta)
+        fields = library_fields(self._library_parts([part], project, 'symbols')[part])
+        footprint = fields.get('Footprint', '')
+        if not re.fullmatch(r'[^/\\:]+:[^/\\:]+', footprint):
+            raise KiCadError('arguments_unusable', {'detail': '%s names no footprint (LIBRARY:NAME)' % part})
+        placed = placed_symbols(project)
+        unknown = [ref for ref in refs if ref not in placed]
+        if unknown:
+            raise KiCadError('arguments_unusable', {'detail': 'not on the schematic: %s' % ', '.join(unknown)})
+        base = {'work_copy_id': work_copy_id, 'part': part, 'footprint': footprint}
+        on_schematic = [ref for ref in refs if placed[ref] != part]
+        if on_schematic:
+            edited = self.edit({'work_copy_id': work_copy_id, 'work_copy_revision': revision,
+                                'script': schematic_script(on_schematic, part), 'symbols': [part],
+                                'intent': [{'op': 'swap', 'ref': ref, 'part': part} for ref in on_schematic]})
+            return dict(edited, **base, side='schematic', swapped=on_schematic,
+                        next='show him the schematic and approve_step schematic; then swap_part again for the board')
+        on_board = board_state(board_index((project / meta['board']).read_text()))[0]
+        missing = [ref for ref in refs if ref not in on_board]
+        if missing:
+            raise KiCadError('arguments_unusable', {'detail': 'not on the board: %s (update the board from the '
+                                                    'schematic first)' % ', '.join(missing)})
+        to_change = [ref for ref in refs if on_board[ref] != footprint]
+        if not to_change:
+            return dict(base, work_copy_revision=revision, side='none', swapped=[],
+                        next='every part named is already %s on the schematic and %s on the board' % (part, footprint))
+        status = step_status(self._original_steps(root, meta), meta.get('approvals', {}),
+                             fingerprints(project, meta['board']))
+        if not ready(status, 'schematic'):
+            raise KiCadError('step_not_approved', {'needs': 'schematic', 'steps': status,
+                                                   'detail': 'show him the swapped schematic and approve_step '
+                                                             'schematic before the board changes'})
+        edited = self.edit({'work_copy_id': work_copy_id, 'work_copy_revision': revision,
+                            'script': board_script(to_change, footprint, board_fields(fields)),
+                            'footprints': [footprint.replace(':', '/', 1)],
+                            'intent': [{'op': 'swap', 'side': 'board', 'ref': ref, 'part': footprint}
+                                       for ref in to_change]})
+        return dict(edited, **base, side='board', swapped=to_change,
+                    next='show him the placement (tracks to the old pads may now end short of the new ones) '
+                         'and approve_step placement before any routing')
 
     def select(self, arguments):
         """Find Similar on a board: the objects of one kind matching every filter, from the board

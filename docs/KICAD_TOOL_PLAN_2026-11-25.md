@@ -50,6 +50,11 @@ Each is one call, done and checked in code (netlist, ERC, DRC and a picture), an
   - picks or makes the FireFli library part through the generator (capacitors, resistors);
   - swaps the schematic and the board;
   - keeps every connection.
+
+  Built 26 Nov in three calls she can make:
+  - **find_part:** when a capacitor isn't in the library, it lists what JLC stocks for that value and size under the brand rule: Taiyo Yuden for X5R/X7R, YAGEO for C0G. Each part shows its ratings, LCSC number and stock. She chooses.
+  - **add_passive:** puts her choice into a library copy through the generator, as the build does. The copy is written back with your approval.
+  - **swap_part:** one call changes the schematic. After your approval, a second call changes the board, with every pad keeping its net and the footprint taking the new part's MPN and LCSC number.
 - **Add another copy of a part already on the board.** For example, "a third RFSW6024": it copies U6's symbol, footprint and fields, so there's no datasheet hunt.
 - **Replace a part with a new one** at the same pins, like J3/J9 today.
 - **Teardrops** (done today).
