@@ -72,7 +72,8 @@ REFERENCE = obj({'kind': S, 'path': S, 'text': S, 'truncated': B, 'entry': S,
     'media_type': S, 'width': I, 'height': I, 'page_count': I, 'next_offset': I,
     'pages': array(obj({'page': I, 'text': S, 'truncated': B})),
     'documents': array(S), 'streams': array(S), 'board_records_decoded': B,
-    'entries': array(obj({'name': S, 'kind': S, 'bytes': I}, ('name',)))}, ('kind',))
+    'entries': array(obj({'name': S, 'kind': S, 'bytes': I}, ('name',))),
+    'facts_held': MAP, 'hint': S}, ('kind',))
 
 ENDPOINT = obj({'reference': S, 'pad': S, 'x_mm': N, 'y_mm': N, 'layer': S}, ())
 PORT = obj({'id': S, 'start': ENDPOINT, 'end': ENDPOINT})
@@ -354,7 +355,8 @@ FETCH_DATASHEET = CapabilityDefinition('fetch_datasheet',
     'exact part (74LVC1G123) is refused with candidates in recovery: each part DigiKey lists with '
     'its maker, package and description; choose the exact part_number and call again.',
     obj({'part_number': S, 'manufacturer': S}, ('part_number',)),
-    obj({'path': S, 'source': S, 'url': S, 'tried': array(MAP)}),
+    obj({'path': S, 'source': S, 'url': S, 'tried': array(MAP), 'facts_held': MAP},
+        ('path', 'source', 'url', 'tried')),
     SideEffect.NONE, FAILURES)
 COPY_LIBRARY = CapabilityDefinition('copy_library',
     'A work copy of a KiCad library folder (the FireFli library: footprints and symbols), for '
@@ -477,6 +479,24 @@ ADD_PASSIVE = CapabilityDefinition('add_passive',
     obj({'work_copy_id': S, 'mpn': S}),
     obj({'symbol': S, 'footprint': S, 'part': MAP, 'lcsc': S, 'jlc_library': S, 'stock': I,
          'work_copy_id': S, 'work_copy_revision': S, 'next': S}),
+    SideEffect.NONE, FAILURES)
+
+PART_FACTS = CapabilityDefinition('part_facts',
+    'The facts kept for a part (pinout, pin functions, layout and design notes), each naming the '
+    'datasheet and page it came from, changing nothing of his design. Ask before opening a datasheet: '
+    'part is its part number or another name it goes by. When nothing is kept, or the job needs '
+    'something new, read the datasheet at that page only, then save what a later job will need in '
+    'the same call: pins [{number, name, function, note, page}], notes [{topic, text, page}] (layout '
+    'keep-outs, boot pins, supply needs, RF guidance), aliases (other names: module name, family, '
+    'B-SoM/M-SoM), description, and source (the datasheet path). Saving needs no approval and merges: '
+    'a pin given again replaces the old one. find_part marks parts with facts_kept; a datasheet\'s '
+    'first read and fetch_datasheet return facts_held when there are some.',
+    obj({'part': S, 'source': S, 'aliases': array(S), 'description': S,
+         'pins': array(obj({'number': S, 'name': S, 'function': S, 'note': S, 'page': I},
+                           ('number', 'name', 'page'))),
+         'notes': array(obj({'topic': S, 'text': S, 'page': I}, ('text', 'page')))}, ('part',)),
+    obj({'part': S, 'found': B, 'aliases': array(S), 'description': S, 'sources': array(S), 'pins': MAP,
+         'notes': array(S), 'updated': S, 'file': S, 'saved': MAP, 'hint': S}, ('part', 'found', 'pins', 'notes')),
     SideEffect.NONE, FAILURES)
 
 SWAP_PART = CapabilityDefinition('swap_part',
@@ -632,6 +652,7 @@ class KiCadAction(str, Enum):
     TAKE_EDITS = 'take_edits'
     SWAP_PART = 'swap_part'
     ADD_PASSIVE = 'add_passive'
+    PART_FACTS = 'part_facts'
 
 
 # Each action keeps its own contract; the capability is one (D-074).
@@ -659,6 +680,7 @@ CONTRACTS = {
     KiCadAction.TAKE_EDITS: TAKE_EDITS,
     KiCadAction.SWAP_PART: SWAP_PART,
     KiCadAction.ADD_PASSIVE: ADD_PASSIVE,
+    KiCadAction.PART_FACTS: PART_FACTS,
 }
 # What changes nothing of Friedl's: reads, and edits of her own work copies.
 FREE_ACTIONS = tuple(item.value for item in (
@@ -667,7 +689,7 @@ FREE_ACTIONS = tuple(item.value for item in (
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.COPY_LIBRARY, KiCadAction.FETCH_DATASHEET,
     KiCadAction.RENDER, KiCadAction.OPEN_IN_KICAD, KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS,
     KiCadAction.SELECT, KiCadAction.FIND_PART, KiCadAction.ADD_PART, KiCadAction.SWAP_PART,
-    KiCadAction.ADD_PASSIVE))
+    KiCadAction.ADD_PASSIVE, KiCadAction.PART_FACTS))
 KICAD = 'kicad'
 FAILURES += ('board_unavailable', 'section_failed', 'section_too_large', 'document_unavailable',
              'page_failed')
@@ -733,7 +755,8 @@ def build_kicad_executors(provider, call_id_source):
                KiCadAction.OPEN_IN_KICAD: provider.open_in_kicad,
                KiCadAction.TAKE_EDITS: provider.take_edits,
                KiCadAction.SWAP_PART: provider.swap_part,
-               KiCadAction.ADD_PASSIVE: provider.add_passive}
+               KiCadAction.ADD_PASSIVE: provider.add_passive,
+               KiCadAction.PART_FACTS: provider.part_facts}
 
     def invoke(arguments):
         code = 'arguments_unusable'

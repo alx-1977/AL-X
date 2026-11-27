@@ -28,7 +28,7 @@ BOARD_AGENT_KICAD_ACTIONS = tuple(item.value for item in (
     KiCadAction.MAKE_HIERARCHICAL, KiCadAction.FETCH_DATASHEET, KiCadAction.RENDER,
     KiCadAction.INSPECT_SCHEMATIC, KiCadAction.TAKE_EDITS, KiCadAction.SELECT, KiCadAction.FIND_PART,
     KiCadAction.ADD_PART, KiCadAction.COPY_LIBRARY, KiCadAction.SWAP_PART,
-    KiCadAction.ADD_PASSIVE))
+    KiCadAction.ADD_PASSIVE, KiCadAction.PART_FACTS))
 
 
 def board_agent_call_refusal(call: CapabilityCall) -> CapabilityAttempt | None:

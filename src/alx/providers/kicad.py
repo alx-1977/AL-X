@@ -1010,6 +1010,11 @@ class KiCadProvider:
             raise KiCadError('unavailable', {'detail': 'no catalogue at %s' % error}) from error
         except ValueError as error:
             raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+        from alx.providers.kicad_facts import held, key_of
+        kept = held(self._firefli_library())
+        for row in found['parts']:
+            if key_of(row.get('mpn', '')) in kept:
+                row['facts_kept'] = True  # part_facts gives them; no datasheet reading needed for those
         if not found['count']:
             found['hint'] = ('not in the FireFli library: a new part is created in a copy_library work copy '
                              'from its datasheet, then used by its exact name')
@@ -1098,6 +1103,45 @@ class KiCadProvider:
                     'work_copy_id': arguments['work_copy_id'], 'work_copy_revision': self._revision(root),
                     'next': 'write_back this library copy with his approval (project_dir is the library folder), '
                             'then swap_part on the board copy'}
+
+    def part_facts(self, arguments):
+        """A part's kept facts, read once from its datasheet; with pins, notes or aliases they are
+        saved first (27 Nov 2026: one job read the M-SoM datasheet 26 times; Friedl: saved without
+        asking, in the library's facts folder)."""
+        from alx.providers.kicad_facts import FactsError, find, save, view
+        library = self._firefli_library()
+        part = str(arguments.get('part') or '').strip()
+        saving = any(arguments.get(k) for k in ('pins', 'notes', 'aliases', 'description'))
+        if saving:
+            source = str(arguments.get('source') or '').strip()
+            if source:
+                try:
+                    source = str(self._reference_location(source))
+                except KiCadError:
+                    pass  # a document named in words is kept as written
+            try:
+                path, data, counts = save(library, part, source=source, aliases=arguments.get('aliases') or (),
+                                          description=arguments.get('description') or '',
+                                          pins=arguments.get('pins') or (), notes=arguments.get('notes') or ())
+            except FactsError as error:
+                raise KiCadError('arguments_unusable', {'detail': str(error)}) from error
+            return dict(view(path, data), found=True, saved=counts)
+        found = find(library, part)
+        if found is None:
+            return {'part': part, 'found': False, 'pins': {}, 'notes': [],
+                    'hint': 'no facts kept for %s yet: read its datasheet at the page you need, then save what a '
+                            'later job will need here (pins with name, function and page; notes with page; '
+                            'source the datasheet path; aliases for other names it goes by)' % part}
+        return dict(view(*found), found=True)
+
+    def _facts_for_document(self, path):
+        """The facts kept for the part a datasheet is named after, or None."""
+        from alx.providers.kicad_facts import find, part_of_document, view
+        try:
+            found = find(self._firefli_library(), part_of_document(path))
+        except (KiCadError, OSError):
+            return None
+        return None if found is None else view(*found)
 
     def swap_part(self, arguments):
         """Parts changed to one library part at the same pins, a step of his order per call (26 Nov):
@@ -1652,17 +1696,24 @@ class KiCadProvider:
         from alx.providers.datasheet_fetch import DatasheetError, fetch_datasheet
         if self.datasheet_sources is None or self.datasheet_folder is None:
             raise KiCadError('engine_unavailable', {'detail': 'no datasheet source is configured'})
+        held = self._facts_for_document(str(arguments.get('part_number') or ''))
         client, nexar, digikey, fetcher = self.datasheet_sources()
         try:
             with client:
-                return fetch_datasheet(arguments.get('part_number', ''), arguments.get('manufacturer') or '',
-                                       self.datasheet_folder, client=client, nexar=nexar, digikey=digikey,
-                                       download=fetcher.fetch_pdf)
+                result = fetch_datasheet(arguments.get('part_number', ''), arguments.get('manufacturer') or '',
+                                         self.datasheet_folder, client=client, nexar=nexar, digikey=digikey,
+                                         download=fetcher.fetch_pdf)
+                if held is not None:
+                    result = dict(result, facts_held=held)
+                return result
         except DatasheetError as error:
             recovery = {'detail': error.detail}
             if error.candidates:
                 # Several parts answer to this number: each with maker and package, for her choice.
                 recovery['candidates'] = error.candidates
+            if held is not None:
+                # What is kept is often all the job needed (27 Nov: 34 failed fetches in one job).
+                recovery['facts_held'] = held
             raise KiCadError({'not_found': 'document_unavailable', 'ambiguous_part': 'arguments_unusable'}
                              .get(error.code, error.code), recovery) from error
         finally:
@@ -1725,12 +1776,13 @@ class KiCadProvider:
         if not raw.resolve().is_relative_to(self.work_root):
             from alx.providers.reference_file import ReferenceError as _Refused
             try:
-                return read_reference(arguments)
+                result = read_reference(arguments)
             except _Refused as error:
                 if str(error) != 'path_denied':
                     raise
                 raise KiCadError('path_denied', {'detail': 'not readable here (outside the readable places, or '
                                                  'a protected name). ' + self._where_things_are()}) from error
+            return self._with_facts(result, raw, arguments)
         # Inside AL/X storage only retained edit evidence is readable.
         parts = raw.resolve().relative_to(self.work_root).parts
         if len(parts) < 2 or parts[1] != 'evidence':
@@ -1743,6 +1795,17 @@ class KiCadProvider:
                 'after_copy_path, is read with read_reference.')})
         root, _ = self._load(parts[0])
         return read_reference(arguments, roots=(root / 'evidence',), protected=False)
+
+    def _with_facts(self, result, path, arguments):
+        """A datasheet's first read carries the facts kept for its part, or the reminder to keep them."""
+        if result.get('kind') != 'pdf' or arguments.get('offset'):
+            return result
+        held = self._facts_for_document(str(path))
+        if held is not None:
+            return dict(result, facts_held=held)
+        return dict(result, hint='no facts kept for this part yet: once you have what you need, save it with '
+                                 'part_facts (source this path, each pin or note with its page), so no later '
+                                 'job reads this datasheet again')
 
     @contextmanager
     def _locked(self, work_copy_id):

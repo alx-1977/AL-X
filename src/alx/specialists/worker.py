@@ -26,9 +26,14 @@ from alx.contracts import (
     CapabilityAttempt, CapabilityCall, CapabilityDefinition, CapabilityResult, CapabilityResultState,
     ModelMessage, ModelRequest, ModelRole, ReasoningModel, ToolImage,
 )
-from alx.contracts.result_summary import bound_result
+from alx.contracts.result_summary import RESULT_LIMIT, bound_result
 
 CALL_TOOL = "call_capability"
+# Reads handed over whole: a read gives up to 24,000 characters and next_offset after all of
+# them, but the 8,000 budget cut most pages to a few characters, so the text between was never
+# seen and she guessed offsets (27 Nov 2026: one datasheet read 26 times, a firmware file 42).
+WHOLE_READS = ("read_reference", "part_facts")
+WHOLE_READ_LIMIT = 40_000
 
 # The worker's own rules. They describe its role, never a domain.
 WORKER_INSTRUCTIONS = """You are a worker carrying out one brief for AL/X, an assistant who \
@@ -258,12 +263,14 @@ class MechanicalWorker:
             self._repeats = 0
         summary["outcome"] = (attempt.reason_code if result is None
                               else result.state.value)
+        limit = (WHOLE_READ_LIMIT if isinstance(parsed.get("action"), str)
+                 and parsed["action"] in WHOLE_READS else RESULT_LIMIT)
         return json.dumps(bound_result({
             "disposition": attempt.disposition.value,
             "reason_code": attempt.reason_code,
             "values": None if result is None else _plain(result.values),
             "failure": None if result is None or result.failure is None else _plain(result.failure),
-        }), ensure_ascii=False, default=str), summary, self._images(result)
+        }, limit), ensure_ascii=False, default=str), summary, self._images(result)
 
     def _images(self, result: CapabilityResult | None) -> tuple[ToolImage, ...]:
         """The picture a succeeded call names by digest, for the next step only (D-075)."""
