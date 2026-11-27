@@ -714,6 +714,25 @@ class KiCadTests(unittest.TestCase):
         # A second review with the same title never replaces the first.
         self.assertEqual(self.provider_review('# AE2 review\nagain').name, report.stem + '-2.md')
 
+    def test_a_numbered_write_back_writes_the_board_and_the_review_into_that_project(self):
+        """Review of #252: a project number refused as a path outside home, or a review saved
+        under the runtime's working folder."""
+        numbered = self.design / 'P0777-demo'
+        shutil.copytree(self.project, numbered)
+        (numbered / 'project.json').write_text('{}')
+        self.project = numbered
+        edited = self.fixed()
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        (Path(elsewhere.name) / 'P0777').mkdir()
+        here = os.getcwd()
+        os.chdir(elsewhere.name)
+        self.addCleanup(os.chdir, here)
+        written = self.success('write_back_kicad_board', **dict(self.write_args(edited), project_dir='P0777'),
+                               report='# Via review\n\nMoved.')
+        self.assertEqual(Path(written['report_path']).parent, numbered.resolve() / 'docs' / 'reviews')
+        self.assertNotEqual((numbered / 'test.kicad_pcb').read_text(), BOARD)
+
     def provider_review(self, text):
         return KiCadProvider(self.settings, self.execute_cli)._save_review(str(self.project), text)
 

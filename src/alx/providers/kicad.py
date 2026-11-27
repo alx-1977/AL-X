@@ -861,11 +861,12 @@ class KiCadProvider:
     def _names_source(self, given, source):
         """Whether project_dir names the folder a copy came from: that folder, or its project as he
         names it (P0009), as check and inspect take it."""
+        from alx.providers.reference_file import ReferenceError as _Refused
         for resolve in (self._source, self._project):
             try:
                 if str(resolve(given)) == source:
                     return True
-            except (KiCadError, OSError, ValueError):
+            except (KiCadError, _Refused, OSError, ValueError):
                 continue
         return False
 
@@ -4017,7 +4018,10 @@ class KiCadProvider:
                 # the approval that wrote the board. The board is written by
                 # now: a report that cannot be saved is said, never a failure.
                 try:
-                    written['report_path'] = str(self._save_review(arguments['project_dir'], report))
+                    # Where the copy came from, not project_dir as given: a project number named as a
+                    # path would put the review elsewhere (review of #252).
+                    written['report_path'] = str(self._save_review(self._load(arguments['work_copy_id'])[1]['source'],
+                                                                   report))
                 except (KiCadError, OSError) as error:
                     written['report_error'] = (str(getattr(error, 'recovery', None) or error))[:200]
             return written
