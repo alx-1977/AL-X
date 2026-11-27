@@ -441,12 +441,14 @@ SELECT = CapabilityDefinition('select',
     'in refs with their fields and pads, all copper of their nets and of nets named (a ground or '
     'supply net\'s only near the job), and every other pad, copper item and keepout around them '
     '(area, or their extent plus 2 mm); limit defaults to 400. Start a board job with it rather than '
-    'one select per kind.',
+    'one select per kind. kind via also gives via_sizes: every via of the whole selection grouped by '
+    'drill and size, with counts and up to 20 examples each, however many vias there are; one call '
+    'answers "are all vias 0.2 mm drill" and shows where the odd ones are.',
     obj({'project_dir': S, 'board': S, 'work_copy_id': S, 'kind': S, 'refs': array(S), 'nets': array(S),
          'layer': S, 'name': S, 'value': S, 'footprint': S, 'area': array(N), 'reads': S, 'ids': array(S),
          'named': B, 'limit': I}, ('kind',)),
     obj({'kind': S, 'count': I, 'objects': array(MAP), 'truncated': B, 'board': S, 'work_copy_revision': S,
-         'counts': MAP},
+         'counts': MAP, 'via_sizes': array(obj({'drill': N, 'size': N, 'count': I, 'examples': array(MAP)}))},
         ('kind', 'count', 'objects', 'truncated')),
     SideEffect.NONE, FAILURES)
 

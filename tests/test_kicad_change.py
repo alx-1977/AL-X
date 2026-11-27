@@ -268,6 +268,21 @@ s.save()
             refused = self.call(runtime, "select", work_copy_id=work, kind="view", refs=[parts[0]["ref"]], name="x")
             self.assertEqual(refused.failure["code"], "arguments_unusable")
 
+    def test_one_via_select_gives_every_via_size_however_many(self):
+        """27 Nov: checking "all vias 0.2 mm drill" took 57 selects, the board cut into squares."""
+        with tempfile.TemporaryDirectory() as folder:
+            runtime, project = self.runtime(folder)
+            board = project / "board.kicad_pcb"
+            vias = "".join('\t(via (at %d 10) (size %s) (drill %s) (layers "F.Cu" "B.Cu") (net 0) (uuid "v-%d"))\n'
+                           % (n, "0.6" if n < 3 else "0.45", "0.3" if n < 3 else "0.2", n) for n in range(25))
+            text = board.read_text()
+            board.write_text(text[:text.rstrip().rfind(")")] + vias + ")\n")
+            work = self.call(runtime, "check_kicad_board", project_dir=str(project)).values["work_copy_id"]
+            seen = self.call(runtime, "select", work_copy_id=work, kind="via", limit=1).values
+            self.assertEqual((seen["count"], len(seen["objects"])), (25, 1))
+            self.assertEqual([(g["drill"], g["size"], g["count"], len(g["examples"])) for g in seen["via_sizes"]],
+                             [(0.2, 0.45, 22, 20), (0.3, 0.6, 3, 3)])
+
     def test_select_then_set_verifies_the_ids_at_the_selected_revision(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime, project = self.runtime(folder)
