@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "tests"))
 from alx.providers.kicad_passives import (decode, generator_entry, jlc_candidates, jlc_listing,  # noqa: E402
                                           with_entry, with_lcsc_row)
 from alx.providers.kicad_swap import (board_fields, board_script, expand_refs, library_fields,  # noqa: E402
-                                      placed_symbols, schematic_refs)
+                                      placed_symbols, schematic_refs, symbol_changes)
 
 GENERATOR = '''PARTS = (
     # Taiyo Yuden X5R / X7R
@@ -147,6 +147,40 @@ class SwapPieces(unittest.TestCase):
                 schematic_refs(placed, ["C7"])
             self.assertEqual(schematic_refs(placed, ["C7", "C1"]), ["C1"])
 
+    def test_a_symbol_without_kicads_indentation_is_found(self):
+        """27 Nov replay: P0009's C94-C96 began "(symbol" at column 0, written by an earlier edit."""
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "a.kicad_sch").write_text(
+                '(kicad_sch\n(symbol\n\t\t(lib_id "Device:C")\n\t\t(property "Reference" "C94")\n)\n)\n')
+            self.assertEqual(placed_symbols(Path(folder))["C94"], ("Device:C", "C94", ("C94",)))
+
+    def test_an_edit_says_part_by_part_what_changed(self):
+        sheet = ('(kicad_sch\n\t(symbol\n\t\t(lib_id "%s")\n\t\t(property "Reference" "C1")\n'
+                 '\t\t(property "Value" "%s")\n\t)\n%s)\n')
+        with tempfile.TemporaryDirectory() as before, tempfile.TemporaryDirectory() as after:
+            Path(before, "a.kicad_sch").write_text(sheet % ("Lib:C0603", "100n", ""))
+            Path(after, "a.kicad_sch").write_text(sheet % (
+                "Lib:C0402", "100n", '\t(symbol\n\t\t(lib_id "Lib:R")\n\t\t(property "Reference" "R1")\n\t)\n'))
+            self.assertEqual(symbol_changes(Path(before), Path(after)), ([
+                {"ref": "C1", "unit": "1", "change": "changed", "was": {"lib_id": "Lib:C0603"},
+                 "now": {"lib_id": "Lib:C0402"}},
+                {"ref": "R1", "unit": "1", "change": "added", "lib_id": "Lib:R"}], 0))
+
+    def test_each_unit_of_a_part_is_compared_and_nothing_is_dropped_unsaid(self):
+        unit = ('\t(symbol\n\t\t(lib_id "Lib:Q")\n\t\t(unit %d)\n\t\t(property "Reference" "U1")\n'
+                '\t\t(property "Note" "%s")\n\t\t(uuid "u-%d")\n\t)\n')
+        many = "".join('\t(symbol\n\t\t(lib_id "Lib:R")\n\t\t(property "Reference" "R%d")\n'
+                       '\t\t(property "Value" "%%s")\n\t\t(uuid "r-%d")\n\t)\n' % (n, n) for n in range(65))
+        with tempfile.TemporaryDirectory() as before, tempfile.TemporaryDirectory() as after:
+            Path(before, "a.kicad_sch").write_text("(kicad_sch\n" + unit % (1, "x", 1) + unit % (2, "x", 2) + ")\n")
+            Path(after, "a.kicad_sch").write_text("(kicad_sch\n" + unit % (1, "y", 1) + unit % (2, "x", 2) + ")\n")
+            changes, omitted = symbol_changes(Path(before), Path(after))
+            self.assertEqual([(c["ref"], c["unit"], c["now"]) for c in changes], [("U1", "1", {"Note": "y"})])
+            Path(before, "a.kicad_sch").write_text("(kicad_sch\n" + many.replace("%s", "1k") + ")\n")
+            Path(after, "a.kicad_sch").write_text("(kicad_sch\n" + many.replace("%s", "2k") + ")\n")
+            changes, omitted = symbol_changes(Path(before), Path(after))
+            self.assertEqual((len(changes), omitted), (60, 5))
+
     def test_a_part_that_keeps_its_footprint_takes_only_the_fields(self):
         script = board_script(["R1", "R2"], "Lib:F", {"Value": "1k"}, keep=("R2",))
         self.assertIn("if ref not in ['R2']:", script)
@@ -206,8 +240,11 @@ class RealSwap(unittest.TestCase):
             def call(action, **arguments):
                 return kicad_call(runtime.executors, action, arguments)
             work = call("check", project_dir=str(project)).values["work_copy_id"]
+            absent = call("swap_part", work_copy_id=work, refs=["R1"], part="FireFli_Resistors:NOT_MADE_YET")
+            self.assertIn("write_back", absent.failure["recovery"]["hint"])
             first = call("swap_part", work_copy_id=work, refs=["R1-R2"], part=RESISTOR)
             self.assertEqual(first.state, CapabilityResultState.SUCCEEDED, first.failure)
+            self.assertEqual({c["ref"] for c in first.values["change_report"]["symbol_changes"]}, {"R1", "R2"})
             self.assertEqual((first.values["side"], list(first.values["swapped"])), ("schematic", ["R1", "R2"]))
             copy = runtime.provider._load(work)[0] / "project"
             self.assertEqual(placed_symbols(copy)["R1"][0], RESISTOR)
