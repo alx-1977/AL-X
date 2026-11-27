@@ -161,9 +161,25 @@ class SwapPieces(unittest.TestCase):
             Path(before, "a.kicad_sch").write_text(sheet % ("Lib:C0603", "100n", ""))
             Path(after, "a.kicad_sch").write_text(sheet % (
                 "Lib:C0402", "100n", '\t(symbol\n\t\t(lib_id "Lib:R")\n\t\t(property "Reference" "R1")\n\t)\n'))
-            self.assertEqual(symbol_changes(Path(before), Path(after)), [
-                {"ref": "C1", "change": "changed", "was": {"lib_id": "Lib:C0603"}, "now": {"lib_id": "Lib:C0402"}},
-                {"ref": "R1", "change": "added", "lib_id": "Lib:R"}])
+            self.assertEqual(symbol_changes(Path(before), Path(after)), ([
+                {"ref": "C1", "unit": "1", "change": "changed", "was": {"lib_id": "Lib:C0603"},
+                 "now": {"lib_id": "Lib:C0402"}},
+                {"ref": "R1", "unit": "1", "change": "added", "lib_id": "Lib:R"}], 0))
+
+    def test_each_unit_of_a_part_is_compared_and_nothing_is_dropped_unsaid(self):
+        unit = ('\t(symbol\n\t\t(lib_id "Lib:Q")\n\t\t(unit %d)\n\t\t(property "Reference" "U1")\n'
+                '\t\t(property "Note" "%s")\n\t\t(uuid "u-%d")\n\t)\n')
+        many = "".join('\t(symbol\n\t\t(lib_id "Lib:R")\n\t\t(property "Reference" "R%d")\n'
+                       '\t\t(property "Value" "%%s")\n\t\t(uuid "r-%d")\n\t)\n' % (n, n) for n in range(65))
+        with tempfile.TemporaryDirectory() as before, tempfile.TemporaryDirectory() as after:
+            Path(before, "a.kicad_sch").write_text("(kicad_sch\n" + unit % (1, "x", 1) + unit % (2, "x", 2) + ")\n")
+            Path(after, "a.kicad_sch").write_text("(kicad_sch\n" + unit % (1, "y", 1) + unit % (2, "x", 2) + ")\n")
+            changes, omitted = symbol_changes(Path(before), Path(after))
+            self.assertEqual([(c["ref"], c["unit"], c["now"]) for c in changes], [("U1", "1", {"Note": "y"})])
+            Path(before, "a.kicad_sch").write_text("(kicad_sch\n" + many.replace("%s", "1k") + ")\n")
+            Path(after, "a.kicad_sch").write_text("(kicad_sch\n" + many.replace("%s", "2k") + ")\n")
+            changes, omitted = symbol_changes(Path(before), Path(after))
+            self.assertEqual((len(changes), omitted), (60, 5))
 
     def test_a_part_that_keeps_its_footprint_takes_only_the_fields(self):
         script = board_script(["R1", "R2"], "Lib:F", {"Value": "1k"}, keep=("R2",))

@@ -62,7 +62,7 @@ CHANGE_REPORT = obj({'files_changed': array(S), 'files_truncated': B,
     'added_count': I, 'removed_count': I, 'moved_count': I, 'truncated': B,
     'per_layer_before': MAP, 'per_layer_after': MAP}), 'full_diff_path': S, 'before_copy_path': S,
     'after_copy_path': S, 'layout_rules': LAYOUT_RULES, 'erc': ERC, 'compared_to_original': MAP,
-    'gate': MAP, 'drawings': array(MAP), 'symbol_changes': array(MAP), 'unmet': array(S), 'reverted_edits': I, 'errors_to_show': ERRORS,
+    'gate': MAP, 'drawings': array(MAP), 'symbol_changes': array(MAP), 'symbol_changes_omitted': I, 'unmet': array(S), 'reverted_edits': I, 'errors_to_show': ERRORS,
     'set': array(MAP), 'label_exceptions': array(obj({'label_net': S, 'reason': S})),
     'orientation_exceptions': array(obj({'orientation': S, 'reason': S}))},
     ('files_changed', 'files_truncated', 'file_diffs', 'diffs_truncated', 'board'))
@@ -160,7 +160,8 @@ _ACTION_DEFINITIONS = (
         'change report, structural board diff and DRC totals before/after. Failed edits '
         'restore the copy; uncertain restoration taints it durably. symbol_changes lists each '
         'placed symbol the edit changed, with every differing field old and new, so the full '
-        'diff is rarely needed. When diffs_truncated, '
+        'diff is rarely needed (symbol_changes_omitted counts any beyond the first 60; read the '
+        'full diff then). When diffs_truncated, '
         'full_diff_path holds the complete diff and before_copy_path/after_copy_path copies '
         'from before and after the edit; later edits keep them. Read them with '
         'kicad read_reference, continuing long text with offset. evidence_full when retained '

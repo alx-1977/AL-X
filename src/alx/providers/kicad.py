@@ -1896,7 +1896,9 @@ class KiCadProvider:
                     report.update(file_diffs=diffs, diffs_truncated=truncated)
                     if not library and any(name.endswith('.kicad_sch') for name in changed):
                         from alx.providers.kicad_swap import symbol_changes
-                        report['symbol_changes'] = symbol_changes(snapshot, project)
+                        report['symbol_changes'], omitted = symbol_changes(snapshot, project)
+                        if omitted:
+                            report['symbol_changes_omitted'] = omitted
                     if truncated:
                         # The report is cut short: keep before and after copies and the
                         # complete diff as evidence that later edits never delete.

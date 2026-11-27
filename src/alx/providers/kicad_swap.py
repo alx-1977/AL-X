@@ -51,7 +51,8 @@ def library_fields(symbol_block: str) -> dict[str, str]:
 
 
 def _placed(folder: Path):
-    """(every reference, library ID, own Reference, fields) of each placed symbol on the project's sheets."""
+    """(every reference, library ID, own Reference, fields, identity) of each placed symbol on the
+    project's sheets; the identity is its sheet, UUID and unit, so the units of one part stay apart."""
     from alx.providers.kicad import sexpr
     for sheet in sorted(Path(folder).rglob('*.kicad_sch')):
         if any(piece.startswith('.') or piece == 'backups' or piece.endswith('-backups')
@@ -74,38 +75,43 @@ def _placed(folder: Path):
             names = [own] + [str(n.children[1]) for n in _all(symbol, 'reference') if len(n.children) > 1]
             names = tuple(dict.fromkeys(n for n in names if not n.startswith('#')))
             if names:
-                yield names, lib_id[0], own, fields
+                uuid = [str(n.children[1]) for n in symbol.named('uuid') if len(n.children) > 1][:1]
+                unit = [str(n.children[1]) for n in symbol.named('unit') if len(n.children) > 1][:1]
+                identity = (str(sheet.relative_to(folder)), uuid[0] if uuid else own, unit[0] if unit else '1')
+                yield names, lib_id[0], own, dict(fields, unit=identity[2]), identity
 
 
 def placed_symbols(folder: Path) -> dict[str, tuple[str, str, tuple[str, ...]]]:
     """Every placed symbol by reference, across the project's sheets: (library ID, the symbol's own
     Reference, every reference it carries). A sheet used more than once gives one symbol several
     references; changing it changes them all."""
-    return {name: (lib_id, own, names) for names, lib_id, own, _fields in _placed(folder) for name in names}
+    return {name: (lib_id, own, names) for names, lib_id, own, _fields, _key in _placed(folder) for name in names}
 
 
 SHOWN_CHANGES = 60
 
 
-def symbol_changes(before: Path, after: Path) -> list[dict]:
+def symbol_changes(before: Path, after: Path) -> tuple[list[dict], int]:
     """What an edit changed on the placed symbols, part by part: its library symbol and each field
     that differs, old and new (27 Nov replay: the board agent read a 25 kB diff of three swapped
-    capacitors 27 times, 2000 characters a call, to see what it had changed)."""
+    capacitors 27 times, 2000 characters a call, to see what it had changed). Each placed symbol is
+    compared by its sheet, UUID and unit; returns the first SHOWN_CHANGES and how many more there are."""
     def parts(folder):
-        return {own: dict(fields, lib_id=lib_id) for _names, lib_id, own, fields in _placed(folder)}
+        return {key: dict(fields, lib_id=lib_id, ref=own) for _names, lib_id, own, fields, key in _placed(folder)}
     old, new = parts(before), parts(after)
     out = []
-    for ref in sorted(old.keys() | new.keys()):
-        was, now = old.get(ref), new.get(ref)
+    for key in sorted(old.keys() | new.keys(), key=lambda k: ((old.get(k) or new.get(k))['ref'], k)):
+        was, now = old.get(key), new.get(key)
+        either = now or was
         if was is None or now is None:
-            out.append({'ref': ref, 'change': 'added' if was is None else 'removed',
-                        'lib_id': (now or was)['lib_id']})
+            out.append({'ref': either['ref'], 'unit': either['unit'], 'change': 'added' if was is None else 'removed',
+                        'lib_id': either['lib_id']})
             continue
-        names = [name for name in dict.fromkeys([*was, *now]) if was.get(name) != now.get(name)]
+        names = [name for name in dict.fromkeys([*was, *now]) if name != 'unit' and was.get(name) != now.get(name)]
         if names:
-            out.append({'ref': ref, 'change': 'changed', 'was': {n: was.get(n) for n in names},
-                        'now': {n: now.get(n) for n in names}})
-    return out[:SHOWN_CHANGES]
+            out.append({'ref': now['ref'], 'unit': now['unit'], 'change': 'changed',
+                        'was': {n: was.get(n) for n in names}, 'now': {n: now.get(n) for n in names}})
+    return out[:SHOWN_CHANGES], max(0, len(out) - SHOWN_CHANGES)
 
 
 def _all(node, name):
