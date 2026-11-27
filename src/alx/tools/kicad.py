@@ -489,14 +489,16 @@ PART_FACTS = CapabilityDefinition('part_facts',
     'the same call: pins [{number, name, function, note, page}], notes [{topic, text, page}] (layout '
     'keep-outs, boot pins, supply needs, RF guidance), aliases (other names: module name, family, '
     'B-SoM/M-SoM), description, and source (the datasheet path). Saving needs no approval and merges: '
-    'a pin given again replaces the old one. find_part marks parts with facts_kept; a datasheet\'s '
-    'first read and fetch_datasheet return facts_held when there are some.',
+    'a pin given again replaces the old one. A part with many pins comes in pieces: call again with '
+    'start set to next_start for the rest. find_part marks parts with facts_kept; a datasheet\'s '
+    'first read and fetch_datasheet say facts_held (how many) when there are some.',
     obj({'part': S, 'source': S, 'aliases': array(S), 'description': S,
          'pins': array(obj({'number': S, 'name': S, 'function': S, 'note': S, 'page': I},
                            ('number', 'name', 'page'))),
-         'notes': array(obj({'topic': S, 'text': S, 'page': I}, ('text', 'page')))}, ('part',)),
+         'notes': array(obj({'topic': S, 'text': S, 'page': I}, ('text', 'page'))), 'start': I}, ('part',)),
     obj({'part': S, 'found': B, 'aliases': array(S), 'description': S, 'sources': array(S), 'pins': MAP,
-         'notes': array(S), 'updated': S, 'file': S, 'saved': MAP, 'hint': S}, ('part', 'found', 'pins', 'notes')),
+         'pin_count': I, 'next_start': I, 'notes': array(S), 'updated': S, 'file': S, 'saved': MAP, 'hint': S},
+        ('part', 'found', 'pins', 'notes')),
     SideEffect.NONE, FAILURES)
 
 SWAP_PART = CapabilityDefinition('swap_part',

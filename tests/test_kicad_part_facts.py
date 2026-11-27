@@ -61,6 +61,30 @@ class FactsStoreTests(unittest.TestCase):
         self.assertEqual(len(data["notes"]), 1)
         self.assertEqual(data["sources"], ["/ds/a.pdf"])
 
+    def test_notes_differing_only_in_a_decimal_point_or_sign_are_both_kept(self) -> None:
+        notes = [{"text": "IO at 1.8 V", "page": 4}, {"text": "IO at 18 V", "page": 4},
+                 {"text": "+5 V rail", "page": 4}, {"text": "-5 V rail", "page": 4}]
+        _, data, counts = save(self.library, "X1", source="/ds/x.pdf", notes=notes)
+        self.assertEqual(counts["notes"], 4)
+        self.assertEqual(len(data["notes"]), 4)
+
+    def test_a_part_with_many_pins_comes_in_pieces(self) -> None:
+        pins = [{"number": str(n), "name": "GPIO%d" % n, "function": "f" * 250, "page": 9} for n in range(1, 201)]
+        path, data, _ = save(self.library, "BIG", source="/ds/big.pdf", pins=pins,
+                             notes=[{"text": "keep-out under antenna", "page": 30}])
+        seen, start, pieces = [], 0, 0
+        while True:
+            piece = view(path, data, start)
+            pieces += 1
+            self.assertEqual(piece["notes"] != [], start == 0)
+            self.assertLessEqual(sum(len(v) for v in piece["pins"].values()), 15_000)
+            seen += list(piece["pins"])
+            if "next_start" not in piece:
+                break
+            start = piece["next_start"]
+        self.assertEqual(seen, [str(n) for n in range(1, 201)])
+        self.assertGreater(pieces, 1)
+
     def test_every_fact_names_its_page_and_source(self) -> None:
         with self.assertRaisesRegex(FactsError, "page"):
             save(self.library, "X1", source="/ds/x.pdf", pins=[{"number": "1", "name": "VDD"}])
@@ -131,12 +155,22 @@ class ProviderTests(unittest.TestCase):
             self.assertIn("part_facts", first["hint"])
             save(self.library, "S-82D1AAD-A8T2U7", source=str(pdf), notes=[{"text": "VCU 4.28 V", "page": 7}])
             first = self.provider.read_reference({"path": str(pdf)})
-            self.assertEqual(first["facts_held"]["notes"], ["VCU 4.28 V (S-82D1AAD-A8T2U7-0123abcd.pdf p.7)"])
+            # A pointer only, so the document's own text always arrives whole (review of #253).
+            self.assertEqual(first["facts_held"]["notes"], 1)
+            self.assertIn("part_facts", first["facts_held"]["hint"])
             later = self.provider.read_reference({"path": str(pdf), "offset": 5000})
             self.assertNotIn("facts_held", later)
             self.assertNotIn("hint", later)
         finally:
             module.read_reference = original
+
+    def test_fetch_finds_facts_by_the_part_number_itself(self) -> None:
+        # A part number is not a path: LM317T/NOPB is not NOPB (review of #253).
+        save(self.library, "LM317T/NOPB", description="regulator")
+        save(self.library, "AP2112K-3.3", description="LDO")
+        self.assertEqual(self.provider._facts_kept("LM317T/NOPB")["part"], "LM317T/NOPB")
+        self.assertEqual(self.provider._facts_kept("AP2112K-3.3")["part"], "AP2112K-3.3")
+        self.assertIsNone(self.provider._facts_kept("NOPB"))
 
     def test_the_board_worker_holds_the_action(self) -> None:
         self.assertIn("part_facts", BOARD_AGENT_KICAD_ACTIONS)
@@ -146,7 +180,8 @@ class WholeReadTests(unittest.TestCase):
     """A read reaches the worker whole, so next_offset follows text she has seen."""
 
     def test_a_long_read_is_not_cut_but_other_results_still_are(self) -> None:
-        text = "pin table line\n" * 1500  # 22,500 characters
+        # 22,500 characters, over 40,000 once escaped as ASCII (review of #253: still cut at 40,000).
+        text = "pin ±0.5 °C – µA\n" * 1250
         obj = StructuredSchema(ValueKind.OBJECT)
         kicad = CapabilityDefinition("kicad", "Board work.", obj, obj, SideEffect.EFFECTFUL)
 

@@ -1111,6 +1111,9 @@ class KiCadProvider:
         from alx.providers.kicad_facts import FactsError, find, save, view
         library = self._firefli_library()
         part = str(arguments.get('part') or '').strip()
+        start = arguments.get('start') or 0
+        if not isinstance(start, int) or isinstance(start, bool) or start < 0:
+            raise KiCadError('arguments_unusable', {'detail': 'start is the next_start a previous part_facts gave'})
         saving = any(arguments.get(k) for k in ('pins', 'notes', 'aliases', 'description'))
         if saving:
             source = str(arguments.get('source') or '').strip()
@@ -1132,16 +1135,17 @@ class KiCadProvider:
                     'hint': 'no facts kept for %s yet: read its datasheet at the page you need, then save what a '
                             'later job will need here (pins with name, function and page; notes with page; '
                             'source the datasheet path; aliases for other names it goes by)' % part}
-        return dict(view(*found), found=True)
+        return dict(view(*found, start=start), found=True)
 
-    def _facts_for_document(self, path):
-        """The facts kept for the part a datasheet is named after, or None."""
-        from alx.providers.kicad_facts import find, part_of_document, view
+    def _facts_kept(self, part, document=False):
+        """Whether facts are kept for a part (by its number, or the part a datasheet file is
+        named after), as a brief pointer to part_facts, or None."""
+        from alx.providers.kicad_facts import brief, find, part_of_document
         try:
-            found = find(self._firefli_library(), part_of_document(path))
+            found = find(self._firefli_library(), part_of_document(part) if document else part)
         except (KiCadError, OSError):
             return None
-        return None if found is None else view(*found)
+        return None if found is None else brief(*found)
 
     def swap_part(self, arguments):
         """Parts changed to one library part at the same pins, a step of his order per call (26 Nov):
@@ -1696,7 +1700,7 @@ class KiCadProvider:
         from alx.providers.datasheet_fetch import DatasheetError, fetch_datasheet
         if self.datasheet_sources is None or self.datasheet_folder is None:
             raise KiCadError('engine_unavailable', {'detail': 'no datasheet source is configured'})
-        held = self._facts_for_document(str(arguments.get('part_number') or ''))
+        held = self._facts_kept(str(arguments.get('part_number') or ''))
         client, nexar, digikey, fetcher = self.datasheet_sources()
         try:
             with client:
@@ -1800,7 +1804,7 @@ class KiCadProvider:
         """A datasheet's first read carries the facts kept for its part, or the reminder to keep them."""
         if result.get('kind') != 'pdf' or arguments.get('offset'):
             return result
-        held = self._facts_for_document(str(path))
+        held = self._facts_kept(str(path), document=True)
         if held is not None:
             return dict(result, facts_held=held)
         return dict(result, hint='no facts kept for this part yet: once you have what you need, save it with '

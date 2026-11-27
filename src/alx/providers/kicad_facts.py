@@ -26,7 +26,9 @@ FOLDER = "facts"
 MAX_PINS = 400
 MAX_NOTES = 40
 MAX_ALIASES = 20
-MAX_TEXT = 1500
+MAX_TEXT = 600
+# Pins handed over per call, by their text: a 400-pin part comes in pieces (start, next_start).
+PIN_PAGE_CHARACTERS = 15_000
 MAX_SHORT = 300
 
 
@@ -88,18 +90,43 @@ def held(library: Path) -> dict[str, str]:
     return out
 
 
-def view(path: Path, data: dict) -> dict:
-    """The facts as she reads them: pins as one line each, keyed by pin number."""
-    pins = {}
-    for number, pin in sorted((data.get("pins") or {}).items(), key=lambda kv: _pin_order(kv[0])):
+def view(path: Path, data: dict, start: int = 0) -> dict:
+    """The facts as she reads them: pins as one line each, keyed by pin number, from pin
+    index start for about PIN_PAGE_CHARACTERS (next_start says where the rest begins);
+    the notes come with the first piece."""
+    ordered = sorted((data.get("pins") or {}).items(), key=lambda kv: _pin_order(kv[0]))
+    pins, used, index = {}, 0, max(0, start)
+    while index < len(ordered):
+        number, pin = ordered[index]
         text = " | ".join(str(pin[k]) for k in ("name", "function", "note") if pin.get(k))
-        pins[number] = "%s (%s p.%s)" % (text, pin.get("source", "?"), pin.get("page", "?"))
-    notes = ["%s%s (%s p.%s)" % ((note["topic"] + ": ") if note.get("topic") else "", note["text"],
-                                 note.get("source", "?"), note.get("page", "?"))
-             for note in data.get("notes") or []]
-    return {"part": data.get("part") or path.stem, "aliases": list(data.get("aliases") or []),
-            "description": data.get("description") or "", "sources": list(data.get("sources") or []),
-            "pins": pins, "notes": notes, "updated": data.get("updated") or "", "file": str(path)}
+        line = "%s (%s p.%s)" % (text, pin.get("source", "?"), pin.get("page", "?"))
+        if pins and used + len(line) > PIN_PAGE_CHARACTERS:
+            break
+        pins[number], used, index = line, used + len(line), index + 1
+    notes = [] if start else [
+        "%s%s (%s p.%s)" % ((note["topic"] + ": ") if note.get("topic") else "", note["text"],
+                            note.get("source", "?"), note.get("page", "?"))
+        for note in data.get("notes") or []]
+    out = {"part": data.get("part") or path.stem, "aliases": list(data.get("aliases") or []),
+           "description": data.get("description") or "", "sources": list(data.get("sources") or []),
+           "pins": pins, "pin_count": len(ordered), "notes": notes, "updated": data.get("updated") or "",
+           "file": str(path)}
+    if index < len(ordered):
+        out["next_start"] = index
+    return out
+
+
+def brief(path: Path, data: dict) -> dict:
+    """What a datasheet read carries: that facts are kept and how many, never the facts
+    themselves, so the document's own text always arrives whole."""
+    return {"part": data.get("part") or path.stem, "pins": len(data.get("pins") or {}),
+            "notes": len(data.get("notes") or []),
+            "hint": "kept facts: part_facts gives them; read on here only for something they lack"}
+
+
+def _same_words(text: str) -> str:
+    # Only spacing and case: a decimal point or sign changes a value (1.8 V is not 18 V).
+    return " ".join(str(text).split()).casefold()
 
 
 def _pin_order(number: str):
@@ -162,16 +189,16 @@ def save(library: Path, part: str, *, source: str = "", aliases=(), description:
         if len(stored_pins) > MAX_PINS:
             raise FactsError("more than %d pins for one part" % MAX_PINS)
         stored_notes = list(data.get("notes") or [])
-        known = {key_of(note.get("text", "")) for note in stored_notes}
+        known = {_same_words(note.get("text", "")) for note in stored_notes}
         for index, note in enumerate(notes):
             if not isinstance(note, dict):
                 raise FactsError("notes[%d] must be an object" % index)
             text = _text(note.get("text"), "notes[%d].text" % index, MAX_TEXT, required=True)
             entry = {"topic": _text(note.get("topic"), "notes[%d].topic" % index, 60), "text": text,
                      "source": label, "page": _page(note.get("page"), "notes[%d]" % index)}
-            if key_of(text) in known:
+            if _same_words(text) in known:
                 continue
-            known.add(key_of(text))
+            known.add(_same_words(text))
             stored_notes.append({k: v for k, v in entry.items() if v != ""})
             counts["notes"] += 1
         if len(stored_notes) > MAX_NOTES:
@@ -211,4 +238,4 @@ def save(library: Path, part: str, *, source: str = "", aliases=(), description:
     return path, data, counts
 
 
-__all__ = ["FactsError", "find", "held", "key_of", "part_of_document", "save", "view"]
+__all__ = ["FactsError", "brief", "find", "held", "key_of", "part_of_document", "save", "view"]
