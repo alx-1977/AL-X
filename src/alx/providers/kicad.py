@@ -1105,7 +1105,16 @@ class KiCadProvider:
             raise KiCadError('arguments_unusable', {'detail': 'swap_part needs a board work copy'})
         project = root / 'project'
         revision = self._revision(root, meta)
-        fields = library_fields(self._library_parts([part], project, 'symbols')[part])
+        try:
+            fields = library_fields(self._library_parts([part], project, 'symbols')[part])
+        except KiCadError as error:
+            if str(error) != 'arguments_unusable':
+                raise
+            # 27 Nov replay: refused once before its part was written back, the agent never
+            # called swap_part again and did both swaps by hand.
+            raise KiCadError('arguments_unusable', dict(error.recovery or {}, hint=(
+                'a part made with add_passive is in the library copy until it is written back: report '
+                'the copy for write_back with his approval, then call swap_part again'))) from error
         footprint = fields.get('Footprint', '')
         if not re.fullmatch(r'[^/\\:]+:[^/\\:]+', footprint):
             raise KiCadError('arguments_unusable', {'detail': '%s names no footprint (LIBRARY:NAME)' % part})
@@ -1885,6 +1894,9 @@ class KiCadProvider:
                             break
                     truncated = (len(diffs) < len(changed) or any(d['truncated'] for d in diffs))
                     report.update(file_diffs=diffs, diffs_truncated=truncated)
+                    if not library and any(name.endswith('.kicad_sch') for name in changed):
+                        from alx.providers.kicad_swap import symbol_changes
+                        report['symbol_changes'] = symbol_changes(snapshot, project)
                     if truncated:
                         # The report is cut short: keep before and after copies and the
                         # complete diff as evidence that later edits never delete.

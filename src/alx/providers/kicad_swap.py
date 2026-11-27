@@ -50,26 +50,70 @@ def library_fields(symbol_block: str) -> dict[str, str]:
     return fields
 
 
-def placed_symbols(folder: Path) -> dict[str, tuple[str, str, tuple[str, ...]]]:
-    """Every placed symbol by reference, across the project's sheets: (library ID, the symbol's own
-    Reference, every reference it carries). A sheet used more than once gives one symbol several
-    references; changing it changes them all."""
-    found = {}
+def _placed(folder: Path):
+    """(every reference, library ID, own Reference, fields) of each placed symbol on the project's sheets."""
+    from alx.providers.kicad import sexpr
     for sheet in sorted(Path(folder).rglob('*.kicad_sch')):
         if any(piece.startswith('.') or piece == 'backups' or piece.endswith('-backups')
                for piece in sheet.relative_to(folder).parts[:-1]):
             continue
-        source = sheet.read_text(errors='replace')
-        for match in re.finditer(r'\n\t\(symbol\n\t\t\(lib_id "((?:[^"\\]|\\.)*)"\)(.*?)\n\t\)', source, re.S):
-            body = match.group(2)
-            own = re.findall(r'\(property "Reference" "((?:[^"\\]|\\.)*)"', body)[:1]
-            names = own + re.findall(r'\(reference "((?:[^"\\]|\\.)*)"\)', body)
-            names = tuple(dict.fromkeys(_unescape(n) for n in names if not n.startswith('#')))
-            if not own or not names:
+        # Parsed, not matched by layout: sheets AL/X wrote earlier can lack KiCad's own indentation
+        # (27 Nov replay: P0009's C94-C96 began "(symbol" at column 0 and were not found).
+        root = sexpr(sheet.read_text(errors='replace'))
+        if root.name != 'kicad_sch':
+            continue
+        for symbol in root.named('symbol'):
+            lib_id = [str(n.children[1]) for n in symbol.named('lib_id') if len(n.children) > 1][:1]
+            fields = {}
+            for n in symbol.named('property'):
+                if len(n.children) > 2:
+                    fields.setdefault(str(n.children[1]), str(n.children[2]))
+            own = fields.get('Reference')
+            if not lib_id or not own:
                 continue
-            for name in names:
-                found[name] = (_unescape(match.group(1)), _unescape(own[0]), names)
-    return found
+            names = [own] + [str(n.children[1]) for n in _all(symbol, 'reference') if len(n.children) > 1]
+            names = tuple(dict.fromkeys(n for n in names if not n.startswith('#')))
+            if names:
+                yield names, lib_id[0], own, fields
+
+
+def placed_symbols(folder: Path) -> dict[str, tuple[str, str, tuple[str, ...]]]:
+    """Every placed symbol by reference, across the project's sheets: (library ID, the symbol's own
+    Reference, every reference it carries). A sheet used more than once gives one symbol several
+    references; changing it changes them all."""
+    return {name: (lib_id, own, names) for names, lib_id, own, _fields in _placed(folder) for name in names}
+
+
+SHOWN_CHANGES = 60
+
+
+def symbol_changes(before: Path, after: Path) -> list[dict]:
+    """What an edit changed on the placed symbols, part by part: its library symbol and each field
+    that differs, old and new (27 Nov replay: the board agent read a 25 kB diff of three swapped
+    capacitors 27 times, 2000 characters a call, to see what it had changed)."""
+    def parts(folder):
+        return {own: dict(fields, lib_id=lib_id) for _names, lib_id, own, fields in _placed(folder)}
+    old, new = parts(before), parts(after)
+    out = []
+    for ref in sorted(old.keys() | new.keys()):
+        was, now = old.get(ref), new.get(ref)
+        if was is None or now is None:
+            out.append({'ref': ref, 'change': 'added' if was is None else 'removed',
+                        'lib_id': (now or was)['lib_id']})
+            continue
+        names = [name for name in dict.fromkeys([*was, *now]) if was.get(name) != now.get(name)]
+        if names:
+            out.append({'ref': ref, 'change': 'changed', 'was': {n: was.get(n) for n in names},
+                        'now': {n: now.get(n) for n in names}})
+    return out[:SHOWN_CHANGES]
+
+
+def _all(node, name):
+    for child in node.children:
+        if hasattr(child, 'children'):
+            if child.name == name:
+                yield child
+            yield from _all(child, name)
 
 
 def schematic_refs(placed: dict, refs: list[str]) -> list[str]:
@@ -135,4 +179,4 @@ def board_fields(fields: dict[str, str]) -> dict[str, str]:
 
 
 __all__ = ['board_fields', 'board_script', 'expand_refs', 'library_fields', 'placed_symbols', 'schematic_refs',
-           'schematic_script']
+           'schematic_script', 'symbol_changes']
