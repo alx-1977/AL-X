@@ -522,6 +522,19 @@ class KiCadTests(unittest.TestCase):
         args['work_copy_revision'] = 'stale'
         self.failure('work_copy_changed', 'write_back_kicad_board', **args)
 
+    def test_a_copy_goes_back_by_its_project_number_and_a_wrong_place_is_named(self):
+        """27 Nov: his approved via fix, written back to "P0009", was refused with no reason."""
+        provider = self.runtime.provider
+        numbered = self.design / 'P0777-demo'
+        shutil.copytree(self.project, numbered)
+        self.assertTrue(provider._names_source('P0777', str(numbered.resolve())))
+        self.assertFalse(provider._names_source('P0778', str(numbered.resolve())))
+        self.assertTrue(provider._names_source(str(self.project), str(self.project.resolve())))
+        args = dict(self.write_args(self.fixed()), project_dir=str(numbered))
+        refused = self.call('write_back_kicad_board', **args)
+        self.assertEqual(refused.failure['code'], 'path_denied')
+        self.assertIn(str(self.project.resolve()), str(refused.failure['recovery']))
+
     def test_exact_broker_approval_backup_before_write_and_read_back(self):
         fixed = self.fixed()
         args = self.write_args(fixed)
@@ -700,6 +713,25 @@ class KiCadTests(unittest.TestCase):
         self.assertIn('C62 and C66', report.read_text())
         # A second review with the same title never replaces the first.
         self.assertEqual(self.provider_review('# AE2 review\nagain').name, report.stem + '-2.md')
+
+    def test_a_numbered_write_back_writes_the_board_and_the_review_into_that_project(self):
+        """Review of #252: a project number refused as a path outside home, or a review saved
+        under the runtime's working folder."""
+        numbered = self.design / 'P0777-demo'
+        shutil.copytree(self.project, numbered)
+        (numbered / 'project.json').write_text('{}')
+        self.project = numbered
+        edited = self.fixed()
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        (Path(elsewhere.name) / 'P0777').mkdir()
+        here = os.getcwd()
+        os.chdir(elsewhere.name)
+        self.addCleanup(os.chdir, here)
+        written = self.success('write_back_kicad_board', **dict(self.write_args(edited), project_dir='P0777'),
+                               report='# Via review\n\nMoved.')
+        self.assertEqual(Path(written['report_path']).parent, numbered.resolve() / 'docs' / 'reviews')
+        self.assertNotEqual((numbered / 'test.kicad_pcb').read_text(), BOARD)
 
     def provider_review(self, text):
         return KiCadProvider(self.settings, self.execute_cli)._save_review(str(self.project), text)
