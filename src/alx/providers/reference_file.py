@@ -59,9 +59,18 @@ def archive_entries(bundle):
     return entries
 
 
-def read_bytes(path):
+def read_bytes(path, trusted=None):
+    """The file's bytes. Below a trusted root only the names under that root are checked for
+    secrets: AL/X's own edit evidence lives under .alx, which the check would otherwise refuse
+    (27 Nov: every read of a full_diff_path the edit report gave was refused, with no reason)."""
     path = Path(path).absolute()
-    if credential_path(path):
+
+    def secret(where):
+        where = Path(where)
+        if trusted is not None and where.is_relative_to(trusted):
+            return credential_path(where.relative_to(trusted))
+        return credential_path(where)
+    if secret(path):
         raise ReferenceError('path_denied')
     file_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(file_fd, 'rb') as stream:
@@ -75,7 +84,7 @@ def read_bytes(path):
             actual = os.readlink(f'/proc/self/fd/{file_fd}')
         else:
             raise ReferenceError('unavailable')
-        if actual != str(path) or credential_path(actual):
+        if actual != str(path) or secret(actual):
             raise ReferenceError('path_denied')
         data = stream.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
@@ -281,7 +290,8 @@ def facts_at(arguments, offset, roots, protected):
                 continue
             entries.append({'name': child.name, 'kind': 'folder' if safe.is_dir() else 'file'})
         return dict(kind='folder', entries=entries, truncated=truncated)
-    data = read_bytes(path)
+    trusted = None if protected else next((r for r in roots or () if path.is_relative_to(r)), None)
+    data = read_bytes(path, trusted)
     if path.suffix.casefold() == '.zip':
         with zipfile.ZipFile(io.BytesIO(data)) as bundle:
             entries = archive_entries(bundle)

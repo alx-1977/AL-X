@@ -79,7 +79,10 @@ def bounded(path, roots, *, protected=True):
     resolved = raw.resolve()
     if ((protected and (denied(raw.as_posix()) or denied(resolved.as_posix())))
             or not any(resolved.is_relative_to(root) for root in roots)):
-        raise KiCadError('path_denied')
+        # With the reason and where to look (27 Nov: refusals without one were tried again and again).
+        raise KiCadError('path_denied', {'detail': '%s is outside the design folders (%s) or has a protected '
+                                         'name. A project is named by its number, e.g. project_dir P0009; a '
+                                         'work copy by its work_copy_id' % (raw, ', '.join(str(r) for r in roots))})
     return resolved
 
 
@@ -1203,8 +1206,19 @@ class KiCadProvider:
         shown = [{key: (len(value) if key in ('outline', 'points') else value) for key, value in item.items()}
                  for item in found[:limit]]
         counts = dict(Counter(item['kind'] for item in found)) if arguments['kind'] == 'view' else None
+        # Every via's size at once, however many (27 Nov: checking "all vias 0.2 mm drill" took 57
+        # selects, the board cut into squares to stay under the limit).
+        sizes = None
+        if arguments['kind'] == 'via':
+            groups = {}
+            for item in found:
+                groups.setdefault((item.get('drill'), item.get('size')), []).append(item)
+            sizes = [{'drill': drill, 'size': size, 'count': len(items),
+                      'examples': [{'id': i['id'], 'at': i.get('at'), 'net': i.get('net')} for i in items[:20]]}
+                     for (drill, size), items in sorted(groups.items(), key=lambda g: -len(g[1]))]
         return {'kind': arguments['kind'], 'count': len(found), 'objects': shown,
                 'truncated': len(found) > limit, 'board': board.name, **({'counts': counts} if counts else {}),
+                **({'via_sizes': sizes} if sizes is not None else {}),
                 **({'work_copy_revision': revision} if revision else {})}
 
     def _copper_in(self, board, arguments):
@@ -1697,11 +1711,24 @@ class KiCadProvider:
         arguments = dict(arguments, path=str(location))
         raw = Path(arguments['path']).expanduser().absolute()
         if not raw.resolve().is_relative_to(self.work_root):
-            return read_reference(arguments)
+            from alx.providers.reference_file import ReferenceError as _Refused
+            try:
+                return read_reference(arguments)
+            except _Refused as error:
+                if str(error) != 'path_denied':
+                    raise
+                raise KiCadError('path_denied', {'detail': 'not readable here (outside the readable places, or '
+                                                 'a protected name). ' + self._where_things_are()}) from error
         # Inside AL/X storage only retained edit evidence is readable.
         parts = raw.resolve().relative_to(self.work_root).parts
         if len(parts) < 2 or parts[1] != 'evidence':
-            raise KiCadError('path_denied')
+            # Said, so it is not tried again (27 Nov: one job tried its own copy's folder 25 times,
+            # each refused with no reason).
+            raise KiCadError('path_denied', {'detail': (
+                'a work copy is read through the kicad actions, not as files: inspect, select (kind view '
+                'for a whole area), inspect_schematic and render take its work_copy_id. Only its '
+                'evidence folder, named in an edit report as full_diff_path, before_copy_path or '
+                'after_copy_path, is read with read_reference.')})
         root, _ = self._load(parts[0])
         return read_reference(arguments, roots=(root / 'evidence',), protected=False)
 
