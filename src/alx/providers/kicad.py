@@ -858,6 +858,17 @@ class KiCadProvider:
                       and not any('backup' in part.lower() or part == '.history'
                                   for part in path.relative_to(folder).parts[:-1]))
 
+    def _names_source(self, given, source):
+        """Whether project_dir names the folder a copy came from: that folder, or its project as he
+        names it (P0009), as check and inspect take it."""
+        for resolve in (self._source, self._project):
+            try:
+                if str(resolve(given)) == source:
+                    return True
+            except (KiCadError, OSError, ValueError):
+                continue
+        return False
+
     def _source(self, path):
         raw = Path(path).expanduser().absolute()
         if any(raw.resolve().is_relative_to(r) for r in self.design_roots):
@@ -4036,9 +4047,12 @@ class KiCadProvider:
 
     def _write_back(self, arguments, recovery):
         root, meta = self._load(arguments['work_copy_id'])
-        source = self._source(arguments['project_dir'])
-        if str(source) != meta['source']:
-            raise KiCadError('path_denied')
+        if not self._names_source(arguments['project_dir'], meta['source']):
+            # Said, with where it goes (27 Nov: his approved via fix, written back to "P0009", was
+            # refused with no reason; the number meant a folder in AL/X's own checkout here).
+            raise KiCadError('path_denied', {'detail': 'this copy came from %s; write it back there (project_dir '
+                                             'that folder or its project number)' % meta['source']})
+        source = self._source(meta['source'])
         if self._revision(root) != arguments['work_copy_revision']:
             raise KiCadError('work_copy_changed')
         if meta.get('taint'):

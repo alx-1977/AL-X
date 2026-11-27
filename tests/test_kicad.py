@@ -522,6 +522,19 @@ class KiCadTests(unittest.TestCase):
         args['work_copy_revision'] = 'stale'
         self.failure('work_copy_changed', 'write_back_kicad_board', **args)
 
+    def test_a_copy_goes_back_by_its_project_number_and_a_wrong_place_is_named(self):
+        """27 Nov: his approved via fix, written back to "P0009", was refused with no reason."""
+        provider = self.runtime.provider
+        numbered = self.design / 'P0777-demo'
+        shutil.copytree(self.project, numbered)
+        self.assertTrue(provider._names_source('P0777', str(numbered.resolve())))
+        self.assertFalse(provider._names_source('P0778', str(numbered.resolve())))
+        self.assertTrue(provider._names_source(str(self.project), str(self.project.resolve())))
+        args = dict(self.write_args(self.fixed()), project_dir=str(numbered))
+        refused = self.call('write_back_kicad_board', **args)
+        self.assertEqual(refused.failure['code'], 'path_denied')
+        self.assertIn(str(self.project.resolve()), str(refused.failure['recovery']))
+
     def test_exact_broker_approval_backup_before_write_and_read_back(self):
         fixed = self.fixed()
         args = self.write_args(fixed)
