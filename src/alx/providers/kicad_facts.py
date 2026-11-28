@@ -19,6 +19,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 
@@ -177,7 +178,7 @@ def save(library: Path, part: str, *, source: str = "", aliases=(), description:
         counts = {"pins": 0, "notes": 0, "aliases": 0}
         stored_pins = dict(data.get("pins") or {})
         for index, pin in enumerate(pins):
-            if not isinstance(pin, dict):
+            if not isinstance(pin, Mapping):
                 raise FactsError("pins[%d] must be an object" % index)
             number = _text(pin.get("number"), "pins[%d].number" % index, 20, required=True)
             entry = {"name": _text(pin.get("name"), "pins[%d].name" % index, 100, required=True),
@@ -191,7 +192,7 @@ def save(library: Path, part: str, *, source: str = "", aliases=(), description:
         stored_notes = list(data.get("notes") or [])
         known = {_same_words(note.get("text", "")) for note in stored_notes}
         for index, note in enumerate(notes):
-            if not isinstance(note, dict):
+            if not isinstance(note, Mapping):
                 raise FactsError("notes[%d] must be an object" % index)
             text = _text(note.get("text"), "notes[%d].text" % index, MAX_TEXT, required=True)
             entry = {"topic": _text(note.get("topic"), "notes[%d].topic" % index, 60), "text": text,
