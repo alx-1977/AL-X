@@ -136,6 +136,14 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(refused.failure["code"], "arguments_unusable")
         self.assertIn("source", refused.failure["recovery"]["detail"])
 
+    def test_pins_and_notes_arrive_as_read_only_records(self) -> None:
+        # The broker freezes arguments; every save in the 28 Nov replay was refused as "not an object".
+        from types import MappingProxyType as frozen
+        saved = self.provider.part_facts({"part": "U9", "source": "/ds/u9.pdf",
+                                          "pins": (frozen({"number": "1", "name": "VDD", "page": 9}),),
+                                          "notes": (frozen({"text": "tie VEN low", "page": 9}),)})
+        self.assertEqual(saved["saved"], {"pins": 1, "notes": 1, "aliases": 0})
+
     def test_find_part_marks_parts_with_facts(self) -> None:
         save(self.library, "S-82D1AAD-A8T2U7", description="Li-ion protection")
         parts = self.call({"action": "find_part", "query": "ABLIC"}).values["result"]["parts"]

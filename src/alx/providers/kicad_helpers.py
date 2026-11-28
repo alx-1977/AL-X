@@ -1172,8 +1172,11 @@ def script_runner(script):
     """Her script, compiled as its own file named "script" with the helpers in reach."""
     # argv and pcbnew by their plain names too: the description says argv[1] is the board, and
     # 25 Nov eight scripts failed on NameError for one or the other.
-    return ("exec(compile(%a, 'script', 'exec'), dict(globals(), __name__='__main__', argv=_sys.argv, "
-            "sys=_sys, pcbnew=_pcbnew))\n" % script)
+    # The script on a line of its own: a traceback quotes the line that ran it, and with the script
+    # inline that quote was her whole script, which pushed the error itself out of view
+    # (28 Nov replay: three failures in a row showed only her own code).
+    return ("_script = %a\nexec(compile(_script, 'script', 'exec'), dict(globals(), __name__='__main__', "
+            "argv=_sys.argv, sys=_sys, pcbnew=_pcbnew))\n" % script)
 
 
 NAMES = ("load", "save", "mm", "point", "xy", "layer", "part", "move_part", "rotate_part", "pad",

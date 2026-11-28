@@ -1133,7 +1133,7 @@ class KiCadProvider:
         if found is None:
             return {'part': part, 'found': False, 'pins': {}, 'notes': [],
                     'hint': 'no facts kept for %s yet: read its datasheet at the page you need, then save what a '
-                            'later job will need here (pins with name, function and page; notes with page; '
+                            'later job will need here (every pin of its pin table with name, function and page; notes with page; '
                             'source the datasheet path; aliases for other names it goes by)' % part}
         return dict(view(*found, start=start), found=True)
 
@@ -1808,8 +1808,9 @@ class KiCadProvider:
         if held is not None:
             return dict(result, facts_held=held)
         return dict(result, hint='no facts kept for this part yet: once you have what you need, save it with '
-                                 'part_facts (source this path, each pin or note with its page), so no later '
-                                 'job reads this datasheet again')
+                                 'part_facts (source this path, each pin or note with its page): every pin of '
+                                 'the pin table, not only the ones this job uses, so no later job reads this '
+                                 'datasheet again')
 
     @contextmanager
     def _locked(self, work_copy_id):
